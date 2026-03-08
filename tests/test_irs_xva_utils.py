@@ -1,0 +1,298 @@
+import unittest
+
+import numpy as np
+
+from py_ore_tools.irs_xva_utils import payer_swap_npv_at_time, swap_npv_from_ore_legs, swap_npv_from_ore_legs_dual_curve
+from py_ore_tools.lgm import LGM1F, LGMParams
+
+
+def _payer_swap_npv_reference(model, p0, fixed_dates, float_dates, t, x_t, fixed_rate, trade_def):
+    notional_fixed = trade_def["SwapData"]["LegData"][0]["Notional"]
+    notional_float = trade_def["SwapData"]["LegData"][1]["Notional"]
+
+    rem_fixed = fixed_dates[fixed_dates > t + 1.0e-12]
+    rem_float = float_dates[float_dates > t + 1.0e-12]
+
+    if rem_fixed.size == 0 and rem_float.size == 0:
+        return np.zeros_like(x_t, dtype=float)
+
+    p_t = p0(t)
+
+    fixed_leg_pv = np.zeros_like(x_t, dtype=float)
+    if rem_fixed.size > 0:
+        p_t_T_fixed = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in rem_fixed])
+        prev = np.concatenate(([t], rem_fixed[:-1]))
+        tau_fixed = rem_fixed - prev
+        fixed_leg_pv = notional_fixed * fixed_rate * np.sum(tau_fixed[:, None] * p_t_T_fixed, axis=0)
+
+    float_leg_pv = np.zeros_like(x_t, dtype=float)
+    if rem_float.size > 0:
+        p_t_T_float = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in rem_float])
+        prev = np.concatenate(([t], rem_float[:-1]))
+        tau_float = rem_float - prev
+        p_start = np.concatenate((np.ones((1, x_t.size)), p_t_T_float[:-1]), axis=0)
+        forwards = (p_start / p_t_T_float - 1.0) / tau_float[:, None]
+        float_leg_pv = notional_float * np.sum(tau_float[:, None] * forwards * p_t_T_float, axis=0)
+
+    return float_leg_pv - fixed_leg_pv
+
+
+def _swap_npv_from_ore_legs_reference(model, p0, legs, t, x_t):
+    pv = np.zeros_like(x_t, dtype=float)
+    p_t = p0(t)
+
+    mask_f = legs["fixed_pay_time"] > t + 1.0e-12
+    if np.any(mask_f):
+        pay = legs["fixed_pay_time"][mask_f]
+        disc = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in pay])
+        cash = legs["fixed_amount"][mask_f]
+        pv += np.sum(cash[:, None] * disc, axis=0)
+
+    mask_future = (legs["float_pay_time"] > t + 1.0e-12) & (legs["float_start_time"] >= t - 1.0e-12)
+    if np.any(mask_future):
+        s = legs["float_start_time"][mask_future]
+        e = legs["float_end_time"][mask_future]
+        pay = legs["float_pay_time"][mask_future]
+        tau = legs["float_accrual"][mask_future]
+        n = legs["float_notional"][mask_future]
+        sign = legs["float_sign"][mask_future]
+        spread = legs["float_spread"][mask_future]
+
+        p_ts = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in s])
+        p_te = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in e])
+        p_tp = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in pay])
+        fwd = (p_ts / p_te - 1.0) / tau[:, None]
+        cash = sign[:, None] * n[:, None] * (fwd + spread[:, None]) * tau[:, None]
+        pv += np.sum(cash * p_tp, axis=0)
+
+    mask_in_period = (
+        (legs["float_pay_time"] > t + 1.0e-12)
+        & (legs["float_start_time"] < t - 1.0e-12)
+        & (legs["float_end_time"] >= t - 1.0e-12)
+    )
+    if np.any(mask_in_period):
+        pay = legs["float_pay_time"][mask_in_period]
+        amount = legs["float_amount"][mask_in_period]
+        p_tp = np.array([model.discount_bond(t, T, x_t, p_t, p0(T)) for T in pay])
+        pv += np.sum(amount[:, None] * p_tp, axis=0)
+
+    return pv
+
+
+def _swap_npv_from_ore_legs_dual_curve_reference(
+    model,
+    p0_disc,
+    p0_fwd,
+    legs,
+    t,
+    x_t,
+    realized_float_coupon=None,
+):
+    pv = np.zeros_like(x_t, dtype=float)
+    p_t_d = p0_disc(t)
+
+    node_tenors = np.asarray(legs.get("node_tenors", np.array([], dtype=float)), dtype=float)
+    use_nodes = node_tenors.size > 0
+    p_nodes_d = None
+    if use_nodes:
+        p_nodes_d = np.array([model.discount_bond(t, t + tau, x_t, p_t_d, p0_disc(t + tau)) for tau in node_tenors])
+
+    def interp_from_nodes(T: float) -> np.ndarray:
+        if not use_nodes:
+            return model.discount_bond(t, T, x_t, p_t_d, p0_disc(T))
+        if T <= t + 1.0e-14:
+            return np.ones_like(x_t, dtype=float)
+        grid = t + node_tenors
+        logp = np.log(np.clip(p_nodes_d, 1.0e-18, None))
+        if T <= grid[0]:
+            return model.discount_bond(t, T, x_t, p_t_d, p0_disc(T))
+        if T >= grid[-1]:
+            t1, t2 = grid[-2], grid[-1]
+            slope = (logp[-1] - logp[-2]) / max(t2 - t1, 1.0e-12)
+            return np.exp(logp[-1] + slope * (T - t2))
+        j = int(np.searchsorted(grid, T, side="right"))
+        t1, t2 = grid[j - 1], grid[j]
+        w = (T - t1) / max(t2 - t1, 1.0e-12)
+        return np.exp((1.0 - w) * logp[j - 1] + w * logp[j])
+
+    def map_forward_bond_from_disc(T: float, p_t_T_disc: np.ndarray) -> np.ndarray:
+        bt = p0_fwd(t) / p0_disc(t)
+        bT = p0_fwd(T) / p0_disc(T)
+        return p_t_T_disc * (bT / bt)
+
+    mask_f = legs["fixed_pay_time"] > t + 1.0e-12
+    if np.any(mask_f):
+        pay = legs["fixed_pay_time"][mask_f]
+        disc = np.array([interp_from_nodes(T) for T in pay])
+        cash = legs["fixed_amount"][mask_f]
+        pv += np.sum(cash[:, None] * disc, axis=0)
+
+    fix_t = np.asarray(legs.get("float_fixing_time", legs["float_start_time"]), dtype=float)
+    pay_all = legs["float_pay_time"]
+    live = pay_all > t + 1.0e-12
+    if np.any(live):
+        s = legs["float_start_time"][live]
+        e = legs["float_end_time"][live]
+        pay = pay_all[live]
+        tau = legs["float_accrual"][live]
+        n = legs["float_notional"][live]
+        sign = legs["float_sign"][live]
+        spread = legs["float_spread"][live]
+        fixed = fix_t[live] <= t + 1.0e-12
+
+        p_tp_d = np.array([interp_from_nodes(T) for T in pay])
+        amount = np.zeros((pay.size, x_t.size), dtype=float)
+
+        if np.any(fixed):
+            if realized_float_coupon is not None:
+                coupon_fix = realized_float_coupon[live][fixed]
+            else:
+                coupon_fix = np.tile(legs["float_coupon"][live][fixed][:, None], (1, x_t.size))
+            amount[fixed, :] = sign[fixed, None] * n[fixed, None] * coupon_fix * tau[fixed, None]
+
+        if np.any(~fixed):
+            s2 = s[~fixed]
+            e2 = e[~fixed]
+            tau2 = tau[~fixed]
+            n2 = n[~fixed]
+            sign2 = sign[~fixed]
+            spread2 = spread[~fixed]
+            p_ts_d2 = np.array([interp_from_nodes(T) for T in s2])
+            p_te_d2 = np.array([interp_from_nodes(T) for T in e2])
+            p_ts_f2 = np.array([map_forward_bond_from_disc(T, p_ts_d2[i]) for i, T in enumerate(s2)])
+            p_te_f2 = np.array([map_forward_bond_from_disc(T, p_te_d2[i]) for i, T in enumerate(e2)])
+            fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / tau2[:, None]
+            amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
+
+        pv += np.sum(amount * p_tp_d, axis=0)
+
+    return pv
+
+
+class TestIrsXvaUtils(unittest.TestCase):
+    def setUp(self):
+        self.model = LGM1F(
+            LGMParams(
+                alpha_times=(1.0, 3.0),
+                alpha_values=(0.015, 0.02, 0.012),
+                kappa_times=(2.0,),
+                kappa_values=(0.03, 0.025),
+                shift=0.0,
+                scaling=1.0,
+            )
+        )
+        self.p0 = lambda t: float(np.exp(-0.02 * t))
+        self.p0_fwd = lambda t: float(np.exp(-0.0175 * t))
+        self.x_t = np.linspace(-0.08, 0.08, 17)
+
+    def test_discount_bond_paths_matches_scalar_stack(self):
+        t = 0.75
+        maturities = np.array([1.0, 1.5, 2.0, 4.0, 5.5], dtype=float)
+        scalar = np.array([self.model.discount_bond(t, float(T), self.x_t, self.p0(t), self.p0(float(T))) for T in maturities])
+        vectorized = self.model.discount_bond_paths(t, maturities, self.x_t, self.p0(t), self.p0)
+        self.assertTrue(np.allclose(vectorized, scalar, rtol=1.0e-12, atol=1.0e-13))
+
+    def test_payer_swap_npv_matches_reference_implementation(self):
+        trade_def = {
+            "SwapData": {
+                "LegData": [
+                    {"Notional": 5_000_000.0},
+                    {"Notional": 5_000_000.0},
+                ]
+            }
+        }
+        fixed_dates = np.array([0.5, 1.0, 1.5, 2.0, 2.5], dtype=float)
+        float_dates = np.array([0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5], dtype=float)
+        fixed_rate = 0.0275
+
+        for t in (0.0, 0.6, 1.3):
+            ref = _payer_swap_npv_reference(self.model, self.p0, fixed_dates, float_dates, t, self.x_t, fixed_rate, trade_def)
+            got = payer_swap_npv_at_time(self.model, self.p0, fixed_dates, float_dates, t, self.x_t, fixed_rate, trade_def)
+            self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+    def test_swap_npv_from_ore_legs_matches_reference_implementation(self):
+        legs = {
+            "fixed_pay_time": np.array([0.5, 1.0, 1.5], dtype=float),
+            "fixed_amount": np.array([-12_500.0, -12_500.0, -12_500.0], dtype=float),
+            "float_pay_time": np.array([0.5, 1.0, 1.5], dtype=float),
+            "float_start_time": np.array([0.0, 0.5, 1.0], dtype=float),
+            "float_end_time": np.array([0.5, 1.0, 1.5], dtype=float),
+            "float_accrual": np.array([0.5, 0.5, 0.5], dtype=float),
+            "float_notional": np.array([1_000_000.0, 1_000_000.0, 1_000_000.0], dtype=float),
+            "float_sign": np.array([1.0, 1.0, 1.0], dtype=float),
+            "float_spread": np.array([0.0010, 0.0012, 0.0014], dtype=float),
+            "float_amount": np.array([0.0, 13_333.0, 0.0], dtype=float),
+        }
+
+        for t in (0.0, 0.75):
+            ref = _swap_npv_from_ore_legs_reference(self.model, self.p0, legs, t, self.x_t)
+            got = swap_npv_from_ore_legs(self.model, self.p0, legs, t, self.x_t)
+            self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+    def test_swap_npv_from_ore_legs_dual_curve_matches_reference_without_nodes(self):
+        legs = {
+            "fixed_pay_time": np.array([0.5, 1.0, 1.5, 2.0], dtype=float),
+            "fixed_amount": np.array([-11_000.0, -11_200.0, -11_400.0, -11_600.0], dtype=float),
+            "float_pay_time": np.array([0.5, 1.0, 1.5, 2.0], dtype=float),
+            "float_start_time": np.array([0.0, 0.5, 1.0, 1.5], dtype=float),
+            "float_end_time": np.array([0.5, 1.0, 1.5, 2.0], dtype=float),
+            "float_accrual": np.array([0.5, 0.5, 0.5, 0.5], dtype=float),
+            "float_notional": np.array([1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0], dtype=float),
+            "float_sign": np.array([1.0, 1.0, 1.0, 1.0], dtype=float),
+            "float_spread": np.array([0.0010, 0.0012, 0.0014, 0.0016], dtype=float),
+            "float_coupon": np.array([0.0200, 0.0205, 0.0210, 0.0215], dtype=float),
+        }
+
+        for t in (0.0, 0.6, 1.1):
+            ref = _swap_npv_from_ore_legs_dual_curve_reference(self.model, self.p0, self.p0_fwd, legs, t, self.x_t)
+            got = swap_npv_from_ore_legs_dual_curve(self.model, self.p0, self.p0_fwd, legs, t, self.x_t)
+            self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+    def test_swap_npv_from_ore_legs_dual_curve_matches_reference_with_nodes_and_fixings(self):
+        legs = {
+            "fixed_pay_time": np.array([0.5, 1.0, 1.5, 2.5], dtype=float),
+            "fixed_amount": np.array([-11_000.0, -11_200.0, -11_400.0, -11_800.0], dtype=float),
+            "float_pay_time": np.array([0.5, 1.0, 1.5, 2.5], dtype=float),
+            "float_start_time": np.array([0.0, 0.5, 1.0, 1.5], dtype=float),
+            "float_end_time": np.array([0.5, 1.0, 1.5, 2.5], dtype=float),
+            "float_fixing_time": np.array([0.0, 0.45, 0.95, 1.45], dtype=float),
+            "float_accrual": np.array([0.5, 0.5, 0.5, 1.0], dtype=float),
+            "float_notional": np.array([1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0], dtype=float),
+            "float_sign": np.array([1.0, 1.0, 1.0, 1.0], dtype=float),
+            "float_spread": np.array([0.0010, 0.0012, 0.0014, 0.0016], dtype=float),
+            "float_coupon": np.array([0.0200, 0.0205, 0.0210, 0.0215], dtype=float),
+            "node_tenors": np.array([0.25, 0.5, 1.0, 1.5, 2.5], dtype=float),
+        }
+        realized_float_coupon = np.vstack(
+            [
+                np.full(self.x_t.size, 0.0200),
+                np.full(self.x_t.size, 0.0205),
+                np.linspace(0.0208, 0.0212, self.x_t.size),
+                np.linspace(0.0213, 0.0217, self.x_t.size),
+            ]
+        )
+
+        for t in (0.0, 1.1):
+            ref = _swap_npv_from_ore_legs_dual_curve_reference(
+                self.model,
+                self.p0,
+                self.p0_fwd,
+                legs,
+                t,
+                self.x_t,
+                realized_float_coupon=realized_float_coupon,
+            )
+            got = swap_npv_from_ore_legs_dual_curve(
+                self.model,
+                self.p0,
+                self.p0_fwd,
+                legs,
+                t,
+                self.x_t,
+                realized_float_coupon=realized_float_coupon,
+            )
+            self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+
+if __name__ == "__main__":
+    unittest.main()

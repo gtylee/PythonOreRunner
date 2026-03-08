@@ -1,0 +1,30 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Generated benchmark and parity outputs (large; regenerate as needed)
+parity_artifacts/
+
+# Local / env overrides (do not commit secrets)
+.env
+.env.local
+*.local
