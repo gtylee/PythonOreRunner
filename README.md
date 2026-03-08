@@ -2,11 +2,25 @@
 
 Python utilities and a native XVA interface for [Open Risk Engine (ORE)](https://github.com/OpenSourceRisk/Engine). Use this to run ORE configs from Python, compare ORE vs Python LGM results, and drive XVA workflows.
 
+## Standalone Python LGM model
+
+**`py_ore_tools`** includes a **standalone Python LGM (Linear Gaussian Model)** implementation that consumes **ORE-style inputs** but runs entirely in **native Python**—no ORE binary or SWIG build required. Same curves, same conventions, same exposure/XVA workflow, so you can iterate quickly and compare directly to ORE.
+
+**Supported products and features:**
+
+- **IRS** – single- and multi-currency interest rate swaps, dual-curve discount/forward, ORE parity-oriented conventions  
+- **FX forwards** – multi-currency LGM–FX hybrid, FX forwards and XCCY float-float  
+- **Caps & floors** – pathwise cap/floor valuation and exposure  
+- **Bermudan swaptions** – exercise-date handling and pathwise NPV  
+- **Multi-currency** – LGM–FX hybrid with correlated IR and FX, aggregate exposure and CVA/FVA-style XVA terms  
+
+Use it for fast prototyping, regression tests, teaching, or as the Python leg in ORE-vs-Python parity runs. See `py_ore_tools/lgm.py`, `lgm_fx_hybrid.py`, `lgm_ir_options.py`, `irs_xva_utils.py`, and `lgm_fx_xva_utils.py` for the core logic; demos and benchmarks under `py_ore_tools/demos/` and `py_ore_tools/benchmarks/`.
+
 ## Layout
 
 | Path | Description |
 |------|-------------|
-| `py_ore_tools/` | ORE runner, LGM/FX models, IRS and XVA helpers, benchmarks, demos |
+| `py_ore_tools/` | Standalone Python LGM (IRS, FX fwd, cap/floor, Bermudans, multi-ccy), ORE runner, XVA helpers, benchmarks, demos |
 | `native_xva_interface/` | Python dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
 | `example*.py` | Example scripts using `OreBasic` and snapshot tools |
 | `tests/` | Unit tests for `py_ore_tools` |
@@ -36,7 +50,7 @@ PYTHONPATH=. python -m pytest native_xva_interface/tests/ -q
 ## Examples
 
 - **`example_basic.py`** / **`example.py`** – Run ORE from Python and inspect NPV/XVA. Expects an ORE executable and an ORE input folder (e.g. from an ORE repo).
-- **`example_ore_snapshot.py`** – Load ORE XML into a snapshot and run Python LGM exposure/XVA.
+- **`example_ore_snapshot.py`** – Load ORE XML into a snapshot and run the **standalone Python LGM** (no ORE binary) for exposure/XVA.
 - **`example_systemic.py`** – Uses `OreBasic` with network/graph dependencies.
 
 Set `ORE_EXE` to the path of the `ore` binary. Set `ORE_EXAMPLE_DIR` to an ORE Input folder (e.g. `path/to/ORE/Examples/Example_7`). If unset, examples assume this repo lives under an ORE tree at `../..` with `Examples/Example_7` and `build/.../App/ore`.
