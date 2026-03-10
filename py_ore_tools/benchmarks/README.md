@@ -31,7 +31,8 @@ Purpose:
 Measure the cost of extracting per-currency discount-factor pillars from an ORE XML case.
 
 Inputs:
-- `ENGINE_REPO_ROOT/Examples/Exposure/Input/ore_measure_lgm.xml` by default
+- `ENGINE_REPO_ROOT/Examples/Exposure/Input/ore_measure_lgm.xml` when available
+- otherwise the vendored fixture under `py_ore_tools/benchmarks/fixtures/discount_factor_extractor/`
 - Optional `--ore-xml` override
 
 Outputs:
@@ -42,6 +43,8 @@ Example:
 ```bash
 python py_ore_tools/benchmarks/benchmark_discount_factor_extractor.py --runs 10
 ```
+
+This benchmark can run without any `Engine` checkout.
 
 ### `benchmark_ore_fx_forwards.py`
 

@@ -13,11 +13,24 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from py_ore_tools.ore_snapshot import extract_discount_factors_by_currency
-from py_ore_tools.repo_paths import require_engine_repo_root
+from py_ore_tools.repo_paths import find_engine_repo_root
+
+
+def _default_fixture_xml() -> Path:
+    engine_root = find_engine_repo_root()
+    if engine_root is not None:
+        return engine_root / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
+    return (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "discount_factor_extractor"
+        / "Input"
+        / "ore_measure_lgm.xml"
+    )
 
 
 def _parse_args() -> argparse.Namespace:
-    default_xml = require_engine_repo_root() / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
+    default_xml = _default_fixture_xml()
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ore-xml", type=Path, default=default_xml)
