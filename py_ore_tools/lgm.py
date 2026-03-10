@@ -30,6 +30,8 @@ ArrayLike = Union[float, np.ndarray]
 DiscountInput = Union[float, np.ndarray, Callable[[float], float]]
 PiecewiseSpec = Union[float, Tuple[Iterable[float], Iterable[float]], Mapping[str, Iterable[float]]]
 
+ORE_PARITY_SEQUENCE_TYPE = "MersenneTwister"
+
 
 def _as_1d_float_array(values: Iterable[float], name: str) -> np.ndarray:
     arr = np.asarray(list(values), dtype=float)
@@ -95,6 +97,69 @@ def _validate_time_input(t: ArrayLike) -> np.ndarray:
     if np.any(~np.isfinite(t_arr)) or np.any(t_arr < 0.0):
         raise ValueError("time input must be finite and non-negative")
     return t_arr
+
+
+def _coerce_seed(seed: int) -> int:
+    seed_int = int(seed)
+    if seed_int < 0:
+        raise ValueError("seed must be non-negative")
+    return seed_int
+
+
+def _load_quantlib():
+    try:
+        import QuantLib as ql
+    except ImportError as exc:
+        raise ImportError(
+            "Ore parity mode requires the QuantLib Python bindings to be installed"
+        ) from exc
+    return ql
+
+
+class OreMersenneTwisterGaussianRng:
+    """QuantLib-backed Gaussian generator matching Ore's pseudo-random stream."""
+
+    def __init__(self, seed: int) -> None:
+        self.seed = _coerce_seed(seed)
+        self._dimension: Optional[int] = None
+        self._generator = None
+
+    def _ensure_dimension(self, size: int) -> None:
+        size = int(size)
+        if size <= 0:
+            raise ValueError("size must be positive")
+        if self._dimension is None:
+            ql = _load_quantlib()
+            uniform = ql.MersenneTwisterUniformRsg(size, self.seed)
+            self._generator = ql.InvCumulativeMersenneTwisterGaussianRsg(uniform)
+            self._dimension = size
+            return
+        if size != self._dimension:
+            raise ValueError(
+                f"OreMersenneTwisterGaussianRng was initialised with dimension {self._dimension}, got {size}"
+            )
+
+    def next_sequence(self, size: int) -> np.ndarray:
+        self._ensure_dimension(size)
+        assert self._generator is not None
+        return np.asarray(self._generator.nextSequence().value(), dtype=float)
+
+    def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
+        if isinstance(size, tuple):
+            if len(size) != 1:
+                raise ValueError("OreMersenneTwisterGaussianRng only supports one-dimensional draws")
+            size = size[0]
+        return self.next_sequence(int(size))
+
+
+def make_ore_gaussian_rng(seed: int, sequence_type: str = ORE_PARITY_SEQUENCE_TYPE) -> OreMersenneTwisterGaussianRng:
+    """Build an exact-match RNG for Ore parity runs."""
+    if sequence_type != ORE_PARITY_SEQUENCE_TYPE:
+        raise ValueError(
+            f"exact Ore parity is only supported for sequence_type='{ORE_PARITY_SEQUENCE_TYPE}', "
+            f"got '{sequence_type}'"
+        )
+    return OreMersenneTwisterGaussianRng(seed)
 
 
 @dataclass(frozen=True)
@@ -587,6 +652,7 @@ def simulate_lgm_measure(
     n_paths: int,
     rng: Optional[np.random.Generator] = None,
     x0: float = 0.0,
+    draw_order: str = "time_major",
 ) -> np.ndarray:
     """Simulate the ORE LGM state ``x(t)`` on a time grid.
 
@@ -596,6 +662,10 @@ def simulate_lgm_measure(
     times_arr = _validate_time_grid(times)
     if n_paths <= 0:
         raise ValueError("n_paths must be positive")
+    if draw_order not in ("time_major", "ore_path_major"):
+        raise ValueError("draw_order must be 'time_major' or 'ore_path_major'")
+    if rng is None and draw_order == "ore_path_major":
+        raise ValueError("draw_order='ore_path_major' requires an explicit rng")
     if rng is None:
         rng = np.random.default_rng()
 
@@ -605,11 +675,29 @@ def simulate_lgm_measure(
     # increments are the path simulation variances on each interval.
     zeta_grid = model.zeta(times_arr)
     var_increments = np.diff(zeta_grid)
+    if draw_order == "time_major":
+        for i, var in enumerate(var_increments):
+            if var < -1.0e-14:
+                raise ValueError("encountered negative variance increment")
+            var = max(var, 0.0)
+            x[i + 1, :] = x[i, :] + np.sqrt(var) * rng.standard_normal(n_paths)
+        return x
+
+    if not hasattr(rng, "next_sequence"):
+        raise TypeError("draw_order='ore_path_major' requires an rng with a next_sequence(size) method")
+    step_scales = np.empty_like(var_increments)
     for i, var in enumerate(var_increments):
         if var < -1.0e-14:
             raise ValueError("encountered negative variance increment")
-        var = max(var, 0.0)
-        x[i + 1, :] = x[i, :] + np.sqrt(var) * rng.standard_normal(n_paths)
+        step_scales[i] = np.sqrt(max(var, 0.0))
+    for p in range(n_paths):
+        draws = np.asarray(rng.next_sequence(step_scales.size), dtype=float)
+        if draws.shape != step_scales.shape:
+            raise ValueError("rng.next_sequence returned an unexpected shape")
+        x_curr = float(x0)
+        for i, scale in enumerate(step_scales):
+            x_curr += scale * draws[i]
+            x[i + 1, p] = x_curr
     return x
 
 
@@ -678,6 +766,9 @@ def simulate_ba_measure(
 __all__ = [
     "LGMParams",
     "LGM1F",
+    "ORE_PARITY_SEQUENCE_TYPE",
+    "OreMersenneTwisterGaussianRng",
+    "make_ore_gaussian_rng",
     "simulate_lgm_measure",
     "simulate_ba_measure",
 ]

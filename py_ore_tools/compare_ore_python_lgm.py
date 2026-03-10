@@ -13,12 +13,12 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-TOOLS_ROOT = Path(__file__).resolve().parents[2]
-if str(TOOLS_ROOT) not in sys.path:
-    sys.path.insert(0, str(TOOLS_ROOT))
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
 
-from py_ore_tools.lgm import LGM1F, LGMParams, make_ore_gaussian_rng, simulate_lgm_measure
-from py_ore_tools.irs_xva_utils import (
+from lgm import LGM1F, LGMParams, simulate_lgm_measure
+from irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     build_discount_curve_from_discount_pairs,
     calibrate_float_spreads_from_coupon,
@@ -37,7 +37,7 @@ from py_ore_tools.irs_xva_utils import (
 
 
 def _parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     default_exposure_input = repo_root / "Examples/Exposure/Input"
     default_exposure_output = repo_root / "Examples/Exposure/Output"
 
@@ -56,7 +56,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--portfolio-xml", type=Path, default=None)
     p.add_argument("--paths", type=int, default=5000)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--rng-mode", choices=["numpy", "ore_parity"], default="numpy")
     p.add_argument("--anchor-t0-npv", action="store_true", default=False)
     p.add_argument("--alpha-source", choices=["auto", "simulation", "calibration"], default="auto")
     p.add_argument("--calibration-xml", type=Path, default=None)
@@ -144,35 +143,26 @@ def _simulate_with_optional_fixing_grid(
     model: LGM1F,
     exposure_times: np.ndarray,
     n_paths: int,
-    rng,
-    draw_order: str,
+    rng: np.random.Generator,
     fixing_times: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate on exposure grid or union(exposure, fixing>0) grid."""
     if fixing_times is None or fixing_times.size == 0:
-        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
+        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0)
         return x_exp, x_exp, exposure_times
 
     extra = np.asarray(fixing_times, dtype=float)
     extra = extra[extra > 1.0e-12]
     if extra.size == 0:
-        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
+        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0)
         return x_exp, x_exp, exposure_times
 
     sim_times = np.unique(np.concatenate((exposure_times, extra)))
-    x_all = simulate_lgm_measure(model, sim_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
+    x_all = simulate_lgm_measure(model, sim_times, n_paths, rng=rng, x0=0.0)
     idx = np.searchsorted(sim_times, exposure_times)
     if not np.allclose(sim_times[idx], exposure_times, atol=1e-12, rtol=0.0):
         raise ValueError("failed to align exposure times on simulated grid")
     return x_all[idx, :], x_all, sim_times
-
-
-def _build_rng(mode: str, seed: int):
-    if mode == "numpy":
-        return np.random.default_rng(seed), "time_major"
-    if mode == "ore_parity":
-        return make_ore_gaussian_rng(seed), "ore_path_major"
-    raise ValueError(f"unsupported rng mode '{mode}'")
 
 
 def _compute_realized_float_coupons(
@@ -311,13 +301,12 @@ def main() -> None:
         best_rmse = float("inf")
         for s in scales:
             model_s = build_model(float(s))
-            rng_s, draw_order_s = _build_rng(args.rng_mode, args.seed)
+            rng_s = np.random.default_rng(args.seed)
             x_s, x_all_s, sim_times_s = _simulate_with_optional_fixing_grid(
                 model_s,
                 times,
                 args.paths,
                 rng=rng_s,
-                draw_order=draw_order_s,
                 fixing_times=fixing_times if args.pathwise_fixing_lock else None,
             )
             realized_coupon_s = None
@@ -358,13 +347,12 @@ def main() -> None:
         print(f"Best alpha scale by EPE RMSE: {best_scale:.6f} (RMSE={best_rmse:,.2f})")
 
     model = build_model(float(args.alpha_scale))
-    rng, draw_order = _build_rng(args.rng_mode, args.seed)
+    rng = np.random.default_rng(args.seed)
     x_paths, x_all_paths, sim_times = _simulate_with_optional_fixing_grid(
         model,
         times,
         args.paths,
         rng=rng,
-        draw_order=draw_order,
         fixing_times=fixing_times if args.pathwise_fixing_lock else None,
     )
     realized_coupon = None
@@ -500,7 +488,6 @@ def main() -> None:
         "counterparty": args.cpty,
         "paths": args.paths,
         "seed": args.seed,
-        "rng_mode": args.rng_mode,
         "ore_input_xml": str(args.ore_input_xml),
         "simulation_xml": str(args.simulation_xml),
         "ore_output_dir": str(args.ore_output_dir),

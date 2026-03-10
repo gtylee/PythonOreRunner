@@ -54,7 +54,11 @@ class InputParametersLike(Protocol):
 
 def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
     if not snapshot.portfolio.trades:
-        raise MappingError("Snapshot portfolio is empty")
+        raise MappingError(
+            "Snapshot portfolio is empty. "
+            "Fix: provide at least one trade in snapshot.portfolio, or load the snapshot "
+            "from an ORE portfolio.xml via XVALoader.from_files(...)."
+        )
 
     market_lines = [f"{q.date.replace('-', '')} {q.key} {q.value}" for q in snapshot.market.raw_quotes]
     fixing_lines = [f"{f.date} {f.index} {f.value}" for f in snapshot.fixings.points]
@@ -70,6 +74,11 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
     if "collateralbalances.xml" not in xml_buffers:
         xml_buffers["collateralbalances.xml"] = _collateral_to_xml(snapshot.collateral)
 
+    # These are required by the SWIG/native orchestration layer, but not every
+    # dataclass-first caller provides them. If absent we synthesize minimal XML
+    # shells so the adapter can still run in lightweight mode. This is not a
+    # parity-grade setup: for ORE parity, callers should provide the real ORE XML
+    # files via XVALoader or explicit xml_buffers.
     for req in ("pricingengine.xml", "todaysmarket.xml", "curveconfig.xml", "simulation.xml"):
         xml_buffers.setdefault(req, _empty_xml(req))
     xml_buffers["simulation.xml"] = _apply_num_paths_to_simulation_xml(
@@ -151,6 +160,11 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
         end_date = _add_months_yyyymmdd(start_date, int(round(p.maturity_years * 12.0)))
         payer_fixed = str(p.pay_fixed).lower()
         payer_float = str(not p.pay_fixed).lower()
+        # This branch is intentionally a convenience fallback, not a full ORE
+        # trade serializer. It bakes in generic conventions (TARGET, A360, 6M
+        # fixed / 3M float, default index by currency). That is acceptable for
+        # lightweight native demos, but it is not sufficient for strict parity
+        # against a real ORE portfolio with bespoke schedules or conventions.
         idx = _default_index_for_ccy(p.ccy)
         return [
             "    <SwapData>",
@@ -172,6 +186,9 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "            <Tenor>6M</Tenor>",
             "            <Calendar>TARGET</Calendar>",
             "            <Convention>MF</Convention>",
+            "            <TermConvention>MF</TermConvention>",
+            "            <Rule>Forward</Rule>",
+            "            <EndOfMonth/>",
             "          </Rules>",
             "        </ScheduleData>",
             "        <FixedLegData>",
@@ -196,6 +213,9 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "            <Tenor>3M</Tenor>",
             "            <Calendar>TARGET</Calendar>",
             "            <Convention>MF</Convention>",
+            "            <TermConvention>MF</TermConvention>",
+            "            <Rule>Forward</Rule>",
+            "            <EndOfMonth/>",
             "          </Rules>",
             "        </ScheduleData>",
             "        <FloatingLegData>",
@@ -352,6 +372,9 @@ def _pricing_engine_xml(cfg: PricingEngineConfig) -> str:
 
 
 def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, ...]) -> str:
+    # This generated todaysmarket.xml is intentionally narrow. It is good enough
+    # for native smoke tests and fully in-memory demos, but it does not aim to
+    # reproduce the full richness of a production ORE todaysmarket.xml.
     fx_spots = "\n".join(
         f"    <FxSpot pair=\"{pair}\">FX/{pair[:3]}/{pair[3:]}</FxSpot>"
         for pair in cfg.fx_pairs
@@ -394,6 +417,9 @@ def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, 
 
 
 def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: tuple[str, ...]) -> str:
+    # Generated curve configs are a compatibility scaffold. They are useful when
+    # the caller wants an in-memory native demo, but they should not be treated
+    # as equivalent to a case-authored ORE curveconfig.xml for parity work.
     if not curves:
         lines = [
             "<CurveConfiguration>",

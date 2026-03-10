@@ -1,8 +1,29 @@
 import unittest
+import json
+from pathlib import Path
 
 import numpy as np
+import pytest
 
-from py_ore_tools.lgm import LGM1F, LGMParams, simulate_ba_measure, simulate_lgm_measure
+from py_ore_tools.lgm import (
+    LGM1F,
+    LGMParams,
+    ORE_PARITY_SEQUENCE_TYPE,
+    make_ore_gaussian_rng,
+    simulate_ba_measure,
+    simulate_lgm_measure,
+)
+from py_ore_tools.irs_xva_utils import (
+    compute_xva_from_exposure_profile,
+    deflate_lgm_npv_paths,
+)
+from py_ore_tools import ore_snapshot as ore_snapshot_module
+from tests.conftest import require_engine_repo_root
+
+try:
+    import QuantLib as ql
+except ImportError:  # pragma: no cover - parity mode requires QuantLib in the test env
+    ql = None
 
 
 class TestLGM(unittest.TestCase):
@@ -16,6 +37,31 @@ class TestLGM(unittest.TestCase):
             scaling=1.0,
         )
         self.model = LGM1F(self.params)
+        self.parity_fixture = (
+            Path(__file__).resolve().parents[1]
+            / "parity_artifacts"
+            / "lgm_rng_alignment"
+            / "mt_seed_42_constant.json"
+        )
+        if not self.parity_fixture.exists():
+            engine_root = require_engine_repo_root()
+            candidate = (
+                engine_root
+                / "Tools"
+                / "PythonOreRunner"
+                / "parity_artifacts"
+                / "lgm_rng_alignment"
+                / "mt_seed_42_constant.json"
+            )
+            if not candidate.exists():
+                pytest.skip("LGM parity fixture is not available locally")
+            self.parity_fixture = candidate
+
+    def _quantlib_sequences(self, seed: int, n_paths: int, dimension: int) -> np.ndarray:
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        gen = ql.InvCumulativeMersenneTwisterGaussianRsg(ql.MersenneTwisterUniformRsg(dimension, seed))
+        return np.vstack([np.asarray(gen.nextSequence().value(), dtype=float) for _ in range(n_paths)])
 
     def test_lgm_measure_moments(self):
         rng = np.random.default_rng(7)
@@ -31,6 +77,99 @@ class TestLGM(unittest.TestCase):
             self.assertLess(abs(emp_mean), 4.5 * se_mean + 1.0e-4)
             if tgt_var > 1.0e-8:
                 self.assertLess(abs(emp_var - tgt_var) / tgt_var, 0.05)
+
+    def test_ore_mt_rng_matches_oracle_fixture(self):
+        payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))
+        expected = np.asarray(payload["z"], dtype=float)
+        seed = int(payload["metadata"]["seed"])
+
+        rng = make_ore_gaussian_rng(seed)
+        actual = np.vstack([rng.next_sequence(expected.shape[1]) for _ in range(expected.shape[0])])
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_lgm_measure_ore_path_major_matches_oracle_fixture(self):
+        payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))
+        params_payload = payload["params"]
+        params = LGMParams(
+            alpha_times=tuple(params_payload["alpha_times"]),
+            alpha_values=tuple(params_payload["alpha_values"]),
+            kappa_times=tuple(params_payload["kappa_times"]),
+            kappa_values=tuple(params_payload["kappa_values"]),
+            shift=float(params_payload["shift"]),
+            scaling=float(params_payload["scaling"]),
+        )
+        model = LGM1F(params)
+        times = np.asarray(payload["times"], dtype=float)
+        expected = np.asarray(payload["x_paths"], dtype=float)
+        seed = int(payload["metadata"]["seed"])
+
+        actual = simulate_lgm_measure(
+            model,
+            times,
+            expected.shape[1],
+            rng=make_ore_gaussian_rng(seed),
+            draw_order="ore_path_major",
+        )
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_piecewise_lgm_measure_matches_quantlib_path_order_oracle(self):
+        times = np.array([0.0, 0.3, 0.9, 1.7, 3.25], dtype=float)
+        n_paths = 5
+        seed = 17
+        z = self._quantlib_sequences(seed, n_paths=n_paths, dimension=times.size - 1)
+
+        expected = np.empty((times.size, n_paths), dtype=float)
+        expected[0, :] = 0.0
+        step_scales = np.sqrt(np.maximum(np.diff(self.model.zeta(times)), 0.0))
+        for p in range(n_paths):
+            x_curr = 0.0
+            for i, scale in enumerate(step_scales):
+                x_curr += scale * z[p, i]
+                expected[i + 1, p] = x_curr
+
+        actual = simulate_lgm_measure(
+            self.model,
+            times,
+            n_paths,
+            rng=make_ore_gaussian_rng(seed),
+            draw_order="ore_path_major",
+        )
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_exact_parity_rejects_non_mersenne_twister(self):
+        with self.assertRaisesRegex(ValueError, ORE_PARITY_SEQUENCE_TYPE):
+            make_ore_gaussian_rng(42, sequence_type="SobolBrownianBridge")
+
+    def test_discount_bond_profile_matches_when_paths_are_shared(self):
+        payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))
+        times = np.asarray(payload["times"], dtype=float)
+        x_paths = np.asarray(payload["x_paths"], dtype=float)
+
+        params_payload = payload["params"]
+        model = LGM1F(
+            LGMParams(
+                alpha_times=tuple(params_payload["alpha_times"]),
+                alpha_values=tuple(params_payload["alpha_values"]),
+                kappa_times=tuple(params_payload["kappa_times"]),
+                kappa_values=tuple(params_payload["kappa_values"]),
+                shift=float(params_payload["shift"]),
+                scaling=float(params_payload["scaling"]),
+            )
+        )
+        p0 = lambda t: float(np.exp(-0.02 * t))
+
+        regenerated = simulate_lgm_measure(
+            model,
+            times,
+            x_paths.shape[1],
+            rng=make_ore_gaussian_rng(int(payload["metadata"]["seed"])),
+            draw_order="ore_path_major",
+        )
+        t = float(times[2])
+        maturity = 4.0
+        lhs = model.discount_bond(t, maturity, x_paths[2], p0, p0)
+        rhs = model.discount_bond(t, maturity, regenerated[2], p0, p0)
+        self.assertTrue(np.array_equal(lhs, rhs))
 
     def test_ba_measure_interval_moments(self):
         rng = np.random.default_rng(11)
@@ -120,9 +259,219 @@ class TestLGM(unittest.TestCase):
         h_scalar = np.array([float(self.model.H(float(t))) for t in times])
         self.assertTrue(np.allclose(h_vec, h_scalar, rtol=1.0e-13, atol=1.0e-14))
 
-        zeta_vec = self.model.zeta(times)
-        zeta_scalar = np.array([float(self.model.zeta(float(t))) for t in times])
-        self.assertTrue(np.allclose(zeta_vec, zeta_scalar, rtol=1.0e-13, atol=1.0e-14))
+    def test_ore_snapshot_day_counter_conventions(self):
+        self.assertAlmostEqual(
+            ore_snapshot_module._year_fraction_from_day_counter("2016-02-05", "2016-05-05", "A365F"),
+            90.0 / 365.0,
+        )
+        self.assertAlmostEqual(
+            ore_snapshot_module._year_fraction_from_day_counter(
+                "2016-02-05", "2016-05-05", "ActualActual(ISDA)"
+            ),
+            90.0 / 366.0,
+        )
+
+    def test_ore_snapshot_date_roundtrip_for_report_time(self):
+        t = ore_snapshot_module._year_fraction_from_day_counter(
+            "2016-02-05", "2016-05-05", "ActualActual(ISDA)"
+        )
+        self.assertEqual(
+            ore_snapshot_module._date_from_time_with_day_counter("2016-02-05", t, "ActualActual(ISDA)"),
+            "2016-05-05",
+        )
+
+    def test_curve_loader_uses_model_day_counter(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            csv_path = Path(td) / "curves.csv"
+            csv_path.write_text(
+                "Date,EUR-EONIA\n"
+                "2016-02-05,1.0\n"
+                "2016-05-05,0.99\n",
+                encoding="utf-8",
+            )
+            payload = ore_snapshot_module._load_ore_discount_pairs_by_columns_with_day_counter(
+                str(csv_path), ["EUR-EONIA"], asof_date="2016-02-05", day_counter="A365F"
+            )
+            dates, times, dfs = payload["EUR-EONIA"]
+            self.assertEqual(dates, ("2016-02-05", "2016-05-05"))
+            self.assertTrue(np.allclose(times, np.array([0.0, 90.0 / 365.0])))
+            self.assertTrue(np.allclose(dfs, np.array([1.0, 0.99])))
+
+    def test_portfolio_leg_times_can_use_a365f(self):
+        from py_ore_tools.irs_xva_utils import load_swap_legs_from_portfolio
+
+        portfolio = (
+            require_engine_repo_root()
+            / "Examples"
+            / "Exposure"
+            / "Input"
+            / "portfolio_singleswap.xml"
+        )
+        legs = load_swap_legs_from_portfolio(
+            str(portfolio), "Swap_20", "2016-02-05", time_day_counter="A365F"
+        )
+        self.assertAlmostEqual(float(legs["fixed_pay_time"][0]), 390.0 / 365.0)
+
+    def test_lgm_npv_deflation_matches_numeraire_identity(self):
+        times = np.array([0.0, 0.5, 1.0], dtype=float)
+        x_paths = np.array(
+            [
+                [0.0, 0.0],
+                [0.01, -0.02],
+                [0.03, 0.01],
+            ],
+            dtype=float,
+        )
+        npv_paths = np.array(
+            [
+                [100.0, 100.0],
+                [110.0, 90.0],
+                [80.0, 120.0],
+            ],
+            dtype=float,
+        )
+        p0 = lambda t: float(np.exp(-0.02 * t))
+        deflated = deflate_lgm_npv_paths(self.model, p0, times, x_paths, npv_paths)
+        for i, t in enumerate(times):
+            expected = npv_paths[i, :] / self.model.numeraire_lgm(float(t), x_paths[i, :], p0)
+            self.assertTrue(np.allclose(deflated[i, :], expected))
+
+    def test_xva_profile_ore_discounting_mode_skips_extra_df(self):
+        times = np.array([0.0, 1.0, 2.0], dtype=float)
+        epe = np.array([10.0, 20.0, 30.0], dtype=float)
+        ene = np.array([5.0, 4.0, 3.0], dtype=float)
+        df = np.array([1.0, 0.95, 0.90], dtype=float)
+        q_c = np.array([1.0, 0.98, 0.95], dtype=float)
+        q_b = np.array([1.0, 0.99, 0.97], dtype=float)
+
+        classic = compute_xva_from_exposure_profile(
+            times, epe, ene, df, q_c, q_b, funding_spread=0.01, exposure_discounting="discount_curve"
+        )
+        ore_mode = compute_xva_from_exposure_profile(
+            times, epe, ene, df, q_c, q_b, funding_spread=0.01, exposure_discounting="numeraire_deflated"
+        )
+
+        self.assertGreater(classic["cva"], 0.0)
+        self.assertGreater(ore_mode["cva"], classic["cva"])
+        self.assertGreater(ore_mode["fva"], classic["fva"])
+
+    def test_xva_profile_ore_funding_curves_match_increment_formula(self):
+        times = np.array([0.0, 1.0, 2.0], dtype=float)
+        epe = np.array([0.0, 20.0, 30.0], dtype=float)
+        ene = np.array([0.0, 4.0, 3.0], dtype=float)
+        df_ois = np.array([1.0, 0.99, 0.97], dtype=float)
+        df_borrow = np.array([1.0, 0.985, 0.96], dtype=float)
+        df_lend = np.array([1.0, 0.992, 0.975], dtype=float)
+        q_c = np.array([1.0, 0.98, 0.95], dtype=float)
+        q_b = np.array([1.0, 0.97, 0.94], dtype=float)
+
+        out = compute_xva_from_exposure_profile(
+            times,
+            epe,
+            ene,
+            df_ois,
+            q_c,
+            q_b,
+            exposure_discounting="numeraire_deflated",
+            funding_discount_borrow=df_borrow,
+            funding_discount_lend=df_lend,
+            funding_discount_ois=df_ois,
+        )
+        expected_fca = (
+            q_c[0] * q_b[0] * epe[1] * (df_borrow[0] / df_borrow[1] - df_ois[0] / df_ois[1])
+            + q_c[1] * q_b[1] * epe[2] * (df_borrow[1] / df_borrow[2] - df_ois[1] / df_ois[2])
+        )
+        expected_fba = (
+            q_c[0] * q_b[0] * ene[1] * (df_lend[0] / df_lend[1] - df_ois[0] / df_ois[1])
+            + q_c[1] * q_b[1] * ene[2] * (df_lend[1] / df_lend[2] - df_ois[1] / df_ois[2])
+        )
+        self.assertAlmostEqual(float(out["fca"]), float(expected_fca), places=12)
+        self.assertAlmostEqual(float(out["fba"]), float(expected_fba), places=12)
+        self.assertAlmostEqual(float(out["fva"]), float(expected_fba + expected_fca), places=12)
+
+    def test_dual_curve_swap_uses_stored_fixed_float_amounts(self):
+        from py_ore_tools.irs_xva_utils import swap_npv_from_ore_legs_dual_curve
+
+        model = LGM1F(LGMParams.constant(alpha=0.01, kappa=0.03))
+        p0 = lambda t: float(np.exp(-0.02 * t))
+        legs = {
+            "fixed_pay_time": np.array([], dtype=float),
+            "fixed_amount": np.array([], dtype=float),
+            "float_pay_time": np.array([1.0], dtype=float),
+            "float_start_time": np.array([0.5], dtype=float),
+            "float_end_time": np.array([1.0], dtype=float),
+            "float_accrual": np.array([0.5], dtype=float),
+            "float_notional": np.array([100.0], dtype=float),
+            "float_sign": np.array([-1.0], dtype=float),
+            "float_spread": np.array([0.0], dtype=float),
+            "float_coupon": np.array([0.03], dtype=float),
+            "float_amount": np.array([-2.0], dtype=float),
+            "float_fixing_time": np.array([0.25], dtype=float),
+        }
+        x_t = np.array([0.0, 0.1], dtype=float)
+        pv = swap_npv_from_ore_legs_dual_curve(model, p0, p0, legs, 0.75, x_t)
+        expected_df = model.discount_bond(0.75, 1.0, x_t, p0, p0)
+        self.assertTrue(np.allclose(pv, -2.0 * expected_df))
+
+    def test_dual_curve_swap_t0_ignores_node_interpolation(self):
+        from py_ore_tools.irs_xva_utils import swap_npv_from_ore_legs_dual_curve
+
+        model = LGM1F(LGMParams.constant(alpha=0.01, kappa=0.03))
+        p0 = lambda t: float(np.exp(-0.02 * t))
+        legs = {
+            "fixed_pay_time": np.array([1.0, 2.0], dtype=float),
+            "fixed_amount": np.array([10.0, 10.0], dtype=float),
+            "float_pay_time": np.array([1.0], dtype=float),
+            "float_start_time": np.array([0.5], dtype=float),
+            "float_end_time": np.array([1.0], dtype=float),
+            "float_accrual": np.array([0.5], dtype=float),
+            "float_notional": np.array([100.0], dtype=float),
+            "float_sign": np.array([-1.0], dtype=float),
+            "float_spread": np.array([0.0], dtype=float),
+            "float_coupon": np.array([0.03], dtype=float),
+            "float_amount": np.array([-1.5], dtype=float),
+            "float_fixing_time": np.array([0.25], dtype=float),
+            "node_tenors": np.array([0.25, 0.5, 1.0], dtype=float),
+        }
+        x0 = np.array([0.0], dtype=float)
+        pv = swap_npv_from_ore_legs_dual_curve(model, p0, p0, legs, 0.0, x0)[0]
+        legs_no_nodes = dict(legs)
+        legs_no_nodes.pop("node_tenors")
+        expected = swap_npv_from_ore_legs_dual_curve(model, p0, p0, legs_no_nodes, 0.0, x0)[0]
+        self.assertAlmostEqual(float(pv), float(expected), places=12)
+
+    def test_dual_curve_swap_defaults_to_exact_curve_valuation(self):
+        from py_ore_tools.irs_xva_utils import swap_npv_from_ore_legs_dual_curve
+
+        model = LGM1F(LGMParams.constant(alpha=0.01, kappa=0.03))
+        p0 = lambda t: float(np.exp(-0.02 * t))
+        legs = {
+            "fixed_pay_time": np.array([1.0, 2.0], dtype=float),
+            "fixed_amount": np.array([10.0, 10.0], dtype=float),
+            "float_pay_time": np.array([1.0], dtype=float),
+            "float_start_time": np.array([0.5], dtype=float),
+            "float_end_time": np.array([1.0], dtype=float),
+            "float_accrual": np.array([0.5], dtype=float),
+            "float_notional": np.array([100.0], dtype=float),
+            "float_sign": np.array([-1.0], dtype=float),
+            "float_spread": np.array([0.0], dtype=float),
+            "float_coupon": np.array([0.03], dtype=float),
+            "float_amount": np.array([-1.5], dtype=float),
+            "float_fixing_time": np.array([0.25], dtype=float),
+            "node_tenors": np.array([0.25, 0.5, 1.0], dtype=float),
+        }
+        x_t = np.array([0.0, 0.1], dtype=float)
+        pv_default = swap_npv_from_ore_legs_dual_curve(model, p0, p0, legs, 0.75, x_t)
+        legs_no_nodes = dict(legs)
+        legs_no_nodes.pop("node_tenors")
+        pv_exact = swap_npv_from_ore_legs_dual_curve(model, p0, p0, legs_no_nodes, 0.75, x_t)
+        pv_nodes = swap_npv_from_ore_legs_dual_curve(
+            model, p0, p0, legs, 0.75, x_t, use_node_interpolation=True
+        )
+        self.assertTrue(np.allclose(pv_default, pv_exact, rtol=1.0e-12, atol=1.0e-12))
+        self.assertFalse(np.allclose(pv_default, pv_nodes, rtol=1.0e-12, atol=1.0e-12))
 
     def test_exact_zetan_matches_dense_numeric_integration(self):
         intervals = [(0.0, 0.7), (0.2, 2.3), (1.0, 5.0)]

@@ -35,7 +35,7 @@ from .dataclasses import (
     XVAConfig,
     XVASnapshot,
 )
-from .exceptions import ConflictError, EngineRunError, MappingError, ValidationError
+from .exceptions import ConflictError, EngineRunError, InputCompatibilityError, MappingError, ValidationError
 from .loader import XVALoader, merge_snapshots
 from .mapper import MappedInputs, build_input_parameters, map_snapshot
 from .parity import ParityCheckResult, ParityTolerance, compare_results
@@ -71,6 +71,7 @@ __all__ = [
     "FixingPoint",
     "FixingsData",
     "GenericProduct",
+    "InputCompatibilityError",
     "IRS",
     "MappedInputs",
     "MappingError",

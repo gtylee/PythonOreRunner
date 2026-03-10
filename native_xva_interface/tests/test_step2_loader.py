@@ -1,10 +1,11 @@
 from pathlib import Path
 
 from native_xva_interface import XVALoader
+from native_xva_interface.tests.conftest import require_engine_repo_root
 
 
 def _xvarisk_input_dir() -> Path:
-    return Path(__file__).resolve().parents[4] / "Examples" / "XvaRisk" / "Input"
+    return require_engine_repo_root() / "Examples" / "XvaRisk" / "Input"
 
 
 def test_loader_parses_known_example_folder():

@@ -1,27 +1,20 @@
 from __future__ import annotations
 
-import sys
+import os
 from pathlib import Path
 
 
-# Allow `import native_xva_interface` when pytest is launched from the repo root.
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
-
-
 def find_engine_repo_root() -> Path | None:
-    import os
-
     env_root = os.getenv("ENGINE_REPO_ROOT")
     candidates = []
     if env_root:
         candidates.append(Path(env_root))
 
+    repo_root = Path(__file__).resolve().parents[1]
     candidates.extend(
         [
-            PACKAGE_ROOT,
-            PACKAGE_ROOT.parent / "Engine",
+            repo_root,
+            repo_root.parent / "Engine",
             Path("/Users/gordonlee/Documents/Engine"),
         ]
     )

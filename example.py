@@ -15,11 +15,10 @@ class MyOreExampleRunner(OreBasic):
         return sorted(trade_ids_input) == sorted(trade_ids_output)
 
 
-# Folders: set ORE_EXAMPLE_DIR and ORE_EXE, or use ORE repo layout (see README)
-_project_root = Path(__file__).resolve().parent
-_ore_repo_root = _project_root.parent.parent
-my_example_folder = Path(os.environ.get("ORE_EXAMPLE_DIR", str(_ore_repo_root / "Examples" / "Example_7")))
-ore_exe = Path(os.environ.get("ORE_EXE", str(_ore_repo_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore")))
+# setup your folders (the Examples in this case)
+repo_root = Path(__file__).resolve().parents[2]
+my_example_folder = repo_root / "Examples" / "Example_7"
+ore_exe = Path(os.environ.get("ORE_EXE", str(repo_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore")))
 
 # attach ore config folders to Python object
 my_ore = MyOreExampleRunner.from_folders(
@@ -47,7 +46,7 @@ my_ore.plots.plot_trade_exposures()
 print("All trades processed: " + str(my_ore.all_trades_processed()))
 
 # backup current run to some safe location
-archiv_folder = _project_root / "parity_artifacts" / "ore_archive"
+archiv_folder = repo_root / "Tools" / "PythonOreRunner" / "parity_artifacts" / "ore_archive"
 current_run = "attempt_01"
 my_ore.backup_inputfiles_to(str(archiv_folder / current_run / "Input"))
 my_ore.backup_outputfolder_to(str(archiv_folder / current_run / "Output"))

@@ -16,3 +16,7 @@ class EngineRunError(XVAInterfaceError):
 
 class ConflictError(XVAInterfaceError):
     """Conflict in mixed-source merge."""
+
+
+class InputCompatibilityError(ValidationError):
+    """Input shape is structurally incompatible with the requested Python path."""

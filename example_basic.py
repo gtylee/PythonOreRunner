@@ -3,11 +3,10 @@ from pathlib import Path
 
 from py_ore_tools import OreBasic
 
-# Folders: set ORE_EXAMPLE_DIR (Input folder or parent) and ORE_EXE, or use ORE repo layout
-_project_root = Path(__file__).resolve().parent
-_ore_repo_root = _project_root.parent.parent
-my_example_folder = Path(os.environ.get("ORE_EXAMPLE_DIR", str(_ore_repo_root / "Examples" / "Example_7")))
-ore_exe = Path(os.environ.get("ORE_EXE", str(_ore_repo_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore")))
+# setup your folders (the Examples in this case)
+repo_root = Path(__file__).resolve().parents[2]
+my_example_folder = repo_root / "Examples" / "Example_7"
+ore_exe = Path(os.environ.get("ORE_EXE", str(repo_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore")))
 
 # attach ore config folders to Python object
 my_ore = OreBasic.from_folders(

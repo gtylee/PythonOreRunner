@@ -1,8 +1,14 @@
+import tempfile
 import unittest
 
 import numpy as np
 
-from py_ore_tools.irs_xva_utils import payer_swap_npv_at_time, swap_npv_from_ore_legs, swap_npv_from_ore_legs_dual_curve
+from py_ore_tools.irs_xva_utils import (
+    load_ore_default_curve_inputs,
+    payer_swap_npv_at_time,
+    swap_npv_from_ore_legs,
+    swap_npv_from_ore_legs_dual_curve,
+)
 from py_ore_tools.lgm import LGM1F, LGMParams
 
 
@@ -290,8 +296,54 @@ class TestIrsXvaUtils(unittest.TestCase):
                 t,
                 self.x_t,
                 realized_float_coupon=realized_float_coupon,
+                use_node_interpolation=True,
             )
             self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+    def test_load_ore_default_curve_inputs_converts_cds_spreads_to_hazard(self):
+        todaysmarket_xml = """\
+<TodaysMarket>
+  <DefaultCurves id="default">
+    <DefaultCurve name="BANK">Default/USD/BANK_SR_USD</DefaultCurve>
+  </DefaultCurves>
+</TodaysMarket>
+"""
+        market_data = """\
+20260101 RECOVERY_RATE/RATE/BANK/SR/USD 0.4
+20260101 CDS/CREDIT_SPREAD/BANK/SR/USD/1Y 0.012
+20260101 CDS/CREDIT_SPREAD/BANK/SR/USD/5Y 0.018
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tm = f"{tmp}/todaysmarket.xml"
+            md = f"{tmp}/market.txt"
+            with open(tm, "w", encoding="utf-8") as f:
+                f.write(todaysmarket_xml)
+            with open(md, "w", encoding="utf-8") as f:
+                f.write(market_data)
+            out = load_ore_default_curve_inputs(tm, md, cpty_name="BANK")
+
+        self.assertAlmostEqual(float(out["recovery"]), 0.4)
+        self.assertTrue(np.allclose(out["hazard_times"], np.array([1.0, 5.0])))
+        self.assertTrue(
+            np.allclose(out["hazard_rates"], np.array([0.012 / 0.6, 0.018 / 0.6]))
+        )
+
+    def test_load_ore_legs_from_flows_keeps_constant_leg_sign_when_coupons_turn_negative(self):
+        from py_ore_tools.irs_xva_utils import load_ore_legs_from_flows
+
+        flows_csv = """\
+#TradeId,Type,CashflowNo,LegNo,PayDate,FlowType,Amount,Currency,Coupon,Accrual,AccrualStartDate,AccrualEndDate,AccruedAmount,fixingDate,fixingValue,Notional,DiscountFactor,PresentValue,FXRate(Local-Base),PresentValue(Base),BaseCurrency
+T1,Swap,1,0,2016-09-01,Interest,100.0,EUR,0.02,0.5,2016-03-01,2016-09-01,0.0,#N/A,#N/A,10000.0,1.0,100.0,1.0,100.0,EUR
+T1,Swap,1,1,2016-06-01,InterestProjected,-10.0,EUR,0.004,0.25,2016-03-01,2016-06-01,0.0,2016-02-26,0.004,10000.0,1.0,-10.0,1.0,-10.0,EUR
+T1,Swap,2,1,2016-09-01,InterestProjected,5.0,EUR,-0.002,0.25,2016-06-01,2016-09-01,0.0,2016-05-30,-0.002,10000.0,1.0,5.0,1.0,5.0,EUR
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = f"{tmp}/flows.csv"
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(flows_csv)
+            legs = load_ore_legs_from_flows(fp, trade_id="T1", asof_date="2016-02-05", time_day_counter="A365F")
+
+        self.assertTrue(np.allclose(legs["float_sign"], np.array([-1.0, -1.0])))
 
 
 if __name__ == "__main__":

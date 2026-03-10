@@ -36,7 +36,11 @@ class XVALoader:
     def from_files(input_dir: str, ore_file: Optional[str] = None) -> XVASnapshot:
         base_dir = Path(input_dir)
         if not base_dir.exists():
-            raise ValidationError(f"Input directory does not exist: {input_dir}")
+            raise ValidationError(
+                f"Input directory does not exist: {input_dir}. "
+                "Fix: point XVALoader.from_files(...) at the ORE Input directory containing "
+                "ore.xml, portfolio.xml, todaysmarket.xml, and related input files."
+            )
 
         ore_path = _pick_ore_file(base_dir, ore_file)
         ore_tree = ET.parse(ore_path)
@@ -47,13 +51,20 @@ class XVALoader:
 
         asof = setup.get("asofDate")
         if not asof:
-            raise ValidationError("Missing Setup/asofDate in ore file")
+            raise ValidationError(
+                "Missing Setup/asofDate in ore file. "
+                "Fix: add <Parameter name=\"asofDate\">YYYY-MM-DD</Parameter> under <Setup>."
+            )
 
         input_path = setup.get("inputPath", ".")
 
         portfolio_file = setup.get("portfolioFile")
         if not portfolio_file:
-            raise ValidationError("Missing Setup/portfolioFile in ore file")
+            raise ValidationError(
+                "Missing Setup/portfolioFile in ore file. "
+                "Fix: add <Parameter name=\"portfolioFile\">...</Parameter> under <Setup>, "
+                "or do not use XVALoader.from_files(...) for this snapshot."
+            )
         portfolio_path = _resolve_ref(portfolio_file, ore_path, input_path)
 
         netting_file = analytics.get("xva", {}).get("csaFile") or setup.get("nettingSetFile") or "netting.xml"
@@ -238,14 +249,21 @@ def _pick_ore_file(base_dir: Path, ore_file: Optional[str]) -> Path:
     if ore_file:
         p = base_dir / ore_file if not Path(ore_file).is_absolute() else Path(ore_file)
         if not p.exists():
-            raise ValidationError(f"ORE file not found: {p}")
+            raise ValidationError(
+                f"ORE file not found: {p}. "
+                "Fix: pass the ore xml filename relative to the Input directory, "
+                "for example ore_file='ore_stress_classic.xml', or use an absolute path."
+            )
         return p
     explicit = base_dir / "ore.xml"
     if explicit.exists():
         return explicit
     cands = sorted(base_dir.glob("ore*.xml"))
     if not cands:
-        raise ValidationError(f"No ore xml files found in {base_dir}")
+        raise ValidationError(
+            f"No ore xml files found in {base_dir}. "
+            "Fix: point the loader at the ORE Input directory, not the run root or Output directory."
+        )
     return cands[0]
 
 
@@ -293,7 +311,9 @@ def _resolve_ref(ref: str, ore_file: Path, input_path: str) -> Path:
         if c.exists():
             return c
 
-    # Keep deterministic fallback for not-yet-existing optional files.
+    # Keep deterministic fallback for optional files. Required files should be
+    # validated by the caller so that their error messages can explain how the
+    # ORE case should be wired, instead of failing here with an opaque path miss.
     return candidates[0]
 
 
@@ -470,7 +490,11 @@ def _parse_netting(path: Path) -> NettingConfig:
 def _parse_collateral(path: Path, required: bool) -> CollateralConfig:
     if not path.exists():
         if required:
-            raise ValidationError(f"Missing collateral balances file: {path}")
+            raise ValidationError(
+                f"Missing collateral balances file: {path}. "
+                "Fix: provide collateralbalances.xml at the expected inputPath-relative location, "
+                "or load a case that does not require collateral balances."
+            )
         return CollateralConfig(source_meta=SourceMeta(origin="file", path=str(path)))
 
     tree = ET.parse(path)
@@ -493,6 +517,10 @@ def _parse_collateral(path: Path, required: bool) -> CollateralConfig:
 
 
 def _load_known_xml_buffers(ore_path: Path, setup: Dict[str, str], analytics: Dict[str, Dict[str, str]], input_path: str) -> Dict[str, str]:
+    # These XML buffers are the minimum set the Python/native runtime knows how
+    # to consume directly. Missing files here do not always make the snapshot
+    # invalid, but they usually force mapper/runtime fallbacks and therefore
+    # weaken parity with a real ORE run.
     fields = {
         "curveconfig.xml": setup.get("curveConfigFile"),
         "conventions.xml": setup.get("conventionsFile"),
@@ -511,6 +539,10 @@ def _load_known_xml_buffers(ore_path: Path, setup: Dict[str, str], analytics: Di
         p = _resolve_ref(ref, ore_path, input_path)
         if p.exists():
             buffers[key] = p.read_text(encoding="utf-8")
+    output_path = (ore_path.parent.parent / setup.get("outputPath", "Output")).resolve()
+    calibration_xml = output_path / "calibration.xml"
+    if calibration_xml.exists():
+        buffers["calibration.xml"] = calibration_xml.read_text(encoding="utf-8")
     return buffers
 
 
@@ -532,7 +564,9 @@ def _to_dt(s: str) -> datetime:
             return datetime.strptime(s, fmt)
         except ValueError:
             continue
-    raise ValidationError(f"Unsupported date format: {s}")
+    raise ValidationError(
+        f"Unsupported date format: {s}. Supported formats are YYYY-MM-DD and YYYYMMDD."
+    )
 
 
 def _normalize_date(s: str) -> str:
@@ -543,7 +577,9 @@ def _normalize_date(s: str) -> str:
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
-    raise ValidationError(f"Unsupported date format: {s}")
+    raise ValidationError(
+        f"Unsupported date format: {s}. Supported formats are YYYY-MM-DD and YYYYMMDD."
+    )
 
 
 def _text(node: ET.Element, path: str) -> Optional[str]:

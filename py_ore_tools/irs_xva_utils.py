@@ -14,13 +14,47 @@ small modelling approximation so that ORE inputs can still be reused.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import csv
 from datetime import date, datetime, timedelta
 import re
 import xml.etree.ElementTree as ET
 import numpy as np
+
+
+_TIME_YEAR_BASIS = 365.25
+
+
+def _days_in_year(year: int) -> int:
+    return 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
+
+
+def _year_fraction_actual_actual(start: date, end: date) -> float:
+    if end == start:
+        return 0.0
+    sign = 1.0
+    if end < start:
+        start, end = end, start
+        sign = -1.0
+
+    total = 0.0
+    cur = start
+    while cur.year < end.year:
+        year_end = date(cur.year + 1, 1, 1)
+        total += (year_end - cur).days / _days_in_year(cur.year)
+        cur = year_end
+    total += (end - cur).days / _days_in_year(cur.year)
+    return sign * total
+
+
+def _time_from_dates(start: date, end: date, day_counter: str) -> float:
+    dc = (day_counter or "A365F").strip().upper()
+    if dc in ("A365F", "A365", "ACT/365(FIXED)", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
+        return (end - start).days / 365.0
+    if dc in ("AAISDA", "ACTUALACTUAL(ISDA)", "ACT/ACT(ISDA)", "ACTUALACTUALISDA"):
+        return _year_fraction_actual_actual(start, end)
+    return _year_fraction_actual_actual(start, end)
 
 
 def build_discount_curve_from_zero_rate_pairs(
@@ -253,22 +287,29 @@ def load_simulation_yield_tenors(simulation_xml: str) -> np.ndarray:
     return arr
 
 
-def _build_schedule(start: date, end: date, tenor: str, calendar: str, convention: str) -> Tuple[np.ndarray, np.ndarray]:
+def _build_schedule(
+    start: date,
+    end: date,
+    tenor: str,
+    calendar: str,
+    convention: str,
+    pay_convention: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     # Build coupon period boundaries from the same rule ingredients ORE stores in
-    # ``ScheduleData/Rules``.  Payment dates are adjusted separately to match the
-    # leg's business-day convention.
+    # ``ScheduleData/Rules``. ORE advances the unadjusted anchor dates and only then
+    # applies business-day adjustment to each boundary independently.
     months = _parse_tenor_to_months(tenor)
-    starts = []
-    ends = []
+    boundaries = [start]
     s = start
     while s < end:
-        e = _add_months(s, months)
-        if e > end:
-            e = end
-        starts.append(s)
-        ends.append(e)
-        s = e
-    pay = np.asarray([_adjust_date(e, convention, calendar) for e in ends], dtype=object)
+        s = _add_months(s, months)
+        if s > end:
+            s = end
+        boundaries.append(s)
+    adjusted = [_adjust_date(d, convention, calendar) for d in boundaries]
+    starts = adjusted[:-1]
+    ends = adjusted[1:]
+    pay = [_adjust_date(d, pay_convention or convention, calendar) for d in boundaries[1:]]
     return np.asarray(starts, dtype=object), np.asarray(ends, dtype=object), pay
 
 
@@ -322,6 +363,24 @@ def load_ore_discount_pairs_from_curves(
 
     The returned arrays are immediately usable with ``build_discount_curve_from_discount_pairs``.
     """
+    data = load_ore_discount_pairs_by_columns(curves_csv, [discount_column])
+    return data[discount_column]
+
+
+def load_ore_discount_pairs_by_columns(
+    curves_csv: str,
+    discount_columns: Sequence[str],
+) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    """Load discount-factor pillars for multiple curves.csv columns in one pass.
+
+    This helper is designed for multi-currency extraction workflows where several
+    currencies may map to the same or different curves.csv columns.
+    """
+    columns = [c for c in discount_columns if c]
+    if not columns:
+        raise ValueError("discount_columns must contain at least one column name")
+
+    requested = list(dict.fromkeys(columns))
     rows = []
     with open(curves_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -332,36 +391,43 @@ def load_ore_discount_pairs_from_curves(
         raise ValueError("curves.csv appears empty")
     if "Date" not in rows[0]:
         raise ValueError("curves.csv missing Date column")
-    if discount_column not in rows[0]:
-        raise ValueError(f"curves.csv missing requested discount column '{discount_column}'")
+    missing = [c for c in requested if c not in rows[0]]
+    if missing:
+        raise ValueError(f"curves.csv missing requested discount columns: {missing}")
 
     d0 = datetime.strptime(rows[0]["Date"], "%Y-%m-%d")
     times = []
-    dfs = []
+    by_col: Dict[str, list[float]] = {c: [] for c in requested}
     for r in rows:
         d = datetime.strptime(r["Date"], "%Y-%m-%d")
-        t = (d - d0).days / 365.0
-        times.append(t)
-        dfs.append(float(r[discount_column]))
+        times.append((d - d0).days / 365.0)
+        for c in requested:
+            by_col[c].append(float(r[c]))
 
     times_arr = np.asarray(times, dtype=float)
-    dfs_arr = np.asarray(dfs, dtype=float)
-
-    # Deduplicate potential repeated dates conservatively by first occurrence.
     uniq_t, idx = np.unique(times_arr, return_index=True)
-    uniq_df = dfs_arr[idx]
-    if uniq_t[0] > 1.0e-12:
-        uniq_t = np.insert(uniq_t, 0, 0.0)
-        uniq_df = np.insert(uniq_df, 0, 1.0)
-    elif uniq_t[0] == 0.0:
-        uniq_df[0] = 1.0
-    return uniq_t, uniq_df
+
+    out: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for c in requested:
+        dfs_arr = np.asarray(by_col[c], dtype=float)
+        uniq_df = dfs_arr[idx].copy()
+        if uniq_t[0] > 1.0e-12:
+            t = np.insert(uniq_t, 0, 0.0)
+            df = np.insert(uniq_df, 0, 1.0)
+        else:
+            t = uniq_t.copy()
+            df = uniq_df
+            if t[0] == 0.0:
+                df[0] = 1.0
+        out[c] = (t, df)
+    return out
 
 
 def load_ore_legs_from_flows(
     flows_csv: str,
     trade_id: str = "Swap_20",
     asof_date: Optional[str] = None,
+    time_day_counter: str = "ActualActual(ISDA)",
 ) -> Dict[str, np.ndarray]:
     """Parse ORE flows.csv and return fixed/floating leg cashflow definitions in year-fraction times.
 
@@ -370,8 +436,10 @@ def load_ore_legs_from_flows(
       float_pay_time, float_start_time, float_end_time, float_accrual, float_spread, float_notional, float_sign
 
     This is the most direct route from ORE cashflow reports into the swap pricers in
-    this module.  We intentionally preserve ORE's payer/receiver sign by inferring it
-    from the exported cashflow amount.
+    this module. The key subtlety is that the *leg* payer/receiver orientation is
+    constant even when coupon rates go negative. We therefore infer a constant leg
+    sign from ``Amount / Coupon`` where possible instead of taking ``sign(Amount)``
+    row-by-row, which would flip signs incorrectly on negative-rate coupons.
     """
     rows = []
     with open(flows_csv, newline="", encoding="utf-8") as f:
@@ -392,7 +460,7 @@ def load_ore_legs_from_flows(
 
     def to_time(date_str: str) -> float:
         d = datetime.strptime(date_str, "%Y-%m-%d")
-        return (d - asof).days / 365.0
+        return _time_from_dates(asof.date(), d.date(), time_day_counter)
 
     fixed = [r for r in rows if r["LegNo"] == "0"]
     floating = [r for r in rows if r["LegNo"] == "1"]
@@ -405,11 +473,34 @@ def load_ore_legs_from_flows(
 
     out: Dict[str, np.ndarray] = {}
 
+    def infer_leg_sign(rows: list[dict[str, str]]) -> float:
+        signed = []
+        for r in rows:
+            amt = float(r["Amount"])
+            cpn_txt = r.get("Coupon", "")
+            try:
+                cpn = float(cpn_txt)
+            except Exception:
+                cpn = 0.0
+            if abs(cpn) > 1.0e-14:
+                signed.append(np.sign(amt / cpn))
+        if signed:
+            s = float(np.sign(np.median(np.asarray(signed, dtype=float))))
+            return s if abs(s) > 0.0 else 1.0
+        nonzero_amt = [np.sign(float(r["Amount"])) for r in rows if abs(float(r["Amount"])) > 1.0e-14]
+        if nonzero_amt:
+            s = float(np.sign(np.median(np.asarray(nonzero_amt, dtype=float))))
+            return s if abs(s) > 0.0 else 1.0
+        return 1.0
+
+    fixed_leg_sign = infer_leg_sign(fixed)
+    float_leg_sign = infer_leg_sign(floating)
+
     out["fixed_pay_time"] = np.asarray([to_time(r["PayDate"]) for r in fixed], dtype=float)
     out["fixed_accrual"] = np.asarray([float(r["Accrual"]) for r in fixed], dtype=float)
     out["fixed_rate"] = np.asarray([float(r["Coupon"]) for r in fixed], dtype=float)
     out["fixed_notional"] = np.asarray([float(r["Notional"]) for r in fixed], dtype=float)
-    out["fixed_sign"] = np.asarray([np.sign(float(r["Amount"])) for r in fixed], dtype=float)
+    out["fixed_sign"] = np.full(len(fixed), fixed_leg_sign, dtype=float)
     out["fixed_amount"] = np.asarray([float(r["Amount"]) for r in fixed], dtype=float)
 
     out["float_pay_time"] = np.asarray([to_time(r["PayDate"]) for r in floating], dtype=float)
@@ -417,13 +508,15 @@ def load_ore_legs_from_flows(
     out["float_end_time"] = np.asarray([to_time(r["AccrualEndDate"]) for r in floating], dtype=float)
     out["float_accrual"] = np.asarray([float(r["Accrual"]) for r in floating], dtype=float)
     out["float_notional"] = np.asarray([float(r["Notional"]) for r in floating], dtype=float)
-    out["float_sign"] = np.asarray([np.sign(float(r["Amount"])) for r in floating], dtype=float)
+    out["float_sign"] = np.full(len(floating), float_leg_sign, dtype=float)
     out["float_coupon"] = np.asarray([float(r["Coupon"]) for r in floating], dtype=float)
     out["float_amount"] = np.asarray([float(r["Amount"]) for r in floating], dtype=float)
     # Flow exports typically contain the all-in projected coupon rather than a clean
     # decomposition into index forward + spread.  Start with zero spread and let a
     # later calibration helper infer the spread if the user wants dual-curve parity.
     out["float_spread"] = np.zeros_like(out["float_accrual"])
+    # Fixing time: flows.csv has no explicit fixing date; use period start (standard convention).
+    out["float_fixing_time"] = np.asarray(out["float_start_time"], dtype=float)
 
     return out
 
@@ -432,6 +525,7 @@ def load_swap_legs_from_portfolio(
     portfolio_xml: str,
     trade_id: str,
     asof_date: str,
+    time_day_counter: str = "ActualActual(ISDA)",
 ) -> Dict[str, np.ndarray]:
     """Build swap legs from ORE trade definition (no flows.csv dependency).
 
@@ -461,6 +555,7 @@ def load_swap_legs_from_portfolio(
     for lx in legs_xml:
         ltype = (lx.findtext("./LegType") or "").strip()
         payer = (lx.findtext("./Payer") or "").strip().lower() == "true"
+        # ORE convention: Payer=true means we pay this leg (outflow); Payer=false means we receive (inflow).
         sign = -1.0 if payer else 1.0
         notional = float((lx.findtext("./Notionals/Notional") or "0").strip())
         dc = (lx.findtext("./DayCounter") or "A365").strip()
@@ -474,10 +569,10 @@ def load_swap_legs_from_portfolio(
         cal = (rules.findtext("./Calendar") or "TARGET").strip()
         conv = (rules.findtext("./Convention") or pay_conv).strip()
 
-        s_dates, e_dates, p_dates = _build_schedule(start, end, tenor, cal, conv)
-        s_t = np.asarray([(d - asof).days / 365.0 for d in s_dates], dtype=float)
-        e_t = np.asarray([(d - asof).days / 365.0 for d in e_dates], dtype=float)
-        p_t = np.asarray([(d - asof).days / 365.0 for d in p_dates], dtype=float)
+        s_dates, e_dates, p_dates = _build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
+        s_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in s_dates], dtype=float)
+        e_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in e_dates], dtype=float)
+        p_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in p_dates], dtype=float)
         accr = np.asarray([_year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
 
         if ltype == "Fixed":
@@ -491,6 +586,8 @@ def load_swap_legs_from_portfolio(
         elif ltype == "Floating":
             spread = float((lx.findtext("./FloatingLegData/Spreads/Spread") or "0").strip())
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
+            float_index = (lx.findtext("./FloatingLegData/Index") or "").strip().upper()
+            float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
             out["float_pay_time"] = p_t
             out["float_start_time"] = s_t
             out["float_end_time"] = e_t
@@ -502,7 +599,9 @@ def load_swap_legs_from_portfolio(
             out["float_amount"] = np.zeros_like(accr)
             # ORE stores fixing lag as business days relative to the accrual start.
             fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
-            out["float_fixing_time"] = np.asarray([(fd - asof).days / 365.0 for fd in fix_dates], dtype=float)
+            out["float_fixing_time"] = np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
+            out["float_index"] = float_index
+            out["float_index_tenor"] = float_index_tenor
         else:
             raise ValueError(f"unsupported leg type '{ltype}'")
 
@@ -657,6 +756,7 @@ def swap_npv_from_ore_legs_dual_curve(
     t: float,
     x_t: np.ndarray,
     realized_float_coupon: Optional[np.ndarray] = None,
+    use_node_interpolation: bool = False,
 ) -> np.ndarray:
     """Pathwise swap NPV with discounting on p0_disc and forwarding on p0_fwd.
 
@@ -664,16 +764,24 @@ def swap_npv_from_ore_legs_dual_curve(
     a deterministic basis ratio:
       P_f(t,T) = P_d(t,T) * (B(T) / B(t)),  B(u)=P_f(0,u)/P_d(0,u)
 
-    This is one of the key ORE-related approximations in the Python toolkit.  ORE can
+    This is one of the key ORE-related approximations in the Python toolkit. ORE can
     carry richer multi-curve state; here we reuse a single LGM factor and transport
     it onto the forwarding curve through the deterministic t=0 basis term structure.
+
+    ``use_node_interpolation`` keeps the older "simulate node tenors, then interpolate
+    discount factors" workflow available for diagnostics.  Exact discount-bond
+    evaluation is the default because it is materially closer to ORE XVA exposure
+    profiles than the node interpolation shortcut on the benchmark parity cases.
     """
     x = np.asarray(x_t, dtype=float)
     pv = np.zeros_like(x, dtype=float)
     p_t_d = p0_disc(t)
 
     node_tenors = np.asarray(legs.get("node_tenors", np.array([], dtype=float)), dtype=float)
-    use_nodes = node_tenors.size > 0
+    # At t=0 we know the exact initial curves, so interpolating off simulation nodes
+    # only introduces approximation error. This was the main source of the large
+    # t0 parity gap against ORE for swap cashflows.
+    use_nodes = bool(use_node_interpolation) and node_tenors.size > 0 and t > 1.0e-14
     grid = t + node_tenors if use_nodes else np.array([], dtype=float)
     bt = p0_fwd(t) / p0_disc(t)
     p_nodes_d = None
@@ -753,11 +861,15 @@ def swap_npv_from_ore_legs_dual_curve(
 
         # Fixed coupons: fixing already known, only discounting remains.
         if np.any(fixed):
-            if realized_float_coupon is not None:
-                coupon_fix = realized_float_coupon[live][fixed]
+            if "float_amount" in legs and realized_float_coupon is None:
+                fixed_amount = np.asarray(legs["float_amount"][live][fixed], dtype=float)
+                amount[fixed, :] = np.tile(fixed_amount[:, None], (1, x_t.size))
             else:
-                coupon_fix = np.tile(legs["float_coupon"][live][fixed][:, None], (1, x_t.size))
-            amount[fixed, :] = sign[fixed, None] * n[fixed, None] * coupon_fix * tau[fixed, None]
+                if realized_float_coupon is not None:
+                    coupon_fix = realized_float_coupon[live][fixed]
+                else:
+                    coupon_fix = np.tile(legs["float_coupon"][live][fixed][:, None], (1, x_t.size))
+                amount[fixed, :] = sign[fixed, None] * n[fixed, None] * coupon_fix * tau[fixed, None]
 
         # Unfixed coupons: project with the forwarding curve, discount with the
         # discounting curve, exactly as in an OIS-discounted ORE setup.
@@ -778,6 +890,59 @@ def swap_npv_from_ore_legs_dual_curve(
         pv += np.sum(amount * p_tp_d, axis=0)
 
     return pv
+
+
+def compute_realized_float_coupons(
+    model,
+    p0_disc,
+    p0_fwd,
+    legs: Dict[str, np.ndarray],
+    sim_times: np.ndarray,
+    x_paths_on_sim_grid: np.ndarray,
+) -> np.ndarray:
+    """Pathwise full floating coupon (forward+spread) locked at each fixing time.
+
+    This belongs in the core helper module because it is required for parity with
+    ORE whenever coupons are already fixed at a given exposure date.  Using static
+    quoted coupons can materially bias the floating leg and therefore EPE/ENE.
+    """
+    s = np.asarray(legs["float_start_time"], dtype=float)
+    e = np.asarray(legs["float_end_time"], dtype=float)
+    tau = np.asarray(legs["float_accrual"], dtype=float)
+    spr = np.asarray(legs["float_spread"], dtype=float)
+    fix_t = np.asarray(legs.get("float_fixing_time", s), dtype=float)
+    quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
+
+    n_cf = s.size
+    n_paths = x_paths_on_sim_grid.shape[1]
+    out = np.zeros((n_cf, n_paths), dtype=float)
+
+    for i in range(n_cf):
+        if tau[i] <= 0.0:
+            out[i, :] = quoted_coupon[i]
+            continue
+        ft = float(fix_t[i])
+        if ft <= 1.0e-12:
+            ps = float(p0_fwd(max(0.0, float(s[i]))))
+            pe = float(p0_fwd(float(e[i])))
+            fwd = (ps / pe - 1.0) / float(tau[i])
+            out[i, :] = fwd + float(spr[i])
+            continue
+        j = int(np.searchsorted(sim_times, ft))
+        if j >= sim_times.size or abs(float(sim_times[j]) - ft) > 1.0e-12:
+            raise ValueError(f"fixing time {ft} not present on simulation grid")
+        x_fix = x_paths_on_sim_grid[j, :]
+        p_ft = float(p0_disc(ft))
+        p_t_s_d = model.discount_bond(ft, float(s[i]), x_fix, p_ft, float(p0_disc(float(s[i]))))
+        p_t_e_d = model.discount_bond(ft, float(e[i]), x_fix, p_ft, float(p0_disc(float(e[i]))))
+        bt = float(p0_fwd(ft) / p0_disc(ft))
+        bs = float(p0_fwd(float(s[i])) / p0_disc(float(s[i])))
+        be = float(p0_fwd(float(e[i])) / p0_disc(float(e[i])))
+        p_t_s_f = p_t_s_d * (bs / bt)
+        p_t_e_f = p_t_e_d * (be / bt)
+        fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(tau[i])
+        out[i, :] = fwd_path + float(spr[i])
+    return out
 
 
 def calibrate_float_spreads_from_coupon(
@@ -1035,9 +1200,11 @@ def load_ore_default_curve_inputs(
     ccy = m.group(3)
 
     hazard_prefix = f"HAZARD_RATE/RATE/{ref_name}/{seniority}/{ccy}/"
+    cds_prefix = f"CDS/CREDIT_SPREAD/{ref_name}/{seniority}/{ccy}/"
     recovery_key = f"RECOVERY_RATE/RATE/{ref_name}/{seniority}/{ccy}"
 
     hazard_points = []
+    cds_points = []
     recovery = None
     with open(market_data_file, encoding="utf-8") as f:
         for line in f:
@@ -1054,11 +1221,22 @@ def load_ore_default_curve_inputs(
             elif key.startswith(hazard_prefix):
                 tenor = key[len(hazard_prefix) :]
                 hazard_points.append((_tenor_to_years(tenor), val))
+            elif key.startswith(cds_prefix):
+                tenor = key[len(cds_prefix) :]
+                cds_points.append((_tenor_to_years(tenor), val))
 
     if recovery is None:
         raise ValueError(f"recovery not found for key '{recovery_key}'")
+    if not hazard_points and cds_points:
+        # ORE builds a default term structure from CDS spreads plus recovery.
+        # For the lightweight Python path we use the same first-order flat-hazard
+        # approximation per pillar: lambda ~= spread / LGD.
+        lgd = max(1.0 - float(recovery), 1.0e-12)
+        hazard_points = sorted((t, s / lgd) for t, s in cds_points)
     if not hazard_points:
-        raise ValueError(f"hazard curve points not found for prefix '{hazard_prefix}'")
+        raise ValueError(
+            f"hazard curve points not found for prefix '{hazard_prefix}' or '{cds_prefix}'"
+        )
     hazard_points = sorted(hazard_points, key=lambda p: p[0])
     times = np.asarray([p[0] for p in hazard_points], dtype=float)
     hazard = np.asarray([p[1] for p in hazard_points], dtype=float)
@@ -1110,3 +1288,277 @@ def survival_probability_from_hazard(
             acc += lambdas[-1] * (x - knots[-1])
         out[i] = np.exp(-acc)
     return out
+
+
+def aggregate_exposure_profile_from_npv_paths(npv_paths: np.ndarray) -> Dict[str, np.ndarray]:
+    """Return EE/EPE/ENE profiles from pathwise NPV matrix [n_times, n_paths].
+
+    The ENE convention here is positive magnitude:
+      ENE(t) = E[max(-V(t), 0)].
+    """
+    v = np.asarray(npv_paths, dtype=float)
+    if v.ndim != 2:
+        raise ValueError("npv_paths must be 2D [n_times, n_paths]")
+    return {
+        "ee": np.mean(v, axis=1),
+        "epe": np.mean(np.maximum(v, 0.0), axis=1),
+        "ene": np.mean(np.maximum(-v, 0.0), axis=1),
+    }
+
+
+def deflate_lgm_npv_paths(
+    model,
+    p0_disc: Callable[[float], float],
+    times: np.ndarray,
+    x_paths: np.ndarray,
+    npv_paths: np.ndarray,
+) -> np.ndarray:
+    """Return ORE-style numeraire-deflated LGM NPVs on a common simulation grid.
+
+    ORE's XVA cube stores base-ccy NPVs divided by the simulation numeraire. This
+    helper applies the same transformation to raw Python LGM NPVs:
+
+      deflated_npv(t) = npv(t) / N(t)
+
+    where ``N(t)`` is the LGM numeraire under ``p0_disc``.
+    """
+    t = np.asarray(times, dtype=float)
+    x = np.asarray(x_paths, dtype=float)
+    v = np.asarray(npv_paths, dtype=float)
+    if t.ndim != 1:
+        raise ValueError("times must be one-dimensional")
+    if x.ndim != 2 or v.ndim != 2:
+        raise ValueError("x_paths and npv_paths must be 2D [n_times, n_paths]")
+    if x.shape != v.shape:
+        raise ValueError("x_paths and npv_paths must have the same shape")
+    if x.shape[0] != t.size:
+        raise ValueError("times length must match the first dimension of x_paths/npv_paths")
+
+    out = np.empty_like(v, dtype=float)
+    for i, ti in enumerate(t):
+        out[i, :] = v[i, :] / model.numeraire_lgm(float(ti), x[i, :], p0_disc)
+    return out
+
+
+def compute_xva_from_exposure_profile(
+    times: np.ndarray,
+    epe: np.ndarray,
+    ene: np.ndarray,
+    discount: np.ndarray,
+    survival_cpty: np.ndarray,
+    survival_own: np.ndarray,
+    recovery_cpty: float = 0.40,
+    recovery_own: float = 0.40,
+    funding_spread: float = 0.0,
+    exposure_discounting: str = "discount_curve",
+    funding_discount_borrow: Optional[np.ndarray] = None,
+    funding_discount_lend: Optional[np.ndarray] = None,
+    funding_discount_ois: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray | float]:
+    """Compute unilateral CVA/DVA/FVA and incremental terms on one exposure grid."""
+    t = np.asarray(times, dtype=float)
+    epe_arr = np.asarray(epe, dtype=float)
+    ene_arr = np.asarray(ene, dtype=float)
+    df = np.asarray(discount, dtype=float)
+    q_c = np.asarray(survival_cpty, dtype=float)
+    q_b = np.asarray(survival_own, dtype=float)
+
+    if not (t.shape == epe_arr.shape == ene_arr.shape == df.shape == q_c.shape == q_b.shape):
+        raise ValueError("times/epe/ene/discount/survivals must share the same 1D shape")
+    if t.ndim != 1:
+        raise ValueError("times must be one-dimensional")
+    if t.size < 2:
+        raise ValueError("need at least two time points")
+    if np.any(np.diff(t) <= 0.0):
+        raise ValueError("times must be strictly increasing")
+
+    mode = str(exposure_discounting).strip().lower()
+    if mode not in ("discount_curve", "numeraire_deflated"):
+        raise ValueError("exposure_discounting must be 'discount_curve' or 'numeraire_deflated'")
+
+    lgd_c = 1.0 - float(recovery_cpty)
+    lgd_b = 1.0 - float(recovery_own)
+    f_spread = float(funding_spread)
+
+    dt = np.diff(t)
+    dpd_c = np.zeros_like(t)
+    dpd_b = np.zeros_like(t)
+    dpd_c[1:] = np.clip(q_c[:-1] - q_c[1:], 0.0, None)
+    dpd_b[1:] = np.clip(q_b[:-1] - q_b[1:], 0.0, None)
+
+    discount_weight = df if mode == "discount_curve" else np.ones_like(df)
+
+    cva_terms = np.zeros_like(t)
+    dva_terms = np.zeros_like(t)
+    fva_terms = np.zeros_like(t)
+    fba_terms = np.zeros_like(t)
+    fca_terms = np.zeros_like(t)
+    cva_terms[1:] = lgd_c * discount_weight[1:] * epe_arr[1:] * dpd_c[1:]
+    dva_terms[1:] = lgd_b * discount_weight[1:] * ene_arr[1:] * dpd_b[1:]
+    if funding_discount_borrow is not None or funding_discount_lend is not None or funding_discount_ois is not None:
+        if funding_discount_borrow is None or funding_discount_lend is None or funding_discount_ois is None:
+            raise ValueError(
+                "funding_discount_borrow, funding_discount_lend and funding_discount_ois must be provided together"
+            )
+        df_b = np.asarray(funding_discount_borrow, dtype=float)
+        df_l = np.asarray(funding_discount_lend, dtype=float)
+        df_o = np.asarray(funding_discount_ois, dtype=float)
+        if not (df_b.shape == df_l.shape == df_o.shape == t.shape):
+            raise ValueError("funding discount arrays must share the same 1D shape as times")
+        surv_joint = q_c[:-1] * q_b[:-1]
+        dcf_borrow = df_b[:-1] / df_b[1:] - df_o[:-1] / df_o[1:]
+        dcf_lend = df_l[:-1] / df_l[1:] - df_o[:-1] / df_o[1:]
+        fca_terms[1:] = surv_joint * epe_arr[1:] * dcf_borrow
+        fba_terms[1:] = surv_joint * ene_arr[1:] * dcf_lend
+        fva_terms = fba_terms + fca_terms
+    else:
+        fva_terms[1:] = f_spread * discount_weight[1:] * epe_arr[1:] * dt
+
+    cva = float(np.sum(cva_terms))
+    dva = float(np.sum(dva_terms))
+    fba = float(np.sum(fba_terms))
+    fca = float(np.sum(fca_terms))
+    fva = float(np.sum(fva_terms))
+    return {
+        "dt": dt,
+        "dpd_cpty": dpd_c,
+        "dpd_own": dpd_b,
+        "cva_terms": cva_terms,
+        "dva_terms": dva_terms,
+        "fba_terms": fba_terms,
+        "fca_terms": fca_terms,
+        "fva_terms": fva_terms,
+        "cva": cva,
+        "dva": dva,
+        "fba": fba,
+        "fca": fca,
+        "fva": fva,
+        "xva_total": float(cva - dva + fva),
+    }
+
+
+def compute_xva_from_npv_paths(
+    times: np.ndarray,
+    npv_paths: np.ndarray,
+    discount: np.ndarray,
+    survival_cpty: np.ndarray,
+    survival_own: np.ndarray,
+    recovery_cpty: float = 0.40,
+    recovery_own: float = 0.40,
+    funding_spread: float = 0.0,
+    exposure_discounting: str = "discount_curve",
+    funding_discount_borrow: Optional[np.ndarray] = None,
+    funding_discount_lend: Optional[np.ndarray] = None,
+    funding_discount_ois: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray | float]:
+    """Compute EE/EPE/ENE and XVA stack from one pathwise netting set matrix."""
+    exp = aggregate_exposure_profile_from_npv_paths(npv_paths)
+    xva = compute_xva_from_exposure_profile(
+        times=times,
+        epe=exp["epe"],
+        ene=exp["ene"],
+        discount=discount,
+        survival_cpty=survival_cpty,
+        survival_own=survival_own,
+        recovery_cpty=recovery_cpty,
+        recovery_own=recovery_own,
+        funding_spread=funding_spread,
+        exposure_discounting=exposure_discounting,
+        funding_discount_borrow=funding_discount_borrow,
+        funding_discount_lend=funding_discount_lend,
+        funding_discount_ois=funding_discount_ois,
+    )
+    return {**exp, **xva}
+
+
+def aggregate_portfolio_npv_paths(
+    npv_paths_by_trade: Mapping[str, np.ndarray],
+    trade_to_netting_set: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Dict[str, np.ndarray] | np.ndarray]:
+    """Aggregate trade path matrices into netting-set matrices and total portfolio."""
+    if not npv_paths_by_trade:
+        raise ValueError("npv_paths_by_trade must not be empty")
+
+    ref_shape: Optional[Tuple[int, int]] = None
+    by_ns: Dict[str, np.ndarray] = {}
+    for trade_id, mat in npv_paths_by_trade.items():
+        arr = np.asarray(mat, dtype=float)
+        if arr.ndim != 2:
+            raise ValueError(f"trade '{trade_id}' path matrix must be 2D [n_times, n_paths]")
+        if ref_shape is None:
+            ref_shape = arr.shape
+        elif arr.shape != ref_shape:
+            raise ValueError(f"trade '{trade_id}' has shape {arr.shape}, expected {ref_shape}")
+
+        ns = "PORTFOLIO"
+        if trade_to_netting_set is not None:
+            ns = str(trade_to_netting_set.get(trade_id, "PORTFOLIO"))
+
+        if ns not in by_ns:
+            by_ns[ns] = np.zeros_like(arr)
+        by_ns[ns] += arr
+
+    portfolio = np.zeros(ref_shape, dtype=float)  # type: ignore[arg-type]
+    for arr in by_ns.values():
+        portfolio += arr
+    return {"by_netting_set": by_ns, "portfolio": portfolio}
+
+
+def compute_portfolio_xva_from_trade_paths(
+    times: np.ndarray,
+    npv_paths_by_trade: Mapping[str, np.ndarray],
+    discount: np.ndarray,
+    survival_cpty: np.ndarray,
+    survival_own: np.ndarray,
+    recovery_cpty: float = 0.40,
+    recovery_own: float = 0.40,
+    funding_spread: float = 0.0,
+    trade_to_netting_set: Optional[Mapping[str, str]] = None,
+) -> Dict[str, object]:
+    """Compute netting-set and portfolio XVA from trade-level path matrices."""
+    agg = aggregate_portfolio_npv_paths(npv_paths_by_trade, trade_to_netting_set=trade_to_netting_set)
+    by_ns = agg["by_netting_set"]
+    if not isinstance(by_ns, dict):
+        raise ValueError("internal aggregation error: expected netting-set mapping")
+
+    ns_out: Dict[str, Dict[str, np.ndarray | float]] = {}
+    cva_sum = 0.0
+    dva_sum = 0.0
+    fva_sum = 0.0
+    for ns, mat in by_ns.items():
+        pack = compute_xva_from_npv_paths(
+            times=times,
+            npv_paths=mat,
+            discount=discount,
+            survival_cpty=survival_cpty,
+            survival_own=survival_own,
+            recovery_cpty=recovery_cpty,
+            recovery_own=recovery_own,
+            funding_spread=funding_spread,
+        )
+        ns_out[ns] = pack
+        cva_sum += float(pack["cva"])
+        dva_sum += float(pack["dva"])
+        fva_sum += float(pack["fva"])
+
+    portfolio_paths = np.asarray(agg["portfolio"], dtype=float)
+    portfolio_pack = compute_xva_from_npv_paths(
+        times=times,
+        npv_paths=portfolio_paths,
+        discount=discount,
+        survival_cpty=survival_cpty,
+        survival_own=survival_own,
+        recovery_cpty=recovery_cpty,
+        recovery_own=recovery_own,
+        funding_spread=funding_spread,
+    )
+    return {
+        "by_netting_set": ns_out,
+        "portfolio": portfolio_pack,
+        "sum_by_netting_set": {
+            "cva": cva_sum,
+            "dva": dva_sum,
+            "fva": fva_sum,
+            "xva_total": float(cva_sum - dva_sum + fva_sum),
+        },
+    }

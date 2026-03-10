@@ -2,14 +2,14 @@ import numpy as np
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+TOOLS_DIR = Path(__file__).resolve().parent / "py_ore_tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
-from py_ore_tools.lgm import LGMParams
-from py_ore_tools.lgm_fx_hybrid import MultiCcyLgmParams, LgmFxHybrid
-from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, fx_forward_npv
-from py_ore_tools.irs_xva_utils import build_discount_curve_from_zero_rate_pairs
+from lgm import LGMParams
+from lgm_fx_hybrid import MultiCcyLgmParams, LgmFxHybrid
+from lgm_fx_xva_utils import FxForwardDef, fx_forward_npv
+from irs_xva_utils import build_discount_curve_from_zero_rate_pairs
 
 
 def run_fx_forward_example(name, pair, maturity, spot0, strike, notional_base,

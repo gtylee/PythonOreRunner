@@ -91,9 +91,9 @@ class FinancialSystem(OreBasic):
         return True
 
 
-# configure folders: set FIN_SYSTEM_FOLDER or use default under project root
-_project_root = Path(__file__).resolve().parent
-fin_system_folder = Path(os.environ.get("FIN_SYSTEM_FOLDER", str(_project_root / "ToyExample")))
+# configure folders
+repo_root = Path(__file__).resolve().parents[2]
+fin_system_folder = Path(os.environ.get("FIN_SYSTEM_FOLDER", str(repo_root / "Tools" / "PythonOreRunner" / "ToyExample")))
 
 # setup financial system
 fs = FinancialSystem.from_folders(
