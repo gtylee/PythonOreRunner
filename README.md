@@ -53,7 +53,26 @@ PYTHONPATH=. python -m pytest native_xva_interface/tests/ -q
 - **`example_ore_snapshot.py`** – Load ORE XML into a snapshot and run the **standalone Python LGM** (no ORE binary) for exposure/XVA.
 - **`example_systemic.py`** – Uses `OreBasic` with network/graph dependencies.
 
-Set `ORE_EXE` to the path of the `ore` binary. Set `ORE_EXAMPLE_DIR` to an ORE Input folder (e.g. `path/to/ORE/Examples/Example_7`). If unset, examples assume this repo lives under an ORE tree at `../..` with `Examples/Example_7` and `build/.../App/ore`.
+Set `ORE_EXE` to the path of the `ore` binary. Set `ORE_EXAMPLE_DIR` to an ORE example folder (for example `path/to/ORE/Examples/Legacy/Example_1`). If unset, examples will auto-discover `ENGINE_REPO_ROOT` and default to `Examples/Legacy/Example_1`.
+
+For a standalone checkout, set `ENGINE_REPO_ROOT` to your ORE `Engine` repo. The benchmark and example scripts will use that for `Examples/` inputs and the default `ore` binary, while writing any generated benchmark output under this repo's local `parity_artifacts/`.
+
+## Benchmarks
+
+Benchmark entrypoints live under `py_ore_tools/benchmarks/`. Typical usage from this repo root:
+
+```bash
+export ENGINE_REPO_ROOT=/path/to/Engine
+
+python py_ore_tools/benchmarks/benchmark_discount_factor_extractor.py --runs 10
+python py_ore_tools/benchmarks/benchmark_ore_fx_forwards.py
+python py_ore_tools/benchmarks/benchmark_ore_fx_forwards_xva.py --samples 2000
+python py_ore_tools/benchmarks/benchmark_lgm_ore_multiccy.py --max-cases 2
+python py_ore_tools/benchmarks/benchmark_lgm_fx_hybrid_ore.py --max-cases 2
+python py_ore_tools/benchmarks/benchmark_ore_ir_options.py
+```
+
+These scripts read market/example inputs from `ENGINE_REPO_ROOT/Examples/...` and emit local results under `parity_artifacts/`.
 
 ## License and ORE
 

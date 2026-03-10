@@ -33,11 +33,12 @@ from py_ore_tools.irs_xva_utils import (
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
+from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = require_engine_repo_root()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
-ORE_BIN_DEFAULT = REPO_ROOT / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore"
+ORE_BIN_DEFAULT = default_ore_bin()
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output-root",
         type=Path,
-        default=REPO_ROOT / "Tools" / "PythonOreRunner" / "parity_artifacts" / "ir_options_ore_benchmark",
+        default=local_parity_artifacts_root() / "ir_options_ore_benchmark",
     )
     p.add_argument("--ore-samples", type=int, default=2000)
     p.add_argument("--ore-seed", type=int, default=42)

@@ -2,11 +2,12 @@ import os
 from pathlib import Path
 
 from py_ore_tools import OreBasic
+from py_ore_tools.repo_paths import default_ore_bin, require_engine_repo_root
 
 # setup your folders (the Examples in this case)
-repo_root = Path(__file__).resolve().parents[2]
-my_example_folder = repo_root / "Examples" / "Example_7"
-ore_exe = Path(os.environ.get("ORE_EXE", str(repo_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore")))
+engine_root = require_engine_repo_root()
+my_example_folder = Path(os.environ.get("ORE_EXAMPLE_DIR", str(engine_root / "Examples" / "Legacy" / "Example_1")))
+ore_exe = Path(os.environ.get("ORE_EXE", str(default_ore_bin())))
 
 # attach ore config folders to Python object
 my_ore = OreBasic.from_folders(

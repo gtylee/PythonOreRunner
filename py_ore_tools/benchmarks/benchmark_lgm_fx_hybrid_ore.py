@@ -9,19 +9,25 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from time import perf_counter
 
-from ore_parity_artifacts import (
+TOOLS_ROOT = Path(__file__).resolve().parents[2]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+from py_ore_tools.ore_parity_artifacts import (
     CaseMetadata,
     build_case_layout,
     write_case_manifest,
     write_command_log,
 )
+from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = require_engine_repo_root()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
-ORE_BIN_DEFAULT = REPO_ROOT / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore"
+ORE_BIN_DEFAULT = default_ore_bin()
 COMPARE_SCRIPT = Path(__file__).resolve().parents[1] / "demos" / "compare_ore_python_lgm_fx.py"
 
 
@@ -40,7 +46,7 @@ class BenchmarkCase:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--output-root", type=Path, default=REPO_ROOT / "Tools" / "PythonOreRunner" / "parity_artifacts" / "lgm_fx_hybrid_benchmark")
+    p.add_argument("--output-root", type=Path, default=local_parity_artifacts_root() / "lgm_fx_hybrid_benchmark")
     p.add_argument("--ore-bin", type=Path, default=ORE_BIN_DEFAULT)
     p.add_argument("--ore-samples", type=int, default=2000)
     p.add_argument("--python-paths", type=int, default=10000)

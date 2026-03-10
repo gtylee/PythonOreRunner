@@ -10,13 +10,20 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from time import perf_counter
 import xml.etree.ElementTree as ET
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+TOOLS_ROOT = Path(__file__).resolve().parents[2]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
+
+REPO_ROOT = require_engine_repo_root()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
-ORE_BIN_DEFAULT = REPO_ROOT / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore"
+ORE_BIN_DEFAULT = default_ore_bin()
 
 
 @dataclass(frozen=True)
@@ -36,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output-root",
         type=Path,
-        default=REPO_ROOT / "Tools" / "PythonOreRunner" / "parity_artifacts" / "fxfwd_ore_xva_benchmark",
+        default=local_parity_artifacts_root() / "fxfwd_ore_xva_benchmark",
     )
     p.add_argument("--samples", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)

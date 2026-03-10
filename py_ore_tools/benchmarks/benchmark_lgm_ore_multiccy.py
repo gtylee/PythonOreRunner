@@ -28,10 +28,11 @@ from py_ore_tools.irs_xva_utils import (
     parse_lgm_params_from_simulation_xml,
     swap_npv_from_ore_legs_dual_curve,
 )
+from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-ORE_BIN_DEFAULT = REPO_ROOT / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore"
+REPO_ROOT = require_engine_repo_root()
+ORE_BIN_DEFAULT = default_ore_bin()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
 COMPARE_SCRIPT = Path(__file__).resolve().parents[1] / "demos" / "compare_ore_python_lgm.py"
@@ -60,7 +61,7 @@ class CaseDef:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ore-bin", type=Path, default=ORE_BIN_DEFAULT)
-    p.add_argument("--output-root", type=Path, default=REPO_ROOT / "Tools" / "PythonOreRunner" / "parity_artifacts" / "multiccy_benchmark")
+    p.add_argument("--output-root", type=Path, default=local_parity_artifacts_root() / "multiccy_benchmark")
     p.add_argument("--ore-samples", type=int, default=128)
     p.add_argument("--python-paths", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)

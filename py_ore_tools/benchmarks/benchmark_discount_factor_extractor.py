@@ -5,14 +5,19 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from time import perf_counter
 
+TOOLS_ROOT = Path(__file__).resolve().parents[2]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
 from py_ore_tools.ore_snapshot import extract_discount_factors_by_currency
+from py_ore_tools.repo_paths import require_engine_repo_root
 
 
 def _parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[4]
-    default_xml = repo_root / "Examples/Exposure/Input/ore_measure_lgm.xml"
+    default_xml = require_engine_repo_root() / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ore-xml", type=Path, default=default_xml)
