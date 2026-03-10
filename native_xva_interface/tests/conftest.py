@@ -39,3 +39,10 @@ def require_engine_repo_root() -> Path:
 
         pytest.skip("Engine checkout with Examples/ is not available")
     return root
+
+
+def require_examples_repo_root() -> Path:
+    local_examples = PACKAGE_ROOT / "Examples"
+    if local_examples.exists():
+        return PACKAGE_ROOT
+    return require_engine_repo_root()

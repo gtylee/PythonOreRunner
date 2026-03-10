@@ -1,11 +1,11 @@
 from pathlib import Path
 
 from native_xva_interface import stress_classic_native_preset
-from native_xva_interface.tests.conftest import require_engine_repo_root
+from native_xva_interface.tests.conftest import require_examples_repo_root
 
 
 def test_stress_classic_native_preset_loads_expected_buffers():
-    repo_root = require_engine_repo_root()
+    repo_root = require_examples_repo_root()
     cfg = stress_classic_native_preset(repo_root, num_paths=10)
     assert cfg.num_paths == 10
     assert cfg.runtime is not None

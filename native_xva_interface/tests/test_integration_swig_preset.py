@@ -14,7 +14,7 @@ from native_xva_interface import (
     XVASnapshot,
     stress_classic_native_preset,
 )
-from native_xva_interface.tests.conftest import require_engine_repo_root
+from native_xva_interface.tests.conftest import require_examples_repo_root
 
 
 @pytest.mark.skipif(os.getenv("RUN_ORE_SWIG_INTEGRATION") != "1", reason="Set RUN_ORE_SWIG_INTEGRATION=1 to run SWIG integration")
@@ -24,7 +24,7 @@ def test_swig_stress_classic_preset_produces_non_zero_xva():
     except Exception as exc:
         pytest.skip(f"ORE-SWIG unavailable: {exc}")
 
-    repo_root = require_engine_repo_root()
+    repo_root = require_examples_repo_root()
     input_dir = repo_root / "Examples" / "XvaRisk" / "Input"
     base = XVALoader.from_files(str(input_dir), ore_file="ore_stress_classic.xml")
 

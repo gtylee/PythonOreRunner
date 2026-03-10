@@ -11,6 +11,31 @@ def pythonorerunner_root() -> Path:
     return PYTHONORERUNNER_ROOT
 
 
+def local_examples_root() -> Path | None:
+    examples_root = PYTHONORERUNNER_ROOT / "Examples"
+    if examples_root.exists():
+        return examples_root
+    return None
+
+
+def find_examples_repo_root() -> Path | None:
+    local_root = local_examples_root()
+    if local_root is not None:
+        return PYTHONORERUNNER_ROOT
+
+    return find_engine_repo_root()
+
+
+def require_examples_repo_root() -> Path:
+    examples_root = find_examples_repo_root()
+    if examples_root is None:
+        raise FileNotFoundError(
+            "Could not locate a repository root with Examples/. "
+            "Vendor the required examples or set ENGINE_REPO_ROOT."
+        )
+    return examples_root
+
+
 def find_engine_repo_root() -> Path | None:
     env_root = os.getenv("ENGINE_REPO_ROOT")
     candidates: list[Path] = []
@@ -19,7 +44,6 @@ def find_engine_repo_root() -> Path | None:
 
     candidates.extend(
         [
-            PYTHONORERUNNER_ROOT,
             PYTHONORERUNNER_ROOT.parent / "Engine",
             Path("/Users/gordonlee/Documents/Engine"),
         ]
