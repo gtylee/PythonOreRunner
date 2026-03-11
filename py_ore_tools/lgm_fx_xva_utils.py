@@ -321,8 +321,9 @@ def apply_mpor_closeout(
     For non-sticky mode in this lightweight implementation, we currently apply the
     same mapping because no additional state re-simulation is available at closeout.
 
-    This is meant to mimic the shape of ORE's MPOR-adjusted exposure workflow rather
-    than reproduce every CSA / collateral detail.
+    This helper remains useful for benchmarks and notebooks, but the authoritative
+    sticky-MPOR logic used by ``PythonLgmAdapter`` now revalues trades directly on
+    a union valuation/closeout grid in ``native_xva_interface.runtime``.
     """
     v = np.asarray(npv_paths, dtype=float)
     t = np.asarray(times, dtype=float)

@@ -4,6 +4,8 @@ import sys
 
 import pandas as pd
 
+from py_ore_tools.repo_paths import require_engine_repo_root
+
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
@@ -52,6 +54,20 @@ class TestOreSnapshotParityReport(unittest.TestCase):
         self.assertIsInstance(df, pd.DataFrame)
         self.assertEqual(list(df.columns), ["section", "field", "value"])
         self.assertTrue(((df["section"] == "comparability") & (df["field"] == "CVA")).any())
+
+    def test_load_from_ore_xml_prefers_calibration_output_when_available(self):
+        ore_xml = (
+            require_engine_repo_root()
+            / "Examples"
+            / "Exposure"
+            / "Input"
+            / "ore_measure_lgm_with_calibration.xml"
+        )
+        snap = load_from_ore_xml(ore_xml)
+
+        self.assertEqual(snap.alpha_source, "calibration")
+        self.assertIsNotNone(snap.calibration_xml_path)
+        self.assertAlmostEqual(snap.lgm_params.shift, 0.0, places=12)
 
 
 if __name__ == "__main__":

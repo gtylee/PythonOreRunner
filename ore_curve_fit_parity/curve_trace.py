@@ -304,6 +304,7 @@ def _parse_segments(yield_curve: ET.Element, market_quotes: dict[str, float]) ->
                 "segment_tag": segment.tag,
                 "type": _child_text(segment, "Type"),
                 "conventions": _child_text(segment, "Conventions"),
+                "pillar_choice": _child_text(segment, "PillarChoice"),
                 "projection_curve": _child_text(segment, "ProjectionCurve"),
                 "projection_curve_receive": _child_text(segment, "ProjectionCurveReceive"),
                 "projection_curve_pay": _child_text(segment, "ProjectionCurvePay"),
@@ -320,6 +321,33 @@ def _parse_segments(yield_curve: ET.Element, market_quotes: dict[str, float]) ->
     return segments
 
 
+def _parse_bootstrap_config(yield_curve: ET.Element) -> dict[str, Any]:
+    node = yield_curve.find("./BootstrapConfig")
+    if node is None:
+        return {}
+    payload: dict[str, Any] = {}
+    for child in list(node):
+        key = child.tag
+        value = (child.text or "").strip()
+        if not value:
+            continue
+        if value.lower() in ("true", "false"):
+            payload[key] = value.lower() == "true"
+            continue
+        try:
+            payload[key] = int(value)
+            continue
+        except ValueError:
+            pass
+        try:
+            payload[key] = float(value)
+            continue
+        except ValueError:
+            pass
+        payload[key] = value
+    return payload
+
+
 def _parse_yield_curve(curveconfig_xml: Path, curve_id: str, market_quotes: dict[str, float]) -> dict[str, Any]:
     root = ET.parse(curveconfig_xml).getroot()
     for yield_curve in root.findall("./YieldCurves/YieldCurve"):
@@ -333,7 +361,10 @@ def _parse_yield_curve(curveconfig_xml: Path, curve_id: str, market_quotes: dict
             "interpolation_variable": _child_text(yield_curve, "InterpolationVariable", "Discount"),
             "interpolation_method": _child_text(yield_curve, "InterpolationMethod", "LogLinear"),
             "yield_curve_day_counter": _child_text(yield_curve, "YieldCurveDayCounter", "A365"),
+            "pillar_choice": _child_text(yield_curve, "PillarChoice", "LastRelevantDate"),
+            "extrapolation": _child_text(yield_curve, "Extrapolation"),
             "tolerance": _child_text(yield_curve, "Tolerance"),
+            "bootstrap_config": _parse_bootstrap_config(yield_curve),
             "segments": _parse_segments(yield_curve, market_quotes),
         }
     raise ValueError(f"Yield curve '{curve_id}' not found in {curveconfig_xml}")
@@ -397,6 +428,42 @@ def _load_calibration_rows(calibration_csv: Path, curve_id: str) -> dict[str, An
         "day_counter": day_counter,
         "currency": currency,
         "pillars": ordered,
+    }
+
+
+def _native_curve_nodes(calibration: dict[str, Any]) -> dict[str, Any]:
+    dates = []
+    times = []
+    discount_factors = []
+    zero_rates = []
+    forward_rates = []
+
+    for pillar in calibration.get("pillars", []):
+        time_text = pillar.get("time", "")
+        df_text = pillar.get("discountFactor", "")
+        if not time_text or not df_text:
+            continue
+        dates.append(str(pillar.get("date", "")))
+        times.append(float(time_text))
+        discount_factors.append(float(df_text))
+        zero_rates.append(float(pillar["zeroRate"]) if pillar.get("zeroRate", "") else None)
+        forward_rates.append(float(pillar["forwardRate"]) if pillar.get("forwardRate", "") else None)
+
+    if times and abs(times[0]) > 1.0e-12:
+        dates.insert(0, "")
+        times.insert(0, 0.0)
+        discount_factors.insert(0, 1.0)
+        zero_rates.insert(0, 0.0)
+        forward_rates.insert(0, None)
+    elif discount_factors:
+        discount_factors[0] = 1.0
+
+    return {
+        "calendar_dates": dates,
+        "times": times,
+        "discount_factors": discount_factors,
+        "zero_rates": zero_rates,
+        "forward_rates": forward_rates,
     }
 
 
@@ -493,6 +560,7 @@ def _trace_curve_by_handle(
 
     calibration = _load_calibration_rows(output_path / "todaysmarketcalibration.csv", curve_id)
     curve_points = _curve_points(output_path, asof_date, curve_name, calibration["day_counter"] or "A365F")
+    native_nodes = _native_curve_nodes(calibration)
     conventions = _parse_conventions(conventions_xml, _collect_convention_ids(list(graph_configs.values())))
     segment_alignment = _align_segments_with_calibration(
         root_curve_config["segments"],
@@ -528,9 +596,70 @@ def _trace_curve_by_handle(
         ),
         "conventions": conventions,
         "segment_alignment": segment_alignment,
+        "native_curve_nodes": native_nodes,
         "ore_curve_points": curve_points,
         "ore_calibration_trace": calibration,
         "dependency_graph": dependency_graph,
+    }
+
+
+def trace_curve_handle_from_ore(ore_xml_path: str | Path, curve_handle: str) -> dict[str, Any]:
+    ore_xml, asof_date, market_data_file, todaysmarket_xml, output_path = _resolve_ore_run_files(ore_xml_path)
+    configuration_id = _simulation_config_id(ore_xml)
+    curveconfig_xml = _resolve_curveconfig_path(ore_xml)
+    conventions_xml = _resolve_conventions_path(ore_xml)
+    parts = curve_handle.split("/")
+    if len(parts) < 3 or parts[0] != "Yield":
+        raise ValueError(f"Unsupported curve handle '{curve_handle}': only Yield handles are currently supported")
+    currency = parts[1]
+    return _trace_curve_by_handle(
+        ore_xml=ore_xml,
+        asof_date=asof_date,
+        market_data_file=market_data_file,
+        todaysmarket_xml=todaysmarket_xml,
+        output_path=output_path,
+        curveconfig_xml=curveconfig_xml,
+        conventions_xml=conventions_xml,
+        configuration_id=configuration_id,
+        curve_handle=curve_handle,
+        currency=currency,
+        trace_type="curve_handle",
+    )
+
+
+def list_curve_handles_from_todaysmarket(
+    ore_xml_path: str | Path,
+    *,
+    configuration_id: str | None = None,
+) -> dict[str, list[str]]:
+    ore_xml, _, _, todaysmarket_xml, _ = _resolve_ore_run_files(ore_xml_path)
+    root = _load_todaysmarket_root(todaysmarket_xml)
+    selected_configuration = configuration_id or _simulation_config_id(ore_xml)
+    config = _load_configuration_node(root, selected_configuration)
+
+    def _handles(section_tag: str, node_tag: str, id_tag: str) -> list[str]:
+        section_id = (config.findtext(f"./{id_tag}") or "").strip()
+        if not section_id:
+            return []
+        section = root.find(f"./{section_tag}[@id='{section_id}']")
+        if section is None:
+            return []
+        handles = []
+        for node in section.findall(f"./{node_tag}"):
+            text = (node.text or "").strip()
+            if text:
+                handles.append(text)
+        return handles
+
+    return {
+        "yield_curves": _handles("YieldCurves", "YieldCurve", "YieldCurvesId"),
+        "discounting_curves": _handles("DiscountingCurves", "DiscountingCurve", "DiscountingCurvesId"),
+        "index_forwarding_curves": _handles("IndexForwardingCurves", "Index", "IndexForwardingCurvesId"),
+        "default_curves": _handles("DefaultCurves", "DefaultCurve", "DefaultCurvesId"),
+        "swap_indices": _handles("SwapIndices", "SwapIndex", "SwapIndicesId"),
+        "fx_volatilities": _handles("FxVolatilities", "FxVolatility", "FxVolatilitiesId"),
+        "swaption_volatilities": _handles("SwaptionVolatilities", "SwaptionVolatility", "SwaptionVolatilitiesId"),
+        "cap_floor_volatilities": _handles("CapFloorVolatilities", "CapFloorVolatility", "CapFloorVolatilitiesId"),
     }
 
 
