@@ -60,6 +60,7 @@ import dataclasses
 import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -225,7 +226,12 @@ class OreSnapshot:
         return _year_fraction_from_day_counter(self.asof_date, d, self.report_day_counter)
 
     def parity_completeness_report(self) -> Dict[str, object]:
-        """Return a structured audit of parity-critical snapshot inputs."""
+        """Return a structured audit of parity-critical snapshot inputs.
+
+        The report is intentionally explicit about what is present, what is
+        missing, and which XVA components are reasonably comparable from this
+        snapshot.
+        """
         requested = tuple(self.requested_xva_metrics)
         file_paths = {
             "ore_xml": self.ore_xml_path,
@@ -371,19 +377,6 @@ class OreSnapshot:
                 rows.append({"section": section, "field": key, "value": value})
         return pd.DataFrame(rows)
 
-    def to_dict(self) -> Dict[str, object]:
-        """JSON-friendly representation of the snapshot contents.
-
-        Callable fields such as ``p0_disc`` are intentionally omitted because they
-        are derived from the exported curve arrays and are not directly serializable.
-        """
-        payload: Dict[str, object] = {}
-        for field in dataclasses.fields(self):
-            if field.name in {"p0_disc", "p0_fwd", "p0_xva_disc", "p0_borrow", "p0_lend"}:
-                continue
-            payload[field.name] = _jsonify_snapshot_value(getattr(self, field.name))
-        return payload
-
     def __repr__(self) -> str:  # keep repr readable even with large arrays
         return (
             f"OreSnapshot("
@@ -430,25 +423,810 @@ class CurveDFPayload:
         }
 
 
-def _jsonify_snapshot_value(value):
-    if dataclasses.is_dataclass(value):
-        return {
-            k: _jsonify_snapshot_value(v)
-            for k, v in dataclasses.asdict(value).items()
+_TODAYSMARKET_OBJECT_META: tuple[tuple[str, str, str], ...] = (
+    ("YieldCurvesId", "YieldCurves", "YieldCurve"),
+    ("DiscountingCurvesId", "DiscountingCurves", "DiscountingCurve"),
+    ("IndexForwardingCurvesId", "IndexForwardingCurves", "Index"),
+    ("SwapIndexCurvesId", "SwapIndexCurves", "SwapIndex"),
+    ("ZeroInflationIndexCurvesId", "ZeroInflationIndexCurves", "ZeroInflationIndexCurve"),
+    ("YYInflationIndexCurvesId", "YYInflationIndexCurves", "YYInflationIndexCurve"),
+    ("FxSpotsId", "FxSpots", "FxSpot"),
+    ("FxVolatilitiesId", "FxVolatilities", "FxVolatility"),
+    ("SwaptionVolatilitiesId", "SwaptionVolatilities", "SwaptionVolatility"),
+    ("YieldVolatilitiesId", "YieldVolatilities", "YieldVolatility"),
+    ("CapFloorVolatilitiesId", "CapFloorVolatilities", "CapFloorVolatility"),
+    ("CDSVolatilitiesId", "CDSVolatilities", "CDSVolatility"),
+    ("DefaultCurvesId", "DefaultCurves", "DefaultCurve"),
+    ("YYInflationCapFloorVolatilitiesId", "YYInflationCapFloorVolatilities", "YYInflationCapFloorVolatility"),
+    ("ZeroInflationCapFloorVolatilitiesId", "ZeroInflationCapFloorVolatilities", "ZeroInflationCapFloorVolatility"),
+    ("EquityCurvesId", "EquityCurves", "EquityCurve"),
+    ("EquityVolatilitiesId", "EquityVolatilities", "EquityVolatility"),
+    ("SecuritiesId", "Securities", "Security"),
+    ("BaseCorrelationsId", "BaseCorrelations", "BaseCorrelation"),
+    ("CommodityCurvesId", "CommodityCurves", "CommodityCurve"),
+    ("CommodityVolatilitiesId", "CommodityVolatilities", "CommodityVolatility"),
+    ("CorrelationsId", "Correlations", "Correlation"),
+)
+
+_SPEC_PREFIX_TO_CURVECONFIG_TAGS: dict[str, tuple[str, ...]] = {
+    "Yield": ("YieldCurves",),
+    "FX": (),
+    "FXVolatility": ("FXVolatilities",),
+    "SwaptionVolatility": ("SwaptionVolatilities",),
+    "YieldVolatility": ("YieldVolatilities",),
+    "CapFloorVolatility": ("CapFloorVolatilities",),
+    "CDSVolatility": ("CDSVolatilities",),
+    "Default": ("DefaultCurves",),
+    "Inflation": ("InflationCurves",),
+    "InflationCapFloorVolatility": ("InflationCapFloorVolatilities",),
+    "Equity": ("EquityCurves",),
+    "EquityVolatility": ("EquityVolatilities",),
+    "Security": ("Securities",),
+    "BaseCorrelation": ("BaseCorrelations",),
+    "Commodity": ("CommodityCurves",),
+    "CommodityVolatility": ("CommodityVolatilities",),
+    "Correlation": ("Correlations",),
+}
+
+_FX_DOMINANCE_ORDER: tuple[str, ...] = (
+    "XAU", "XAG", "XPT", "XPD",
+    "EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "ZAR",
+    "MYR", "SGD",
+    "DKK", "NOK", "SEK",
+    "HKD", "THB", "TWD", "MXN",
+    "CNY", "CNH",
+    "JPY",
+    "IDR", "KRW",
+)
+
+
+def validate_ore_input_snapshot(
+    ore_xml_path: str | Path,
+    *,
+    include_all_market_configs: bool = False,
+) -> Dict[str, object]:
+    """Preflight validation of ORE input linkages for ore_snapshot-style runs.
+
+    This codifies the common setup checklist:
+    - conventions referenced by active curve configs exist
+    - quotes referenced by active curve configs exist on asof date
+    - curve specs in active todaysmarket sections resolve to real curve configs
+    - yield and index curve aliases do not overlap inside the same todaysmarket id
+    - requested market configurations in ore.xml exist in todaysmarket.xml
+    - FX duplicate/dominance outcomes are surfaced explicitly
+    - implyTodaysFixings and any asof-date fixings are surfaced together
+    """
+    ore_xml = Path(ore_xml_path).resolve()
+    ore_root = ET.parse(ore_xml).getroot()
+
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    analytics_params: dict[str, dict[str, str]] = {}
+    for analytic in ore_root.findall("./Analytics/Analytic"):
+        analytic_type = analytic.attrib.get("type", "").strip()
+        analytics_params[analytic_type] = {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in analytic.findall("./Parameter")
         }
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, tuple):
-        return [_jsonify_snapshot_value(v) for v in value]
-    if isinstance(value, list):
-        return [_jsonify_snapshot_value(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _jsonify_snapshot_value(v) for k, v in value.items()}
-    if isinstance(value, (np.floating, np.integer)):
-        return value.item()
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return value
+
+    asof_date = setup_params.get("asofDate", "")
+    if not asof_date:
+        raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
+
+    base = ore_xml.parent
+    curveconfig_xml = (base / setup_params.get("curveConfigFile", "curveconfig.xml")).resolve()
+    conventions_xml = (base / setup_params.get("conventionsFile", "conventions.xml")).resolve()
+    todaysmarket_xml = (base / setup_params.get("marketConfigFile", "todaysmarket.xml")).resolve()
+    market_data_file = (base / setup_params.get("marketDataFile", "market.txt")).resolve()
+    fixing_data_file = (base / setup_params.get("fixingDataFile", "fixings.txt")).resolve()
+    portfolio_xml = (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    imply_todays_fixings = str(setup_params.get("implyTodaysFixings", "N")).strip().upper() in {"Y", "YES", "TRUE"}
+
+    missing_files = [
+        str(p)
+        for p in (curveconfig_xml, conventions_xml, todaysmarket_xml, market_data_file)
+        if not p.exists()
+    ]
+    if missing_files:
+        raise FileNotFoundError(f"Required ORE input files not found: {missing_files}")
+
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    cc_root = ET.parse(curveconfig_xml).getroot()
+    conv_root = ET.parse(conventions_xml).getroot()
+
+    available_market_configs = sorted(
+        {
+            cfg.attrib.get("id", "").strip()
+            for cfg in tm_root.findall("./Configuration")
+            if cfg.attrib.get("id", "").strip()
+        }
+    )
+    requested_market_configs = []
+    for value in markets_params.values():
+        value = value.strip()
+        if value and value not in requested_market_configs:
+            requested_market_configs.append(value)
+    curves_cfg = analytics_params.get("curves", {}).get("configuration", "").strip()
+    if curves_cfg and curves_cfg not in requested_market_configs:
+        requested_market_configs.append(curves_cfg)
+    if "default" not in requested_market_configs:
+        requested_market_configs.append("default")
+
+    missing_requested_market_configs = [
+        cfg for cfg in requested_market_configs if cfg not in available_market_configs
+    ]
+    active_market_configs = (
+        available_market_configs if include_all_market_configs else [cfg for cfg in requested_market_configs if cfg in available_market_configs]
+    )
+
+    curve_nodes_by_tag: dict[str, dict[str, ET.Element]] = defaultdict(dict)
+    for section in list(cc_root):
+        section_tag = section.tag
+        for curve_node in list(section):
+            curve_id = (curve_node.findtext("./CurveId") or "").strip()
+            if curve_id:
+                curve_nodes_by_tag[section_tag][curve_id] = curve_node
+
+    available_conventions = sorted(
+        {
+            (node.findtext("./Id") or "").strip()
+            for node in list(conv_root)
+            if (node.findtext("./Id") or "").strip()
+        }
+    )
+    available_convention_set = set(available_conventions)
+    relevant_currencies, relevant_indices, relevant_counterparties = _collect_snapshot_relevance(
+        portfolio_xml if portfolio_xml.exists() else None,
+        analytics_params,
+    )
+
+    active_section_ids: dict[str, set[str]] = defaultdict(set)
+    missing_section_refs: list[dict[str, str]] = []
+    for config_id in active_market_configs:
+        cfg = tm_root.find(f"./Configuration[@id='{config_id}']")
+        if cfg is None:
+            continue
+        for config_child, section_tag, _ in _TODAYSMARKET_OBJECT_META:
+            section_id = (cfg.findtext(f"./{config_child}") or "").strip()
+            if not section_id:
+                continue
+            active_section_ids[section_tag].add(section_id)
+            if tm_root.find(f"./{section_tag}[@id='{section_id}']") is None:
+                missing_section_refs.append(
+                    {
+                        "configuration": config_id,
+                        "section": section_tag,
+                        "section_id": section_id,
+                    }
+                )
+
+    active_curve_ids_by_tag: dict[str, set[str]] = defaultdict(set)
+    invalid_curve_specs: list[dict[str, str]] = []
+    for _, section_tag, item_tag in _TODAYSMARKET_OBJECT_META:
+        for section_id in sorted(active_section_ids.get(section_tag, set())):
+            section = tm_root.find(f"./{section_tag}[@id='{section_id}']")
+            if section is None:
+                continue
+            for item in section.findall(f"./{item_tag}"):
+                if section_tag == "SwapIndexCurves":
+                    continue
+                spec = (item.text or "").strip()
+                if not spec:
+                    continue
+                parent_tags, curve_id = _curve_spec_target(spec)
+                if parent_tags is None:
+                    invalid_curve_specs.append(
+                        {
+                            "section": section_tag,
+                            "section_id": section_id,
+                            "item": item_tag,
+                            "spec": spec,
+                            "reason": "unrecognized curve spec prefix",
+                        }
+                    )
+                    continue
+                if not parent_tags:
+                    continue
+                if curve_id is None:
+                    invalid_curve_specs.append(
+                        {
+                            "section": section_tag,
+                            "section_id": section_id,
+                            "item": item_tag,
+                            "spec": spec,
+                            "reason": "could not parse curve id from spec",
+                        }
+                    )
+                    continue
+                found = False
+                for parent_tag in parent_tags:
+                    if curve_id in curve_nodes_by_tag.get(parent_tag, {}):
+                        active_curve_ids_by_tag[parent_tag].add(curve_id)
+                        found = True
+                if not found:
+                    invalid_curve_specs.append(
+                        {
+                            "section": section_tag,
+                            "section_id": section_id,
+                            "item": item_tag,
+                            "spec": spec,
+                            "reason": "referenced curve config not found",
+                        }
+                    )
+
+    quote_scope_curve_ids_by_tag: dict[str, set[str]] = defaultdict(set)
+    for section_id in sorted(active_section_ids.get("DiscountingCurves", set())):
+        section = tm_root.find(f"./DiscountingCurves[@id='{section_id}']")
+        if section is None:
+            continue
+        selected = [
+            node for node in section.findall("./DiscountingCurve")
+            if not relevant_currencies or (node.attrib.get("currency", "").strip() in relevant_currencies)
+        ]
+        for node in selected or section.findall("./DiscountingCurve"):
+            spec = (node.text or "").strip()
+            parent_tags, curve_id = _curve_spec_target(spec)
+            if not parent_tags or curve_id is None:
+                continue
+            for parent_tag in parent_tags:
+                if curve_id in curve_nodes_by_tag.get(parent_tag, {}):
+                    quote_scope_curve_ids_by_tag[parent_tag].add(curve_id)
+    for section_id in sorted(active_section_ids.get("IndexForwardingCurves", set())):
+        section = tm_root.find(f"./IndexForwardingCurves[@id='{section_id}']")
+        if section is None:
+            continue
+        selected = [
+            node for node in section.findall("./Index")
+            if not relevant_indices or (node.attrib.get("name", "").strip() in relevant_indices)
+        ]
+        for node in selected or section.findall("./Index"):
+            spec = (node.text or "").strip()
+            parent_tags, curve_id = _curve_spec_target(spec)
+            if not parent_tags or curve_id is None:
+                continue
+            for parent_tag in parent_tags:
+                if curve_id in curve_nodes_by_tag.get(parent_tag, {}):
+                    quote_scope_curve_ids_by_tag[parent_tag].add(curve_id)
+    for section_id in sorted(active_section_ids.get("DefaultCurves", set())):
+        section = tm_root.find(f"./DefaultCurves[@id='{section_id}']")
+        if section is None:
+            continue
+        selected = [
+            node for node in section.findall("./DefaultCurve")
+            if not relevant_counterparties or (node.attrib.get("name", "").strip() in relevant_counterparties)
+        ]
+        for node in selected:
+            spec = (node.text or "").strip()
+            parent_tags, curve_id = _curve_spec_target(spec)
+            if not parent_tags or curve_id is None:
+                continue
+            for parent_tag in parent_tags:
+                if curve_id in curve_nodes_by_tag.get(parent_tag, {}):
+                    quote_scope_curve_ids_by_tag[parent_tag].add(curve_id)
+    if not quote_scope_curve_ids_by_tag:
+        quote_scope_curve_ids_by_tag = active_curve_ids_by_tag
+
+    used_conventions: set[str] = set()
+    required_mandatory_quotes: set[str] = set()
+    required_optional_quotes: set[str] = set()
+    for section_tag, curve_ids in quote_scope_curve_ids_by_tag.items():
+        for curve_id in sorted(curve_ids):
+            node = curve_nodes_by_tag.get(section_tag, {}).get(curve_id)
+            if node is None:
+                continue
+            for conv_node in node.findall(".//Conventions"):
+                conv_id = (conv_node.text or "").strip()
+                if conv_id:
+                    used_conventions.add(conv_id)
+            for quote_node in node.findall(".//Quotes/Quote"):
+                quote = (quote_node.text or "").strip()
+                if not quote:
+                    continue
+                optional = str(quote_node.attrib.get("optional", "")).strip().lower() in {"true", "y", "yes", "1"}
+                if optional:
+                    required_optional_quotes.add(quote)
+                else:
+                    required_mandatory_quotes.add(quote)
+            for quote_node in node.findall(".//Quotes/CompositeQuote/RateQuote"):
+                quote = (quote_node.text or "").strip()
+                if quote:
+                    required_mandatory_quotes.add(quote)
+            for quote_node in node.findall(".//Quotes/CompositeQuote/SpreadQuote"):
+                quote = (quote_node.text or "").strip()
+                if quote:
+                    required_mandatory_quotes.add(quote)
+
+    missing_conventions = sorted(used_conventions - available_convention_set)
+
+    market_quotes_by_date = _load_ore_csv_keys_by_date(market_data_file)
+    asof_market_quotes = market_quotes_by_date.get(asof_date, set())
+    missing_mandatory_quotes = sorted(required_mandatory_quotes - asof_market_quotes)
+    missing_optional_quotes = sorted(required_optional_quotes - asof_market_quotes)
+
+    overlaps: list[dict[str, str]] = []
+    yield_ids = {
+        section.attrib.get("id", "").strip()
+        for section in tm_root.findall("./YieldCurves")
+        if section.attrib.get("id", "").strip()
+    }
+    index_ids = {
+        section.attrib.get("id", "").strip()
+        for section in tm_root.findall("./IndexForwardingCurves")
+        if section.attrib.get("id", "").strip()
+    }
+    for shared_id in sorted(yield_ids & index_ids):
+        y_section = tm_root.find(f"./YieldCurves[@id='{shared_id}']")
+        i_section = tm_root.find(f"./IndexForwardingCurves[@id='{shared_id}']")
+        if y_section is None or i_section is None:
+            continue
+        yield_names = {
+            node.attrib.get("name", "").strip()
+            for node in y_section.findall("./YieldCurve")
+            if node.attrib.get("name", "").strip()
+        }
+        index_names = {
+            node.attrib.get("name", "").strip()
+            for node in i_section.findall("./Index")
+            if node.attrib.get("name", "").strip()
+        }
+        for name in sorted(yield_names & index_names):
+            overlaps.append({"id": shared_id, "name": name})
+
+    fx_pairs_with_both_directions = []
+    fx_quote_pairs = sorted(q for q in asof_market_quotes if q.startswith("FX/RATE/"))
+    fx_seen: set[tuple[str, str]] = set()
+    for key in fx_quote_pairs:
+        parts = key.split("/")
+        if len(parts) != 4:
+            continue
+        c1, c2 = parts[2], parts[3]
+        canonical = tuple(sorted((c1, c2)))
+        if canonical in fx_seen:
+            continue
+        inverse = f"FX/RATE/{c2}/{c1}"
+        if inverse in asof_market_quotes and c1 != c2:
+            dominant = _fx_dominance(c1, c2)
+            kept = f"FX/RATE/{dominant[:3]}/{dominant[3:]}"
+            dropped = inverse if kept == key else key
+            fx_pairs_with_both_directions.append(
+                {
+                    "pair": f"{canonical[0]}/{canonical[1]}",
+                    "dominant": dominant,
+                    "kept": kept,
+                    "dropped": dropped,
+                }
+            )
+            fx_seen.add(canonical)
+
+    today_fixing_count = 0
+    if fixing_data_file.exists():
+        fixing_keys_by_date = _load_ore_csv_keys_by_date(fixing_data_file)
+        today_fixing_count = len(fixing_keys_by_date.get(asof_date, set()))
+
+    issues: list[str] = []
+    action_items: list[dict[str, object]] = []
+    if missing_requested_market_configs:
+        issues.append(f"missing todaysmarket configurations: {missing_requested_market_configs}")
+        action_items.append(
+            {
+                "code": "missing_market_configurations",
+                "severity": "error",
+                "what_failed": "Some market configurations requested by ore.xml are not defined in todaysmarket.xml.",
+                "what_to_fix": "Add the missing <Configuration id=\"...\"> blocks to todaysmarket.xml or change the Markets/Parameter values in ore.xml to an existing configuration id.",
+                "where_to_fix": [str(ore_xml), str(todaysmarket_xml)],
+                "details": missing_requested_market_configs,
+            }
+        )
+    if missing_section_refs:
+        issues.append("some active todaysmarket section ids are referenced but not defined")
+        action_items.append(
+            {
+                "code": "missing_todaysmarket_sections",
+                "severity": "error",
+                "what_failed": "An active configuration points to a todaysmarket section id that does not exist.",
+                "what_to_fix": "Create the missing section block in todaysmarket.xml or change the corresponding *Id field in the active configuration to an existing section id.",
+                "where_to_fix": [str(todaysmarket_xml)],
+                "details": missing_section_refs,
+            }
+        )
+    if invalid_curve_specs:
+        issues.append("some active todaysmarket curve specs do not resolve to curve configurations")
+        action_items.append(
+            {
+                "code": "unresolved_curve_specs",
+                "severity": "error",
+                "what_failed": "Some specs in todaysmarket.xml point to curve ids that are not present in curveconfig.xml.",
+                "what_to_fix": "Either add the missing curve configuration to curveconfig.xml or change the spec in todaysmarket.xml so it points at a real CurveId.",
+                "where_to_fix": [str(todaysmarket_xml), str(curveconfig_xml)],
+                "details": invalid_curve_specs,
+            }
+        )
+    if missing_conventions:
+        issues.append("some active curve-config convention ids are missing")
+        action_items.append(
+            {
+                "code": "missing_conventions",
+                "severity": "error",
+                "what_failed": "Active curve configs reference convention ids that do not exist in conventions.xml.",
+                "what_to_fix": "Add these convention ids to conventions.xml or update the <Conventions> fields in curveconfig.xml to use ids that already exist.",
+                "where_to_fix": [str(curveconfig_xml), str(conventions_xml)],
+                "details": missing_conventions,
+            }
+        )
+    if missing_mandatory_quotes:
+        issues.append("some active mandatory curve-config quotes are missing on the asof date")
+        action_items.append(
+            {
+                "code": "missing_mandatory_quotes",
+                "severity": "error",
+                "what_failed": "The active curve build requests mandatory quote ids that are not present in the market data on the asof date.",
+                "what_to_fix": "Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml.",
+                "where_to_fix": [str(curveconfig_xml), str(market_data_file)],
+                "details": missing_mandatory_quotes[:50],
+                "detail_count": len(missing_mandatory_quotes),
+            }
+        )
+    if overlaps:
+        issues.append("yield and index curve aliases overlap inside an active todaysmarket id")
+        action_items.append(
+            {
+                "code": "yield_index_alias_overlap",
+                "severity": "error",
+                "what_failed": "The same alias name is used in both YieldCurves and IndexForwardingCurves for the same todaysmarket id.",
+                "what_to_fix": "Rename either the YieldCurve @name or the Index @name in todaysmarket.xml so the alias only appears once per id.",
+                "where_to_fix": [str(todaysmarket_xml)],
+                "details": overlaps,
+            }
+        )
+    if today_fixing_count > 0 and not imply_todays_fixings:
+        issues.append("asof-date fixings are present but implyTodaysFixings is disabled")
+        action_items.append(
+            {
+                "code": "todays_fixings_ignored",
+                "severity": "warning",
+                "what_failed": "The fixing file contains asof-date fixings, but ORE is configured not to use today's fixings.",
+                "what_to_fix": "Set Setup/implyTodaysFixings to Y in ore.xml if those asof-date fixings should be consumed, or remove them from the fixing file if they are not intentional.",
+                "where_to_fix": [str(ore_xml), str(fixing_data_file) if fixing_data_file.exists() else str(ore_xml)],
+                "details": {"asof_date": asof_date, "today_fixing_count": today_fixing_count},
+            }
+        )
+    if fx_pairs_with_both_directions:
+        action_items.append(
+            {
+                "code": "fx_dominance_notice",
+                "severity": "info",
+                "what_failed": "Both FX directions are present for some pairs, so ORE will keep only the dominant orientation internally.",
+                "what_to_fix": "If you want a cleaner input set, keep only the dominant FX direction shown here in the market data file.",
+                "where_to_fix": [str(market_data_file)],
+                "details": fx_pairs_with_both_directions,
+            }
+        )
+
+    checks = {
+        "market_configurations_exist": not missing_requested_market_configs,
+        "referenced_todaysmarket_sections_exist": not missing_section_refs,
+        "curve_specs_resolve": not invalid_curve_specs,
+        "conventions_exist": not missing_conventions,
+        "quotes_exist_for_asof": not missing_mandatory_quotes,
+        "yield_index_names_distinct": not overlaps,
+    }
+
+    return {
+        "summary": {
+            "ore_xml_path": str(ore_xml),
+            "asof_date": asof_date,
+            "selected_market_configs": active_market_configs,
+            "market_contexts": dict(markets_params),
+        },
+        "files": {
+            "curveconfig_xml": str(curveconfig_xml),
+            "conventions_xml": str(conventions_xml),
+            "todaysmarket_xml": str(todaysmarket_xml),
+            "market_data_file": str(market_data_file),
+            "fixing_data_file": str(fixing_data_file) if fixing_data_file.exists() else None,
+            "portfolio_xml": str(portfolio_xml) if portfolio_xml.exists() else None,
+        },
+        "market_configurations": {
+            "requested": requested_market_configs,
+            "available": available_market_configs,
+            "missing_requested": missing_requested_market_configs,
+            "valid": not missing_requested_market_configs,
+        },
+        "todaysmarket_sections": {
+            "missing_references": missing_section_refs,
+            "valid": not missing_section_refs,
+        },
+        "curve_specs": {
+            "active_curve_ids_by_section": {k: sorted(v) for k, v in sorted(active_curve_ids_by_tag.items())},
+            "quote_scope_curve_ids_by_section": {k: sorted(v) for k, v in sorted(quote_scope_curve_ids_by_tag.items())},
+            "invalid": invalid_curve_specs,
+            "valid": not invalid_curve_specs,
+        },
+        "conventions": {
+            "used_ids": sorted(used_conventions),
+            "missing_ids": missing_conventions,
+            "valid": not missing_conventions,
+        },
+        "quotes": {
+            "mandatory_required_count": len(required_mandatory_quotes),
+            "optional_required_count": len(required_optional_quotes),
+            "asof_quote_count": len(asof_market_quotes),
+            "missing_mandatory": missing_mandatory_quotes,
+            "missing_optional": missing_optional_quotes,
+            "valid": not missing_mandatory_quotes,
+        },
+        "todaysmarket_names": {
+            "yield_index_overlaps": overlaps,
+            "distinct": not overlaps,
+        },
+        "fx_dominance": {
+            "pairs_with_both_directions": fx_pairs_with_both_directions,
+            "pair_count_with_both_directions": len(fx_pairs_with_both_directions),
+        },
+        "fixings": {
+            "imply_todays_fixings": imply_todays_fixings,
+            "today_fixing_count": today_fixing_count,
+            "potential_issue": bool(today_fixing_count > 0 and not imply_todays_fixings),
+        },
+        "checks": checks,
+        "issues": issues,
+        "action_items": action_items,
+        "input_links_valid": bool(all(checks.values())),
+    }
+
+
+def ore_input_validation_dataframe(report: Dict[str, object]):
+    """Convert ``validate_ore_input_snapshot()`` output into a flat DataFrame."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("pandas is required for ore_input_validation_dataframe()") from exc
+
+    rows = []
+    for section in (
+        "market_configurations",
+        "todaysmarket_sections",
+        "curve_specs",
+        "conventions",
+        "quotes",
+        "todaysmarket_names",
+        "fixings",
+        "checks",
+    ):
+        payload = report.get(section, {})
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                rows.append({"section": section, "field": key, "value": value})
+    for idx, item in enumerate(report.get("action_items", [])):
+        rows.append({"section": "action_items", "field": f"{idx}:code", "value": item.get("code")})
+        rows.append({"section": "action_items", "field": f"{idx}:severity", "value": item.get("severity")})
+        rows.append({"section": "action_items", "field": f"{idx}:what_failed", "value": item.get("what_failed")})
+        rows.append({"section": "action_items", "field": f"{idx}:what_to_fix", "value": item.get("what_to_fix")})
+        rows.append({"section": "action_items", "field": f"{idx}:where_to_fix", "value": item.get("where_to_fix")})
+    return pd.DataFrame(rows, columns=["section", "field", "value"])
+
+
+def validate_xva_snapshot_dataclasses(snapshot) -> Dict[str, object]:
+    """Validate an in-memory XVASnapshot-style dataclass object.
+
+    This is intended for snapshots from ``native_xva_interface.dataclasses``
+    or compatible programmatic objects with the same attribute layout.
+    """
+    market = snapshot.market
+    fixings = snapshot.fixings
+    portfolio = snapshot.portfolio
+    config = snapshot.config
+    netting = getattr(snapshot, "netting", None)
+    collateral = getattr(snapshot, "collateral", None)
+
+    quote_keys = [getattr(q, "key", "") for q in market.raw_quotes]
+    quote_key_dates = [(getattr(q, "date", ""), getattr(q, "key", "")) for q in market.raw_quotes]
+    quote_duplicate_count = len(quote_key_dates) - len(set(quote_key_dates))
+
+    trade_ids = [t.trade_id for t in portfolio.trades]
+    trade_counterparties = {t.counterparty for t in portfolio.trades}
+    trade_netting_sets = {t.netting_set for t in portfolio.trades}
+    defined_netting_sets = set((netting.netting_sets or {}).keys()) if netting is not None else set()
+    collateral_netting_sets = {
+        b.netting_set_id for b in (collateral.balances if collateral is not None else ())
+    }
+    supported_metrics = {"CVA", "DVA", "FVA", "MVA"}
+    analytics = tuple(config.analytics)
+    invalid_metrics = sorted(m for m in analytics if m not in supported_metrics)
+    market_quote_dates = sorted({q.date for q in market.raw_quotes})
+    fixing_dates = sorted({p.date for p in fixings.points})
+
+    asof_consistent = market.asof == config.asof
+    quote_dates_match_asof = all(q.date == market.asof for q in market.raw_quotes)
+    fixing_dates_not_after_asof = all(p.date <= config.asof for p in fixings.points)
+    analytics_supported = bool(analytics) and not invalid_metrics
+    trade_ids_unique = len(trade_ids) == len(set(trade_ids))
+    netting_sets_defined = not trade_netting_sets or trade_netting_sets.issubset(defined_netting_sets) or not defined_netting_sets
+    collateral_matches_netting = not collateral_netting_sets or collateral_netting_sets.issubset(
+        defined_netting_sets or trade_netting_sets
+    )
+
+    issues: list[str] = []
+    action_items: list[dict[str, object]] = []
+    if not asof_consistent:
+        issues.append("market.asof and config.asof do not match")
+        action_items.append(
+            {
+                "code": "asof_mismatch",
+                "severity": "error",
+                "what_failed": "The market asof date and config asof date do not match.",
+                "what_to_fix": "Set snapshot.market.asof and snapshot.config.asof to the same date before running validation or pricing.",
+                "where_to_fix": ["snapshot.market.asof", "snapshot.config.asof"],
+                "details": {"market_asof": market.asof, "config_asof": config.asof},
+            }
+        )
+    if not quote_dates_match_asof:
+        issues.append("some market quotes are not dated on the market asof")
+        action_items.append(
+            {
+                "code": "quote_date_mismatch",
+                "severity": "error",
+                "what_failed": "Some market quotes carry a date different from snapshot.market.asof.",
+                "what_to_fix": "Either restamp those MarketQuote.date values to the snapshot asof or move them into a snapshot whose asof matches the quote date.",
+                "where_to_fix": ["snapshot.market.raw_quotes[*].date"],
+                "details": market_quote_dates,
+            }
+        )
+    if quote_duplicate_count > 0:
+        issues.append("duplicate market quote (date, key) entries are present")
+        action_items.append(
+            {
+                "code": "duplicate_market_quotes",
+                "severity": "error",
+                "what_failed": "There are duplicate market quotes with the same (date, key) pair.",
+                "what_to_fix": "Deduplicate snapshot.market.raw_quotes so each (date, key) appears once.",
+                "where_to_fix": ["snapshot.market.raw_quotes"],
+                "details": {"duplicate_count": quote_duplicate_count},
+            }
+        )
+    if not fixing_dates_not_after_asof:
+        issues.append("some fixings are dated after the snapshot asof")
+        action_items.append(
+            {
+                "code": "fixings_after_asof",
+                "severity": "error",
+                "what_failed": "Some fixing dates are later than the snapshot asof date.",
+                "what_to_fix": "Remove future fixings or move the snapshot asof forward so the fixings are historical or same-day.",
+                "where_to_fix": ["snapshot.fixings.points[*].date", "snapshot.config.asof"],
+                "details": fixing_dates,
+            }
+        )
+    if not analytics_supported:
+        issues.append("config.analytics contains unsupported metrics or is empty")
+        action_items.append(
+            {
+                "code": "unsupported_analytics",
+                "severity": "error",
+                "what_failed": "The analytics tuple contains unsupported metric names or no metrics at all.",
+                "what_to_fix": "Use only supported metrics: CVA, DVA, FVA, MVA.",
+                "where_to_fix": ["snapshot.config.analytics"],
+                "details": {"invalid": invalid_metrics, "requested": list(analytics)},
+            }
+        )
+    if not trade_ids_unique:
+        issues.append("portfolio trade ids are not unique")
+        action_items.append(
+            {
+                "code": "duplicate_trade_ids",
+                "severity": "error",
+                "what_failed": "More than one trade uses the same trade_id.",
+                "what_to_fix": "Give each trade a unique trade_id in snapshot.portfolio.trades.",
+                "where_to_fix": ["snapshot.portfolio.trades[*].trade_id"],
+                "details": trade_ids,
+            }
+        )
+    if not netting_sets_defined and defined_netting_sets:
+        issues.append("some trade netting sets are missing from netting config")
+        action_items.append(
+            {
+                "code": "missing_netting_sets",
+                "severity": "error",
+                "what_failed": "Some trades reference netting sets that are not defined in snapshot.netting.netting_sets.",
+                "what_to_fix": "Add the missing NettingSet objects to snapshot.netting.netting_sets or change the trade netting_set values to an existing key.",
+                "where_to_fix": ["snapshot.portfolio.trades[*].netting_set", "snapshot.netting.netting_sets"],
+                "details": sorted(trade_netting_sets - defined_netting_sets),
+            }
+        )
+    if not collateral_matches_netting:
+        issues.append("some collateral balances reference unknown netting sets")
+        action_items.append(
+            {
+                "code": "unknown_collateral_netting_sets",
+                "severity": "error",
+                "what_failed": "Some collateral balances reference netting sets that do not exist in the snapshot netting/trade set.",
+                "what_to_fix": "Change CollateralBalance.netting_set_id to a real trade/netting-set id or add the missing netting set definition.",
+                "where_to_fix": ["snapshot.collateral.balances[*].netting_set_id", "snapshot.netting.netting_sets"],
+                "details": sorted(collateral_netting_sets - (defined_netting_sets or trade_netting_sets)),
+            }
+        )
+
+    checks = {
+        "asof_consistent": asof_consistent,
+        "quote_dates_match_asof": quote_dates_match_asof,
+        "fixing_dates_not_after_asof": fixing_dates_not_after_asof,
+        "analytics_supported": analytics_supported,
+        "trade_ids_unique": trade_ids_unique,
+        "netting_sets_defined": netting_sets_defined,
+        "collateral_matches_netting": collateral_matches_netting,
+    }
+
+    return {
+        "summary": {
+            "asof": config.asof,
+            "base_currency": config.base_currency,
+            "analytics": list(analytics),
+            "trade_count": len(portfolio.trades),
+            "quote_count": len(market.raw_quotes),
+            "fixing_count": len(fixings.points),
+            "counterparties": sorted(trade_counterparties),
+            "netting_sets": sorted(trade_netting_sets),
+        },
+        "market": {
+            "market_asof": market.asof,
+            "config_asof": config.asof,
+            "quote_dates": market_quote_dates,
+            "quote_duplicate_count": quote_duplicate_count,
+            "quote_key_count": len(set(quote_keys)),
+        },
+        "fixings": {
+            "dates": fixing_dates,
+            "count": len(fixings.points),
+        },
+        "portfolio": {
+            "trade_ids": trade_ids,
+            "counterparties": sorted(trade_counterparties),
+            "netting_sets": sorted(trade_netting_sets),
+        },
+        "netting": {
+            "defined_netting_sets": sorted(defined_netting_sets),
+            "missing_trade_netting_sets": sorted(trade_netting_sets - defined_netting_sets) if defined_netting_sets else [],
+        },
+        "collateral": {
+            "balance_netting_sets": sorted(collateral_netting_sets),
+            "unknown_balance_netting_sets": sorted(collateral_netting_sets - (defined_netting_sets or trade_netting_sets)),
+        },
+        "analytics": {
+            "requested": list(analytics),
+            "invalid": invalid_metrics,
+        },
+        "checks": checks,
+        "issues": issues,
+        "action_items": action_items,
+        "snapshot_valid": bool(all(checks.values()) and not issues),
+    }
+
+
+def xva_snapshot_validation_dataframe(report: Dict[str, object]):
+    """Convert ``validate_xva_snapshot_dataclasses()`` output into a flat DataFrame."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("pandas is required for xva_snapshot_validation_dataframe()") from exc
+
+    rows = []
+    for section in ("market", "fixings", "portfolio", "netting", "collateral", "analytics", "checks"):
+        payload = report.get(section, {})
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                rows.append({"section": section, "field": key, "value": value})
+    for idx, item in enumerate(report.get("action_items", [])):
+        rows.append({"section": "action_items", "field": f"{idx}:code", "value": item.get("code")})
+        rows.append({"section": "action_items", "field": f"{idx}:severity", "value": item.get("severity")})
+        rows.append({"section": "action_items", "field": f"{idx}:what_failed", "value": item.get("what_failed")})
+        rows.append({"section": "action_items", "field": f"{idx}:what_to_fix", "value": item.get("what_to_fix")})
+        rows.append({"section": "action_items", "field": f"{idx}:where_to_fix", "value": item.get("where_to_fix")})
+    return pd.DataFrame(rows, columns=["section", "field", "value"])
 
 
 def extract_discount_factors_by_currency(
@@ -489,19 +1267,19 @@ def extract_discount_factors_by_currency(
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {curves_csv}")
 
     simulation_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
-    model_day_counter = "A365F"
-    if simulation_analytic is not None:
-        simulation_params = {
-            n.attrib.get("name", ""): (n.text or "").strip()
-            for n in simulation_analytic.findall("./Parameter")
-        }
-        simulation_xml = (base / simulation_params.get("simulationConfigFile", "simulation.xml")).resolve()
-        if not simulation_xml.exists():
-            raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
-        simulation_root = ET.parse(simulation_xml).getroot()
-        model_day_counter = _normalize_day_counter_name(
-            (simulation_root.findtext("./DayCounter") or "A365F").strip()
-        )
+    if simulation_analytic is None:
+        raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml}")
+    simulation_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in simulation_analytic.findall("./Parameter")
+    }
+    simulation_xml = (base / simulation_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    if not simulation_xml.exists():
+        raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
+    simulation_root = ET.parse(simulation_xml).getroot()
+    model_day_counter = _normalize_day_counter_name(
+        (simulation_root.findtext("./DayCounter") or "A365F").strip()
+    )
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     todaysmarket_xml = (base / todaysmarket_rel).resolve()
@@ -593,6 +1371,103 @@ def dump_discount_factors_json(
         configuration_id=configuration_id,
     )
     return json.dumps(payload, indent=indent, sort_keys=True)
+
+
+def _curve_spec_target(spec: str) -> tuple[Optional[tuple[str, ...]], Optional[str]]:
+    parts = [p.strip() for p in str(spec).split("/") if p.strip()]
+    if not parts:
+        return None, None
+    prefix = parts[0]
+    parent_tags = _SPEC_PREFIX_TO_CURVECONFIG_TAGS.get(prefix)
+    if parent_tags is None:
+        return None, None
+    if not parent_tags:
+        return parent_tags, None
+    if len(parts) < 2:
+        return parent_tags, None
+    return parent_tags, parts[-1]
+
+
+def _collect_snapshot_relevance(
+    portfolio_xml: Optional[Path],
+    analytics_params: dict[str, dict[str, str]],
+) -> tuple[set[str], set[str], set[str]]:
+    currencies: set[str] = set()
+    indices: set[str] = set()
+    counterparties: set[str] = set()
+    for analytic in analytics_params.values():
+        base_ccy = (analytic.get("baseCurrency") or "").strip()
+        if base_ccy:
+            currencies.add(base_ccy)
+        for key in ("cvaName", "dvaName"):
+            name = (analytic.get(key) or "").strip()
+            if name:
+                counterparties.add(name)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return currencies, indices, counterparties
+
+    root = ET.parse(portfolio_xml).getroot()
+    for node in root.findall(".//Envelope/CounterParty"):
+        value = (node.text or "").strip()
+        if value:
+            counterparties.add(value)
+    for node in root.findall(".//FloatingLegData/Index"):
+        value = (node.text or "").strip()
+        if value:
+            indices.add(value)
+    for xpath in (
+        ".//Currency",
+        ".//PayCurrency",
+        ".//ReceiveCurrency",
+        ".//BoughtCurrency",
+        ".//SoldCurrency",
+    ):
+        for node in root.findall(xpath):
+            value = (node.text or "").strip()
+            if value and len(value) == 3 and value.isalpha():
+                currencies.add(value.upper())
+    return currencies, indices, counterparties
+
+
+def _split_ore_loader_line(line: str) -> list[str]:
+    return [tok for tok in re.split(r"[,;\t ]+", line.strip()) if tok]
+
+
+def _load_ore_csv_keys_by_date(path: Path) -> dict[str, set[str]]:
+    by_date: dict[str, set[str]] = defaultdict(set)
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tokens = _split_ore_loader_line(line)
+            if len(tokens) < 3:
+                continue
+            by_date[tokens[0]].add(tokens[1])
+    return by_date
+
+
+def _fx_dominance(ccy1: str, ccy2: str) -> str:
+    if ccy1 == ccy2:
+        return ccy1 + ccy2
+    dominance = list(_FX_DOMINANCE_ORDER)
+    try:
+        p1 = dominance.index(ccy1)
+    except ValueError:
+        p1 = None
+    try:
+        p2 = dominance.index(ccy2)
+    except ValueError:
+        p2 = None
+    if p1 is not None and p2 is not None:
+        return ccy1 + ccy2 if p1 < p2 else ccy2 + ccy1
+    if p1 is None and p2 is None:
+        return ccy1 + ccy2
+    if ccy1 == "JPY":
+        return ccy2 + ccy1
+    if ccy2 == "JPY":
+        return ccy1 + ccy2
+    return ccy1 + ccy2 if p1 is not None else ccy2 + ccy1
 
 
 def extract_market_instruments_by_currency(
@@ -1681,7 +2556,7 @@ def _parse_market_instrument_key(key: str) -> Optional[Dict[str, object]]:
         maturity = _safe_tenor_years(tenor)
         if maturity is None:
             return None
-        idx = parts[3] if len(parts) > 4 else ""
+        idx = parts[4] if len(parts) > 5 else (parts[3] if len(parts) > 4 else "")
         return {
             "instrument_type": "IR_SWAP",
             "ccy": ccy,
@@ -1729,9 +2604,11 @@ def _fit_curve_from_instruments(
         times, zeros = _fit_weighted_zero_nodes(instruments)
     elif method == "bootstrap_mm_irs_v1":
         times, zeros = _fit_bootstrap_mm_irs_nodes(instruments)
+    elif method == "ql_helper_eur_v1":
+        times, zeros = _fit_quantlib_helper_eur_nodes(asof_date, instruments)
     else:
         raise ValueError(
-            "fit_method must be 'weighted_zero_logdf_v1' or 'bootstrap_mm_irs_v1'"
+            "fit_method must be 'weighted_zero_logdf_v1', 'bootstrap_mm_irs_v1' or 'ql_helper_eur_v1'"
         )
 
     instr_t = np.asarray(times, dtype=float)
@@ -1887,6 +2764,173 @@ def _fit_bootstrap_mm_irs_nodes(
             zeros.append(0.0)
         else:
             zeros.append(float(-np.log(max(known_df[t], 1.0e-12)) / t))
+    return times, zeros
+
+
+def _fit_quantlib_helper_eur_nodes(
+    asof_date: str,
+    instruments: list[Dict[str, object]],
+) -> tuple[list[float], list[float]]:
+    try:
+        import QuantLib as ql
+    except Exception as exc:
+        raise RuntimeError("QuantLib is required for fit_method='ql_helper_eur_v1'") from exc
+
+    if not instruments:
+        return [0.0], [0.0]
+
+    ccy = ""
+    first_key = str(instruments[0].get("quote_key", "")).upper()
+    parts = first_key.split("/")
+    if len(parts) >= 3:
+        ccy = parts[2]
+    if ccy != "EUR":
+        raise ValueError("fit_method='ql_helper_eur_v1' currently supports EUR only")
+
+    year, month, day = (int(x) for x in asof_date.split("-"))
+    ref = ql.Date(day, month, year)
+    ql.Settings.instance().evaluationDate = ref
+
+    cal = ql.TARGET()
+    fixed_dc = ql.Thirty360(ql.Thirty360.BondBasis)
+    zero_dc = ql.Actual365Fixed()
+    index_3m = ql.Euribor3M()
+    index_6m = ql.Euribor6M()
+
+    mm: list[Dict[str, object]] = []
+    fra: list[Dict[str, object]] = []
+    irs: list[Dict[str, object]] = []
+    for ins in instruments:
+        tpe = str(ins.get("instrument_type", "")).upper()
+        key = str(ins.get("quote_key", "")).upper()
+        if tpe == "MM":
+            mm.append(ins)
+        elif key.startswith("FRA/RATE/EUR/"):
+            fra.append(ins)
+        elif tpe == "IR_SWAP":
+            irs.append(ins)
+
+    def _quote(ins: Dict[str, object]) -> ql.QuoteHandle:
+        return ql.QuoteHandle(ql.SimpleQuote(float(ins["quote_value"])))
+
+    def _period(text: str) -> ql.Period:
+        return ql.Period(str(text).upper())
+
+    helpers: list[ql.RateHelper] = []
+    discount_handle = ql.RelinkableYieldTermStructureHandle()
+
+    has_ois = any("/1D/" in str(ins.get("quote_key", "")).upper() for ins in irs)
+    if has_ois:
+        overnight = ql.Eonia()
+        # Only use the overnight deposit pillar to anchor the very front end.
+        for ins in mm:
+            key = str(ins.get("quote_key", "")).upper()
+            parts = key.split("/")
+            if len(parts) < 5:
+                continue
+            if parts[3] not in ("0D", "ON"):
+                continue
+            tenor = parts[-1]
+            helpers.append(
+                ql.DepositRateHelper(
+                    _quote(ins),
+                    _period(tenor),
+                    0,
+                    cal,
+                    ql.Following,
+                    False,
+                    ql.Actual360(),
+                )
+            )
+        for ins in sorted(irs, key=lambda x: float(x["maturity"])):
+            key = str(ins.get("quote_key", "")).upper()
+            if "/1D/" not in key:
+                continue
+            tenor = key.split("/")[-1]
+            helpers.append(
+                ql.OISRateHelper(
+                    2,
+                    _period(tenor),
+                    _quote(ins),
+                    overnight,
+                )
+            )
+        curve = ql.PiecewiseLogLinearDiscount(ref, helpers, zero_dc)
+    else:
+        for ins in sorted(mm, key=lambda x: float(x["maturity"])):
+            key = str(ins.get("quote_key", "")).upper()
+            parts = key.split("/")
+            if len(parts) < 5:
+                continue
+            tenor = parts[-1]
+            fixing_days = int(parts[3][:-1]) if parts[3].endswith("D") and parts[3][:-1].isdigit() else 2
+            helpers.append(
+                ql.DepositRateHelper(
+                    _quote(ins),
+                    _period(tenor),
+                    fixing_days,
+                    cal,
+                    ql.ModifiedFollowing,
+                    False,
+                    ql.Actual360(),
+                )
+            )
+        for ins in sorted(fra, key=lambda x: float(x["maturity"])):
+            key = str(ins.get("quote_key", "")).upper()
+            parts = key.split("/")
+            if len(parts) < 5:
+                continue
+            start_period = _period(parts[3])
+            tenor = parts[4]
+            if tenor == "3M":
+                helpers.append(ql.FraRateHelper(_quote(ins), start_period, index_3m))
+            elif tenor == "6M":
+                helpers.append(ql.FraRateHelper(_quote(ins), start_period, index_6m))
+        for ins in sorted(irs, key=lambda x: float(x["maturity"])):
+            key = str(ins.get("quote_key", "")).upper()
+            parts = key.split("/")
+            if len(parts) < 6:
+                continue
+            float_tenor = parts[4]
+            swap_tenor = parts[-1]
+            if float_tenor == "3M":
+                ibor = ql.Euribor3M(discount_handle)
+            elif float_tenor == "6M":
+                ibor = ql.Euribor6M(discount_handle)
+            else:
+                continue
+            helpers.append(
+                ql.SwapRateHelper(
+                    _quote(ins),
+                    _period(swap_tenor),
+                    cal,
+                    ql.Annual,
+                    ql.ModifiedFollowing,
+                    fixed_dc,
+                    ibor,
+                    ql.QuoteHandle(),
+                    ql.Period(0, ql.Days),
+                    discount_handle,
+                )
+            )
+        curve = ql.PiecewiseLogLinearDiscount(ref, helpers, zero_dc)
+
+    discount_handle.linkTo(curve)
+    curve.enableExtrapolation()
+
+    dates = list(curve.dates())
+    times = [0.0]
+    zeros = [0.0]
+    seen = {0.0}
+    for d in dates[1:]:
+        t = float(curve.timeFromReference(d))
+        if t <= 1.0e-12:
+            continue
+        if any(abs(t - s) < 1.0e-10 for s in seen):
+            continue
+        seen.add(t)
+        times.append(t)
+        zeros.append(float(curve.zeroRate(d, zero_dc, ql.Continuous).rate()))
     return times, zeros
 
 

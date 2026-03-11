@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import csv
 import math
 import numpy as np
+import warnings
 import xml.etree.ElementTree as ET
 
 from .dataclasses import MarketData, MarketQuote, XVASnapshot
@@ -253,7 +254,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
             curve_factor_specs=curve_factor_specs,
             output_mode="bump_change" if ore_entries else "derivative",
         )
-        unsupported_prefixes = ("hazard:", "recovery:")
+        unsupported_prefixes = ("recovery:",)
         unsupported_factors = sorted(
             {
                 e.normalized_factor
@@ -269,9 +270,8 @@ class OreSnapshotPythonLgmSensitivityComparator:
         notes: List[str] = []
         if unsupported_factors:
             notes.append(
-                "Credit sensitivity parity is approximate and excluded from comparison output. "
-                "ORE shocks simulated survival-probability factors, while the Python snapshot path only has "
-                "an approximate today-curve reconstruction."
+                "Recovery sensitivity parity is not implemented in the Python snapshot path and is excluded "
+                "from comparison output."
             )
         python_supported = [e for e in python_entries if e.normalized_factor not in unsupported_factors]
         ore_supported = [e for e in ore_entries if e.normalized_factor not in unsupported_factors]
@@ -424,14 +424,17 @@ class OreSnapshotPythonLgmSensitivityComparator:
         quote_entries = self._hazard_curve_quote_entries(snapshot, f"hazard:{name}:{int(target_time)}Y")
         if not quote_entries:
             return snapshot
-        bumped_values = _rebuild_hazard_quotes_from_survival_node_shock(
+        credit_curves = dict(snapshot.config.params.get("python.credit_survival_curves", {}))
+        credit_curves[name] = _build_credit_survival_curve_shock(
             [q for _, q in quote_entries],
             coarse_node_times=coarse_nodes,
             target_time=target_time,
             shift_size=shift_size,
         )
+        params = dict(snapshot.config.params)
+        params["python.credit_survival_curves"] = credit_curves
         return self.engine.prepare_sensitivity_snapshot(
-            self._bump_snapshot_quotes(snapshot, quote_entries, bumped_values),
+            replace(snapshot, config=replace(snapshot.config, params=params)),
             curve_fit_mode="ore_fit",
             use_ore_output_curves=False,
             frozen_float_spreads=snapshot.config.params.get("python.frozen_float_spreads"),
@@ -622,7 +625,12 @@ def _discount_curve_family_by_currency(snapshot: XVASnapshot) -> Dict[str, str]:
         return {}
     try:
         tm_root = ET.fromstring(todaysmarket_xml)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to parse todaysmarket.xml when resolving discount curve families: {exc}",
+            UserWarning,
+            stacklevel=2,
+        )
         return {}
     config_id = (
         str(snapshot.config.params.get("market.simulation", "")).strip()
@@ -784,6 +792,38 @@ def _bump_hazard_curve_quotes_by_survival_node(
     return solve(+1.0), solve(-1.0)
 
 
+def _ore_bucket_weight(shift_times: Sequence[float], bucket: int, t: float) -> float:
+    tenors = [float(x) for x in shift_times]
+    tt = float(t)
+    j = int(bucket)
+    if j < 0 or j >= len(tenors):
+        return 0.0
+    t1 = tenors[j]
+    if len(tenors) == 1:
+        return 1.0
+    if j == 0:
+        t2 = tenors[j + 1]
+        if tt <= t1:
+            return 1.0
+        if tt <= t2:
+            return (t2 - tt) / max(t2 - t1, 1.0e-12)
+        return 0.0
+    if j == len(tenors) - 1:
+        t0 = tenors[j - 1]
+        if tt >= t0 and tt <= t1:
+            return (tt - t0) / max(t1 - t0, 1.0e-12)
+        if tt > t1:
+            return 1.0
+        return 0.0
+    t0 = tenors[j - 1]
+    t2 = tenors[j + 1]
+    if tt >= t0 and tt <= t1:
+        return (tt - t0) / max(t1 - t0, 1.0e-12)
+    if tt > t1 and tt <= t2:
+        return (t2 - tt) / max(t2 - t1, 1.0e-12)
+    return 0.0
+
+
 def _survival_from_piecewise_hazard(
     times: Sequence[float],
     hazard_times: Sequence[float],
@@ -862,3 +902,38 @@ def _rebuild_hazard_quotes_from_survival_node_shock(
         else:
             rebuilt.append(float(coarse_lambdas[idx]))
     return rebuilt
+
+
+def _build_credit_survival_curve_shock(
+    quotes: Sequence[MarketQuote],
+    coarse_node_times: Sequence[float],
+    target_time: float,
+    shift_size: float,
+    extrapolation: str = "flat_zero",
+) -> Dict[str, object]:
+    raw_times = []
+    raw_rates = []
+    for q in quotes:
+        tenor = _parse_tenor_to_years(str(q.key).split("/")[-1])
+        if tenor is None or tenor <= 0.0:
+            continue
+        raw_times.append(float(tenor))
+        raw_rates.append(float(q.value))
+    coarse = np.asarray(sorted(float(x) for x in coarse_node_times if float(x) > 0.0), dtype=float)
+    if not raw_times or coarse.size == 0:
+        return {"node_times": list(coarse_node_times), "survival_probabilities": [], "extrapolation": extrapolation}
+
+    raw_times_arr = np.asarray(raw_times, dtype=float)
+    raw_rates_arr = np.asarray(raw_rates, dtype=float)
+    base_surv = _survival_from_piecewise_hazard(coarse, raw_times_arr, raw_rates_arr)
+    avg_haz = -np.log(np.clip(base_surv, 1.0e-18, 1.0)) / coarse
+    target_idx = int(np.argmin(np.abs(coarse - float(target_time))))
+    shifted_avg_haz = np.array(avg_haz, copy=True)
+    for i, t in enumerate(coarse):
+        shifted_avg_haz[i] = avg_haz[i] + shift_size * _ore_bucket_weight(coarse, target_idx, float(t))
+    shifted_surv = np.exp(-shifted_avg_haz * coarse)
+    return {
+        "node_times": [float(x) for x in coarse],
+        "survival_probabilities": [float(x) for x in shifted_surv],
+        "extrapolation": str(extrapolation).strip().lower(),
+    }

@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 
+from py_ore_tools.repo_paths import pythonorerunner_root, require_engine_repo_root
 from py_ore_tools.lgm import (
     LGM1F,
     LGMParams,
@@ -18,7 +18,6 @@ from py_ore_tools.irs_xva_utils import (
     deflate_lgm_npv_paths,
 )
 from py_ore_tools import ore_snapshot as ore_snapshot_module
-from tests.conftest import require_engine_repo_root
 
 try:
     import QuantLib as ql
@@ -38,24 +37,11 @@ class TestLGM(unittest.TestCase):
         )
         self.model = LGM1F(self.params)
         self.parity_fixture = (
-            Path(__file__).resolve().parents[1]
+            pythonorerunner_root()
             / "parity_artifacts"
             / "lgm_rng_alignment"
             / "mt_seed_42_constant.json"
         )
-        if not self.parity_fixture.exists():
-            engine_root = require_engine_repo_root()
-            candidate = (
-                engine_root
-                / "Tools"
-                / "PythonOreRunner"
-                / "parity_artifacts"
-                / "lgm_rng_alignment"
-                / "mt_seed_42_constant.json"
-            )
-            if not candidate.exists():
-                pytest.skip("LGM parity fixture is not available locally")
-            self.parity_fixture = candidate
 
     def _quantlib_sequences(self, seed: int, n_paths: int, dimension: int) -> np.ndarray:
         if ql is None:

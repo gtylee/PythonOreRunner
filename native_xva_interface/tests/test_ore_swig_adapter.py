@@ -1,4 +1,7 @@
+import pytest
+
 from native_xva_interface import (
+    EngineRunError,
     FXForward,
     FixingsData,
     MarketData,
@@ -141,3 +144,57 @@ def test_ore_swig_adapter_extracts_advanced_report_layouts():
     assert result.xva_by_metric["FVA"] == 3.0
     assert result.exposure_by_netting_set["NS1"] == 5.0
     assert result.pv_total == 25.0
+
+
+# ---------------------------------------------------------------------------
+# Correctness regression test for runtime.py cleanup (#3)
+# ---------------------------------------------------------------------------
+
+
+class _OREAppInternalTypeError:
+    """An OREApp that *accepts* the two-arg run signature but raises TypeError from
+    inside the function body — simulating a real engine computation error, not a
+    missing-keyword-argument mismatch.
+
+    When _invoke_run catches this TypeError it silently falls through to the
+    no-arg app.run() call, masking the real failure.
+    """
+
+    def __init__(self, inputs, *args):
+        self._no_arg_called = False
+
+    def run(self, market_data=None, fixing_data=None):
+        if market_data is not None:
+            # Raise from *inside* the function — this is NOT a signature mismatch.
+            raise TypeError("internal: cannot convert market_data element to C++ type")
+        # No-arg fallback silently succeeds, hiding the real error.
+        self._no_arg_called = True
+
+    def getReportNames(self):
+        return []
+
+    def getCubeNames(self):
+        return []
+
+    def getMarketCubeNames(self):
+        return []
+
+
+class _FakeModuleInternalTypeError:
+    InputParameters = FakeInputParameters
+    OREApp = _OREAppInternalTypeError
+
+
+def test_invoke_run_does_not_swallow_internal_type_error():
+    """A TypeError raised *inside* app.run(market_data, fixing_data) — not from a
+    signature mismatch — must propagate as EngineRunError rather than being silently
+    caught and retried as the no-arg app.run().
+
+    Bug: _invoke_run catches *all* TypeErrors from the two-arg call.  If the
+    TypeError originates inside the function body (real engine error) the exception
+    is discarded and the no-arg path runs instead, returning a silent empty result.
+    """
+    adapter = ORESwigAdapter(module=_FakeModuleInternalTypeError)
+    snap = _snapshot()
+    with pytest.raises(EngineRunError, match="internal"):
+        adapter.run(snap, mapped=map_snapshot(snap), run_id="r3")

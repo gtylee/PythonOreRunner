@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from py_ore_tools.repo_paths import require_examples_repo_root
-
 from .dataclasses import (
     FXForward,
     FixingsData,
@@ -106,8 +104,6 @@ def stress_classic_native_preset(repo_root: str | Path, num_paths: int = 64) -> 
     """
 
     root = Path(repo_root)
-    if not (root / "Examples" / "XvaRisk" / "Input").exists():
-        root = require_examples_repo_root()
     input_dir = root / "Examples" / "XvaRisk" / "Input"
     snap = XVALoader.from_files(str(input_dir), ore_file="ore_stress_classic.xml")
 

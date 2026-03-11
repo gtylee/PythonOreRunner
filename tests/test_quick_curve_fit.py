@@ -142,6 +142,48 @@ class TestQuickCurveFit(unittest.TestCase):
         )
         self.assertIn("USD", fitted)
 
+    def test_quantlib_helper_eur_curve_bump_keeps_10y_forward_direction(self):
+        quotes = [
+            ("MM/RATE/EUR/0D/1D", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/1D/1Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/1D/2Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/1D/5Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/1D/10Y", 0.02),
+            ("MM/RATE/EUR/2D/6M", 0.02),
+            ("FRA/RATE/EUR/1M/6M", 0.02),
+            ("FRA/RATE/EUR/3M/6M", 0.02),
+            ("FRA/RATE/EUR/6M/6M", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/6M/2Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/6M/5Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/6M/10Y", 0.02),
+            ("IR_SWAP/RATE/EUR/2D/6M/11Y", 0.02),
+        ]
+
+        base = fit_discount_curves_from_programmatic_quotes(
+            asof_date="2016-02-05",
+            quotes=quotes,
+            fit_method="ql_helper_eur_v1",
+            fit_grid_mode="instrument",
+        )["EUR"]
+        bumped_quotes = [
+            (k, v + 1.0e-4 if k == "IR_SWAP/RATE/EUR/2D/6M/10Y" else v)
+            for k, v in quotes
+        ]
+        bumped = fit_discount_curves_from_programmatic_quotes(
+            asof_date="2016-02-05",
+            quotes=bumped_quotes,
+            fit_method="ql_helper_eur_v1",
+            fit_grid_mode="instrument",
+        )["EUR"]
+
+        base_dfs = np.asarray(base["dfs"], dtype=float)
+        bumped_dfs = np.asarray(bumped["dfs"], dtype=float)
+
+        self.assertTrue(np.all(np.diff(base_dfs) <= 1.0e-12))
+        self.assertTrue(np.all(np.diff(bumped_dfs) <= 1.0e-12))
+        self.assertGreater(len(base["times"]), 1)
+        self.assertEqual(len(base["times"]), len(bumped["times"]))
+
 
 if __name__ == "__main__":
     unittest.main()

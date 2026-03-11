@@ -181,6 +181,15 @@ def _safe_rel(py: float, ore: float) -> Optional[float]:
     return abs(float(py) - float(ore)) / denom
 
 
+def _resolve_repo_path(path_text: Optional[str]) -> Path:
+    if not path_text:
+        raise ValueError("path_text must be provided")
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
 def _clean_inactive_metric_fields(row: dict[str, object]) -> dict[str, object]:
     metric_map = {
         "cva": bool(row.get("metric_active_cva", True)),
@@ -244,7 +253,7 @@ def _write_markdown_summary(path: Path, summary: dict[str, object]) -> None:
 
 
 def _run_irs_snapshot_case(case: CaseDef, paths: int, seed: int) -> dict[str, object]:
-    snap = load_from_ore_xml(case.ore_xml)
+    snap = load_from_ore_xml(_resolve_repo_path(case.ore_xml))
     model = snap.build_model()
     use_ore_rng = case.name.startswith("measure_lgm")
     rng = make_ore_gaussian_rng(seed) if use_ore_rng else np.random.default_rng(seed)
@@ -318,7 +327,7 @@ def _run_irs_snapshot_case(case: CaseDef, paths: int, seed: int) -> dict[str, ob
     row = {
         "case": case.name,
         "case_type": case.case_type,
-        "ore_xml": str(Path(case.ore_xml).resolve()),
+        "ore_xml": str(_resolve_repo_path(case.ore_xml)),
         "trade_id": snap.trade_id,
         "domestic_ccy": snap.domestic_ccy,
         "paths": paths,
@@ -349,7 +358,7 @@ def _run_irs_snapshot_case(case: CaseDef, paths: int, seed: int) -> dict[str, ob
 
 
 def _run_artifact_summary_case(case: CaseDef, paths: int, seed: int) -> dict[str, object]:
-    summary_path = Path(case.summary_json).resolve()
+    summary_path = _resolve_repo_path(case.summary_json)
     data = json.loads(summary_path.read_text(encoding="utf-8"))
 
     ore_cva = float(data["ore_cva"])
@@ -366,7 +375,7 @@ def _run_artifact_summary_case(case: CaseDef, paths: int, seed: int) -> dict[str
     row = {
         "case": case.name,
         "case_type": case.case_type,
-        "ore_xml": str(Path(data["ore_input_xml"]).resolve()) if "ore_input_xml" in data else None,
+        "ore_xml": str(_resolve_repo_path(data["ore_input_xml"])) if "ore_input_xml" in data else None,
         "trade_id": data.get("trade_id", case.name),
         "domestic_ccy": data.get("domestic_ccy", ""),
         "paths": int(data.get("n_paths", paths)),
@@ -430,7 +439,7 @@ def _read_ore_npv0(output_dir: Path) -> float:
 
 
 def _run_native_ore_case(case: CaseDef, paths: int, seed: int) -> dict[str, object]:
-    ore_xml_path = Path(case.ore_xml).resolve()
+    ore_xml_path = _resolve_repo_path(case.ore_xml)
     input_dir = ore_xml_path.parent
     snap = XVALoader.from_files(str(input_dir), ore_file=ore_xml_path.name)
     output_dir = (input_dir.parent / snap.config.params.get("outputPath", "Output")).resolve()
