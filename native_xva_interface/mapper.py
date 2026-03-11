@@ -81,7 +81,11 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
             xml_buffers[k] = v
 
     if "portfolio.xml" not in xml_buffers:
-        xml_buffers["portfolio.xml"] = _portfolio_to_xml(snapshot.portfolio, snapshot.config.asof)
+        xml_buffers["portfolio.xml"] = _portfolio_to_xml(
+            snapshot.portfolio,
+            snapshot.config.asof,
+            snapshot.config.runtime or RuntimeConfig(),
+        )
     if "netting.xml" not in xml_buffers:
         xml_buffers["netting.xml"] = _netting_to_xml(snapshot.netting)
     if "collateralbalances.xml" not in xml_buffers:
@@ -160,7 +164,7 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     return input_parameters
 
 
-def _portfolio_to_xml(portfolio: Portfolio, asof: str) -> str:
+def _portfolio_to_xml(portfolio: Portfolio, asof: str, runtime: RuntimeConfig) -> str:
     lines = ["<Portfolio>"]
     for t in portfolio.trades:
         lines.append(f'  <Trade id="{t.trade_id}">')
@@ -170,14 +174,17 @@ def _portfolio_to_xml(portfolio: Portfolio, asof: str) -> str:
         lines.append(f"      <NettingSetId>{t.netting_set}</NettingSetId>")
         lines.append("      <AdditionalFields/>")
         lines.append("    </Envelope>")
-        lines.extend(_product_xml(t, asof))
+        lines.extend(_product_xml(t, asof, runtime))
         lines.append("  </Trade>")
     lines.append("</Portfolio>")
     return "\n".join(lines)
 
 
-def _product_xml(trade: Trade, asof: str) -> List[str]:
+def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) -> List[str]:
     p = trade.product
+    runtime = runtime or RuntimeConfig()
+    conventions = runtime.conventions
+    indices = runtime.simulation_market.indices
     if isinstance(p, IRS):
         start_date = _fmt_yyyymmdd(asof)
         end_date = _add_months_yyyymmdd(start_date, int(round(p.maturity_years * 12.0)))
@@ -188,7 +195,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
         # fixed / 3M float, default index by currency). That is acceptable for
         # lightweight native demos, but it is not sufficient for strict parity
         # against a real ORE portfolio with bespoke schedules or conventions.
-        idx = _default_index_for_ccy(p.ccy)
+        idx = _resolve_index_for_trade_currency(p.ccy, indices)
         return [
             "    <SwapData>",
             "      <StartDate>" + start_date + "</StartDate>",
@@ -197,7 +204,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "        <LegType>Fixed</LegType>",
             f"        <Payer>{payer_fixed}</Payer>",
             f"        <Currency>{p.ccy}</Currency>",
-            "        <DayCounter>A360</DayCounter>",
+            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
             "        <PaymentConvention>MF</PaymentConvention>",
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
@@ -207,7 +214,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
             "            <Tenor>6M</Tenor>",
-            "            <Calendar>TARGET</Calendar>",
+            f"            <Calendar>{conventions.calendar}</Calendar>",
             "            <Convention>MF</Convention>",
             "            <TermConvention>MF</TermConvention>",
             "            <Rule>Forward</Rule>",
@@ -224,7 +231,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "        <LegType>Floating</LegType>",
             f"        <Payer>{payer_float}</Payer>",
             f"        <Currency>{p.ccy}</Currency>",
-            "        <DayCounter>A360</DayCounter>",
+            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
             "        <PaymentConvention>MF</PaymentConvention>",
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
@@ -234,7 +241,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
             "            <Tenor>3M</Tenor>",
-            "            <Calendar>TARGET</Calendar>",
+            f"            <Calendar>{conventions.calendar}</Calendar>",
             "            <Convention>MF</Convention>",
             "            <TermConvention>MF</TermConvention>",
             "            <Rule>Forward</Rule>",
@@ -256,13 +263,14 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
         quote = p.pair[3:]
         bought = p.notional if p.buy_base else p.notional * p.strike
         sold = p.notional * p.strike if p.buy_base else p.notional
+        value_date = _add_months_yyyymmdd(_fmt_yyyymmdd(asof), int(round(p.maturity_years * 12.0)))
         return [
             "    <FxForwardData>",
             f"      <BoughtCurrency>{base if p.buy_base else quote}</BoughtCurrency>",
             f"      <BoughtAmount>{bought}</BoughtAmount>",
             f"      <SoldCurrency>{quote if p.buy_base else base}</SoldCurrency>",
             f"      <SoldAmount>{sold}</SoldAmount>",
-            "      <ValueDate>2030-01-01</ValueDate>",
+            f"      <ValueDate>{value_date[:4]}-{value_date[4:6]}-{value_date[6:]}</ValueDate>",
             "    </FxForwardData>",
         ]
     if isinstance(p, BermudanSwaption):
@@ -270,7 +278,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
         end_date = _add_months_yyyymmdd(start_date, int(round(p.maturity_years * 12.0)))
         payer_fixed = str(p.pay_fixed).lower()
         payer_float = str(not p.pay_fixed).lower()
-        float_index = p.float_index or _default_index_for_ccy(p.ccy)
+        float_index = p.float_index or _resolve_index_for_trade_currency(p.ccy, indices)
         exercise_dates = "\n".join(f"          <ExerciseDate>{d}</ExerciseDate>" for d in p.exercise_dates)
         return [
             "    <SwaptionData>",
@@ -291,7 +299,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
             "        </Notionals>",
-            "        <DayCounter>A360</DayCounter>",
+            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
             "        <PaymentConvention>ModifiedFollowing</PaymentConvention>",
             "        <FloatingLegData>",
             f"          <Index>{float_index}</Index>",
@@ -306,7 +314,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
             "            <Tenor>6M</Tenor>",
-            "            <Calendar>TARGET</Calendar>",
+            f"            <Calendar>{conventions.calendar}</Calendar>",
             "            <Convention>Following</Convention>",
             "            <TermConvention>Following</TermConvention>",
             "            <Rule>Forward</Rule>",
@@ -321,7 +329,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
             "        </Notionals>",
-            "        <DayCounter>ACT/ACT</DayCounter>",
+            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
             "        <PaymentConvention>Following</PaymentConvention>",
             "        <FixedLegData>",
             "          <Rates>",
@@ -333,7 +341,7 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
             "            <Tenor>1Y</Tenor>",
-            "            <Calendar>TARGET</Calendar>",
+            f"            <Calendar>{conventions.calendar}</Calendar>",
             "            <Convention>Following</Convention>",
             "            <TermConvention>Following</TermConvention>",
             "            <Rule>Forward</Rule>",
@@ -409,42 +417,156 @@ def _add_months_yyyymmdd(start_yyyymmdd: str, months: int) -> str:
     return f"{y:04d}{m:02d}{day:02d}"
 
 
+def _currency_from_token(value: str) -> str:
+    token = str(value or "").strip().upper()
+    return token[:3] if len(token) >= 3 and token[:3].isalpha() else ""
+
+
+def _currency_from_curve_id(curve_id: str) -> str:
+    token = str(curve_id or "").strip().upper()
+    if "/" in token:
+        for part in token.split("/"):
+            if len(part) == 3 and part.isalpha():
+                return part
+    if "-" in token:
+        head = token.split("-", 1)[0]
+        if len(head) == 3 and head.isalpha():
+            return head
+    return _currency_from_token(token)
+
+
+def _currency_from_index_name(index_name: str) -> str:
+    token = str(index_name or "").strip().upper()
+    if "-" in token:
+        head = token.split("-", 1)[0]
+        if len(head) == 3 and head.isalpha():
+            return head
+    return _currency_from_token(token)
+
+
+def _ordered_unique(values: List[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return tuple(out)
+
+
+def _currencies_from_fx_pairs(pairs: tuple[str, ...]) -> tuple[str, ...]:
+    values: List[str] = []
+    for pair in pairs:
+        token = str(pair or "").strip().upper()
+        if len(token) >= 6:
+            values.extend((token[:3], token[3:6]))
+    return _ordered_unique(values)
+
+
+def _resolve_market_currencies(
+    discount_curve: str,
+    currencies: tuple[str, ...] = (),
+    fx_pairs: tuple[str, ...] = (),
+    indices: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    values = list(currencies)
+    values.extend(_currencies_from_fx_pairs(fx_pairs))
+    values.extend(_currency_from_index_name(index) for index in indices)
+    discount_ccy = _currency_from_curve_id(discount_curve)
+    if discount_ccy:
+        values.append(discount_ccy)
+    return _ordered_unique([str(v).upper() for v in values if v])
+
+
+def _curve_convention_for_currency(ccy: str) -> str:
+    c = ccy.upper()
+    if c == "USD":
+        return "USD-ON-DEPOSIT-SOFR"
+    if c == "GBP":
+        return "GBP-ON-DEPOSIT-SONIA"
+    if c == "CHF":
+        return "CHF-ON-DEPOSIT-SARON"
+    if c == "JPY":
+        return "JPY-ON-DEPOSIT-TONAR"
+    return "EUR-ON-DEPOSIT-ESTER"
+
+
+def _curve_path_for(curve_id: str, currency: str) -> str:
+    return f"Yield/{currency}/{curve_id}"
+
+
+def _default_curve_discount_path(curves: tuple, fallback_curve: str) -> str:
+    usd_curve = next((c for c in curves if getattr(c, "currency", "").upper() == "USD"), None)
+    if usd_curve is not None:
+        return _curve_path_for(usd_curve.curve_id, "USD")
+    ccy = _currency_from_curve_id(fallback_curve) or "USD"
+    return _curve_path_for(fallback_curve, ccy)
+
+
+def _default_curve_currency(name: str, counterparties: CounterpartyConfig | None, base_currency: str) -> str:
+    if counterparties is not None:
+        mapped = str(counterparties.curve_currencies.get(name, "")).strip().upper()
+        if mapped:
+            return mapped
+    return str(base_currency or "USD").strip().upper() or "USD"
+
+
+def _simulation_calendar(cfg: SimulationMarketConfig, cam_cfg: CrossAssetModelConfig | None = None) -> str:
+    values = list(cfg.currencies)
+    if cam_cfg is not None:
+        values.extend(cam_cfg.currencies)
+    return ",".join(_ordered_unique([str(v).upper() for v in values if v])) or "EUR,USD"
+
+
+def _swap_indices_xml_lines(currencies: tuple[str, ...], indices: tuple[str, ...]) -> List[str]:
+    lines: List[str] = []
+    for ccy in currencies:
+        discounting_index = _resolve_index_for_trade_currency(ccy, indices)
+        for tenor in ("1Y", "30Y"):
+            lines.append(
+                f"      <SwapIndex><Name>{ccy}-CMS-{tenor}</Name><DiscountingIndex>{discounting_index}</DiscountingIndex></SwapIndex>"
+            )
+    return lines
+
+
 def _default_index_for_ccy(ccy: str) -> str:
     c = ccy.upper()
     if c == "USD":
-        return "USD-LIBOR-3M"
+        return "USD-SOFR"
     if c == "GBP":
-        return "GBP-LIBOR-3M"
+        return "GBP-SONIA"
     if c == "CHF":
-        return "CHF-LIBOR-3M"
+        return "CHF-SARON"
     if c == "JPY":
-        return "JPY-LIBOR-3M"
-    return "EUR-EURIBOR-3M"
+        return "JPY-TONAR"
+    return "EUR-ESTER"
+
+
+def _resolve_index_for_trade_currency(ccy: str, configured_indices: tuple[str, ...] = ()) -> str:
+    target = ccy.upper()
+    for index in configured_indices:
+        if _currency_from_index_name(index) == target:
+            return str(index).upper()
+    return _default_index_for_ccy(target)
 
 
 def _runtime_xml_buffers(snapshot: XVASnapshot) -> Dict[str, str]:
     runtime = snapshot.config.runtime or RuntimeConfig()
-    # Strict template mode uses a fully in-memory compatibility template set
-    # to provide complete XVA runtime wiring without external file loading.
-    if runtime.simulation.strict_template:
-        try:
-            from .stress_classic_templates import stress_classic_xml_buffers
-
-            out = dict(stress_classic_xml_buffers(num_paths=snapshot.config.num_paths))
-            if runtime.credit_simulation.enabled:
-                out["creditsimulation.xml"] = _credit_simulation_xml(runtime.credit_simulation)
-            return out
-        except Exception:
-            # Fall back to generated builders below if compatibility templates
-            # are unavailable in the runtime environment.
-            pass
     out = {
         "pricingengine.xml": _pricing_engine_xml(runtime.pricing_engine),
-        "todaysmarket.xml": _todays_market_xml(runtime.todays_market, runtime.simulation_market.default_curve_names),
+        "todaysmarket.xml": _todays_market_xml(
+            runtime.todays_market,
+            runtime.simulation_market,
+            runtime.counterparties,
+            snapshot.config.base_currency,
+        ),
         "curveconfig.xml": _curve_config_xml(
             runtime.curve_configs,
             runtime.todays_market.discount_curve,
             runtime.simulation_market.default_curve_names,
+            runtime.counterparties,
+            snapshot.config.base_currency,
         ),
         "simulation.xml": _simulation_xml(
             runtime.simulation,
@@ -476,19 +598,54 @@ def _pricing_engine_xml(cfg: PricingEngineConfig) -> str:
             "    <Engine>DiscountingSwapEngine</Engine>",
             "    <EngineParameters/>",
             "  </Product>",
+            "  <Product type=\"BermudanSwaption\">",
+            "    <Model>LGM</Model>",
+            "    <ModelParameters>",
+            "      <Parameter name=\"Reversion\">0.03</Parameter>",
+            "      <Parameter name=\"Volatility\">0.01</Parameter>",
+            "      <Parameter name=\"ShiftHorizon\">0.0</Parameter>",
+            "    </ModelParameters>",
+            "    <Engine>Gaussian1dNonstandardSwaptionEngine</Engine>",
+            "    <EngineParameters>",
+            "      <Parameter name=\"sx\">3.0</Parameter>",
+            "      <Parameter name=\"nx\">10</Parameter>",
+            "      <Parameter name=\"sy\">3.0</Parameter>",
+            "      <Parameter name=\"ny\">10</Parameter>",
+            "    </EngineParameters>",
+            "  </Product>",
             "</PricingEngines>",
         ]
     )
 
 
-def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, ...]) -> str:
+def _todays_market_xml(
+    cfg: TodaysMarketConfig,
+    market_cfg: SimulationMarketConfig,
+    counterparties: CounterpartyConfig | None,
+    base_currency: str,
+) -> str:
     # This generated todaysmarket.xml is intentionally narrow. It is good enough
     # for native smoke tests and fully in-memory demos, but it does not aim to
     # reproduce the full richness of a production ORE todaysmarket.xml.
+    currencies = _resolve_market_currencies(
+        cfg.discount_curve,
+        market_cfg.currencies,
+        cfg.fx_pairs,
+        market_cfg.indices,
+    )
+    curve_ccy = _currency_from_curve_id(cfg.discount_curve) or (currencies[0] if currencies else "EUR")
     fx_spots = "\n".join(
         f"    <FxSpot pair=\"{pair}\">FX/{pair[:3]}/{pair[3:]}</FxSpot>"
         for pair in cfg.fx_pairs
     ) or "    <FxSpot pair=\"EURUSD\">FX/EUR/USD</FxSpot>"
+    discounting_curves = "\n".join(
+        f"    <DiscountingCurve currency=\"{ccy}\">{_curve_path_for(cfg.discount_curve, ccy)}</DiscountingCurve>"
+        for ccy in currencies
+    ) or f"    <DiscountingCurve currency=\"{curve_ccy}\">{_curve_path_for(cfg.discount_curve, curve_ccy)}</DiscountingCurve>"
+    forwarding_curves = "\n".join(
+        f"    <Index name=\"{str(index).upper()}\">{_curve_path_for(cfg.discount_curve, _currency_from_index_name(index) or curve_ccy)}</Index>"
+        for index in _ordered_unique([str(i).upper() for i in market_cfg.indices])
+    ) or f"    <Index name=\"{_default_index_for_ccy(curve_ccy)}\">{_curve_path_for(cfg.discount_curve, curve_ccy)}</Index>"
     return "\n".join(
         [
             "<TodaysMarket>",
@@ -502,13 +659,13 @@ def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, 
             f"    <DefaultCurvesId>{cfg.market_id}</DefaultCurvesId>",
             "  </Configuration>",
             f"  <YieldCurves id=\"{cfg.market_id}\">",
-            f"    <YieldCurve name=\"{cfg.discount_curve}\">Yield/EUR/{cfg.discount_curve}</YieldCurve>",
+            f"    <YieldCurve name=\"{cfg.discount_curve}\">{_curve_path_for(cfg.discount_curve, curve_ccy)}</YieldCurve>",
             "  </YieldCurves>",
             f"  <DiscountingCurves id=\"{cfg.market_id}\">",
-            f"    <DiscountingCurve currency=\"EUR\">Yield/EUR/{cfg.discount_curve}</DiscountingCurve>",
+            discounting_curves,
             "  </DiscountingCurves>",
             f"  <IndexForwardingCurves id=\"{cfg.market_id}\">",
-            f"    <Index name=\"EUR-ESTER\">Yield/EUR/{cfg.discount_curve}</Index>",
+            forwarding_curves,
             "  </IndexForwardingCurves>",
             f"  <FxSpots id=\"{cfg.market_id}\">",
             fx_spots,
@@ -517,8 +674,8 @@ def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, 
             f"  <SwaptionVolatilities id=\"{cfg.market_id}\"/>",
             f"  <DefaultCurves id=\"{cfg.market_id}\">",
             *[
-                f"    <DefaultCurve name=\"{name}\">Default/USD/{name}</DefaultCurve>"
-                for name in default_curve_names
+                f"    <DefaultCurve name=\"{name}\">Default/{_default_curve_currency(name, counterparties, base_currency)}/{name}</DefaultCurve>"
+                for name in market_cfg.default_curve_names
             ],
             "  </DefaultCurves>",
             "</TodaysMarket>",
@@ -526,7 +683,13 @@ def _todays_market_xml(cfg: TodaysMarketConfig, default_curve_names: tuple[str, 
     )
 
 
-def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: tuple[str, ...]) -> str:
+def _curve_config_xml(
+    curves: tuple,
+    fallback_curve: str,
+    default_curve_names: tuple[str, ...],
+    counterparties: CounterpartyConfig | None = None,
+    base_currency: str = "USD",
+) -> str:
     # Generated curve configs are a compatibility scaffold. They are useful when
     # the caller wants an in-memory native demo, but they should not be treated
     # as equivalent to a case-authored ORE curveconfig.xml for parity work.
@@ -537,13 +700,13 @@ def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: t
             "    <YieldCurve>",
             f"      <CurveId>{fallback_curve}</CurveId>",
             "      <CurveDescription>Auto-generated flat curve</CurveDescription>",
-            "      <Currency>EUR</Currency>",
+            f"      <Currency>{_currency_from_curve_id(fallback_curve) or 'EUR'}</Currency>",
             f"      <DiscountCurve>{fallback_curve}</DiscountCurve>",
             "      <Segments>",
             "        <Simple>",
             "          <Type>Deposit</Type>",
-            "          <Quotes><Quote>ZERO/RATE/EUR/1Y</Quote></Quotes>",
-            "          <Conventions>EUR-ON-DEPOSIT-ESTER</Conventions>",
+            f"          <Quotes><Quote>ZERO/RATE/{_currency_from_curve_id(fallback_curve) or 'EUR'}/1Y</Quote></Quotes>",
+            f"          <Conventions>{_curve_convention_for_currency(_currency_from_curve_id(fallback_curve) or 'EUR')}</Conventions>",
             "        </Simple>",
             "      </Segments>",
             "      <InterpolationVariable>Discount</InterpolationVariable>",
@@ -555,20 +718,21 @@ def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: t
             "  <DefaultCurves>",
         ]
         for name in default_curve_names:
+            curve_currency = _default_curve_currency(name, counterparties, base_currency)
             lines.extend(
                 [
                     "    <DefaultCurve>",
                     f"      <CurveId>{name}</CurveId>",
                     "      <CurveDescription/>",
-                    "      <Currency>USD</Currency>",
+                    f"      <Currency>{curve_currency}</Currency>",
                     "      <Configurations>",
                     "        <Configuration priority=\"0\">",
                     "          <Type>SpreadCDS</Type>",
-                    "          <DiscountCurve>Yield/USD/USD-SOFR</DiscountCurve>",
+                    f"          <DiscountCurve>{_default_curve_discount_path(curves, fallback_curve)}</DiscountCurve>",
                     "          <DayCounter>Actual/365 (Fixed)</DayCounter>",
-                    f"          <RecoveryRate>RECOVERY_RATE/RATE/{name}/SNRFOR/USD</RecoveryRate>",
+                    f"          <RecoveryRate>RECOVERY_RATE/RATE/{name}/SNRFOR/{curve_currency}</RecoveryRate>",
                     "          <Quotes>",
-                    f"            <Quote>CDS/CREDIT_SPREAD/{name}/SNRFOR/USD/*</Quote>",
+                    f"            <Quote>CDS/CREDIT_SPREAD/{name}/SNRFOR/{curve_currency}/*</Quote>",
                     "          </Quotes>",
                     "          <Conventions>CDS-STANDARD-CONVENTIONS</Conventions>",
                     "          <Extrapolation>true</Extrapolation>",
@@ -594,7 +758,7 @@ def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: t
                 "        <Simple>",
                 "          <Type>Deposit</Type>",
                 f"          <Quotes>{quote_nodes}</Quotes>",
-                "          <Conventions>EUR-ON-DEPOSIT-ESTER</Conventions>",
+                f"          <Conventions>{_curve_convention_for_currency(c.currency)}</Conventions>",
                 "        </Simple>",
                 "      </Segments>",
                 "      <InterpolationVariable>Discount</InterpolationVariable>",
@@ -607,20 +771,21 @@ def _curve_config_xml(curves: tuple, fallback_curve: str, default_curve_names: t
     lines.append("  </YieldCurves>")
     lines.append("  <DefaultCurves>")
     for name in default_curve_names:
+        curve_currency = _default_curve_currency(name, counterparties, base_currency)
         lines.extend(
             [
                 "    <DefaultCurve>",
                 f"      <CurveId>{name}</CurveId>",
                 "      <CurveDescription/>",
-                "      <Currency>USD</Currency>",
+                f"      <Currency>{curve_currency}</Currency>",
                 "      <Configurations>",
                 "        <Configuration priority=\"0\">",
                 "          <Type>SpreadCDS</Type>",
-                "          <DiscountCurve>Yield/USD/USD-SOFR</DiscountCurve>",
+                f"          <DiscountCurve>{_default_curve_discount_path(curves, fallback_curve)}</DiscountCurve>",
                 "          <DayCounter>Actual/365 (Fixed)</DayCounter>",
-                f"          <RecoveryRate>RECOVERY_RATE/RATE/{name}/SNRFOR/USD</RecoveryRate>",
+                f"          <RecoveryRate>RECOVERY_RATE/RATE/{name}/SNRFOR/{curve_currency}</RecoveryRate>",
                 "          <Quotes>",
-                f"            <Quote>CDS/CREDIT_SPREAD/{name}/SNRFOR/USD/*</Quote>",
+                f"            <Quote>CDS/CREDIT_SPREAD/{name}/SNRFOR/{curve_currency}/*</Quote>",
                 "          </Quotes>",
                 "          <Conventions>CDS-STANDARD-CONVENTIONS</Conventions>",
                 "          <Extrapolation>true</Extrapolation>",
@@ -640,23 +805,22 @@ def _simulation_xml(
     cam_cfg: CrossAssetModelConfig,
     num_paths: int,
 ) -> str:
-    if cfg.strict_template:
-        return _simulation_xml_strict(cfg, num_paths)
     samples = num_paths if num_paths > 0 else cfg.samples
-    grid = ",".join(cfg.dates) if cfg.dates else "1Y,2Y"
+    strict_mode = bool(cfg.strict_template)
+    grid = ",".join(cfg.dates) if cfg.dates else ("88,3M" if strict_mode else "1Y,2Y")
     cam_xml = _cross_asset_model_xml(cam_cfg)
-    market_xml = _simulation_market_xml(market_cfg)
+    market_xml = _simulation_market_xml(market_cfg, strict_mode=strict_mode)
     return "\n".join(
         [
             "<Simulation>",
             "  <Parameters>",
             "    <Discretization>Exact</Discretization>",
             f"    <Grid>{grid}</Grid>",
-            "    <Calendar>EUR,USD</Calendar>",
+            f"    <Calendar>{_simulation_calendar(market_cfg, cam_cfg)}</Calendar>",
             "    <Sequence>SobolBrownianBridge</Sequence>",
             "    <Scenario>Simple</Scenario>",
-            f"    <Samples>{samples}</Samples>",
             f"    <Seed>{cfg.seed}</Seed>",
+            f"    <Samples>{samples}</Samples>",
             "    <CloseOutLag>2W</CloseOutLag>",
             "    <MporMode>StickyDate</MporMode>",
             "    <DayCounter>A365F</DayCounter>",
@@ -666,70 +830,6 @@ def _simulation_xml(
             "</Simulation>",
         ]
     )
-
-
-def _simulation_xml_strict(cfg: SimulationConfig, num_paths: int) -> str:
-    samples = num_paths if num_paths > 0 else cfg.samples
-    grid = ",".join(cfg.dates) if cfg.dates else "88,3M"
-    return f"""<Simulation>
-  <Parameters>
-    <Discretization>Exact</Discretization>
-    <Grid>{grid}</Grid>
-    <Calendar>EUR,USD</Calendar>
-    <Sequence>SobolBrownianBridge</Sequence>
-    <Scenario>Simple</Scenario>
-    <Seed>{cfg.seed}</Seed>
-    <Samples>{samples}</Samples>
-    <CloseOutLag>2W</CloseOutLag>
-    <MporMode>StickyDate</MporMode>
-    <DayCounter>A365F</DayCounter>
-  </Parameters>
-  <CrossAssetModel>
-    <DomesticCcy>EUR</DomesticCcy>
-    <Currencies>
-      <Currency>EUR</Currency>
-      <Currency>USD</Currency>
-    </Currencies>
-    <BootstrapTolerance>0.0001</BootstrapTolerance>
-    <InterestRateModels>
-      <LGM ccy="default">
-        <CalibrationType>Bootstrap</CalibrationType>
-        <Volatility><Calibrate>Y</Calibrate><VolatilityType>Hagan</VolatilityType><ParamType>Piecewise</ParamType><TimeGrid>1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0</TimeGrid><InitialValue>0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01</InitialValue></Volatility>
-        <Reversion><Calibrate>N</Calibrate><ReversionType>HullWhite</ReversionType><ParamType>Constant</ParamType><TimeGrid/><InitialValue>0.03</InitialValue></Reversion>
-        <CalibrationSwaptions><Expiries> 1Y,  2Y,  4Y,  6Y,  8Y, 10Y, 12Y, 14Y, 16Y, 18Y, 19Y</Expiries><Terms>   19Y, 18Y, 16Y, 14Y, 12Y, 10Y,  8Y,  6Y,  4Y,  2Y,  1Y</Terms><Strikes/></CalibrationSwaptions>
-        <ParameterTransformation><ShiftHorizon>20.0</ShiftHorizon><Scaling>1.0</Scaling></ParameterTransformation>
-      </LGM>
-      <LGM ccy="EUR">
-        <CalibrationType>Bootstrap</CalibrationType>
-        <Volatility><Calibrate>Y</Calibrate><VolatilityType>Hagan</VolatilityType><ParamType>Piecewise</ParamType><TimeGrid>1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0</TimeGrid><InitialValue>0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01</InitialValue></Volatility>
-        <Reversion><Calibrate>N</Calibrate><ReversionType>HullWhite</ReversionType><ParamType>Constant</ParamType><TimeGrid/><InitialValue>0.03</InitialValue></Reversion>
-        <CalibrationSwaptions><Expiries> 1Y,  2Y,  4Y,  6Y,  8Y, 10Y, 12Y, 14Y, 16Y, 18Y, 19Y</Expiries><Terms>   19Y, 18Y, 16Y, 14Y, 12Y, 10Y,  8Y,  6Y,  4Y,  2Y,  1Y</Terms><Strikes/></CalibrationSwaptions>
-        <ParameterTransformation><ShiftHorizon>20.0</ShiftHorizon><Scaling>1.0</Scaling></ParameterTransformation>
-      </LGM>
-    </InterestRateModels>
-    <ForeignExchangeModels>
-      <CrossCcyLGM foreignCcy="default"><DomesticCcy>EUR</DomesticCcy><CalibrationType>Bootstrap</CalibrationType><Sigma><Calibrate>Y</Calibrate><ParamType>Piecewise</ParamType><TimeGrid>1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0</TimeGrid><InitialValue>0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1</InitialValue></Sigma><CalibrationOptions><Expiries>1Y, 2Y, 3Y, 4Y, 5Y, 10Y</Expiries><Strikes/></CalibrationOptions></CrossCcyLGM>
-      <CrossCcyLGM foreignCcy="USD"><DomesticCcy>EUR</DomesticCcy><CalibrationType>Bootstrap</CalibrationType><Sigma><Calibrate>Y</Calibrate><ParamType>Piecewise</ParamType><TimeGrid>1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0</TimeGrid><InitialValue>0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1</InitialValue></Sigma><CalibrationOptions><Expiries>1Y, 2Y, 3Y, 4Y, 5Y, 10Y</Expiries><Strikes/></CalibrationOptions></CrossCcyLGM>
-    </ForeignExchangeModels>
-    <InstantaneousCorrelations>
-      <Correlation factor1="IR:EUR" factor2="IR:USD">0</Correlation>
-      <Correlation factor1="IR:EUR" factor2="FX:USDEUR">0</Correlation>
-      <Correlation factor1="IR:USD" factor2="FX:USDEUR">0</Correlation>
-    </InstantaneousCorrelations>
-  </CrossAssetModel>
-  <Market>
-    <BaseCurrency>EUR</BaseCurrency>
-    <Currencies><Currency>EUR</Currency><Currency>USD</Currency></Currencies>
-    <YieldCurves><Configuration><Tenors>1W, 1M, 2M, 3M, 4M, 5M, 6M, 7M, 8M, 10M, 1Y, 15M, 18M, 21M, 2Y, 3Y,4Y,5Y,7Y,8Y,9Y,10Y,12Y,15Y,20Y,30Y</Tenors><Interpolation>LogLinear</Interpolation><Extrapolation>Y</Extrapolation></Configuration></YieldCurves>
-    <Indices><Index>EUR-EURIBOR-6M</Index><Index>EUR-EURIBOR-3M</Index><Index>EUR-EONIA</Index><Index>USD-FedFunds</Index><Index>USD-LIBOR-3M</Index><Index>USD-LIBOR-6M</Index></Indices>
-    <SwapIndices><SwapIndex><Name>EUR-CMS-1Y</Name><DiscountingIndex>EUR-EONIA</DiscountingIndex></SwapIndex><SwapIndex><Name>EUR-CMS-30Y</Name><DiscountingIndex>EUR-EONIA</DiscountingIndex></SwapIndex><SwapIndex><Name>USD-CMS-1Y</Name><DiscountingIndex>USD-FedFunds</DiscountingIndex></SwapIndex><SwapIndex><Name>USD-CMS-30Y</Name><DiscountingIndex>USD-FedFunds</DiscountingIndex></SwapIndex></SwapIndices>
-    <DefaultCurves><Names/><Tenors>6M,1Y,2Y</Tenors></DefaultCurves>
-    <SwaptionVolatilities><Simulate>false</Simulate><ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay><Currencies><Currency>EUR</Currency><Currency>USD</Currency></Currencies><Expiries>6M,1Y,2Y,3Y,5Y,10Y,12Y,15Y,20Y</Expiries><Terms>1Y,2Y,3Y,4Y,5Y,7Y,10Y,15Y,20Y,30Y</Terms></SwaptionVolatilities>
-    <FxVolatilities><Simulate>false</Simulate><ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay><CurrencyPairs><CurrencyPair>USDEUR</CurrencyPair></CurrencyPairs><Expiries>6M,1Y,2Y,3Y,4Y,5Y,7Y,10Y</Expiries></FxVolatilities>
-    <AggregationScenarioDataCurrencies><Currency>EUR</Currency><Currency>USD</Currency></AggregationScenarioDataCurrencies>
-    <AggregationScenarioDataIndices><Index>EUR-EURIBOR-3M</Index><Index>EUR-EONIA</Index><Index>USD-LIBOR-3M</Index></AggregationScenarioDataIndices>
-  </Market>
-</Simulation>"""
 
 
 def _cross_asset_model_xml(cfg: CrossAssetModelConfig) -> str:
@@ -785,11 +885,12 @@ def _cross_asset_model_xml(cfg: CrossAssetModelConfig) -> str:
     )
 
 
-def _simulation_market_xml(cfg: SimulationMarketConfig) -> str:
+def _simulation_market_xml(cfg: SimulationMarketConfig, strict_mode: bool = False) -> str:
     currencies = "\n".join(f"      <Currency>{c}</Currency>" for c in cfg.currencies)
-    indices = "\n".join(f"      <Index>{i}</Index>" for i in cfg.indices)
+    indices = "\n".join(f"      <Index>{str(i).upper()}</Index>" for i in cfg.indices)
     names = "\n".join(f"        <Name>{n}</Name>" for n in cfg.default_curve_names)
     pairs = "\n".join(f"        <CurrencyPair>{p}</CurrencyPair>" for p in cfg.fx_pairs)
+    swap_indices = _swap_indices_xml_lines(cfg.currencies, cfg.indices)
     return "\n".join(
         [
             "  <Market>",
@@ -799,7 +900,9 @@ def _simulation_market_xml(cfg: SimulationMarketConfig) -> str:
             "    </Currencies>",
             "    <YieldCurves>",
             "      <Configuration>",
-            "        <Tenors>3M,6M,1Y,2Y,3Y,4Y,5Y,7Y,10Y,12Y,15Y,20Y</Tenors>",
+            "        <Tenors>1W,1M,2M,3M,4M,5M,6M,7M,8M,10M,1Y,15M,18M,21M,2Y,3Y,4Y,5Y,7Y,8Y,9Y,10Y,12Y,15Y,20Y,30Y</Tenors>"
+            if strict_mode
+            else "        <Tenors>3M,6M,1Y,2Y,3Y,4Y,5Y,7Y,10Y,12Y,15Y,20Y</Tenors>",
             "        <Interpolation>LogLinear</Interpolation>",
             "        <Extrapolation>Y</Extrapolation>",
             "      </Configuration>",
@@ -808,20 +911,20 @@ def _simulation_market_xml(cfg: SimulationMarketConfig) -> str:
             indices,
             "    </Indices>",
             "    <SwapIndices>",
-            "      <SwapIndex><Name>EUR-CMS-1Y</Name><DiscountingIndex>EUR-ESTER</DiscountingIndex></SwapIndex>",
-            "      <SwapIndex><Name>EUR-CMS-30Y</Name><DiscountingIndex>EUR-ESTER</DiscountingIndex></SwapIndex>",
+            *swap_indices,
             "    </SwapIndices>",
             "    <DefaultCurves>",
             "      <Names>",
             names,
             "      </Names>",
-            "      <Tenors>1Y,2Y,5Y,10Y</Tenors>",
+            "      <Tenors>6M,1Y,2Y</Tenors>" if strict_mode else "      <Tenors>1Y,2Y,5Y,10Y</Tenors>",
             "      <SimulateSurvivalProbabilities>true</SimulateSurvivalProbabilities>",
             "      <SimulateRecoveryRates>true</SimulateRecoveryRates>",
             "      <Calendars><Calendar name=\"\">TARGET</Calendar></Calendars>",
             "      <Extrapolation>FlatZero</Extrapolation>",
             "    </DefaultCurves>",
             "    <SwaptionVolatilities>",
+            "      <Simulate>false</Simulate>",
             "      <ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay>",
             "      <Currencies>",
             currencies,
@@ -835,7 +938,7 @@ def _simulation_market_xml(cfg: SimulationMarketConfig) -> str:
             "      <CurrencyPairs>",
             pairs,
             "      </CurrencyPairs>",
-            "      <Expiries>1Y,2Y,5Y</Expiries>",
+            "      <Expiries>6M,1Y,2Y,3Y,4Y,5Y,7Y,10Y</Expiries>" if strict_mode else "      <Expiries>1Y,2Y,5Y</Expiries>",
             "    </FxVolatilities>",
             "    <AggregationScenarioDataCurrencies>",
             currencies,
@@ -934,14 +1037,18 @@ def _counterparty_xml(cfg: CounterpartyConfig) -> str:
         return "<CounterpartyInformation><Counterparties/></CounterpartyInformation>"
     lines = ["<CounterpartyInformation>", "  <Counterparties>"]
     for cid in cfg.ids:
+        credit_quality = str(cfg.credit_qualities.get(cid, "IG"))
+        bacva_weight = cfg.bacva_risk_weights.get(cid, 0.05)
+        saccr_weight = cfg.saccr_risk_weights.get(cid, 1.0)
+        sacva_bucket = cfg.sacva_risk_buckets.get(cid, 2)
         lines.extend(
             [
                 "    <Counterparty>",
                 f"      <CounterpartyId>{cid}</CounterpartyId>",
-                "      <CreditQuality>IG</CreditQuality>",
-                "      <BaCvaRiskWeight>0.05</BaCvaRiskWeight>",
-                "      <SaCcrRiskWeight>1</SaCcrRiskWeight>",
-                "      <SaCvaRiskBucket>2</SaCvaRiskBucket>",
+                f"      <CreditQuality>{credit_quality}</CreditQuality>",
+                f"      <BaCvaRiskWeight>{bacva_weight}</BaCvaRiskWeight>",
+                f"      <SaCcrRiskWeight>{saccr_weight}</SaCcrRiskWeight>",
+                f"      <SaCvaRiskBucket>{sacva_bucket}</SaCvaRiskBucket>",
                 "    </Counterparty>",
             ]
         )
@@ -982,8 +1089,13 @@ def _resolve_mpor_config(snapshot: XVASnapshot, xml_buffers: Dict[str, str]) -> 
             period = (root.findtext("./Parameters/CloseOutLag") or "").strip()
             if period:
                 source = "simulation.xml"
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to parse simulation.xml when resolving MPOR CloseOutLag: {exc}. "
+                "Falling back to netting set or param overrides.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     for ns in snapshot.netting.netting_sets.values():
         if ns.margin_period_of_risk:
@@ -998,8 +1110,13 @@ def _resolve_mpor_config(snapshot: XVASnapshot, xml_buffers: Dict[str, str]) -> 
         try:
             period = f"{max(int(float(override_days)), 0)}D"
             source = "python.mpor_days"
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to parse python.mpor_days={override_days!r} as a number: {exc}. "
+                "The override will be ignored and MPOR remains disabled.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     years = _period_to_years(period)
     days = _period_to_days(period)

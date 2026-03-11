@@ -369,6 +369,11 @@ class ConventionsConfig:
 @dataclass(frozen=True)
 class CounterpartyConfig:
     ids: Tuple[str, ...] = ()
+    curve_currencies: Dict[str, str] = field(default_factory=dict)
+    credit_qualities: Dict[str, str] = field(default_factory=dict)
+    bacva_risk_weights: Dict[str, float] = field(default_factory=dict)
+    saccr_risk_weights: Dict[str, float] = field(default_factory=dict)
+    sacva_risk_buckets: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -665,5 +670,12 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             day_counter=conv.get("day_counter", "A365"),
             calendar=conv.get("calendar", "TARGET"),
         ),
-        counterparties=CounterpartyConfig(ids=tuple(cp.get("ids", ()))),
+        counterparties=CounterpartyConfig(
+            ids=tuple(cp.get("ids", ())),
+            curve_currencies={str(k): str(v) for k, v in cp.get("curve_currencies", {}).items()},
+            credit_qualities={str(k): str(v) for k, v in cp.get("credit_qualities", {}).items()},
+            bacva_risk_weights={str(k): float(v) for k, v in cp.get("bacva_risk_weights", {}).items()},
+            saccr_risk_weights={str(k): float(v) for k, v in cp.get("saccr_risk_weights", {}).items()},
+            sacva_risk_buckets={str(k): int(v) for k, v in cp.get("sacva_risk_buckets", {}).items()},
+        ),
     )
