@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 
 Metric = Literal["CVA", "DVA", "FVA", "MVA"]
-ProductType = Literal["IRS", "FXForward", "EuropeanOption", "Generic"]
+ProductType = Literal["IRS", "FXForward", "EuropeanOption", "BermudanSwaption", "Generic"]
 
 
 @dataclass(frozen=True)
@@ -145,7 +145,32 @@ class GenericProduct(Product):
     product_type: ProductType = field(init=False, default="Generic")
 
 
-ProductSpec = Union[IRS, FXForward, EuropeanOption, GenericProduct]
+@dataclass(frozen=True)
+class BermudanSwaption(Product):
+    ccy: str
+    notional: float
+    fixed_rate: float
+    maturity_years: float
+    pay_fixed: bool
+    exercise_dates: Tuple[str, ...]
+    settlement: str = "Physical"
+    option_type: str = "Call"
+    long_short: str = "Long"
+    float_index: str = ""
+    product_type: ProductType = field(init=False, default="BermudanSwaption")
+
+    def __post_init__(self) -> None:
+        if self.notional <= 0:
+            raise ValueError("BermudanSwaption.notional must be > 0")
+        if self.maturity_years <= 0:
+            raise ValueError("BermudanSwaption.maturity_years must be > 0")
+        if not self.exercise_dates:
+            raise ValueError("BermudanSwaption.exercise_dates must not be empty")
+        for d in self.exercise_dates:
+            _validate_date_like(d, "BermudanSwaption.exercise_dates")
+
+
+ProductSpec = Union[IRS, FXForward, EuropeanOption, BermudanSwaption, GenericProduct]
 
 
 @dataclass(frozen=True)
@@ -183,10 +208,22 @@ class NettingSet:
     counterparty: Optional[str] = None
     active_csa: bool = False
     csa_currency: Optional[str] = None
+    margin_period_of_risk: Optional[str] = None
     threshold_pay: Optional[float] = None
     threshold_receive: Optional[float] = None
     mta_pay: Optional[float] = None
     mta_receive: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class MporConfig:
+    enabled: bool = False
+    mpor_years: float = 0.0
+    mpor_days: int = 0
+    closeout_lag_period: str = ""
+    sticky: bool = True
+    cashflow_mode: str = "NonePay"
+    source: str = "disabled"
 
 
 @dataclass(frozen=True)
@@ -358,6 +395,7 @@ class XVAConfig:
     params: Dict[str, str] = field(default_factory=dict)
     xml_buffers: Dict[str, str] = field(default_factory=dict)
     runtime: Optional[RuntimeConfig] = None
+    mpor: MporConfig = field(default_factory=MporConfig)
     source_meta: SourceMeta = field(default_factory=lambda: SourceMeta(origin="dataclass"))
 
     def __post_init__(self) -> None:
@@ -399,10 +437,37 @@ def _parse_product(data: Dict[str, Any]) -> ProductSpec:
         return FXForward(**{k: data[k] for k in ("pair", "notional", "strike", "maturity_years", "buy_base") if k in data})
     if t == "EuropeanOption":
         return EuropeanOption(**{k: data[k] for k in ("underlying", "kind", "strike", "notional", "maturity_years") if k in data})
+    if t == "BermudanSwaption":
+        return BermudanSwaption(
+            **{
+                k: data[k]
+                for k in (
+                    "ccy",
+                    "notional",
+                    "fixed_rate",
+                    "maturity_years",
+                    "pay_fixed",
+                    "exercise_dates",
+                    "settlement",
+                    "option_type",
+                    "long_short",
+                    "float_index",
+                )
+                if k in data
+            }
+        )
     return GenericProduct(payload=data.get("payload", {}))
 
 
 def _snapshot_from_dict(data: Dict[str, Any]) -> XVASnapshot:
+    for required_key in ("market", "fixings", "portfolio", "config"):
+        if required_key not in data:
+            raise ValueError(
+                f"Snapshot dict is missing required key: '{required_key}'. "
+                f"Keys present: {sorted(data.keys())}. "
+                "Fix: ensure the dict was produced by XVASnapshot.to_dict() or "
+                "provide all four required top-level keys."
+            )
     market = data["market"]
     fixings = data["fixings"]
     portfolio = data["portfolio"]
@@ -442,6 +507,7 @@ def _snapshot_from_dict(data: Dict[str, Any]) -> XVASnapshot:
         params=config.get("params", {}),
         xml_buffers=config.get("xml_buffers", {}),
         runtime=_runtime_from_dict(config.get("runtime")) if config.get("runtime") else None,
+        mpor=MporConfig(**config.get("mpor", {})),
         source_meta=SourceMeta(**config.get("source_meta", {"origin": "dataclass"})),
     )
 

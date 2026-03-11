@@ -4,10 +4,13 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import csv
+import re
+import warnings
 import xml.etree.ElementTree as ET
 from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
 from .dataclasses import (
+    BermudanSwaption,
     CollateralBalance,
     CollateralConfig,
     FXForward,
@@ -17,6 +20,7 @@ from .dataclasses import (
     IRS,
     MarketData,
     MarketQuote,
+    MporConfig,
     NettingConfig,
     NettingSet,
     Portfolio,
@@ -115,6 +119,12 @@ class XVALoader:
             analytics=metrics,
             params={**setup, **{f"market.{k}": v for k, v in markets.items()}},
             xml_buffers=xml_buffers,
+            mpor=_resolve_snapshot_mpor(
+                base_currency=base_currency,
+                params={**setup, **analytics.get("xva", {})},
+                xml_buffers=xml_buffers,
+                netting=netting,
+            ),
             source_meta=SourceMeta(origin="file", path=str(ore_path)),
         )
 
@@ -241,6 +251,7 @@ def _merge_config(base: XVAConfig, override: XVAConfig, on_conflict: ConflictPol
         params=params,
         xml_buffers=xml_buffers,
         runtime=override.runtime or base.runtime,
+        mpor=override.mpor if override.mpor != MporConfig() else base.mpor,
         source_meta=SourceMeta(origin="merged"),
     )
 
@@ -400,6 +411,17 @@ def _parse_portfolio(path: Path) -> Portfolio:
         additional: Dict[str, str] = {}
         for af in t.findall("./Envelope/AdditionalFields/*"):
             additional[af.tag] = (af.text or "").strip()
+        if trade_type == "Swap":
+            for leg in t.findall(".//SwapData/LegData"):
+                if (_text(leg, "./LegType") or "").lower() != "floating":
+                    continue
+                index = (_text(leg, "./FloatingLegData/Index") or "").strip()
+                if index and "index" not in additional:
+                    additional["index"] = index
+                fixing_days = (_text(leg, "./FloatingLegData/FixingDays") or "").strip()
+                if fixing_days and "fixingDays" not in additional:
+                    additional["fixingDays"] = fixing_days
+                break
 
         trades.append(
             Trade(
@@ -460,6 +482,45 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
             maturity_years=max(maturity, 1.0),
         )
 
+    if trade_type == "Swaption":
+        style = (_text(trade, ".//SwaptionData/OptionData/Style") or "").strip().lower()
+        if style == "bermudan":
+            fixed_leg = None
+            float_leg = None
+            for leg in trade.findall(".//SwaptionData/LegData"):
+                leg_type = (_text(leg, "./LegType") or "").strip().lower()
+                if leg_type == "fixed":
+                    fixed_leg = leg
+                elif leg_type == "floating":
+                    float_leg = leg
+            if fixed_leg is not None and float_leg is not None:
+                ccy = _text(fixed_leg, "./Currency") or _text(float_leg, "./Currency") or "EUR"
+                notional = float(_text(fixed_leg, "./Notionals/Notional") or _text(float_leg, "./Notionals/Notional") or 0.0)
+                fixed_rate = float(_text(fixed_leg, "./FixedLegData/Rates/Rate") or 0.0)
+                pay_fixed = (_text(fixed_leg, "./Payer") or "true").lower() == "true"
+                start = _text(fixed_leg, "./ScheduleData/Rules/StartDate") or _text(float_leg, "./ScheduleData/Rules/StartDate")
+                end = _text(fixed_leg, "./ScheduleData/Rules/EndDate") or _text(float_leg, "./ScheduleData/Rules/EndDate")
+                maturity = _maturity_years(start, end)
+                exercise_dates = tuple(
+                    _normalize_date((n.text or "").strip())
+                    for n in trade.findall(".//SwaptionData/OptionData/ExerciseDates/ExerciseDate")
+                    if (n.text or "").strip()
+                )
+                if not exercise_dates:
+                    return GenericProduct(payload={"trade_type": trade_type, "style": "Bermudan"})
+                return BermudanSwaption(
+                    ccy=ccy,
+                    notional=notional,
+                    fixed_rate=fixed_rate,
+                    maturity_years=max(maturity, 1.0),
+                    pay_fixed=pay_fixed,
+                    exercise_dates=exercise_dates,
+                    settlement=_text(trade, ".//SwaptionData/OptionData/Settlement") or "Physical",
+                    option_type=_text(trade, ".//SwaptionData/OptionData/OptionType") or "Call",
+                    long_short=_text(trade, ".//SwaptionData/OptionData/LongShort") or "Long",
+                    float_index=_text(float_leg, "./FloatingLegData/Index") or "",
+                )
+
     return GenericProduct(payload={"trade_type": trade_type})
 
 
@@ -479,6 +540,7 @@ def _parse_netting(path: Path) -> NettingConfig:
             netting_set_id=ns_id,
             active_csa=csa_flag,
             csa_currency=_text(n, "./CSADetails/CSACurrency"),
+            margin_period_of_risk=_text(n, "./CSADetails/MarginPeriodOfRisk"),
             threshold_pay=_to_float(_text(n, "./CSADetails/ThresholdPay")),
             threshold_receive=_to_float(_text(n, "./CSADetails/ThresholdReceive")),
             mta_pay=_to_float(_text(n, "./CSADetails/MinimumTransferAmountPay")),
@@ -593,3 +655,108 @@ def _to_float(v: Optional[str]) -> Optional[float]:
     if v is None or v == "":
         return None
     return float(v)
+
+
+def _resolve_snapshot_mpor(
+    *,
+    base_currency: str,
+    params: Dict[str, str],
+    xml_buffers: Dict[str, str],
+    netting: NettingConfig,
+) -> MporConfig:
+    period = ""
+    source = "disabled"
+
+    simulation_xml = xml_buffers.get("simulation.xml", "")
+    if simulation_xml:
+        try:
+            root = ET.fromstring(simulation_xml)
+            period = (root.findtext("./Parameters/CloseOutLag") or "").strip()
+            if period:
+                source = "simulation.xml"
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to parse simulation.xml when resolving MPOR CloseOutLag: {exc}. "
+                "Falling back to netting set or param overrides.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    for ns in netting.netting_sets.values():
+        if ns.margin_period_of_risk:
+            period = str(ns.margin_period_of_risk).strip()
+            source = f"netting:{ns.netting_set_id}"
+            break
+
+    override_days = str(params.get("python.mpor_days", "")).strip()
+    override_period = str(params.get("python.mpor_source_override", "")).strip()
+    if override_period:
+        period = override_period
+        source = "python.mpor_source_override"
+    elif override_days:
+        try:
+            days = max(int(float(override_days)), 0)
+            period = f"{days}D"
+            source = "python.mpor_days"
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to parse python.mpor_days={override_days!r} as a number: {exc}. "
+                "The override will be ignored and MPOR remains disabled.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    mode = str(params.get("python.mpor_mode", "sticky")).strip().lower()
+    if mode and mode != "sticky":
+        raise ValidationError(
+            f"Unsupported python.mpor_mode '{mode}'. Only 'sticky' is supported."
+        )
+
+    years = _period_to_years(period)
+    days = _period_to_days(period)
+    enabled = years > 0.0 or days > 0
+    return MporConfig(
+        enabled=enabled,
+        mpor_years=years,
+        mpor_days=days,
+        closeout_lag_period=period,
+        sticky=True,
+        cashflow_mode="NonePay",
+        source=source if enabled else "disabled",
+    )
+
+
+def _period_to_years(period: str) -> float:
+    p = str(period).strip().upper()
+    if not p:
+        return 0.0
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([DWMY])", p)
+    if not m:
+        return 0.0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit == "D":
+        return n / 365.25
+    if unit == "W":
+        return (7.0 * n) / 365.25
+    if unit == "M":
+        return n / 12.0
+    return n
+
+
+def _period_to_days(period: str) -> int:
+    p = str(period).strip().upper()
+    if not p:
+        return 0
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([DWMY])", p)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit == "D":
+        return int(round(n))
+    if unit == "W":
+        return int(round(5.0 * n))
+    if unit == "M":
+        return int(round(21.0 * n))
+    return int(round(252.0 * n))

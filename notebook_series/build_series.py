@@ -172,7 +172,17 @@ def notebook_01() -> list[dict]:
         ),
         code(
             """
-            from native_xva_interface import XVASnapshot, map_snapshot, DeterministicToyAdapter, ORESwigAdapter
+            from dataclasses import replace
+
+            from native_xva_interface import (
+                XVASnapshot,
+                XVAEngine,
+                Trade,
+                FXForward,
+                map_snapshot,
+                DeterministicToyAdapter,
+                ORESwigAdapter,
+            )
 
             # Build one small snapshot entirely from Python so we can inspect the structure directly.
             snapshot = nh.make_programmatic_snapshot(num_paths=128)
@@ -249,6 +259,116 @@ def notebook_01() -> list[dict]:
         ),
         md(
             """
+            ## The same API with a real ORE bundle
+
+            The programmatic snapshot is the cleanest place to start, but the same `XVASnapshot` type is also what the
+            loader produces from a real ORE input directory. This mirrors the "minimal real bundle" check in
+            `PythonIntegration/native_xva_interface/demo_achieved.py`.
+            """
+        ),
+        code(
+            """
+            loaded_snapshot = nh.load_base_snapshot(num_paths=32)
+            loaded_result, loaded_elapsed = nh.run_adapter(loaded_snapshot, DeterministicToyAdapter())
+
+            loaded_summary = pd.DataFrame(
+                [
+                    {"field": "source path", "value": getattr(loaded_snapshot.config.source_meta, "path", "") or "(in-memory)"},
+                    {"field": "asof", "value": loaded_snapshot.config.asof},
+                    {"field": "base_currency", "value": loaded_snapshot.config.base_currency},
+                    {"field": "trades", "value": len(loaded_snapshot.portfolio.trades)},
+                    {"field": "market quotes", "value": len(loaded_snapshot.market.raw_quotes)},
+                    {"field": "fixings", "value": len(loaded_snapshot.fixings.points)},
+                    {"field": "num_paths", "value": loaded_snapshot.config.num_paths},
+                ]
+            )
+            display(loaded_summary)
+            print(f"Loaded snapshot toy elapsed: {loaded_elapsed:.4f}s")
+            display(nh.result_metrics_frame(loaded_result))
+            """
+        ),
+        md(
+            """
+            That is the first architectural payoff: the notebook does not need a separate object model for "real ORE files"
+            versus "hand-built Python trades". Both paths converge to the same runtime contract.
+            """
+        ),
+        md(
+            """
+            ## Incremental workflow on top of the snapshot
+
+            `demo_small_xva.py` is older and uses a different API shape, but the workflow idea still applies: build the
+            state once, then apply targeted market and portfolio changes. In the current interface this is handled by
+            `XVAEngine.create_session(...)` plus `update_market(...)` / `update_portfolio(...)`.
+            """
+        ),
+        code(
+            """
+            session = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot)
+            base_session_result = session.run(return_cubes=False)
+
+            bumped_quotes = []
+            for quote in snapshot.market.raw_quotes:
+                if quote.key == "ZERO/RATE/EUR/1Y":
+                    bumped_quotes.append(replace(quote, value=quote.value + 0.0010))
+                else:
+                    bumped_quotes.append(quote)
+            session.update_market(replace(snapshot.market, raw_quotes=tuple(bumped_quotes)))
+            after_market_result = session.run(return_cubes=False)
+
+            session.update_portfolio(
+                add=[
+                    Trade(
+                        trade_id="FXFWD_PATCH_1",
+                        counterparty="CP_A",
+                        netting_set="NS_EUR",
+                        trade_type="FxForward",
+                        product=FXForward(
+                            pair="EURUSD",
+                            notional=1_000_000,
+                            strike=1.08,
+                            maturity_years=0.5,
+                            buy_base=False,
+                        ),
+                    )
+                ],
+                amend=[("FXFWD_DEMO_1", {"product": {"strike": 1.10}})],
+            )
+            after_portfolio_result = session.run(return_cubes=False)
+
+            incremental = pd.DataFrame(
+                [
+                    {
+                        "run": "base session",
+                        "pv": base_session_result.pv_total,
+                        "xva_total": base_session_result.xva_total,
+                        "rebuild_counts": str(base_session_result.metadata.get("rebuild_counts", {})),
+                    },
+                    {
+                        "run": "after market update",
+                        "pv": after_market_result.pv_total,
+                        "xva_total": after_market_result.xva_total,
+                        "rebuild_counts": str(after_market_result.metadata.get("rebuild_counts", {})),
+                    },
+                    {
+                        "run": "after portfolio update",
+                        "pv": after_portfolio_result.pv_total,
+                        "xva_total": after_portfolio_result.xva_total,
+                        "rebuild_counts": str(after_portfolio_result.metadata.get("rebuild_counts", {})),
+                    },
+                ]
+            )
+            display(incremental)
+            """
+        ),
+        md(
+            """
+            The exact numbers here come from the toy adapter, so the point is not market realism. The point is that the
+            snapshot is not just a static serialization object; it is also the unit of incremental session updates.
+            """
+        ),
+        md(
+            """
             ## Optional SWIG run
 
             This is intentionally a boundary check, not a parity claim. The point is that the same snapshot can be handed to
@@ -276,6 +396,8 @@ def notebook_01() -> list[dict]:
             ## Key takeaways
 
             - The dataclass layer already carries enough structure to be the common hand-off point for both engines.
+            - The same snapshot contract works for a hand-built programmatic demo and for a snapshot loaded from real ORE files.
+            - Session updates build on the same object model, so market and portfolio changes do not require a different API tier.
             - `stable_key()` matters because notebooks and tests need a cheap way to detect a real change in economic content.
             - `map_snapshot()` is the explicit boundary where Python objects turn into ORE-style runtime payloads.
 
@@ -311,7 +433,22 @@ def notebook_02() -> list[dict]:
         code(BOOTSTRAP),
         code(
             """
-            from native_xva_interface import map_snapshot, DeterministicToyAdapter
+            from dataclasses import replace
+
+            from native_xva_interface import (
+                CollateralBalance,
+                CollateralConfig,
+                FixingPoint,
+                FixingsData,
+                MarketData,
+                MarketQuote,
+                NettingConfig,
+                NettingSet,
+                XVAConfig,
+                map_snapshot,
+                DeterministicToyAdapter,
+            )
+            from py_ore_tools import validate_xva_snapshot_dataclasses, xva_snapshot_validation_dataframe
 
             # Run ORE now, then load the fresh inputs and outputs into Python-facing snapshot objects.
             snapshot, ore_snapshot, fresh_meta = nh.load_fresh_case_snapshots("flat_EUR_5Y_A", label="notebook_02")
@@ -402,6 +539,103 @@ def notebook_02() -> list[dict]:
             economically lined up well enough to compare specific XVA numbers.”
             """
         ),
+        md(
+            """
+            ## File-backed validation as a fix list
+
+            The XML/file validator is meant to answer a more operational question: if the case is not linked up cleanly,
+            what exactly should be changed next? The report below is shown as a fix list rather than a generic status dump.
+            """
+        ),
+        code(
+            """
+            from py_ore_tools import validate_ore_input_snapshot, ore_input_validation_dataframe
+
+            file_validation = validate_ore_input_snapshot(fresh_meta["ore_xml"])
+            file_validation_df = ore_input_validation_dataframe(file_validation)
+            display(file_validation_df[file_validation_df["section"] == "action_items"])
+
+            print("Input links valid:", file_validation["input_links_valid"])
+            for item in file_validation.get("action_items", []):
+                print(f"[{item['severity']}] {item['code']}")
+                print("  failed :", item["what_failed"])
+                print("  fix    :", item["what_to_fix"])
+                print("  where  :", ", ".join(str(x) for x in item.get("where_to_fix", [])))
+            """
+        ),
+        md(
+            """
+            ## Dataclass validation: good and bad examples
+
+            The file-backed validator checks the ORE XML chain. There is now a second validator for the in-memory dataclasses
+            themselves. That matters when snapshots are built programmatically, merged, or modified before any engine run.
+
+            The good example below is a deliberately well-formed programmatic snapshot. The fresh loader-backed snapshot above
+            is useful for inspection, but it is not a clean teaching example for this validator because loader bundles can be
+            operationally valid while still failing stricter in-memory consistency checks.
+
+            The bad example breaks a few basic contracts on purpose:
+            - quote date no longer matches the snapshot asof
+            - a fixing is placed after the asof date
+            - the trade references a netting set that is not defined
+            - collateral references another unknown netting set
+            - analytics includes an unsupported metric
+            """
+        ),
+        code(
+            """
+            good_snapshot = nh.make_programmatic_snapshot(num_paths=128)
+            good_report = validate_xva_snapshot_dataclasses(good_snapshot)
+            good_df = xva_snapshot_validation_dataframe(good_report)
+            print("Good snapshot valid:", good_report["snapshot_valid"])
+            print("Good snapshot issues:", good_report["issues"])
+            display(good_df)
+            display(good_df[good_df["section"] == "action_items"])
+            """
+        ),
+        code(
+            """
+            bad_snapshot = replace(
+                good_snapshot,
+                market=replace(
+                    good_snapshot.market,
+                    raw_quotes=(
+                        MarketQuote(
+                            date="1999-01-01",
+                            key=good_snapshot.market.raw_quotes[0].key,
+                            value=good_snapshot.market.raw_quotes[0].value,
+                        ),
+                    ) if good_snapshot.market.raw_quotes else (
+                        MarketQuote(date="1999-01-01", key="FX/RATE/EUR/USD", value=1.10),
+                    ),
+                ),
+                fixings=FixingsData(
+                    points=(FixingPoint(date="2099-01-01", index="USD-LIBOR-3M", value=0.05),)
+                ),
+                portfolio=replace(
+                    good_snapshot.portfolio,
+                    trades=(
+                        replace(good_snapshot.portfolio.trades[0], netting_set="BROKEN_NS"),
+                    ) if good_snapshot.portfolio.trades else good_snapshot.portfolio.trades,
+                ),
+                netting=NettingConfig(netting_sets={"NS_OK": NettingSet(netting_set_id="NS_OK", counterparty="CP_A")}),
+                collateral=CollateralConfig(balances=(CollateralBalance(netting_set_id="BROKEN_COLLATERAL", currency=good_snapshot.config.base_currency),)),
+                config=replace(good_snapshot.config, analytics=("CVA", "NOT_A_METRIC")),
+            )
+
+            bad_report = validate_xva_snapshot_dataclasses(bad_snapshot)
+            bad_df = xva_snapshot_validation_dataframe(bad_report)
+            print("Bad snapshot valid:", bad_report["snapshot_valid"])
+            print("Bad snapshot issues:", bad_report["issues"])
+            display(bad_df)
+            display(bad_df[bad_df["section"] == "action_items"])
+            for item in bad_report.get("action_items", []):
+                print(f"[{item['severity']}] {item['code']}")
+                print("  failed :", item["what_failed"])
+                print("  fix    :", item["what_to_fix"])
+                print("  where  :", ", ".join(str(x) for x in item.get("where_to_fix", [])))
+            """
+        ),
         code(
             """
             # One cheap engine pass shows that the fresh snapshot is immediately executable from Python.
@@ -449,6 +683,9 @@ def notebook_03() -> list[dict]:
         code(BOOTSTRAP),
         code(
             """
+            import json
+            import subprocess
+
             from py_ore_tools import (
                 discount_factors_to_dataframe,
                 extract_discount_factors_by_currency,
@@ -457,11 +694,14 @@ def notebook_03() -> list[dict]:
                 fit_discount_curves_from_ore_market,
                 fit_discount_curves_from_programmatic_quotes,
                 fitted_curves_to_dataframe,
+                parse_lgm_params_from_calibration_xml,
+                parse_lgm_params_from_simulation_xml,
                 quote_dicts_from_pairs,
             )
-            from ore_curve_fit_parity import trace_discount_curve_from_ore, trace_index_curve_from_ore
+            from ore_curve_fit_parity import compare_python_vs_ore, trace_discount_curve_from_ore, trace_index_curve_from_ore
 
             ORE_XML = nh.default_curve_case_ore_xml(repo)
+            CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "Tools" / "PythonOreRunner" / "py_ore_tools" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
             df_payload = extract_discount_factors_by_currency(ORE_XML, configuration_id="default")
             df_long = discount_factors_to_dataframe(df_payload)
             instruments = extract_market_instruments_by_currency(ORE_XML)
@@ -474,7 +714,11 @@ def notebook_03() -> list[dict]:
             fitted_df = fitted_curves_to_dataframe(fitted)
             usd_discount_trace = trace_discount_curve_from_ore(ORE_XML, currency="USD")
             usd_index_trace = trace_index_curve_from_ore(ORE_XML, index_name="USD-LIBOR-6M")
+            usd_python_fit_compare = compare_python_vs_ore(ORE_XML, currency="USD")
             configured_lgm, calibrated_lgm, calibration_meta = nh.run_fresh_lgm_calibration_demo(ccy_key="EUR")
+            calibration_hw_parity_meta = nh.run_fresh_lgm_calibration_hullwhite_parity_demo(
+                base_fresh_ore_xml=calibration_meta["fresh_ore_xml"]
+            )
 
             print("ORE XML:", ORE_XML)
             display(df_long.head(12))
@@ -563,6 +807,126 @@ def notebook_03() -> list[dict]:
                 }
             )
             display(trace_compare)
+            """
+        ),
+        md(
+            """
+            ## Python curve fitter demo on mixed instruments
+
+            The USD discount trace is a good compact demo because it mixes three instrument types in one curve:
+
+            - deposits
+            - FRAs
+            - swaps
+
+            The Python diagnostic fitter here is deliberately narrow: it rebuilds the ORE curve from the native ORE
+            calibration nodes and then compares the rebuilt discount factors to the ORE report grid. That makes the
+            interpolation parity visible without pretending we have fully reimplemented ORE helper construction.
+            """
+        ),
+        code(
+            """
+            usd_input_rows = []
+            for segment in usd_discount_trace["segment_alignment"]:
+                for quote in segment["quotes"]:
+                    pillar = quote.get("ore_pillar") or {}
+                    usd_input_rows.append(
+                        {
+                            "segment_type": segment["type"],
+                            "quote_key": quote["quote_key"],
+                            "market_quote": quote.get("quote_value"),
+                            "pillar_time": pd.to_numeric(pillar.get("time"), errors="coerce"),
+                            "pillar_df": pd.to_numeric(pillar.get("discountFactor"), errors="coerce"),
+                            "pillar_zero_rate": pd.to_numeric(pillar.get("zeroRate"), errors="coerce"),
+                        }
+                    )
+            usd_input_df = pd.DataFrame(usd_input_rows)
+            display(usd_input_df.head(12))
+
+            usd_fit_compare_df = pd.DataFrame(
+                [
+                    {
+                        "time": point.time,
+                        "ore_df": point.ore_value,
+                        "python_df": point.engine_value,
+                        "abs_error": point.abs_error,
+                        "rel_error": point.rel_error,
+                    }
+                    for point in usd_python_fit_compare.points
+                ]
+            )
+            usd_fit_compare_df["ore_zero_rate"] = -np.log(np.clip(usd_fit_compare_df["ore_df"], 1.0e-12, None)) / usd_fit_compare_df["time"].replace(0.0, np.nan)
+            usd_fit_compare_df["python_zero_rate"] = -np.log(np.clip(usd_fit_compare_df["python_df"], 1.0e-12, None)) / usd_fit_compare_df["time"].replace(0.0, np.nan)
+            ore_log_df = -np.log(np.clip(usd_fit_compare_df["ore_df"].to_numpy(dtype=float), 1.0e-12, None))
+            py_log_df = -np.log(np.clip(usd_fit_compare_df["python_df"].to_numpy(dtype=float), 1.0e-12, None))
+            grid_time = usd_fit_compare_df["time"].to_numpy(dtype=float)
+            usd_fit_compare_df["ore_forward_rate"] = np.gradient(ore_log_df, grid_time, edge_order=1)
+            usd_fit_compare_df["python_forward_rate"] = np.gradient(py_log_df, grid_time, edge_order=1)
+            display(usd_fit_compare_df.head(12))
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+            native_nodes = pd.DataFrame(
+                {
+                    "time": usd_discount_trace["native_curve_nodes"]["times"],
+                    "df": usd_discount_trace["native_curve_nodes"]["discount_factors"],
+                }
+            )
+            axes[0].scatter(native_nodes["time"], native_nodes["df"], s=28, color=nh.PALETTE["gold"], label="ORE native nodes")
+            axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_df"], linewidth=1.8, label="ORE report grid")
+            axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_df"], linewidth=1.4, linestyle="--", label="Python fitter")
+            axes[0].set_title("USD curve fitter: inputs to fitted outputs")
+            axes[0].set_xlabel("Time (years)")
+            axes[0].set_ylabel("Discount Factor")
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend()
+
+            axes[1].plot(usd_fit_compare_df["time"], 1.0e9 * usd_fit_compare_df["abs_error"], linewidth=1.8, color=nh.PALETTE["rose"])
+            axes[1].set_title("USD curve fitter absolute error (nanodf)")
+            axes[1].set_xlabel("Time (years)")
+            axes[1].set_ylabel("Abs Error x 1e9")
+            axes[1].grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+
+            rate_display = usd_fit_compare_df[
+                [
+                    "time",
+                    "ore_zero_rate",
+                    "python_zero_rate",
+                    "ore_forward_rate",
+                    "python_forward_rate",
+                    "abs_error",
+                ]
+            ].head(12)
+            display(rate_display)
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=True)
+            axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_zero_rate"], linewidth=1.8, label="ORE zero")
+            axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_zero_rate"], linewidth=1.4, linestyle="--", label="Python zero")
+            axes[0].set_title("USD curve fitter zero rates")
+            axes[0].set_xlabel("Time (years)")
+            axes[0].set_ylabel("Zero Rate")
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend()
+
+            axes[1].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_forward_rate"], linewidth=1.8, label="ORE forward")
+            axes[1].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_forward_rate"], linewidth=1.4, linestyle="--", label="Python forward")
+            axes[1].set_title("USD curve fitter instantaneous forwards")
+            axes[1].set_xlabel("Time (years)")
+            axes[1].set_ylabel("Forward Rate")
+            axes[1].grid(True, alpha=0.3)
+            axes[1].legend()
+
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+
+            print("Python fitter status:", usd_python_fit_compare.status)
+            print("Max abs error:", usd_python_fit_compare.max_abs_error)
+            print("Max rel error:", usd_python_fit_compare.max_rel_error)
             """
         ),
         code(
@@ -700,12 +1064,194 @@ def notebook_03() -> list[dict]:
             display(alpha_compare[["bucket_label", "configured_alpha", "calibrated_alpha", "alpha_shift_bp"]])
 
             nh.plot_lgm_calibration_summary(configured_lgm, calibrated_lgm, title="Fresh ORE calibration: configured template vs calibrated output")
+
+            lgm_ccys = ["EUR", "USD", "GBP", "CHF", "JPY"]
+            lgm_ccy_rows = []
+            lgm_alpha_curves = []
+            lgm_kappa_curves = []
+
+            for ccy in lgm_ccys:
+                cfg = parse_lgm_params_from_simulation_xml(calibration_meta["simulation_xml"], ccy_key=ccy)
+                cal = parse_lgm_params_from_calibration_xml(calibration_meta["calibration_xml"], ccy_key=ccy)
+                alpha_cfg_ccy = nh.lgm_param_frame(cfg, param="alpha")
+                alpha_cal_ccy = nh.lgm_param_frame(cal, param="alpha")
+                kappa_cfg_ccy = nh.lgm_param_frame(cfg, param="kappa")
+                kappa_cal_ccy = nh.lgm_param_frame(cal, param="kappa")
+
+                lgm_ccy_rows.append(
+                    {
+                        "ccy": ccy,
+                        "alpha_bucket_count": len(alpha_cal_ccy),
+                        "kappa_bucket_count": len(kappa_cal_ccy),
+                        "alpha_mean_shift_bp": 1.0e4 * (alpha_cal_ccy["value"].mean() - alpha_cfg_ccy["value"].mean()),
+                        "kappa_mean_shift_bp": 1.0e4 * (kappa_cal_ccy["value"].mean() - kappa_cfg_ccy["value"].mean()),
+                    }
+                )
+
+                lgm_alpha_curves.append(
+                    alpha_cal_ccy.assign(ccy=ccy).rename(columns={"value": "calibrated_alpha"})
+                )
+                lgm_kappa_curves.append(
+                    kappa_cal_ccy.assign(ccy=ccy).rename(columns={"value": "calibrated_kappa"})
+                )
+
+            lgm_ccy_summary = pd.DataFrame(lgm_ccy_rows).sort_values("ccy")
+            lgm_alpha_curve_df = pd.concat(lgm_alpha_curves, ignore_index=True)
+            lgm_kappa_curve_df = pd.concat(lgm_kappa_curves, ignore_index=True)
+
+            display(lgm_ccy_summary)
+            display(lgm_alpha_curve_df.head(12))
+            display(lgm_kappa_curve_df.head(12))
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=False)
+            for ccy, grp in lgm_alpha_curve_df.groupby("ccy"):
+                g = grp.sort_values("horizon_years")
+                axes[0].step(g["horizon_years"], g["calibrated_alpha"], where="post", linewidth=1.8, label=ccy)
+            axes[0].set_title("Calibrated alpha by currency")
+            axes[0].set_xlabel("Horizon (years)")
+            axes[0].set_ylabel("Alpha")
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend()
+
+            for ccy, grp in lgm_kappa_curve_df.groupby("ccy"):
+                g = grp.sort_values("horizon_years")
+                axes[1].step(g["horizon_years"], g["calibrated_kappa"], where="post", linewidth=1.8, label=ccy)
+            axes[1].set_title("Calibrated kappa by currency")
+            axes[1].set_xlabel("Horizon (years)")
+            axes[1].set_ylabel("Kappa")
+            axes[1].grid(True, alpha=0.3)
+            axes[1].legend()
+
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## External Python-vs-ORE calibration parity
+
+            The notebook's fresh ORE calibration run keeps the original `Hagan` volatility parametrization, while the current
+            external Python calibration backend is implemented for the `HullWhite/HullWhite` subset. So this section derives a
+            `HullWhite` variant of the same ORE example, runs it fresh, and then compares the external Python calibration
+            against that derived case.
+
+            This section runs the external benchmark on the fresh case and summarizes three things:
+            - whether the basket expiries line up with ORE
+            - whether the helper market values are matched under the calibrated Python result
+            - how close the calibrated sigma buckets are to ORE for representative currencies
+            """
+        ),
+        code(
+            """
+            calibration_case_root = Path(calibration_hw_parity_meta["fresh_output_dir"]).parent
+            parity_reports = {}
+            for ccy in ["EUR", "USD"]:
+                out_json = calibration_case_root / f"python_parity_report_{ccy.lower()}.json"
+                cmd = [
+                    sys.executable,
+                    str(CALIBRATION_PARITY_SCRIPT),
+                    "--case-root",
+                    str(calibration_case_root),
+                    "--currency",
+                    ccy,
+                    "--out-json",
+                    str(out_json),
+                ]
+                completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                if not out_json.exists():
+                    raise FileNotFoundError(f"Parity report not written for {ccy}: {out_json}")
+                parity_reports[ccy] = json.loads(out_json.read_text())
+
+            parity_summary_rows = [
+                {
+                    "ccy": ccy,
+                    "status": "ok",
+                    "vol_source": report["vol_source"],
+                    "vol_type": report["vol_type"],
+                    "basket_size": report["basket_size"],
+                    "basket_grid_match": report["basket_expiry_time_matches_ore_grid"],
+                    "python_valid": report["python_valid"],
+                    "python_rmse": report["python_rmse"],
+                    "max_abs_sigma_diff": report["max_abs_diff"],
+                    "max_rel_sigma_diff": report["max_rel_diff"],
+                }
+                for ccy, report in sorted(parity_reports.items())
+            ]
+            parity_summary = pd.DataFrame(parity_summary_rows)
+            display(parity_summary)
+
+            parity_point_rows = []
+            for ccy, report in sorted(parity_reports.items()):
+                first_point = report["points"][0]
+                last_point = report["points"][-1]
+                parity_point_rows.extend(
+                    [
+                        {
+                            "ccy": ccy,
+                            "point": "first",
+                            "expiry": first_point["expiry"],
+                            "term": first_point["term"],
+                            "market_vol": first_point["market_vol"],
+                            "market_value": first_point["market_value"],
+                            "model_value": first_point["model_value"],
+                            "model_vol": first_point["model_vol"],
+                        },
+                        {
+                            "ccy": ccy,
+                            "point": "last",
+                            "expiry": last_point["expiry"],
+                            "term": last_point["term"],
+                            "market_vol": last_point["market_vol"],
+                            "market_value": last_point["market_value"],
+                            "model_value": last_point["model_value"],
+                            "model_vol": last_point["model_vol"],
+                        },
+                    ]
+                )
+            display(pd.DataFrame(parity_point_rows))
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=False)
+            for ccy, report in sorted(parity_reports.items()):
+                x = np.arange(len(report["ore_sigmas"]))
+                axes[0].plot(x, report["ore_sigmas"], linewidth=1.8, label=f"{ccy} ORE")
+                axes[0].plot(x, report["python_sigmas"], linewidth=1.4, linestyle="--", label=f"{ccy} Python")
+            axes[0].set_title("ORE vs Python calibrated sigma buckets")
+            axes[0].set_xlabel("Bucket index")
+            axes[0].set_ylabel("Sigma")
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend(ncol=2)
+
+            for ccy, report in sorted(parity_reports.items()):
+                x = np.arange(len(report["ore_sigmas"]))
+                diffs_bp = 1.0e4 * (np.array(report["python_sigmas"]) - np.array(report["ore_sigmas"]))
+                axes[1].plot(x, diffs_bp, linewidth=1.8, marker="o", label=ccy)
+            axes[1].set_title("Python minus ORE sigma difference (bp)")
+            axes[1].set_xlabel("Bucket index")
+            axes[1].set_ylabel("Sigma diff x 1e4")
+            axes[1].grid(True, alpha=0.3)
+            axes[1].legend()
+
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            The important part of this benchmark is not just the final sigma difference. The benchmark now uses ORE's emitted
+            `marketdata.csv` and `todaysmarketcalibration.csv` to rebuild the calibration surface and the discount/forward
+            curves, so a small parameter difference is interpretable. Earlier versions that used synthetic flat helper vols
+            produced misleading failures. In notebook 3 this compare is run on a derived `HullWhite` variant of the ORE case
+            so the external Python backend and the ORE calibration are actually solving the same supported problem.
             """
         ),
         md(
             """
             The key visual is the alpha comparison. The template starts from a flat `1%` volatility line, while the calibrated
             output bends upward across maturities. Kappa stays flat because this case calibrates volatility but not reversion.
+            The additional multi-currency tables make it clear which currencies carry their own calibrated alpha/kappa term
+            structures in the same run.
             """
         ),
         md(
@@ -716,9 +1262,14 @@ def notebook_03() -> list[dict]:
             - The fitted grid is much denser than the market pillars, so visualizing both levels prevents false precision.
             - The direct extractor path and the native session bridge now explicitly show one shared curve-extraction contract.
             - The same fitter stack also works without XML, which is useful for small programmatic demos and tests.
+            - The notebook now shows a clean Python curve fitter demo on one USD curve with deposits, FRAs, and swaps as inputs.
+            - The Python fitter section now shows discount factors, zero rates, and instantaneous forwards side by side.
             - The notebook now shows a real fresh ORE calibration run, not a flat parameter template masquerading as calibrated output.
+            - The calibration section now includes the other configured currencies, not only EUR.
             - In the chosen case, `alpha` is calibrated while `kappa` remains fixed, so that asymmetry is expected.
             - `load_from_ore_xml(...)` remains the clean bridge from ORE artifacts to Python-side model inputs.
+            - The new external calibration parity check is only credible because it now rebuilds helper inputs from ORE output artifacts, not from synthetic placeholder vols.
+            - The parity compare in this notebook is run on a derived HullWhite variant of the calibration case so it reflects an actual supported external-vs-ORE calibration comparison.
 
             ## Where this connects next
 
@@ -997,7 +1548,7 @@ def notebook_05() -> list[dict]:
             ## Inputs we reuse from the repo
 
             The aligned comparison still starts from the repo's benchmark case definition:
-            - `parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A`
+            - `Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A`
             - `run_ore_snapshot_native_xva.py`
             - parity notes in `SKILL.md`
 
@@ -1142,12 +1693,255 @@ def notebook_05() -> list[dict]:
     ]
 
 
+def notebook_06() -> list[dict]:
+    return [
+        md(
+            """
+            # 06. Bermudan Swaption Pricing: Python vs ORE
+
+            This notebook focuses on the native Bermudan swaption path that was added on top of the Python LGM stack.
+            The objective is narrower than the XVA notebooks: price a few Bermudans, compare the Python methods against
+            ORE classic, and inspect one case in more detail.
+
+            **Purpose**
+            - show the current Python Bermudan pricing methods side by side with ORE classic
+            - make the calibration-vs-simulation model-source point explicit
+            - inspect one benchmark case through its exercise diagnostics
+
+            **What you will learn**
+            - how close Python `backward` is to ORE classic on the current benchmark pack
+            - why Python `lsmc` is still useful as a control but is not the parity target
+            - what the Bermudan exercise diagnostics look like on the base case
+            """
+        ),
+        code(BOOTSTRAP),
+        md(
+            """
+            ## Inputs reused from the repo
+
+            This notebook uses the native Bermudan benchmark pack and the Python Bermudan pricer already exercised by the regression tests:
+            - `Tools/PythonOreRunner/parity_artifacts/bermudan_method_compare`
+            - `native_xva_interface/bermudan.py`
+            - `native_xva_interface/tests/test_bermudan_pricer.py`
+            """
+        ),
+        code(
+            """
+            berm_comp = nh.load_bermudan_method_comparison()
+            display(berm_comp)
+
+            berm_overview = berm_comp[["case_name", "fixed_rate", "py_lsmc", "py_backward", "ore_classic", "ore_amc", "ore_amc_source"]].copy()
+            display(berm_overview)
+            nh.plot_bermudan_method_levels(berm_comp, title="Stored Bermudan benchmark pack: Python vs ORE classic")
+            nh.plot_bermudan_ore_deltas(berm_comp, title="Stored Bermudan benchmark pack: Python minus ORE classic")
+            """
+        ),
+        md(
+            """
+            The main thing to read off the two plots is that `py_backward` is now the ORE-classic parity method on this
+            benchmark pack. `py_lsmc` is still informative because it stays close to `backward`, but it is a control, not
+            the target engine.
+            """
+        ),
+        md(
+            """
+            ## Detailed base case: 2% Bermudan
+
+            The `berm_200bp` case is the cleanest single example because it sits near the middle of the pack and also has
+            an AMC fallback number stored in the comparison CSV. Here we reprice the case directly through the Python API
+            so the notebook reflects the current code rather than only the stored summary file.
+            """
+        ),
+        code(
+            """
+            berm_summary, berm_diag, berm_speed, berm_meta = nh.run_bermudan_case_summary("berm_200bp", num_paths=4096, seed=42)
+            display(pd.DataFrame([berm_meta]))
+            display(berm_summary)
+            display(berm_speed)
+            display(berm_diag)
+
+            nh.plot_metric_delta(
+                berm_summary.rename(columns={"method": "metric", "delta_vs_ore": "delta"}),
+                title="berm_200bp: Python method minus ORE classic",
+            )
+            fig, ax = plt.subplots(figsize=(9.0, 4.2))
+            nh.plot_bar_frame(
+                berm_speed,
+                "engine",
+                "elapsed_sec",
+                title="berm_200bp runtime view: Python methods and stored ORE timings",
+                color=nh.PALETTE["gold"],
+                ax=ax,
+            )
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            nh.plot_bermudan_exercise_diagnostics(berm_diag, title="berm_200bp exercise diagnostics")
+            """
+        ),
+        md(
+            """
+            The summary table should show `model_param_source = calibration` for both Python methods. That is important:
+            on these benchmark cases the best parity source is the actual `calibration.xml` emitted by ORE classic, not a
+            Python-side reconstruction of the trade-specific builder path.
+            """
+        ),
+        md(
+            """
+            The timing table mixes two sources on purpose:
+
+            - Python timings are measured live in the notebook with wall-clock time
+            - ORE timings come from the stored `pricingstats.csv` and `runtimes.csv` written by the benchmark run
+
+            So this section is best read as an operational runtime view, not as a strict apples-to-apples microbenchmark.
+            """
+        ),
+        md(
+            """
+            ## Interpreting the diagnostics
+
+            The exercise-probability chart answers “when does the option matter most?”. The boundary-state chart answers
+            “where is the continuation-versus-exercise switch happening in the LGM state variable?”. Those are the quickest
+            sanity checks when the aggregate price looks wrong.
+            """
+        ),
+        md(
+            """
+            ## Sensitivity definition example: direct quote bump vs ORE sensitivity analytic
+
+            The biggest open issue is not the Bermudan price itself. It is the meaning of the sensitivity number.
+
+            For the `berm_200bp` case we now run three calculations live in the notebook:
+            - ORE `sensitivity.csv`
+            - direct ORE quote bump-and-reprice
+            - Python quote bump-and-reprice
+
+            This is important because ORE's sensitivity analytic is not the same as "edit one line in the market file and
+            reprice". It goes through the sensitivity scenario engine and par-conversion layer first.
+            """
+        ),
+        code(
+            """
+            sens_payload, sens_meta, sens_rows, sens_config, sens_scenario = nh.run_bermudan_sensitivity_comparison(
+                "berm_200bp",
+                method="backward",
+                num_paths=256,
+                seed=17,
+                shift_size=1.0e-4,
+            )
+            display(sens_meta)
+            display(sens_rows)
+            nh.plot_bermudan_sensitivity_triplet(
+                sens_rows,
+                title="berm_200bp: ORE sensitivity analytic vs direct ORE quote bump vs Python quote bump",
+            )
+            """
+        ),
+        md(
+            """
+            The expected pattern is:
+
+            - `python_quote_bump` is close to `ore_direct_quote_bump`
+            - both can disagree sharply with `ore_sensitivity_csv`
+
+            That means the remaining gap is not the Bermudan backward engine. It is the sensitivity-definition layer used by
+            ORE's analytic.
+            """
+        ),
+        code(
+            """
+            display(sens_config)
+
+            focus_cols = ["#TradeId", "Factor", "ScenarioDescription", "Base NPV", "Scenario NPV", "Difference"]
+            available_cols = [c for c in focus_cols if c in sens_scenario.columns]
+            if not available_cols:
+                available_cols = list(sens_scenario.columns)
+            display(sens_scenario[available_cols])
+            """
+        ),
+        md(
+            """
+            Read the two ORE tables together:
+
+            - `sensitivity_config.csv` shows which internal sensitivity key actually moved
+            - `scenario.csv` shows the up/down scenario NPVs produced by the analytic
+
+            On this case the reported factor label `IndexCurve/EUR-EURIBOR-6M/0/10Y` is associated with an internal node key,
+            not a literal raw-market-file quote bump. That is why the direct ORE bump and the sensitivity analytic can have
+            different signs.
+            """
+        ),
+        code(
+            """
+            direct_vs_analytic = sens_rows[
+                [
+                    "normalized_factor",
+                    "ore_bump_change",
+                    "ore_direct_quote_bump_change",
+                    "python_quote_full_bump_change",
+                    "python_quote_full_minus_ore_direct",
+                ]
+            ].copy()
+            direct_vs_analytic["analytic_minus_direct_ore"] = (
+                direct_vs_analytic["ore_bump_change"] - direct_vs_analytic["ore_direct_quote_bump_change"]
+            )
+            display(direct_vs_analytic)
+            """
+        ),
+        md(
+            """
+            The forward `EUR 6M 10Y` row is the headline example:
+
+            - ORE sensitivity analytic says the bump change is positive
+            - direct ORE quote bump says the bump change is negative
+            - Python quote bump is close to direct ORE quote bump
+
+            So if the benchmark objective is "match direct market quote bumping", Python is already on the right side of the
+            comparison. Matching `sensitivity.csv` would require replicating ORE's par-conversion / sensitivity-scenario
+            machinery, not changing the Bermudan pricer.
+            """
+        ),
+        code(
+            """
+            berm_rank = berm_comp[["case_name", "py_backward_abs_rel_diff"]].copy()
+            berm_rank["py_backward_abs_rel_diff_bp"] = 1.0e4 * berm_rank["py_backward_abs_rel_diff"]
+            display(berm_rank)
+
+            fig, ax = plt.subplots(figsize=(8.5, 4.2))
+            nh.plot_bar_frame(
+                berm_rank.rename(columns={"py_backward_abs_rel_diff_bp": "abs_rel_diff_bp"}),
+                "case_name",
+                "abs_rel_diff_bp",
+                title="Backward parity gap vs ORE classic (basis points of relative error)",
+                color=nh.PALETTE["teal"],
+                ax=ax,
+            )
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - Use the stored Bermudan comparison pack for the quick multi-case view.
+            - Use the direct `berm_200bp` repricing section when you want current diagnostics from the live Python code.
+            - For sensitivities, distinguish direct quote bumping from ORE's sensitivity analytic. They are not the same calculation.
+            - Treat `backward` as the ORE-classic parity engine and `lsmc` as the control.
+            - On these Bermudan cases, `calibration.xml` is the right model source whenever ORE has already produced it.
+            """
+        ),
+    ]
+
+
 NOTEBOOKS = {
     "01_python_to_ore_swig_dataclasses.ipynb": notebook_01,
     "02_ore_snapshot_capabilities.ipynb": notebook_02,
     "03_curve_calibration_and_lgm_params.ipynb": notebook_03,
     "04_python_lgm_xva_model.ipynb": notebook_04,
     "05_joint_python_and_ore_workflow.ipynb": notebook_05,
+    "06_bermudan_python_vs_ore.ipynb": notebook_06,
 }
 
 

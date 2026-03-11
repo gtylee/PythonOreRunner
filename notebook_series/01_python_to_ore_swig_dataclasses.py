@@ -29,36 +29,18 @@ from pathlib import Path
 import os
 import sys
 
-def _is_pythonorerunner_root(path: Path) -> bool:
-    return (
-        (path / "notebook_series" / "series_helpers.py").exists()
-        and (path / "native_xva_interface").exists()
-        and (path / "py_ore_tools").exists()
-    )
-
-def _is_engine_root(path: Path) -> bool:
-    return (path / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists()
-
 def _find_repo_root(start: Path) -> Path:
     current = start.resolve()
     for candidate in (current, *current.parents):
-        if _is_pythonorerunner_root(candidate) or _is_engine_root(candidate):
+        if (candidate / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
             return candidate
-    repo_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
-    if _is_pythonorerunner_root(repo_hint):
-        return repo_hint
     repo_hint = Path("/Users/gordonlee/Documents/Engine")
-    if _is_engine_root(repo_hint):
+    if (repo_hint / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
         return repo_hint
-    raise RuntimeError("Could not locate a PythonOreRunner or Engine repo root from the current notebook working directory")
-
-def _pythonorerunner_root(repo_root: Path) -> Path:
-    if _is_pythonorerunner_root(repo_root):
-        return repo_root
-    return repo_root / "Tools" / "PythonOreRunner"
+    raise RuntimeError("Could not locate the Engine repo root from the current notebook working directory")
 
 REPO_ROOT = _find_repo_root(Path.cwd())
-NOTEBOOK_DIR = _pythonorerunner_root(REPO_ROOT) / "notebook_series"
+NOTEBOOK_DIR = REPO_ROOT / "Tools" / "PythonOreRunner" / "notebook_series"
 for path in (NOTEBOOK_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -96,7 +78,17 @@ This notebook stays close to the tested dataclass and adapter surface already us
 """
 
 # %% cell 3
-from native_xva_interface import XVASnapshot, map_snapshot, DeterministicToyAdapter, ORESwigAdapter
+from dataclasses import replace
+
+from native_xva_interface import (
+    XVASnapshot,
+    XVAEngine,
+    Trade,
+    FXForward,
+    map_snapshot,
+    DeterministicToyAdapter,
+    ORESwigAdapter,
+)
 
 # Build one small snapshot entirely from Python so we can inspect the structure directly.
 snapshot = nh.make_programmatic_snapshot(num_paths=128)
@@ -166,13 +158,119 @@ display(nh.result_metrics_frame(toy_result))
 
 # %% cell 10
 """
+## The same API with a real ORE bundle
+
+The programmatic snapshot is the cleanest place to start, but the same `XVASnapshot` type is also what the
+loader produces from a real ORE input directory. This mirrors the "minimal real bundle" check in
+`PythonIntegration/native_xva_interface/demo_achieved.py`.
+"""
+
+# %% cell 11
+loaded_snapshot = nh.load_base_snapshot(num_paths=32)
+loaded_result, loaded_elapsed = nh.run_adapter(loaded_snapshot, DeterministicToyAdapter())
+
+loaded_summary = pd.DataFrame(
+    [
+        {"field": "source path", "value": getattr(loaded_snapshot.config.source_meta, "path", "") or "(in-memory)"},
+        {"field": "asof", "value": loaded_snapshot.config.asof},
+        {"field": "base_currency", "value": loaded_snapshot.config.base_currency},
+        {"field": "trades", "value": len(loaded_snapshot.portfolio.trades)},
+        {"field": "market quotes", "value": len(loaded_snapshot.market.raw_quotes)},
+        {"field": "fixings", "value": len(loaded_snapshot.fixings.points)},
+        {"field": "num_paths", "value": loaded_snapshot.config.num_paths},
+    ]
+)
+display(loaded_summary)
+print(f"Loaded snapshot toy elapsed: {loaded_elapsed:.4f}s")
+display(nh.result_metrics_frame(loaded_result))
+
+# %% cell 12
+"""
+That is the first architectural payoff: the notebook does not need a separate object model for "real ORE files"
+versus "hand-built Python trades". Both paths converge to the same runtime contract.
+"""
+
+# %% cell 13
+"""
+## Incremental workflow on top of the snapshot
+
+`demo_small_xva.py` is older and uses a different API shape, but the workflow idea still applies: build the
+state once, then apply targeted market and portfolio changes. In the current interface this is handled by
+`XVAEngine.create_session(...)` plus `update_market(...)` / `update_portfolio(...)`.
+"""
+
+# %% cell 14
+session = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot)
+base_session_result = session.run(return_cubes=False)
+
+bumped_quotes = []
+for quote in snapshot.market.raw_quotes:
+    if quote.key == "ZERO/RATE/EUR/1Y":
+        bumped_quotes.append(replace(quote, value=quote.value + 0.0010))
+    else:
+        bumped_quotes.append(quote)
+session.update_market(replace(snapshot.market, raw_quotes=tuple(bumped_quotes)))
+after_market_result = session.run(return_cubes=False)
+
+session.update_portfolio(
+    add=[
+        Trade(
+            trade_id="FXFWD_PATCH_1",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="FxForward",
+            product=FXForward(
+                pair="EURUSD",
+                notional=1_000_000,
+                strike=1.08,
+                maturity_years=0.5,
+                buy_base=False,
+            ),
+        )
+    ],
+    amend=[("FXFWD_DEMO_1", {"product": {"strike": 1.10}})],
+)
+after_portfolio_result = session.run(return_cubes=False)
+
+incremental = pd.DataFrame(
+    [
+        {
+            "run": "base session",
+            "pv": base_session_result.pv_total,
+            "xva_total": base_session_result.xva_total,
+            "rebuild_counts": str(base_session_result.metadata.get("rebuild_counts", {})),
+        },
+        {
+            "run": "after market update",
+            "pv": after_market_result.pv_total,
+            "xva_total": after_market_result.xva_total,
+            "rebuild_counts": str(after_market_result.metadata.get("rebuild_counts", {})),
+        },
+        {
+            "run": "after portfolio update",
+            "pv": after_portfolio_result.pv_total,
+            "xva_total": after_portfolio_result.xva_total,
+            "rebuild_counts": str(after_portfolio_result.metadata.get("rebuild_counts", {})),
+        },
+    ]
+)
+display(incremental)
+
+# %% cell 15
+"""
+The exact numbers here come from the toy adapter, so the point is not market realism. The point is that the
+snapshot is not just a static serialization object; it is also the unit of incremental session updates.
+"""
+
+# %% cell 16
+"""
 ## Optional SWIG run
 
 This is intentionally a boundary check, not a parity claim. The point is that the same snapshot can be handed to
 an ORE-backed adapter without rewriting the notebook around engine-specific inputs.
 """
 
-# %% cell 11
+# %% cell 17
 swig = nh.swig_status()
 print(swig["message"])
 
@@ -186,11 +284,13 @@ elif swig["available"]:
 else:
     print("Skipping ORE-SWIG adapter execution in this environment.")
 
-# %% cell 12
+# %% cell 18
 """
 ## Key takeaways
 
 - The dataclass layer already carries enough structure to be the common hand-off point for both engines.
+- The same snapshot contract works for a hand-built programmatic demo and for a snapshot loaded from real ORE files.
+- Session updates build on the same object model, so market and portfolio changes do not require a different API tier.
 - `stable_key()` matters because notebooks and tests need a cheap way to detect a real change in economic content.
 - `map_snapshot()` is the explicit boundary where Python objects turn into ORE-style runtime payloads.
 

@@ -146,7 +146,10 @@ def build_swap_schedules(trade_def: Dict) -> Tuple[np.ndarray, np.ndarray, float
 
 
 def _parse_yyyymmdd(s: str) -> date:
-    return datetime.strptime(s, "%Y%m%d").date()
+    txt = s.strip()
+    if "-" in txt:
+        return datetime.strptime(txt, "%Y-%m-%d").date()
+    return datetime.strptime(txt, "%Y%m%d").date()
 
 
 def _add_months(d: date, months: int) -> date:
@@ -237,11 +240,13 @@ def _advance_business_days(d: date, n: int, calendar: str) -> date:
 
 
 def _year_fraction(start: date, end: date, day_counter: str) -> float:
-    dc = day_counter.upper()
+    dc = day_counter.upper().replace(" ", "")
     if dc == "A360":
         return (end - start).days / 360.0
     if dc == "A365":
         return (end - start).days / 365.0
+    if dc in ("ACT/ACT", "ACT/ACT(ISDA)", "AAISDA", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)"):
+        return _year_fraction_actual_actual(start, end)
     if dc == "30/360":
         d1 = min(start.day, 30)
         d2 = min(end.day, 30) if d1 == 30 else end.day
@@ -497,6 +502,8 @@ def load_ore_legs_from_flows(
     float_leg_sign = infer_leg_sign(floating)
 
     out["fixed_pay_time"] = np.asarray([to_time(r["PayDate"]) for r in fixed], dtype=float)
+    out["fixed_start_time"] = np.asarray([to_time(r["AccrualStartDate"]) for r in fixed], dtype=float)
+    out["fixed_end_time"] = np.asarray([to_time(r["AccrualEndDate"]) for r in fixed], dtype=float)
     out["fixed_accrual"] = np.asarray([float(r["Accrual"]) for r in fixed], dtype=float)
     out["fixed_rate"] = np.asarray([float(r["Coupon"]) for r in fixed], dtype=float)
     out["fixed_notional"] = np.asarray([float(r["Notional"]) for r in fixed], dtype=float)
@@ -541,10 +548,14 @@ def load_swap_legs_from_portfolio(
             break
     if trade is None:
         raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
-    if (trade.findtext("./TradeType") or "").strip() != "Swap":
-        raise ValueError("only Swap trade type is supported")
+    trade_type = (trade.findtext("./TradeType") or "").strip()
+    if trade_type == "Swap":
+        swap = trade.find("./SwapData")
+    elif trade_type == "Swaption":
+        swap = trade.find("./SwaptionData")
+    else:
+        raise ValueError("only Swap and Swaption trade types are supported")
 
-    swap = trade.find("./SwapData")
     legs_xml = swap.findall("./LegData") if swap is not None else []
     if len(legs_xml) != 2:
         raise ValueError("expected exactly 2 legs in swap trade")
@@ -577,6 +588,8 @@ def load_swap_legs_from_portfolio(
 
         if ltype == "Fixed":
             rate = float((lx.findtext("./FixedLegData/Rates/Rate") or "0").strip())
+            out["fixed_start_time"] = s_t
+            out["fixed_end_time"] = e_t
             out["fixed_pay_time"] = p_t
             out["fixed_accrual"] = accr
             out["fixed_rate"] = np.full_like(accr, rate)
@@ -607,6 +620,8 @@ def load_swap_legs_from_portfolio(
 
     required = [
         "fixed_pay_time",
+        "fixed_start_time",
+        "fixed_end_time",
         "fixed_accrual",
         "fixed_rate",
         "fixed_notional",
@@ -757,16 +772,17 @@ def swap_npv_from_ore_legs_dual_curve(
     x_t: np.ndarray,
     realized_float_coupon: Optional[np.ndarray] = None,
     use_node_interpolation: bool = False,
+    exercise_into_whole_periods: bool = False,
 ) -> np.ndarray:
     """Pathwise swap NPV with discounting on p0_disc and forwarding on p0_fwd.
 
-    Forwarding curve discount factors are mapped from discounting curve state using
-    a deterministic basis ratio:
-      P_f(t,T) = P_d(t,T) * (B(T) / B(t)),  B(u)=P_f(0,u)/P_d(0,u)
+    Discounting always uses ``p0_disc``. Forward coupon projection applies the same
+    LGM state directly to ``p0_fwd`` as an input term structure:
+      P_f(t,T;x_t) = model.discount_bond(t,T,x_t,p0_fwd(t),p0_fwd(T))
 
-    This is one of the key ORE-related approximations in the Python toolkit. ORE can
-    carry richer multi-curve state; here we reuse a single LGM factor and transport
-    it onto the forwarding curve through the deterministic t=0 basis term structure.
+    This is closer to ORE's ``LgmVectorised::fixing()`` than the older deterministic
+    basis-ratio transport approximation, where the forwarding curve was reconstructed
+    from the discounting state.
 
     ``use_node_interpolation`` keeps the older "simulate node tenors, then interpolate
     discount factors" workflow available for diagnostics.  Exact discount-bond
@@ -783,7 +799,6 @@ def swap_npv_from_ore_legs_dual_curve(
     # t0 parity gap against ORE for swap cashflows.
     use_nodes = bool(use_node_interpolation) and node_tenors.size > 0 and t > 1.0e-14
     grid = t + node_tenors if use_nodes else np.array([], dtype=float)
-    bt = p0_fwd(t) / p0_disc(t)
     p_nodes_d = None
     logp = None
     slope = None
@@ -830,13 +845,24 @@ def swap_npv_from_ore_legs_dual_curve(
 
         return out
 
-    def map_forward_bond_from_disc_batch(T: np.ndarray, p_t_T_disc: np.ndarray) -> np.ndarray:
-        maturities = np.asarray(T, dtype=float)
-        bT = np.fromiter((float(p0_fwd(float(m))) / p0_disc(float(m)) for m in maturities), dtype=float, count=maturities.size)
-        return p_t_T_disc * (bT / bt)[:, None]
+    p_t_f = float(p0_fwd(t))
 
-    # Fixed leg discounted on discount curve
-    mask_f = legs["fixed_pay_time"] > t + 1e-12
+    def forward_bond_batch(T: np.ndarray) -> np.ndarray:
+        maturities = np.asarray(T, dtype=float)
+        if maturities.ndim != 1:
+            raise ValueError("maturities must be one-dimensional")
+        if maturities.size == 0:
+            return np.empty((0, x.size), dtype=float)
+        p_T_f = np.fromiter((float(p0_fwd(float(Ti))) for Ti in maturities), dtype=float, count=maturities.size)
+        return model.discount_bond_paths(t, maturities, x, p_t_f, p_T_f)
+
+    if exercise_into_whole_periods:
+        fixed_start = np.asarray(legs.get("fixed_start_time", np.full_like(legs["fixed_pay_time"], -1.0)), dtype=float)
+        mask_f = fixed_start >= t - 1.0e-12
+    else:
+        # For generic swap valuation a coupon remains alive until its payment date,
+        # even after the accrual period has started.
+        mask_f = legs["fixed_pay_time"] > t + 1.0e-12
     if np.any(mask_f):
         pay = legs["fixed_pay_time"][mask_f]
         disc = interp_from_nodes_batch(pay)
@@ -845,7 +871,10 @@ def swap_npv_from_ore_legs_dual_curve(
 
     fix_t = np.asarray(legs.get("float_fixing_time", legs["float_start_time"]), dtype=float)
     pay_all = legs["float_pay_time"]
-    live = pay_all > t + 1e-12
+    if exercise_into_whole_periods:
+        live = legs["float_start_time"] >= t - 1.0e-12
+    else:
+        live = pay_all > t + 1.0e-12
     if np.any(live):
         s = legs["float_start_time"][live]
         e = legs["float_end_time"][live]
@@ -880,10 +909,8 @@ def swap_npv_from_ore_legs_dual_curve(
             n2 = n[~fixed]
             sign2 = sign[~fixed]
             spread2 = spread[~fixed]
-            p_ts_d2 = interp_from_nodes_batch(s2)
-            p_te_d2 = interp_from_nodes_batch(e2)
-            p_ts_f2 = map_forward_bond_from_disc_batch(s2, p_ts_d2)
-            p_te_f2 = map_forward_bond_from_disc_batch(e2, p_te_d2)
+            p_ts_f2 = forward_bond_batch(s2)
+            p_te_f2 = forward_bond_batch(e2)
             fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / tau2[:, None]
             amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
@@ -1084,7 +1111,10 @@ def parse_lgm_params_from_simulation_xml(simulation_xml: str, ccy_key: str = "EU
     alpha_vals = parse_grid(vol_node.findtext("./InitialValue"))
     kappa_times = parse_grid(rev_node.findtext("./TimeGrid"))
     kappa_vals = parse_grid(rev_node.findtext("./InitialValue"))
-    shift = float((trans_node.findtext("./ShiftHorizon") or "0").strip())
+    # ORE's ``ShiftHorizon`` is a calibration-basket configuration parameter, not
+    # an additive shift to the LGM bond-loading function H(t). The lightweight
+    # Python LGM kernel only supports the latter concept, so keep it at zero here.
+    shift = 0.0
     scaling = float((trans_node.findtext("./Scaling") or "1").strip())
 
     calibrate_vol = (vol_node.findtext("./Calibrate") or "N").strip().upper() == "Y"
@@ -1136,7 +1166,9 @@ def parse_lgm_params_from_calibration_xml(calibration_xml: str, ccy_key: str = "
     alpha_vals = parse_grid(vol_node.findtext("./InitialValue"))
     kappa_times = parse_grid(rev_node.findtext("./TimeGrid"))
     kappa_vals = parse_grid(rev_node.findtext("./InitialValue"))
-    shift = float((trans_node.findtext("./ShiftHorizon") or "0").strip())
+    # ``ShiftHorizon`` in ORE calibration output is not the same object as the
+    # additive H(t) shift used by the Python kernel, so do not feed it through.
+    shift = 0.0
     scaling = float((trans_node.findtext("./Scaling") or "1").strip())
 
     return {
@@ -1288,6 +1320,91 @@ def survival_probability_from_hazard(
             acc += lambdas[-1] * (x - knots[-1])
         out[i] = np.exp(-acc)
     return out
+
+
+def average_hazard_from_survival_probabilities(
+    node_times: np.ndarray,
+    survival_probabilities: np.ndarray,
+) -> np.ndarray:
+    """Return ORE-style averaged hazards h(t) = -log(S(t)) / t at node times."""
+    times = np.asarray(node_times, dtype=float)
+    surv = np.asarray(survival_probabilities, dtype=float)
+    if times.ndim != 1 or surv.ndim != 1 or times.size != surv.size:
+        raise ValueError("node_times and survival_probabilities must be 1D arrays of equal size")
+    if times.size == 0:
+        raise ValueError("survival curve is empty")
+    if np.any(times <= 0.0):
+        raise ValueError("node_times must be strictly positive")
+    if np.any(np.diff(times) <= 0.0):
+        raise ValueError("node_times must be strictly increasing")
+    if np.any(surv <= 0.0) or np.any(surv > 1.0):
+        raise ValueError("survival probabilities must be in (0, 1]")
+    return -np.log(np.clip(surv, 1.0e-18, 1.0)) / times
+
+
+def survival_probabilities_from_average_hazard(
+    node_times: np.ndarray,
+    average_hazard_rates: np.ndarray,
+) -> np.ndarray:
+    """Return survival nodes S(t) = exp(-h(t) * t) from averaged hazards."""
+    times = np.asarray(node_times, dtype=float)
+    hazards = np.asarray(average_hazard_rates, dtype=float)
+    if times.ndim != 1 or hazards.ndim != 1 or times.size != hazards.size:
+        raise ValueError("node_times and average_hazard_rates must be 1D arrays of equal size")
+    if np.any(times <= 0.0):
+        raise ValueError("node_times must be strictly positive")
+    if np.any(np.diff(times) <= 0.0):
+        raise ValueError("node_times must be strictly increasing")
+    return np.exp(-hazards * times)
+
+
+def build_survival_probability_curve_from_nodes(
+    node_times: np.ndarray,
+    survival_probabilities: np.ndarray,
+    extrapolation: str = "flat_zero",
+) -> Callable[[float], float]:
+    """Build an ORE-style survival curve from survival nodes.
+
+    ORE scenario credit curves are represented as SurvivalProbabilityCurve<LogLinear>
+    in scenario sim market. This helper reproduces that behavior:
+    - loglinear interpolation in survival probability between nodes
+    - `flat_zero`: constant averaged hazard beyond the last node
+    - `flat_fwd`: constant forward hazard beyond the last interval
+    """
+    times = np.asarray(node_times, dtype=float)
+    surv = np.asarray(survival_probabilities, dtype=float)
+    if times.ndim != 1 or surv.ndim != 1 or times.size != surv.size:
+        raise ValueError("node_times and survival_probabilities must be 1D arrays of equal size")
+    if times.size == 0:
+        raise ValueError("survival curve is empty")
+    if np.any(times <= 0.0):
+        raise ValueError("node_times must be strictly positive")
+    if np.any(np.diff(times) <= 0.0):
+        raise ValueError("node_times must be strictly increasing")
+    if np.any(surv <= 0.0) or np.any(surv > 1.0):
+        raise ValueError("survival probabilities must be in (0, 1]")
+
+    log_surv = np.log(np.clip(surv, 1.0e-18, 1.0))
+    avg_hazard = average_hazard_from_survival_probabilities(times, surv)
+    if times.size > 1:
+        last_fwd_hazard = -(log_surv[-1] - log_surv[-2]) / max(times[-1] - times[-2], 1.0e-12)
+    else:
+        last_fwd_hazard = avg_hazard[-1]
+    mode = str(extrapolation).strip().lower()
+
+    def curve(t: float) -> float:
+        tt = max(float(t), 0.0)
+        if tt <= 1.0e-12:
+            return 1.0
+        if tt <= times[0]:
+            return float(np.exp(-avg_hazard[0] * tt))
+        if tt < times[-1]:
+            return float(np.exp(np.interp(tt, times, log_surv)))
+        if mode == "flat_fwd":
+            return float(np.exp(log_surv[-1] - last_fwd_hazard * (tt - times[-1])))
+        return float(np.exp(-avg_hazard[-1] * tt))
+
+    return curve
 
 
 def aggregate_exposure_profile_from_npv_paths(npv_paths: np.ndarray) -> Dict[str, np.ndarray]:

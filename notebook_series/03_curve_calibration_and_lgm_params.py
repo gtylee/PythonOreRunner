@@ -24,36 +24,18 @@ from pathlib import Path
 import os
 import sys
 
-def _is_pythonorerunner_root(path: Path) -> bool:
-    return (
-        (path / "notebook_series" / "series_helpers.py").exists()
-        and (path / "native_xva_interface").exists()
-        and (path / "py_ore_tools").exists()
-    )
-
-def _is_engine_root(path: Path) -> bool:
-    return (path / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists()
-
 def _find_repo_root(start: Path) -> Path:
     current = start.resolve()
     for candidate in (current, *current.parents):
-        if _is_pythonorerunner_root(candidate) or _is_engine_root(candidate):
+        if (candidate / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
             return candidate
-    repo_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
-    if _is_pythonorerunner_root(repo_hint):
-        return repo_hint
     repo_hint = Path("/Users/gordonlee/Documents/Engine")
-    if _is_engine_root(repo_hint):
+    if (repo_hint / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
         return repo_hint
-    raise RuntimeError("Could not locate a PythonOreRunner or Engine repo root from the current notebook working directory")
-
-def _pythonorerunner_root(repo_root: Path) -> Path:
-    if _is_pythonorerunner_root(repo_root):
-        return repo_root
-    return repo_root / "Tools" / "PythonOreRunner"
+    raise RuntimeError("Could not locate the Engine repo root from the current notebook working directory")
 
 REPO_ROOT = _find_repo_root(Path.cwd())
-NOTEBOOK_DIR = _pythonorerunner_root(REPO_ROOT) / "notebook_series"
+NOTEBOOK_DIR = REPO_ROOT / "Tools" / "PythonOreRunner" / "notebook_series"
 for path in (NOTEBOOK_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -81,6 +63,9 @@ print(repo)
 RUN_ORE_SWIG = os.getenv("RUN_ORE_SWIG_DEMOS") == "1"
 
 # %% cell 2
+import json
+import subprocess
+
 from py_ore_tools import (
     discount_factors_to_dataframe,
     extract_discount_factors_by_currency,
@@ -89,11 +74,14 @@ from py_ore_tools import (
     fit_discount_curves_from_ore_market,
     fit_discount_curves_from_programmatic_quotes,
     fitted_curves_to_dataframe,
+    parse_lgm_params_from_calibration_xml,
+    parse_lgm_params_from_simulation_xml,
     quote_dicts_from_pairs,
 )
-from ore_curve_fit_parity import trace_discount_curve_from_ore, trace_index_curve_from_ore
+from ore_curve_fit_parity import compare_python_vs_ore, trace_discount_curve_from_ore, trace_index_curve_from_ore
 
 ORE_XML = nh.default_curve_case_ore_xml(repo)
+CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "Tools" / "PythonOreRunner" / "py_ore_tools" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
 df_payload = extract_discount_factors_by_currency(ORE_XML, configuration_id="default")
 df_long = discount_factors_to_dataframe(df_payload)
 instruments = extract_market_instruments_by_currency(ORE_XML)
@@ -106,7 +94,11 @@ fitted = fit_discount_curves_from_ore_market(
 fitted_df = fitted_curves_to_dataframe(fitted)
 usd_discount_trace = trace_discount_curve_from_ore(ORE_XML, currency="USD")
 usd_index_trace = trace_index_curve_from_ore(ORE_XML, index_name="USD-LIBOR-6M")
+usd_python_fit_compare = compare_python_vs_ore(ORE_XML, currency="USD")
 configured_lgm, calibrated_lgm, calibration_meta = nh.run_fresh_lgm_calibration_demo(ccy_key="EUR")
+calibration_hw_parity_meta = nh.run_fresh_lgm_calibration_hullwhite_parity_demo(
+    base_fresh_ore_xml=calibration_meta["fresh_ore_xml"]
+)
 
 print("ORE XML:", ORE_XML)
 display(df_long.head(12))
@@ -191,6 +183,124 @@ trace_compare = pd.DataFrame(
 display(trace_compare)
 
 # %% cell 9
+"""
+## Python curve fitter demo on mixed instruments
+
+The USD discount trace is a good compact demo because it mixes three instrument types in one curve:
+
+- deposits
+- FRAs
+- swaps
+
+The Python diagnostic fitter here is deliberately narrow: it rebuilds the ORE curve from the native ORE
+calibration nodes and then compares the rebuilt discount factors to the ORE report grid. That makes the
+interpolation parity visible without pretending we have fully reimplemented ORE helper construction.
+"""
+
+# %% cell 10
+usd_input_rows = []
+for segment in usd_discount_trace["segment_alignment"]:
+    for quote in segment["quotes"]:
+        pillar = quote.get("ore_pillar") or {}
+        usd_input_rows.append(
+            {
+                "segment_type": segment["type"],
+                "quote_key": quote["quote_key"],
+                "market_quote": quote.get("quote_value"),
+                "pillar_time": pd.to_numeric(pillar.get("time"), errors="coerce"),
+                "pillar_df": pd.to_numeric(pillar.get("discountFactor"), errors="coerce"),
+                "pillar_zero_rate": pd.to_numeric(pillar.get("zeroRate"), errors="coerce"),
+            }
+        )
+usd_input_df = pd.DataFrame(usd_input_rows)
+display(usd_input_df.head(12))
+
+usd_fit_compare_df = pd.DataFrame(
+    [
+        {
+            "time": point.time,
+            "ore_df": point.ore_value,
+            "python_df": point.engine_value,
+            "abs_error": point.abs_error,
+            "rel_error": point.rel_error,
+        }
+        for point in usd_python_fit_compare.points
+    ]
+)
+usd_fit_compare_df["ore_zero_rate"] = -np.log(np.clip(usd_fit_compare_df["ore_df"], 1.0e-12, None)) / usd_fit_compare_df["time"].replace(0.0, np.nan)
+usd_fit_compare_df["python_zero_rate"] = -np.log(np.clip(usd_fit_compare_df["python_df"], 1.0e-12, None)) / usd_fit_compare_df["time"].replace(0.0, np.nan)
+ore_log_df = -np.log(np.clip(usd_fit_compare_df["ore_df"].to_numpy(dtype=float), 1.0e-12, None))
+py_log_df = -np.log(np.clip(usd_fit_compare_df["python_df"].to_numpy(dtype=float), 1.0e-12, None))
+grid_time = usd_fit_compare_df["time"].to_numpy(dtype=float)
+usd_fit_compare_df["ore_forward_rate"] = np.gradient(ore_log_df, grid_time, edge_order=1)
+usd_fit_compare_df["python_forward_rate"] = np.gradient(py_log_df, grid_time, edge_order=1)
+display(usd_fit_compare_df.head(12))
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+native_nodes = pd.DataFrame(
+    {
+        "time": usd_discount_trace["native_curve_nodes"]["times"],
+        "df": usd_discount_trace["native_curve_nodes"]["discount_factors"],
+    }
+)
+axes[0].scatter(native_nodes["time"], native_nodes["df"], s=28, color=nh.PALETTE["gold"], label="ORE native nodes")
+axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_df"], linewidth=1.8, label="ORE report grid")
+axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_df"], linewidth=1.4, linestyle="--", label="Python fitter")
+axes[0].set_title("USD curve fitter: inputs to fitted outputs")
+axes[0].set_xlabel("Time (years)")
+axes[0].set_ylabel("Discount Factor")
+axes[0].grid(True, alpha=0.3)
+axes[0].legend()
+
+axes[1].plot(usd_fit_compare_df["time"], 1.0e9 * usd_fit_compare_df["abs_error"], linewidth=1.8, color=nh.PALETTE["rose"])
+axes[1].set_title("USD curve fitter absolute error (nanodf)")
+axes[1].set_xlabel("Time (years)")
+axes[1].set_ylabel("Abs Error x 1e9")
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+rate_display = usd_fit_compare_df[
+    [
+        "time",
+        "ore_zero_rate",
+        "python_zero_rate",
+        "ore_forward_rate",
+        "python_forward_rate",
+        "abs_error",
+    ]
+].head(12)
+display(rate_display)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=True)
+axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_zero_rate"], linewidth=1.8, label="ORE zero")
+axes[0].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_zero_rate"], linewidth=1.4, linestyle="--", label="Python zero")
+axes[0].set_title("USD curve fitter zero rates")
+axes[0].set_xlabel("Time (years)")
+axes[0].set_ylabel("Zero Rate")
+axes[0].grid(True, alpha=0.3)
+axes[0].legend()
+
+axes[1].plot(usd_fit_compare_df["time"], usd_fit_compare_df["ore_forward_rate"], linewidth=1.8, label="ORE forward")
+axes[1].plot(usd_fit_compare_df["time"], usd_fit_compare_df["python_forward_rate"], linewidth=1.4, linestyle="--", label="Python forward")
+axes[1].set_title("USD curve fitter instantaneous forwards")
+axes[1].set_xlabel("Time (years)")
+axes[1].set_ylabel("Forward Rate")
+axes[1].grid(True, alpha=0.3)
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+print("Python fitter status:", usd_python_fit_compare.status)
+print("Max abs error:", usd_python_fit_compare.max_abs_error)
+print("Max rel error:", usd_python_fit_compare.max_rel_error)
+
+# %% cell 11
 fitted_weighted_dense = fit_discount_curves_from_ore_market(
     ORE_XML,
     fit_method="weighted_zero_logdf_v1",
@@ -222,13 +332,13 @@ plt.tight_layout()
 plt.show()
 plt.close(fig)
 
-# %% cell 10
+# %% cell 12
 """
 The weighted-versus-bootstrap comparison is worth showing because it makes the fitting choice visible. The old
 extractor demo did this well, and it is more informative than showing one fitter in isolation.
 """
 
-# %% cell 11
+# %% cell 13
 programmatic_quote_pairs = [
     ("MM/RATE/USD/USD-LIBOR/1M", 0.0520),
     ("MM/RATE/USD/USD-LIBOR/3M", 0.0515),
@@ -271,7 +381,7 @@ plt.tight_layout()
 plt.show()
 plt.close(fig)
 
-# %% cell 12
+# %% cell 14
 """
 ## Fresh LGM calibration run
 
@@ -286,7 +396,7 @@ In this example ORE calibrates `alpha` and keeps `kappa` fixed, so the interesti
 buckets rather than the reversion line.
 """
 
-# %% cell 13
+# %% cell 15
 calibration_status = pd.DataFrame(
     [
         {"field": "source_ore_xml", "value": calibration_meta["source_ore_xml"]},
@@ -321,13 +431,193 @@ display(alpha_compare[["bucket_label", "configured_alpha", "calibrated_alpha", "
 
 nh.plot_lgm_calibration_summary(configured_lgm, calibrated_lgm, title="Fresh ORE calibration: configured template vs calibrated output")
 
-# %% cell 14
+lgm_ccys = ["EUR", "USD", "GBP", "CHF", "JPY"]
+lgm_ccy_rows = []
+lgm_alpha_curves = []
+lgm_kappa_curves = []
+
+for ccy in lgm_ccys:
+    cfg = parse_lgm_params_from_simulation_xml(calibration_meta["simulation_xml"], ccy_key=ccy)
+    cal = parse_lgm_params_from_calibration_xml(calibration_meta["calibration_xml"], ccy_key=ccy)
+    alpha_cfg_ccy = nh.lgm_param_frame(cfg, param="alpha")
+    alpha_cal_ccy = nh.lgm_param_frame(cal, param="alpha")
+    kappa_cfg_ccy = nh.lgm_param_frame(cfg, param="kappa")
+    kappa_cal_ccy = nh.lgm_param_frame(cal, param="kappa")
+
+    lgm_ccy_rows.append(
+        {
+            "ccy": ccy,
+            "alpha_bucket_count": len(alpha_cal_ccy),
+            "kappa_bucket_count": len(kappa_cal_ccy),
+            "alpha_mean_shift_bp": 1.0e4 * (alpha_cal_ccy["value"].mean() - alpha_cfg_ccy["value"].mean()),
+            "kappa_mean_shift_bp": 1.0e4 * (kappa_cal_ccy["value"].mean() - kappa_cfg_ccy["value"].mean()),
+        }
+    )
+
+    lgm_alpha_curves.append(
+        alpha_cal_ccy.assign(ccy=ccy).rename(columns={"value": "calibrated_alpha"})
+    )
+    lgm_kappa_curves.append(
+        kappa_cal_ccy.assign(ccy=ccy).rename(columns={"value": "calibrated_kappa"})
+    )
+
+lgm_ccy_summary = pd.DataFrame(lgm_ccy_rows).sort_values("ccy")
+lgm_alpha_curve_df = pd.concat(lgm_alpha_curves, ignore_index=True)
+lgm_kappa_curve_df = pd.concat(lgm_kappa_curves, ignore_index=True)
+
+display(lgm_ccy_summary)
+display(lgm_alpha_curve_df.head(12))
+display(lgm_kappa_curve_df.head(12))
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=False)
+for ccy, grp in lgm_alpha_curve_df.groupby("ccy"):
+    g = grp.sort_values("horizon_years")
+    axes[0].step(g["horizon_years"], g["calibrated_alpha"], where="post", linewidth=1.8, label=ccy)
+axes[0].set_title("Calibrated alpha by currency")
+axes[0].set_xlabel("Horizon (years)")
+axes[0].set_ylabel("Alpha")
+axes[0].grid(True, alpha=0.3)
+axes[0].legend()
+
+for ccy, grp in lgm_kappa_curve_df.groupby("ccy"):
+    g = grp.sort_values("horizon_years")
+    axes[1].step(g["horizon_years"], g["calibrated_kappa"], where="post", linewidth=1.8, label=ccy)
+axes[1].set_title("Calibrated kappa by currency")
+axes[1].set_xlabel("Horizon (years)")
+axes[1].set_ylabel("Kappa")
+axes[1].grid(True, alpha=0.3)
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+# %% cell 16
+"""
+## External Python-vs-ORE calibration parity
+
+The notebook's fresh ORE calibration run keeps the original `Hagan` volatility parametrization, while the current
+external Python calibration backend is implemented for the `HullWhite/HullWhite` subset. So this section derives a
+`HullWhite` variant of the same ORE example, runs it fresh, and then compares the external Python calibration
+against that derived case.
+
+This section runs the external benchmark on the fresh case and summarizes three things:
+- whether the basket expiries line up with ORE
+- whether the helper market values are matched under the calibrated Python result
+- how close the calibrated sigma buckets are to ORE for representative currencies
+"""
+
+# %% cell 17
+calibration_case_root = Path(calibration_hw_parity_meta["fresh_output_dir"]).parent
+parity_reports = {}
+for ccy in ["EUR", "USD"]:
+    out_json = calibration_case_root / f"python_parity_report_{ccy.lower()}.json"
+    cmd = [
+        sys.executable,
+        str(CALIBRATION_PARITY_SCRIPT),
+        "--case-root",
+        str(calibration_case_root),
+        "--currency",
+        ccy,
+        "--out-json",
+        str(out_json),
+    ]
+    completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    if not out_json.exists():
+        raise FileNotFoundError(f"Parity report not written for {ccy}: {out_json}")
+    parity_reports[ccy] = json.loads(out_json.read_text())
+
+parity_summary_rows = [
+    {
+        "ccy": ccy,
+        "status": "ok",
+        "vol_source": report["vol_source"],
+        "vol_type": report["vol_type"],
+        "basket_size": report["basket_size"],
+        "basket_grid_match": report["basket_expiry_time_matches_ore_grid"],
+        "python_valid": report["python_valid"],
+        "python_rmse": report["python_rmse"],
+        "max_abs_sigma_diff": report["max_abs_diff"],
+        "max_rel_sigma_diff": report["max_rel_diff"],
+    }
+    for ccy, report in sorted(parity_reports.items())
+]
+parity_summary = pd.DataFrame(parity_summary_rows)
+display(parity_summary)
+
+parity_point_rows = []
+for ccy, report in sorted(parity_reports.items()):
+    first_point = report["points"][0]
+    last_point = report["points"][-1]
+    parity_point_rows.extend(
+        [
+            {
+                "ccy": ccy,
+                "point": "first",
+                "expiry": first_point["expiry"],
+                "term": first_point["term"],
+                "market_vol": first_point["market_vol"],
+                "market_value": first_point["market_value"],
+                "model_value": first_point["model_value"],
+                "model_vol": first_point["model_vol"],
+            },
+            {
+                "ccy": ccy,
+                "point": "last",
+                "expiry": last_point["expiry"],
+                "term": last_point["term"],
+                "market_vol": last_point["market_vol"],
+                "market_value": last_point["market_value"],
+                "model_value": last_point["model_value"],
+                "model_vol": last_point["model_vol"],
+            },
+        ]
+    )
+display(pd.DataFrame(parity_point_rows))
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharex=False)
+for ccy, report in sorted(parity_reports.items()):
+    x = np.arange(len(report["ore_sigmas"]))
+    axes[0].plot(x, report["ore_sigmas"], linewidth=1.8, label=f"{ccy} ORE")
+    axes[0].plot(x, report["python_sigmas"], linewidth=1.4, linestyle="--", label=f"{ccy} Python")
+axes[0].set_title("ORE vs Python calibrated sigma buckets")
+axes[0].set_xlabel("Bucket index")
+axes[0].set_ylabel("Sigma")
+axes[0].grid(True, alpha=0.3)
+axes[0].legend(ncol=2)
+
+for ccy, report in sorted(parity_reports.items()):
+    x = np.arange(len(report["ore_sigmas"]))
+    diffs_bp = 1.0e4 * (np.array(report["python_sigmas"]) - np.array(report["ore_sigmas"]))
+    axes[1].plot(x, diffs_bp, linewidth=1.8, marker="o", label=ccy)
+axes[1].set_title("Python minus ORE sigma difference (bp)")
+axes[1].set_xlabel("Bucket index")
+axes[1].set_ylabel("Sigma diff x 1e4")
+axes[1].grid(True, alpha=0.3)
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+# %% cell 18
+"""
+The important part of this benchmark is not just the final sigma difference. The benchmark now uses ORE's emitted
+`marketdata.csv` and `todaysmarketcalibration.csv` to rebuild the calibration surface and the discount/forward
+curves, so a small parameter difference is interpretable. Earlier versions that used synthetic flat helper vols
+produced misleading failures. In notebook 3 this compare is run on a derived `HullWhite` variant of the ORE case
+so the external Python backend and the ORE calibration are actually solving the same supported problem.
+"""
+
+# %% cell 19
 """
 The key visual is the alpha comparison. The template starts from a flat `1%` volatility line, while the calibrated
 output bends upward across maturities. Kappa stays flat because this case calibrates volatility but not reversion.
+The additional multi-currency tables make it clear which currencies carry their own calibrated alpha/kappa term
+structures in the same run.
 """
 
-# %% cell 15
+# %% cell 20
 """
 ## Key takeaways
 
@@ -335,9 +625,14 @@ output bends upward across maturities. Kappa stays flat because this case calibr
 - The fitted grid is much denser than the market pillars, so visualizing both levels prevents false precision.
 - The direct extractor path and the native session bridge now explicitly show one shared curve-extraction contract.
 - The same fitter stack also works without XML, which is useful for small programmatic demos and tests.
+- The notebook now shows a clean Python curve fitter demo on one USD curve with deposits, FRAs, and swaps as inputs.
+- The Python fitter section now shows discount factors, zero rates, and instantaneous forwards side by side.
 - The notebook now shows a real fresh ORE calibration run, not a flat parameter template masquerading as calibrated output.
+- The calibration section now includes the other configured currencies, not only EUR.
 - In the chosen case, `alpha` is calibrated while `kappa` remains fixed, so that asymmetry is expected.
 - `load_from_ore_xml(...)` remains the clean bridge from ORE artifacts to Python-side model inputs.
+- The new external calibration parity check is only credible because it now rebuilds helper inputs from ORE output artifacts, not from synthetic placeholder vols.
+- The parity compare in this notebook is run on a derived HullWhite variant of the calibration case so it reflects an actual supported external-vs-ORE calibration comparison.
 
 ## Where this connects next
 

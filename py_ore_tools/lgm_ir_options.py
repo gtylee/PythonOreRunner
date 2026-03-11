@@ -103,6 +103,32 @@ class BermudanSwaptionDef:
             raise ValueError("settlement must be 'physical' or 'cash'")
 
 
+@dataclass(frozen=True)
+class BermudanExerciseDiagnostic:
+    time: float
+    intrinsic_mean: float
+    continuation_mean: float
+    exercise_probability: float
+    active_paths: int
+    boundary_state: float | None = None
+
+
+@dataclass(frozen=True)
+class BermudanLsmcResult:
+    npv_paths: np.ndarray
+    option_npv_paths: np.ndarray
+    signed_underlying_paths: np.ndarray
+    exercise_indices: np.ndarray
+    diagnostics: tuple[BermudanExerciseDiagnostic, ...]
+
+
+@dataclass(frozen=True)
+class BermudanBackwardResult:
+    price: float
+    exercise_values: tuple[tuple[float, np.ndarray], ...]
+    diagnostics: tuple[BermudanExerciseDiagnostic, ...]
+
+
 def _to_1d(arr: np.ndarray | Sequence[float], name: str) -> np.ndarray:
     out = np.asarray(arr, dtype=float)
     if out.ndim != 1:
@@ -486,6 +512,176 @@ def bermudan_npv_paths(
     return out
 
 
+def bermudan_lsmc_result(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    p0_fwd: Callable[[float], float],
+    bermudan: BermudanSwaptionDef,
+    times: Iterable[float],
+    x_paths: np.ndarray,
+    basis_degree: int = 2,
+    itm_only: bool = True,
+) -> BermudanLsmcResult:
+    """Full Bermudan LSMC result including continuation diagnostics.
+
+    This is a more implementation-facing variant of :func:`bermudan_npv_paths`
+    used by higher-level benchmarking and parity tooling.
+    """
+    t = _to_1d(np.asarray(list(times), dtype=float), "times")
+    if x_paths.shape[0] != t.size:
+        raise ValueError("x_paths first dimension must match times size")
+    if np.any(np.diff(t) <= 0.0):
+        raise ValueError("times must be strictly increasing")
+    if basis_degree < 0:
+        raise ValueError("basis_degree must be non-negative")
+
+    ex = np.asarray(bermudan.exercise_times, dtype=float)
+    ex_idx = np.searchsorted(t, ex)
+    if np.any(ex_idx >= t.size):
+        raise ValueError("exercise_times must be <= last simulation time")
+    ex_flags = np.zeros(t.size, dtype=bool)
+    ex_flags[ex_idx] = True
+
+    signed_swap = np.zeros_like(x_paths)
+    for i in range(t.size):
+        swap_npv = swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            bermudan.underlying_legs,
+            float(t[i]),
+            x_paths[i, :],
+        )
+        signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
+
+    v = np.zeros_like(x_paths)
+    v[-1, :] = np.maximum(signed_swap[-1, :], 0.0) if ex_flags[-1] else 0.0
+    betas: dict[int, np.ndarray] = {}
+    cont_hat_by_idx: dict[int, np.ndarray] = {}
+    intrinsic_by_idx: dict[int, np.ndarray] = {}
+
+    for i in range(t.size - 2, -1, -1):
+        p_i = float(p0_disc(float(t[i])))
+        cont_realized = model.discount_bond(float(t[i]), float(t[i + 1]), x_paths[i, :], p_i, float(p0_disc(float(t[i + 1])))) * v[i + 1, :]
+        if not ex_flags[i]:
+            v[i, :] = cont_realized
+            continue
+
+        x_i = x_paths[i, :]
+        y_i = cont_realized
+        exer_raw = signed_swap[i, :]
+        intrinsic = np.maximum(exer_raw, 0.0)
+
+        reg_mask = np.ones_like(x_i, dtype=bool)
+        if itm_only:
+            reg_mask = intrinsic > 1.0e-14
+            if np.count_nonzero(reg_mask) < max(8, basis_degree + 2):
+                reg_mask = np.ones_like(x_i, dtype=bool)
+
+        a = _basis_polynomial_1d(x_i[reg_mask], basis_degree)
+        b = y_i[reg_mask]
+        try:
+            beta, *_ = np.linalg.lstsq(a, b, rcond=None)
+            betas[i] = beta
+            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ beta
+        except np.linalg.LinAlgError:
+            cont_hat = np.full_like(y_i, float(np.mean(b)))
+        cont_hat = np.maximum(cont_hat, 0.0)
+
+        exercise_now = exer_raw > cont_hat
+        cont_hat_by_idx[i] = cont_hat
+        intrinsic_by_idx[i] = intrinsic
+        v[i, :] = np.where(exercise_now, exer_raw, cont_realized)
+
+    if bermudan.settlement.strip().lower() == "cash":
+        exercise_indices = np.full(x_paths.shape[1], -1, dtype=int)
+        diagnostics = []
+        for i in ex_idx:
+            intrinsic = intrinsic_by_idx.get(int(i), np.maximum(signed_swap[i, :], 0.0))
+            cont_hat = cont_hat_by_idx.get(int(i), np.zeros(x_paths.shape[1], dtype=float))
+            ex_mask = intrinsic > cont_hat
+            diagnostics.append(
+                BermudanExerciseDiagnostic(
+                    time=float(t[i]),
+                    intrinsic_mean=float(np.mean(intrinsic)),
+                    continuation_mean=float(np.mean(cont_hat)),
+                    exercise_probability=float(np.mean(ex_mask)),
+                    active_paths=int(x_paths.shape[1]),
+                    boundary_state=_exercise_boundary_state(x_paths[i, :], ex_mask),
+                )
+            )
+        return BermudanLsmcResult(
+            npv_paths=np.maximum(v, 0.0),
+            option_npv_paths=np.maximum(v, 0.0),
+            signed_underlying_paths=signed_swap,
+            exercise_indices=exercise_indices,
+            diagnostics=tuple(diagnostics),
+        )
+
+    out = np.zeros_like(x_paths)
+    exercised = np.zeros(x_paths.shape[1], dtype=bool)
+    exercise_indices = np.full(x_paths.shape[1], -1, dtype=int)
+    diagnostics = []
+    for i in range(t.size):
+        active = ~exercised
+        if np.any(active):
+            out[i, active] = v[i, active]
+        if np.any(exercised):
+            out[i, exercised] = signed_swap[i, exercised]
+
+        if not ex_flags[i]:
+            continue
+        active_idx = np.where(~exercised)[0]
+        if active_idx.size == 0:
+            diagnostics.append(
+                BermudanExerciseDiagnostic(
+                    time=float(t[i]),
+                    intrinsic_mean=0.0,
+                    continuation_mean=0.0,
+                    exercise_probability=0.0,
+                    active_paths=0,
+                    boundary_state=None,
+                )
+            )
+            continue
+
+        x_i = x_paths[i, active_idx]
+        if i in betas:
+            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ betas[i]
+        else:
+            cont_hat = np.zeros_like(x_i)
+        cont_hat = np.maximum(cont_hat, 0.0)
+        exer_now_val = signed_swap[i, active_idx]
+        intrinsic = np.maximum(exer_now_val, 0.0)
+        do_ex = exer_now_val > cont_hat
+        diagnostics.append(
+            BermudanExerciseDiagnostic(
+                time=float(t[i]),
+                intrinsic_mean=float(np.mean(intrinsic)),
+                continuation_mean=float(np.mean(cont_hat)),
+                exercise_probability=float(np.mean(do_ex)),
+                active_paths=int(active_idx.size),
+                boundary_state=_exercise_boundary_state(x_i, do_ex),
+            )
+        )
+        if np.any(do_ex):
+            ex_idx_global = active_idx[do_ex]
+            exercised[ex_idx_global] = True
+            exercise_indices[ex_idx_global] = i
+            out[i, ex_idx_global] = exer_now_val[do_ex]
+        if np.any(~do_ex):
+            keep_idx_global = active_idx[~do_ex]
+            out[i, keep_idx_global] = cont_hat[~do_ex]
+
+    return BermudanLsmcResult(
+        npv_paths=out,
+        option_npv_paths=np.maximum(v, 0.0),
+        signed_underlying_paths=signed_swap,
+        exercise_indices=exercise_indices,
+        diagnostics=tuple(diagnostics),
+    )
+
+
 def bermudan_price(
     model: LGM1F,
     p0_disc: Callable[[float], float],
@@ -501,12 +697,299 @@ def bermudan_price(
     return float(np.mean(v[0, :]))
 
 
+def bermudan_backward_price(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    p0_fwd: Callable[[float], float],
+    bermudan: BermudanSwaptionDef,
+    *,
+    n_grid: int = 121,
+    stddevs: float = 6.0,
+    quadrature_order: int = 21,
+    convolution_sx: float | None = None,
+    convolution_nx: int | None = None,
+    convolution_sy: float = 3.0,
+    convolution_ny: int = 10,
+) -> BermudanBackwardResult:
+    """Deterministic backward induction on a one-dimensional LGM state grid."""
+    if n_grid < 3 or n_grid % 2 == 0:
+        raise ValueError("n_grid must be an odd integer >= 3")
+    if quadrature_order < 3:
+        raise ValueError("quadrature_order must be >= 3")
+    if convolution_ny < 1:
+        raise ValueError("convolution_ny must be >= 1")
+
+    ex = np.asarray(bermudan.exercise_times, dtype=float)
+    times = np.concatenate(([0.0], ex))
+    zeta = np.asarray(model.zeta(times), dtype=float)
+    mx = (int(n_grid) - 1) // 2
+    if convolution_nx is None:
+        convolution_nx = max(1, int(round(mx / max(float(stddevs), 1.0e-12))))
+    if convolution_sx is None:
+        convolution_sx = mx / float(convolution_nx)
+    y_nodes, y_weights = _convolution_nodes_and_weights(float(convolution_sy), int(convolution_ny))
+
+    x_grids: list[np.ndarray] = [_convolution_state_grid(float(v), mx, int(convolution_nx)) for v in zeta]
+    values: list[np.ndarray] = [np.zeros_like(g) for g in x_grids]
+
+    diagnostics: list[BermudanExerciseDiagnostic] = []
+    exercise_values: list[tuple[float, np.ndarray]] = []
+
+    last = len(times) - 1
+    last_grid = x_grids[last]
+    intrinsic_last_pv = np.maximum(
+        float(bermudan.exercise_sign)
+        * swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            bermudan.underlying_legs,
+            float(times[last]),
+            last_grid,
+            exercise_into_whole_periods=True,
+        ),
+        0.0,
+    )
+    num_last = np.asarray(model.numeraire_lgm(float(times[last]), last_grid, p0_disc), dtype=float)
+    intrinsic_last = intrinsic_last_pv / num_last
+    values[last] = intrinsic_last
+    exercise_values.append((float(times[last]), intrinsic_last_pv.copy()))
+    diagnostics.append(
+        BermudanExerciseDiagnostic(
+            time=float(times[last]),
+            intrinsic_mean=float(np.mean(intrinsic_last_pv)),
+            continuation_mean=0.0,
+            exercise_probability=float(np.mean(intrinsic_last_pv > 0.0)),
+            active_paths=int(last_grid.size),
+            boundary_state=_exercise_boundary_state(last_grid, intrinsic_last_pv > 0.0),
+        )
+    )
+
+    for i in range(len(times) - 2, -1, -1):
+        t_i = float(times[i])
+        t_n = float(times[i + 1])
+        grid_i = x_grids[i]
+        grid_n = x_grids[i + 1]
+        next_v = values[i + 1]
+        cont = _convolution_rollback(
+            next_v,
+            zeta_t1=float(zeta[i + 1]),
+            zeta_t0=float(zeta[i]),
+            mx=mx,
+            nx=int(convolution_nx),
+            y_nodes=y_nodes,
+            y_weights=y_weights,
+        )
+
+        if i == 0:
+            values[i] = cont
+            continue
+
+        intrinsic_pv = np.maximum(
+            float(bermudan.exercise_sign)
+            * swap_npv_from_ore_legs_dual_curve(
+                model,
+                p0_disc,
+                p0_fwd,
+                bermudan.underlying_legs,
+                t_i,
+                grid_i,
+                exercise_into_whole_periods=True,
+            ),
+            0.0,
+        )
+        intrinsic = intrinsic_pv / np.asarray(model.numeraire_lgm(t_i, grid_i, p0_disc), dtype=float)
+        values[i] = np.maximum(intrinsic, cont)
+        exercise_values.append((t_i, intrinsic_pv.copy()))
+        diagnostics.append(
+            _backward_diagnostic(
+                model,
+                p0_disc,
+                p0_fwd,
+                bermudan,
+                t_i,
+                grid_i,
+                cont,
+                reduced_values=True,
+            )
+        )
+
+    diagnostics = sorted(diagnostics, key=lambda d: d.time)
+    exercise_values = sorted(exercise_values, key=lambda x: x[0])
+    return BermudanBackwardResult(
+        price=float(values[0][0]),
+        exercise_values=tuple(exercise_values),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _backward_diagnostic(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    p0_fwd: Callable[[float], float],
+    bermudan: BermudanSwaptionDef,
+    t: float,
+    grid: np.ndarray,
+    cont: np.ndarray,
+    reduced_values: bool = False,
+) -> BermudanExerciseDiagnostic:
+    x_eval = np.asarray(grid, dtype=float)
+    probs = None
+    intrinsic_pv = np.maximum(
+        float(bermudan.exercise_sign)
+        * swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            bermudan.underlying_legs,
+            float(t),
+            x_eval,
+            exercise_into_whole_periods=True,
+        ),
+        0.0,
+    )
+    if reduced_values:
+        intrinsic = intrinsic_pv / np.asarray(model.numeraire_lgm(float(t), x_eval, p0_disc), dtype=float)
+    else:
+        intrinsic = intrinsic_pv
+    cont_eval = np.interp(x_eval, grid, cont, left=cont[0], right=cont[-1])
+    ex_mask = intrinsic > cont_eval
+    if probs is None:
+        probs = _state_grid_probabilities(model, float(t), x_eval)
+    return BermudanExerciseDiagnostic(
+        time=float(t),
+        intrinsic_mean=float(np.sum(probs * intrinsic_pv)),
+        continuation_mean=float(np.sum(probs * cont_eval)),
+        exercise_probability=float(np.sum(probs * ex_mask.astype(float))),
+        active_paths=int(x_eval.size),
+        boundary_state=_exercise_boundary_state(x_eval, ex_mask),
+    )
+
+
+def _convolution_nodes_and_weights(sy: float, ny: int) -> tuple[np.ndarray, np.ndarray]:
+    h = 1.0 / float(ny)
+    my = int(np.floor(float(sy) * float(ny) + 0.5))
+    y = h * (np.arange(2 * my + 1, dtype=float) - my)
+    n = 0.5 * (1.0 + np.vectorize(math.erf, otypes=[float])(y / np.sqrt(2.0)))
+    g = np.exp(-0.5 * y * y) / np.sqrt(2.0 * np.pi)
+    w = np.empty_like(y)
+    for i in range(y.size):
+        if i == 0 or i == y.size - 1:
+            y0 = y[0]
+            w[i] = (1.0 + y0 / h) * (0.5 * (1.0 + math.erf((y0 + h) / np.sqrt(2.0)))) - (y0 / h) * (
+                0.5 * (1.0 + math.erf(y0 / np.sqrt(2.0)))
+            ) + (math.exp(-0.5 * (y0 + h) * (y0 + h)) / np.sqrt(2.0 * np.pi) - math.exp(-0.5 * y0 * y0) / np.sqrt(2.0 * np.pi)) / h
+        else:
+            w[i] = (
+                (1.0 + y[i] / h) * n[i + 1]
+                - 2.0 * y[i] / h * n[i]
+                - (1.0 - y[i] / h) * n[i - 1]
+                + (g[i + 1] - 2.0 * g[i] + g[i - 1]) / h
+            )
+        if w[i] < 0.0 and w[i] > -1.0e-10:
+            w[i] = 0.0
+    return y, w
+
+
+def _convolution_state_grid(zeta_t: float, mx: int, nx: int) -> np.ndarray:
+    if mx < 0 or nx < 1:
+        raise ValueError("invalid convolution grid parameters")
+    if abs(zeta_t) <= 1.0e-18:
+        return np.zeros(2 * mx + 1, dtype=float)
+    dx = np.sqrt(max(float(zeta_t), 0.0)) / float(nx)
+    return dx * (np.arange(2 * mx + 1, dtype=float) - mx)
+
+
+def _convolution_rollback(
+    values: np.ndarray,
+    *,
+    zeta_t1: float,
+    zeta_t0: float,
+    mx: int,
+    nx: int,
+    y_nodes: np.ndarray,
+    y_weights: np.ndarray,
+) -> np.ndarray:
+    v = np.asarray(values, dtype=float)
+    if abs(zeta_t1 - zeta_t0) <= 1.0e-18:
+        return v.copy()
+    sigma = np.sqrt(max(float(zeta_t1), 0.0))
+    dx = sigma / float(nx)
+    out = np.zeros(2 * mx + 1, dtype=float)
+    if abs(zeta_t0) <= 1.0e-18:
+        acc = 0.0
+        for y_i, w_i in zip(y_nodes, y_weights):
+            kp = y_i * sigma / dx + mx
+            kk = int(np.floor(kp))
+            alpha = kp - kk
+            beta = 1.0 + kk - kp
+            interp = v[0] if kk < 0 else (v[-1] if kk + 1 > 2 * mx else alpha * v[kk + 1] + beta * v[kk])
+            acc += w_i * interp
+        out.fill(acc)
+        return out
+    std = np.sqrt(max(float(zeta_t1 - zeta_t0), 0.0))
+    dx2 = np.sqrt(max(float(zeta_t0), 0.0)) / float(nx)
+    for k in range(2 * mx + 1):
+        acc = 0.0
+        for y_i, w_i in zip(y_nodes, y_weights):
+            kp = (dx2 * (k - mx) + y_i * std) / dx + mx
+            kk = int(np.floor(kp))
+            alpha = kp - kk
+            beta = 1.0 + kk - kp
+            interp = v[0] if kk < 0 else (v[-1] if kk + 1 > 2 * mx else alpha * v[kk + 1] + beta * v[kk])
+            acc += w_i * interp
+        out[k] = acc
+    return out
+
+
+def _state_grid_probabilities(model: LGM1F, t: float, x_grid: np.ndarray) -> np.ndarray:
+    x = np.asarray(x_grid, dtype=float)
+    if x.size == 1:
+        return np.array([1.0], dtype=float)
+    z = max(float(model.zeta(t)), 0.0)
+    if z <= 1.0e-18:
+        probs = np.zeros_like(x)
+        probs[np.argmin(np.abs(x))] = 1.0
+        return probs
+    sigma = np.sqrt(z)
+    edges = np.empty(x.size + 1, dtype=float)
+    edges[1:-1] = 0.5 * (x[:-1] + x[1:])
+    edges[0] = x[0] - 0.5 * (x[1] - x[0])
+    edges[-1] = x[-1] + 0.5 * (x[-1] - x[-2])
+    cdf = 0.5 * (1.0 + np.vectorize(math.erf, otypes=[float])(edges / (sigma * np.sqrt(2.0))))
+    probs = np.diff(cdf)
+    s = float(np.sum(probs))
+    if s <= 0.0:
+        return np.full(x.size, 1.0 / x.size, dtype=float)
+    return probs / s
+
+
+def _exercise_boundary_state(x: np.ndarray, exercise_mask: np.ndarray) -> float | None:
+    x1 = np.asarray(x, dtype=float)
+    mask = np.asarray(exercise_mask, dtype=bool)
+    if x1.size == 0 or not np.any(mask) or np.all(mask):
+        return None
+    order = np.argsort(x1)
+    xs = x1[order]
+    ms = mask[order]
+    switch = np.where(ms[:-1] != ms[1:])[0]
+    if switch.size == 0:
+        return None
+    k = int(switch[-1])
+    return float(0.5 * (xs[k] + xs[k + 1]))
+
+
 __all__ = [
     "CapFloorDef",
     "BermudanSwaptionDef",
+    "BermudanBackwardResult",
+    "BermudanExerciseDiagnostic",
+    "BermudanLsmcResult",
     "forward_rate_from_bonds",
     "capfloor_npv",
     "capfloor_npv_paths",
+    "bermudan_backward_price",
+    "bermudan_lsmc_result",
     "bermudan_npv_paths",
     "bermudan_price",
 ]

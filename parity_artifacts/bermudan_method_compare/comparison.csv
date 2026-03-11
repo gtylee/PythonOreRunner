@@ -1,0 +1,4 @@
+case_name,trade_id,fixed_rate,py_lsmc,py_backward,py_lsmc_calibrated,py_backward_calibrated,ore_classic,ore_amc,ore_amc_source,py_lsmc_minus_ore_classic,py_backward_minus_ore_classic,py_lsmc_calibrated_minus_ore_classic,py_backward_calibrated_minus_ore_classic,ore_amc_minus_ore_classic
+berm_100bp,BermSwp,0.01,107948.70558984496,96382.62399997452,,,96185.093011,,unavailable(returncode=-11),11763.612578844957,197.53098897451127,,,
+berm_200bp,BermSwp,0.02,60925.08781650084,52294.674108018015,,,52289.126872,52289.126872,expected_output_fallback,8635.96094450084,5.547236018013791,,,0.0
+berm_300bp,BermSwp,0.03,29987.429772961557,24337.233631332754,,,24384.657538,,unavailable(returncode=-11),5602.772234961558,-47.42390666724532,,,

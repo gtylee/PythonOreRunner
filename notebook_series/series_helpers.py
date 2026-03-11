@@ -213,23 +213,13 @@ def locate_ore_exe(repo: Path | None = None) -> Path:
     raise FileNotFoundError("ORE executable not found under the local build tree")
 
 
-def run_ore_case_fresh(source_ore_xml: Path, *, label: str) -> tuple[Path, Path, dict[str, Any]]:
-    repo = find_repo_root()
-    py_runner = _pythonorerunner_root(repo)
-    ore_exe = locate_ore_exe(repo)
-    source_ore_xml = Path(source_ore_xml).resolve()
-    run_root = (
-        py_runner
-        / "notebook_series"
-        / "_fresh_runs"
-        / f"{label}_{int(time.time() * 1000)}"
-    )
-    input_dir = run_root / "Input"
-    output_dir = run_root / "Output"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    root = ET.parse(source_ore_xml).getroot()
+def _normalize_ore_parameters(
+    root: ET.Element,
+    *,
+    base_dir: Path,
+    input_dir: Path,
+    output_dir: Path,
+) -> None:
     output_relative_names = {
         "logFile",
         "outputFile",
@@ -240,11 +230,12 @@ def run_ore_case_fresh(source_ore_xml: Path, *, label: str) -> tuple[Path, Path,
         "rawCubeOutputFile",
         "netCubeOutputFile",
     }
+    extra_file_names = {"calendarAdjustment", "configFile"}
     for node in root.findall(".//Parameter"):
         name = node.attrib.get("name", "")
         text = (node.text or "").strip()
         if name == "inputPath":
-            node.text = str(source_ore_xml.parent)
+            node.text = str(input_dir)
             continue
         if name == "outputPath":
             node.text = str(output_dir)
@@ -252,12 +243,33 @@ def run_ore_case_fresh(source_ore_xml: Path, *, label: str) -> tuple[Path, Path,
         if name in output_relative_names and text:
             node.text = Path(text).name
             continue
-        if name.endswith("File") and text:
-            resolved = (source_ore_xml.parent / text).resolve() if not Path(text).is_absolute() else Path(text)
+        if (name.endswith("File") or name in extra_file_names) and text:
+            resolved = (base_dir / text).resolve() if not Path(text).is_absolute() else Path(text)
             node.text = str(resolved)
         elif name.endswith("Path") and name != "inputPath" and text:
-            resolved = (source_ore_xml.parent / text).resolve() if not Path(text).is_absolute() else Path(text)
+            resolved = (base_dir / text).resolve() if not Path(text).is_absolute() else Path(text)
             node.text = str(resolved)
+
+
+def run_ore_case_fresh(source_ore_xml: Path, *, label: str) -> tuple[Path, Path, dict[str, Any]]:
+    repo = find_repo_root()
+    ore_exe = locate_ore_exe(repo)
+    source_ore_xml = Path(source_ore_xml).resolve()
+    run_root = (
+        repo
+        / "Tools"
+        / "PythonOreRunner"
+        / "notebook_series"
+        / "_fresh_runs"
+        / f"{label}_{int(time.time() * 1000)}"
+    )
+    input_dir = run_root / "Input"
+    output_dir = run_root / "Output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    root = ET.parse(source_ore_xml).getroot()
+    _normalize_ore_parameters(root, base_dir=source_ore_xml.parent, input_dir=source_ore_xml.parent, output_dir=output_dir)
 
     fresh_ore_xml = input_dir / "ore.xml"
     ET.ElementTree(root).write(fresh_ore_xml, encoding="utf-8", xml_declaration=True)
@@ -598,12 +610,248 @@ def capability_matrix_frame(swig_available: bool) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def aligned_case_dir(case_name: str = "flat_EUR_5Y_A") -> Path:
+def aligned_case_dir(case_name: str = "flat_EUR_10Y_B") -> Path:
     repo = find_repo_root()
     return _pythonorerunner_root(repo) / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / case_name
 
 
-def run_aligned_case_compare(case_name: str = "flat_EUR_5Y_A", *, paths: int = 2000):
+def bermudan_compare_root(repo: Path | None = None) -> Path:
+    repo = repo or find_repo_root()
+    return _pythonorerunner_root(repo) / "parity_artifacts" / "bermudan_method_compare"
+
+
+def load_bermudan_method_comparison() -> pd.DataFrame:
+    path = bermudan_compare_root() / "comparison.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Bermudan comparison csv not found: {path}")
+    frame = pd.read_csv(path)
+    for col in ("py_lsmc", "py_backward", "ore_classic", "ore_amc"):
+        if col in frame:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    if {"py_lsmc", "ore_classic"}.issubset(frame.columns):
+        frame["py_lsmc_minus_ore_classic"] = frame["py_lsmc"] - frame["ore_classic"]
+    if {"py_backward", "ore_classic"}.issubset(frame.columns):
+        frame["py_backward_minus_ore_classic"] = frame["py_backward"] - frame["ore_classic"]
+        frame["py_backward_abs_rel_diff"] = (
+            frame["py_backward_minus_ore_classic"].abs() / frame["ore_classic"].abs().clip(lower=1.0)
+        )
+    return frame.sort_values("fixed_rate").reset_index(drop=True)
+
+
+def _load_trade_npv_csv(npv_csv: Path, trade_id: str) -> float:
+    with npv_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            key = row.get("TradeId", row.get("#TradeId", ""))
+            if str(key).strip() == str(trade_id):
+                for candidate in ("NPV(Base)", "NPV", "Base NPV"):
+                    if candidate in row and str(row[candidate]).strip():
+                        return float(row[candidate])
+    raise ValueError(f"Trade '{trade_id}' not found in {npv_csv}")
+
+
+def _load_trade_pricing_stats(pricingstats_csv: Path, trade_id: str) -> dict[str, float]:
+    with pricingstats_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            key = row.get("TradeId", row.get("#TradeId", ""))
+            if str(key).strip() == str(trade_id):
+                return {
+                    "number_of_pricings": float(row.get("NumberOfPricings", 0.0) or 0.0),
+                    "cumulative_timing_us": float(row.get("CumulativeTiming", 0.0) or 0.0),
+                    "average_timing_us": float(row.get("AverageTiming", 0.0) or 0.0),
+                }
+    raise ValueError(f"Trade '{trade_id}' not found in {pricingstats_csv}")
+
+
+def _load_runtime_totals(runtimes_csv: Path) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    with runtimes_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            key = str(row.get("#Key", row.get("Key", ""))).strip()
+            if key:
+                totals[key] = float(row.get("Total", 0.0) or 0.0) / 1.0e6
+    return totals
+
+
+def run_bermudan_case_summary(case_name: str = "berm_200bp", *, trade_id: str = "BermSwp", num_paths: int = 4096, seed: int = 42):
+    bootstrap_notebook_env()
+    from native_xva_interface import price_bermudan_from_ore_case
+
+    case_root = bermudan_compare_root() / case_name
+    input_dir = case_root / "Input"
+    output_dir = case_root / "Output" / "classic"
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Bermudan case input not found: {input_dir}")
+    ore_price = _load_trade_npv_csv(output_dir / "npv.csv", trade_id)
+    ore_trade_stats = _load_trade_pricing_stats(output_dir / "pricingstats.csv", trade_id)
+    ore_runtime_totals = _load_runtime_totals(output_dir / "runtimes.csv")
+
+    t0 = time.perf_counter()
+    lsmc = price_bermudan_from_ore_case(
+        input_dir,
+        ore_file="ore_classic.xml",
+        trade_id=trade_id,
+        method="lsmc",
+        num_paths=num_paths,
+        seed=seed,
+        curve_mode="market_fit",
+    )
+    lsmc_elapsed = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    backward = price_bermudan_from_ore_case(
+        input_dir,
+        ore_file="ore_classic.xml",
+        trade_id=trade_id,
+        method="backward",
+        num_paths=num_paths,
+        seed=seed,
+        curve_mode="market_fit",
+    )
+    backward_elapsed = time.perf_counter() - t0
+
+    summary = pd.DataFrame(
+        [
+            {
+                "method": "py_lsmc",
+                "price": float(lsmc.price),
+                "ore_classic": float(ore_price),
+                "delta_vs_ore": float(lsmc.price - ore_price),
+                "abs_rel_diff": abs(float(lsmc.price - ore_price)) / max(abs(float(ore_price)), 1.0),
+                "model_param_source": str(lsmc.model_param_source),
+                "curve_source": str(lsmc.curve_source),
+            },
+            {
+                "method": "py_backward",
+                "price": float(backward.price),
+                "ore_classic": float(ore_price),
+                "delta_vs_ore": float(backward.price - ore_price),
+                "abs_rel_diff": abs(float(backward.price - ore_price)) / max(abs(float(ore_price)), 1.0),
+                "model_param_source": str(backward.model_param_source),
+                "curve_source": str(backward.curve_source),
+            },
+        ]
+    )
+
+    speed = pd.DataFrame(
+        [
+            {
+                "engine": "py_lsmc",
+                "elapsed_sec": float(lsmc_elapsed),
+                "timing_source": "wall_clock_notebook",
+            },
+            {
+                "engine": "py_backward",
+                "elapsed_sec": float(backward_elapsed),
+                "timing_source": "wall_clock_notebook",
+            },
+            {
+                "engine": "ore_classic_trade_avg",
+                "elapsed_sec": float(ore_trade_stats["average_timing_us"]) / 1.0e6,
+                "timing_source": "pricingstats_average",
+            },
+            {
+                "engine": "ore_classic_trade_cumulative",
+                "elapsed_sec": float(ore_trade_stats["cumulative_timing_us"]) / 1.0e6,
+                "timing_source": "pricingstats_cumulative",
+            },
+            {
+                "engine": "ore_classic_xva_total",
+                "elapsed_sec": float(ore_runtime_totals.get("XVA|Run XVAAnalytic", np.nan)),
+                "timing_source": "runtimes_total",
+            },
+        ]
+    )
+    speed["speed_ratio_vs_py_backward"] = speed["elapsed_sec"] / max(float(backward_elapsed), 1.0e-12)
+
+    diag_rows: list[dict[str, Any]] = []
+    for method_name, result in (("py_lsmc", lsmc), ("py_backward", backward)):
+        for diag in result.exercise_diagnostics:
+            diag_rows.append(
+                {
+                    "method": method_name,
+                    "time": float(diag.time),
+                    "intrinsic_mean": float(diag.intrinsic_mean),
+                    "continuation_mean": float(diag.continuation_mean),
+                    "exercise_probability": float(diag.exercise_probability),
+                    "boundary_state": np.nan if diag.boundary_state is None else float(diag.boundary_state),
+                }
+            )
+    diagnostics = pd.DataFrame(diag_rows).sort_values(["method", "time"]).reset_index(drop=True)
+    meta = {
+        "case_name": case_name,
+        "trade_id": trade_id,
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "ore_npv_csv": str(output_dir / "npv.csv"),
+        "num_paths": int(num_paths),
+        "seed": int(seed),
+    }
+    return summary, diagnostics, speed, meta
+
+
+def run_bermudan_sensitivity_comparison(
+    case_name: str = "berm_200bp",
+    *,
+    method: str = "backward",
+    num_paths: int = 256,
+    seed: int = 17,
+    shift_size: float = 1.0e-4,
+):
+    repo = bootstrap_notebook_env()
+    py_runner = _pythonorerunner_root(repo)
+    compare_script = py_runner / "compare_bermudan_ore_sensitivities.py"
+    output_root = py_runner / "parity_artifacts" / "bermudan_sensitivity_compare"
+    cmd = [
+        sys.executable,
+        str(compare_script),
+        "--case-name",
+        case_name,
+        "--method",
+        method,
+        "--num-paths",
+        str(num_paths),
+        "--seed",
+        str(seed),
+        "--shift-size",
+        str(shift_size),
+        "--output-root",
+        str(output_root),
+    ]
+    start = time.perf_counter()
+    cp = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, check=False)
+    elapsed = time.perf_counter() - start
+    if cp.returncode != 0:
+        raise RuntimeError(
+            f"Bermudan sensitivity comparison run failed with return code {cp.returncode}: "
+            f"{cp.stderr[-2000:] or cp.stdout[-2000:]}"
+        )
+    json_path = output_root / f"{case_name}_{method}.json"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    rows = pd.DataFrame(payload.get("rows", []))
+    meta = pd.DataFrame(
+        [
+            {
+                "case_name": payload.get("case_name", case_name),
+                "trade_id": payload.get("trade_id", "BermSwp"),
+                "method": payload.get("method", method),
+                "shift_size": payload.get("shift_size", shift_size),
+                "python_price": payload.get("python_price"),
+                "ore_price": payload.get("ore_price"),
+                "price_diff": payload.get("price_diff"),
+                "ore_run_root": payload.get("ore_run_root"),
+                "elapsed_sec": elapsed,
+            }
+        ]
+    )
+    ore_run_root = Path(payload["ore_run_root"])
+    sensitivity_config = pd.read_csv(ore_run_root / "Output" / "sensitivity_config.csv")
+    scenario = pd.read_csv(ore_run_root / "Output" / "scenario.csv")
+    return payload, meta, rows, sensitivity_config, scenario
+
+
+def run_aligned_case_compare(case_name: str = "flat_EUR_10Y_B", *, paths: int = 2000):
     bootstrap_notebook_env()
     from dataclasses import replace
     from native_xva_interface import XVAEngine, PythonLgmAdapter
@@ -749,6 +997,81 @@ def run_fresh_lgm_calibration_demo(*, ccy_key: str = "EUR"):
     return configured, calibrated, meta
 
 
+def run_fresh_lgm_calibration_hullwhite_parity_demo(*, base_fresh_ore_xml: str | Path):
+    bootstrap_notebook_env()
+    repo = find_repo_root()
+    ore_exe = locate_ore_exe(repo)
+    base_fresh_ore_xml = Path(base_fresh_ore_xml).resolve()
+    if not base_fresh_ore_xml.exists():
+        raise FileNotFoundError(f"base fresh ore xml not found: {base_fresh_ore_xml}")
+
+    ore_root = ET.parse(base_fresh_ore_xml).getroot()
+    sim_node = ore_root.find("./Analytics/Analytic[@type='simulation']/Parameter[@name='simulationConfigFile']")
+    if sim_node is None or not (sim_node.text or "").strip():
+        raise ValueError(f"simulationConfigFile missing in {base_fresh_ore_xml}")
+
+    source_sim_xml = Path((sim_node.text or "").strip()).resolve()
+    if not source_sim_xml.exists():
+        raise FileNotFoundError(f"simulation xml not found: {source_sim_xml}")
+
+    run_root = (
+        repo
+        / "Tools"
+        / "PythonOreRunner"
+        / "notebook_series"
+        / "_fresh_runs"
+        / f"notebook_03_lgm_calibration_hw_parity_{int(time.time() * 1000)}"
+    )
+    input_dir = run_root / "Input"
+    output_dir = run_root / "Output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sim_root = ET.parse(source_sim_xml).getroot()
+    for node in sim_root.findall("./CrossAssetModel/InterestRateModels/LGM/Volatility/VolatilityType"):
+        node.text = "HullWhite"
+    hw_sim_xml = input_dir / "simulation_hw.xml"
+    ET.ElementTree(sim_root).write(hw_sim_xml, encoding="utf-8", xml_declaration=True)
+
+    ore_copy_root = ET.parse(base_fresh_ore_xml).getroot()
+    _normalize_ore_parameters(ore_copy_root, base_dir=base_fresh_ore_xml.parent, input_dir=input_dir, output_dir=output_dir)
+    sim_copy_node = ore_copy_root.find("./Analytics/Analytic[@type='simulation']/Parameter[@name='simulationConfigFile']")
+    if sim_copy_node is None:
+        raise ValueError(f"simulationConfigFile missing in {base_fresh_ore_xml}")
+    sim_copy_node.text = str(hw_sim_xml)
+    calibration_cfg_node = ore_copy_root.find("./Analytics/Analytic[@type='calibration']/Parameter[@name='configFile']")
+    if calibration_cfg_node is not None:
+        calibration_cfg_node.text = str(hw_sim_xml)
+    hw_source_ore_xml = input_dir / "ore.xml"
+    ET.ElementTree(ore_copy_root).write(hw_source_ore_xml, encoding="utf-8", xml_declaration=True)
+
+    start = time.perf_counter()
+    cp = subprocess.run(
+        [str(ore_exe), str(hw_source_ore_xml)],
+        cwd=str(run_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    elapsed = time.perf_counter() - start
+    if cp.returncode != 0:
+        raise RuntimeError(
+            f"Fresh HullWhite parity ORE run failed for {hw_source_ore_xml} with return code {cp.returncode}: "
+            f"{cp.stderr[-2000:] or cp.stdout[-2000:]}"
+        )
+    meta = {
+        "source_ore_xml": str(base_fresh_ore_xml),
+        "derived_source_ore_xml": str(hw_source_ore_xml),
+        "derived_simulation_xml": str(hw_sim_xml),
+        "fresh_ore_xml": str(hw_source_ore_xml),
+        "fresh_output_dir": str(output_dir),
+        "elapsed_sec": elapsed,
+        "returncode": int(cp.returncode),
+        "run_root": str(run_root),
+    }
+    return meta
+
+
 def run_live_swig_stress_classic_irs(*, num_paths: int = 128):
     bootstrap_notebook_env()
     from dataclasses import replace
@@ -764,7 +1087,7 @@ def run_live_swig_stress_classic_irs(*, num_paths: int = 128):
     )
 
     repo = find_repo_root()
-    input_dir = _examples_root(repo) / "XvaRisk" / "Input"
+    input_dir = repo / "Examples" / "XvaRisk" / "Input"
     base = XVALoader.from_files(str(input_dir), ore_file="ore_stress_classic.xml")
     cfg = replace(stress_classic_native_preset(repo, num_paths=num_paths), analytics=("CVA", "DVA", "FVA", "MVA"))
     snap = XVASnapshot(
@@ -943,6 +1266,114 @@ def plot_metric_delta(frame: pd.DataFrame, *, metric_col: str = "metric", delta_
     ax.set_title(title)
     ax.set_xlabel(delta_col.replace("_", " ").title())
     ax.set_ylabel("")
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_bermudan_method_levels(frame: pd.DataFrame, *, title: str = "Bermudan pricing methods vs ORE") -> None:
+    required = ["case_name", "py_lsmc", "py_backward", "ore_classic"]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing Bermudan comparison columns: {missing}")
+    plot_frame = frame.copy()
+    x = np.arange(len(plot_frame))
+    width = 0.24
+    fig, ax = plt.subplots(figsize=(11.0, 4.8))
+    ax.bar(x - width, plot_frame["py_lsmc"], width=width, label="py_lsmc", color=PALETTE["blue"])
+    ax.bar(x, plot_frame["py_backward"], width=width, label="py_backward", color=PALETTE["teal"])
+    ax.bar(x + width, plot_frame["ore_classic"], width=width, label="ore_classic", color=PALETTE["gold"])
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_frame["case_name"].astype(str))
+    ax.set_title(title)
+    ax.set_ylabel("Price")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_bermudan_ore_deltas(frame: pd.DataFrame, *, title: str = "Python minus ORE classic for Bermudan cases") -> None:
+    required = ["case_name", "py_lsmc_minus_ore_classic", "py_backward_minus_ore_classic"]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing Bermudan delta columns: {missing}")
+    plot_frame = frame.copy()
+    x = np.arange(len(plot_frame))
+    width = 0.34
+    fig, ax = plt.subplots(figsize=(11.0, 4.6))
+    ax.axhline(0.0, color=PALETTE["slate"], lw=1.2)
+    ax.bar(x - width / 2, plot_frame["py_lsmc_minus_ore_classic"], width=width, label="py_lsmc - ore", color=PALETTE["rose"])
+    ax.bar(x + width / 2, plot_frame["py_backward_minus_ore_classic"], width=width, label="py_backward - ore", color=PALETTE["teal"])
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_frame["case_name"].astype(str))
+    ax.set_title(title)
+    ax.set_ylabel("Delta")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_bermudan_exercise_diagnostics(frame: pd.DataFrame, *, title: str = "Bermudan exercise diagnostics") -> None:
+    required = ["method", "time", "exercise_probability", "boundary_state"]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing Bermudan diagnostic columns: {missing}")
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 4.6))
+    for method, grp in frame.groupby("method"):
+        g = grp.sort_values("time")
+        axes[0].plot(g["time"], g["exercise_probability"], marker="o", lw=2.0, label=method)
+        axes[1].plot(g["time"], g["boundary_state"], marker="o", lw=2.0, label=method)
+    axes[0].set_title("Exercise probability by date")
+    axes[0].set_xlabel("Exercise time (years)")
+    axes[0].set_ylabel("Probability")
+    axes[1].set_title("Boundary state by date")
+    axes[1].set_xlabel("Exercise time (years)")
+    axes[1].set_ylabel("Boundary state")
+    axes[0].legend()
+    axes[1].legend()
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_bermudan_sensitivity_triplet(frame: pd.DataFrame, *, title: str = "Bermudan sensitivity comparison") -> None:
+    required = [
+        "normalized_factor",
+        "ore_bump_change",
+        "ore_direct_quote_bump_change",
+        "python_quote_full_bump_change",
+    ]
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing Bermudan sensitivity columns: {missing}")
+    plot_frame = frame.copy()
+    x = np.arange(len(plot_frame))
+    width = 0.24
+    fig, ax = plt.subplots(figsize=(11.5, 4.8))
+    ax.axhline(0.0, color=PALETTE["slate"], lw=1.2)
+    ax.bar(x - width, plot_frame["ore_bump_change"], width=width, label="ore_sensitivity_csv", color=PALETTE["gold"])
+    ax.bar(
+        x,
+        plot_frame["ore_direct_quote_bump_change"],
+        width=width,
+        label="ore_direct_quote_bump",
+        color=PALETTE["rose"],
+    )
+    ax.bar(
+        x + width,
+        plot_frame["python_quote_full_bump_change"],
+        width=width,
+        label="python_quote_bump",
+        color=PALETTE["teal"],
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_frame["normalized_factor"].astype(str))
+    ax.set_title(title)
+    ax.set_ylabel("Bump change")
+    ax.legend()
     plt.tight_layout()
     plt.show()
     plt.close(fig)
@@ -1159,7 +1590,7 @@ def lgm_benchmark_frame(model, times: np.ndarray, *, path_counts: tuple[int, ...
 
 def parse_parity_report() -> tuple[pd.DataFrame, str]:
     repo = find_repo_root()
-    report_path = _pythonorerunner_root(repo) / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
+    report_path = repo / "Tools" / "PythonOreRunner" / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
     text = report_path.read_text(encoding="utf-8")
     rows = []
     for line in text.splitlines():

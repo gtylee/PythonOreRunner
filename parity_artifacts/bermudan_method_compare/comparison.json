@@ -1,0 +1,53 @@
+[
+  {
+    "case_name": "berm_100bp",
+    "trade_id": "BermSwp",
+    "fixed_rate": 0.01,
+    "py_lsmc": 107948.70558984496,
+    "py_backward": 96382.62399997452,
+    "py_lsmc_calibrated": null,
+    "py_backward_calibrated": null,
+    "ore_classic": 96185.093011,
+    "ore_amc": null,
+    "ore_amc_source": "unavailable(returncode=-11)",
+    "py_lsmc_minus_ore_classic": 11763.612578844957,
+    "py_backward_minus_ore_classic": 197.53098897451127,
+    "py_lsmc_calibrated_minus_ore_classic": null,
+    "py_backward_calibrated_minus_ore_classic": null,
+    "ore_amc_minus_ore_classic": null
+  },
+  {
+    "case_name": "berm_200bp",
+    "trade_id": "BermSwp",
+    "fixed_rate": 0.02,
+    "py_lsmc": 60925.08781650084,
+    "py_backward": 52294.674108018015,
+    "py_lsmc_calibrated": null,
+    "py_backward_calibrated": null,
+    "ore_classic": 52289.126872,
+    "ore_amc": 52289.126872,
+    "ore_amc_source": "expected_output_fallback",
+    "py_lsmc_minus_ore_classic": 8635.96094450084,
+    "py_backward_minus_ore_classic": 5.547236018013791,
+    "py_lsmc_calibrated_minus_ore_classic": null,
+    "py_backward_calibrated_minus_ore_classic": null,
+    "ore_amc_minus_ore_classic": 0.0
+  },
+  {
+    "case_name": "berm_300bp",
+    "trade_id": "BermSwp",
+    "fixed_rate": 0.03,
+    "py_lsmc": 29987.429772961557,
+    "py_backward": 24337.233631332754,
+    "py_lsmc_calibrated": null,
+    "py_backward_calibrated": null,
+    "ore_classic": 24384.657538,
+    "ore_amc": null,
+    "ore_amc_source": "unavailable(returncode=-11)",
+    "py_lsmc_minus_ore_classic": 5602.772234961558,
+    "py_backward_minus_ore_classic": -47.42390666724532,
+    "py_lsmc_calibrated_minus_ore_classic": null,
+    "py_backward_calibrated_minus_ore_classic": null,
+    "ore_amc_minus_ore_classic": null
+  }
+]

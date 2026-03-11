@@ -1,4 +1,5 @@
 from .dataclasses import (
+    BermudanSwaption,
     CollateralBalance,
     CollateralConfig,
     CreditEntityConfig,
@@ -20,6 +21,7 @@ from .dataclasses import (
     IRS,
     MarketData,
     MarketQuote,
+    MporConfig,
     NettingConfig,
     NettingSet,
     Portfolio,
@@ -34,6 +36,17 @@ from .dataclasses import (
     XVAAnalyticConfig,
     XVAConfig,
     XVASnapshot,
+)
+from .bermudan import (
+    BermudanBenchmarkResult,
+    BermudanPricingResult,
+    BermudanPvSensitivity,
+    BermudanSensitivityBenchmarkResult,
+    BermudanSensitivityBenchmarkRow,
+    benchmark_bermudan_from_ore_case,
+    benchmark_bermudan_sensitivities_from_ore_case,
+    price_bermudan_from_ore_case,
+    price_bermudan_with_sensis_from_ore_case,
 )
 from .exceptions import ConflictError, EngineRunError, InputCompatibilityError, MappingError, ValidationError
 from .loader import XVALoader, merge_snapshots
@@ -57,6 +70,12 @@ PortfolioSnapshot = Portfolio
 __all__ = [
     "CollateralBalance",
     "CollateralConfig",
+    "BermudanBenchmarkResult",
+    "BermudanPricingResult",
+    "BermudanPvSensitivity",
+    "BermudanSensitivityBenchmarkResult",
+    "BermudanSensitivityBenchmarkRow",
+    "BermudanSwaption",
     "CreditEntityConfig",
     "CreditSimulationConfig",
     "ConventionsConfig",
@@ -84,6 +103,7 @@ __all__ = [
     "MarketData",
     "MarketDataSnapshot",
     "MarketQuote",
+    "MporConfig",
     "NettingConfig",
     "NettingSet",
     "ORESwigAdapter",
@@ -112,10 +132,14 @@ __all__ = [
     "XVAResult",
     "XVASession",
     "XVASnapshot",
+    "benchmark_bermudan_from_ore_case",
+    "benchmark_bermudan_sensitivities_from_ore_case",
     "build_input_parameters",
     "compare_results",
     "map_snapshot",
     "merge_snapshots",
+    "price_bermudan_from_ore_case",
+    "price_bermudan_with_sensis_from_ore_case",
     "stress_classic_native_preset",
     "stress_classic_native_runtime",
     "stress_classic_fixing_lines",

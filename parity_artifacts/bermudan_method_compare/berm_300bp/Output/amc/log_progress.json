@@ -1,0 +1,6 @@
+{ "@timestamp": "2026-03-11T17:03:47.501902", "key": "Running XVA Analytic", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-11T17:03:47.502987", "key": "XVA: Build Today's Market", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-11T17:03:47.505339", "key": "XVA: Build Today's Market", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-11T17:03:47.690650", "key": "XVA: Build AMC portfolio", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-11T17:03:47.692046", "key": "XVA: Build AMC portfolio", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-11T17:03:48.119509", "detail": "1 trade", "key": "XVA: Build AMC Cube...", "progress": 0, "total": 1 }

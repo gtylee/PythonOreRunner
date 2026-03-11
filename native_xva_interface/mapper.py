@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import re
+import warnings
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Mapping, Protocol
 
 from .dataclasses import (
+    BermudanSwaption,
     CollateralConfig,
     ConventionsConfig,
     CounterpartyConfig,
@@ -15,6 +17,7 @@ from .dataclasses import (
     FXForward,
     GenericProduct,
     IRS,
+    MporConfig,
     NettingConfig,
     Portfolio,
     PricingEngineConfig,
@@ -60,12 +63,22 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
             "from an ORE portfolio.xml via XVALoader.from_files(...)."
         )
 
+    if not snapshot.market.raw_quotes:
+        warnings.warn(
+            "Snapshot contains no market quotes (raw_quotes is empty). "
+            "The XVA engine will run with zero market data and produce meaningless results. "
+            "Fix: populate snapshot.market.raw_quotes with at least discount-curve and FX quotes.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     market_lines = [f"{q.date.replace('-', '')} {q.key} {q.value}" for q in snapshot.market.raw_quotes]
     fixing_lines = [f"{f.date} {f.index} {f.value}" for f in snapshot.fixings.points]
     xml_buffers = dict(snapshot.config.xml_buffers)
     runtime_xml = _runtime_xml_buffers(snapshot)
     for k, v in runtime_xml.items():
-        xml_buffers.setdefault(k, v)
+        if k not in xml_buffers or _is_generated_placeholder_xml(xml_buffers[k], k):
+            xml_buffers[k] = v
 
     if "portfolio.xml" not in xml_buffers:
         xml_buffers["portfolio.xml"] = _portfolio_to_xml(snapshot.portfolio, snapshot.config.asof)
@@ -74,15 +87,20 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
     if "collateralbalances.xml" not in xml_buffers:
         xml_buffers["collateralbalances.xml"] = _collateral_to_xml(snapshot.collateral)
 
-    # These are required by the SWIG/native orchestration layer, but not every
-    # dataclass-first caller provides them. If absent we synthesize minimal XML
-    # shells so the adapter can still run in lightweight mode. This is not a
-    # parity-grade setup: for ORE parity, callers should provide the real ORE XML
-    # files via XVALoader or explicit xml_buffers.
+    # These are required by the SWIG/native orchestration layer. For dataclass-
+    # only snapshots we synthesize a generated compatibility bundle so the
+    # adapter can run without an ORE input folder. This is not a parity-grade
+    # setup: for ORE parity, callers should provide the real ORE XML files via
+    # XVALoader or explicit xml_buffers.
     for req in ("pricingengine.xml", "todaysmarket.xml", "curveconfig.xml", "simulation.xml"):
-        xml_buffers.setdefault(req, _empty_xml(req))
+        if req not in xml_buffers:
+            xml_buffers[req] = runtime_xml.get(req, _empty_xml(req))
     xml_buffers["simulation.xml"] = _apply_num_paths_to_simulation_xml(
         xml_buffers["simulation.xml"], snapshot.config.num_paths
+    )
+    resolved_mpor = _resolve_mpor_config(snapshot, xml_buffers)
+    xml_buffers["simulation.xml"] = _apply_mpor_to_simulation_xml(
+        xml_buffers["simulation.xml"], resolved_mpor
     )
 
     return MappedInputs(
@@ -126,6 +144,11 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     _maybe_set(input_parameters, "setXvaBaseCurrency", snapshot.config.base_currency)
     _maybe_set(input_parameters, "setExposureBaseCurrency", snapshot.config.base_currency)
     _maybe_set(input_parameters, "setMarketConfig", _market_config_args(snapshot.config.params))
+    resolved_mpor = _resolve_mpor_config(snapshot, mapped.xml_buffers)
+    if resolved_mpor.enabled:
+        _maybe_set(input_parameters, "setMporDays", int(resolved_mpor.mpor_days))
+        _maybe_set(input_parameters, "setMporCalendar", snapshot.config.base_currency)
+        _maybe_set_bool(input_parameters, "setMporForward", True)
     _maybe_set_bool(input_parameters, "setCvaAnalytic", "CVA" in snapshot.config.analytics)
     _maybe_set_bool(input_parameters, "setDvaAnalytic", "DVA" in snapshot.config.analytics)
     _maybe_set_bool(input_parameters, "setFvaAnalytic", "FVA" in snapshot.config.analytics)
@@ -242,6 +265,84 @@ def _product_xml(trade: Trade, asof: str) -> List[str]:
             "      <ValueDate>2030-01-01</ValueDate>",
             "    </FxForwardData>",
         ]
+    if isinstance(p, BermudanSwaption):
+        start_date = _fmt_yyyymmdd(asof)
+        end_date = _add_months_yyyymmdd(start_date, int(round(p.maturity_years * 12.0)))
+        payer_fixed = str(p.pay_fixed).lower()
+        payer_float = str(not p.pay_fixed).lower()
+        float_index = p.float_index or _default_index_for_ccy(p.ccy)
+        exercise_dates = "\n".join(f"          <ExerciseDate>{d}</ExerciseDate>" for d in p.exercise_dates)
+        return [
+            "    <SwaptionData>",
+            "      <OptionData>",
+            f"        <LongShort>{p.long_short}</LongShort>",
+            f"        <OptionType>{p.option_type}</OptionType>",
+            "        <Style>Bermudan</Style>",
+            f"        <Settlement>{p.settlement}</Settlement>",
+            "        <PayOffAtExpiry>false</PayOffAtExpiry>",
+            "        <ExerciseDates>",
+            exercise_dates,
+            "        </ExerciseDates>",
+            "      </OptionData>",
+            "      <LegData>",
+            "        <LegType>Floating</LegType>",
+            f"        <Payer>{payer_float}</Payer>",
+            f"        <Currency>{p.ccy}</Currency>",
+            "        <Notionals>",
+            f"          <Notional>{p.notional}</Notional>",
+            "        </Notionals>",
+            "        <DayCounter>A360</DayCounter>",
+            "        <PaymentConvention>ModifiedFollowing</PaymentConvention>",
+            "        <FloatingLegData>",
+            f"          <Index>{float_index}</Index>",
+            "          <Spreads>",
+            "            <Spread>0.0</Spread>",
+            "          </Spreads>",
+            "          <FixingDays>2</FixingDays>",
+            "          <IsInArrears>false</IsInArrears>",
+            "        </FloatingLegData>",
+            "        <ScheduleData>",
+            "          <Rules>",
+            f"            <StartDate>{start_date}</StartDate>",
+            f"            <EndDate>{end_date}</EndDate>",
+            "            <Tenor>6M</Tenor>",
+            "            <Calendar>TARGET</Calendar>",
+            "            <Convention>Following</Convention>",
+            "            <TermConvention>Following</TermConvention>",
+            "            <Rule>Forward</Rule>",
+            "            <EndOfMonth/>",
+            "          </Rules>",
+            "        </ScheduleData>",
+            "      </LegData>",
+            "      <LegData>",
+            "        <LegType>Fixed</LegType>",
+            f"        <Payer>{payer_fixed}</Payer>",
+            f"        <Currency>{p.ccy}</Currency>",
+            "        <Notionals>",
+            f"          <Notional>{p.notional}</Notional>",
+            "        </Notionals>",
+            "        <DayCounter>ACT/ACT</DayCounter>",
+            "        <PaymentConvention>Following</PaymentConvention>",
+            "        <FixedLegData>",
+            "          <Rates>",
+            f"            <Rate>{p.fixed_rate}</Rate>",
+            "          </Rates>",
+            "        </FixedLegData>",
+            "        <ScheduleData>",
+            "          <Rules>",
+            f"            <StartDate>{start_date}</StartDate>",
+            f"            <EndDate>{end_date}</EndDate>",
+            "            <Tenor>1Y</Tenor>",
+            "            <Calendar>TARGET</Calendar>",
+            "            <Convention>Following</Convention>",
+            "            <TermConvention>Following</TermConvention>",
+            "            <Rule>Forward</Rule>",
+            "            <EndOfMonth/>",
+            "          </Rules>",
+            "        </ScheduleData>",
+            "      </LegData>",
+            "    </SwaptionData>",
+        ]
     return ["    <Data/>", f"    <!-- Generic product payload omitted for {type(p).__name__} -->"]
 
 
@@ -257,6 +358,7 @@ def _netting_to_xml(netting: NettingConfig) -> str:
         lines.append(f"      <ThresholdReceive>{ns.threshold_receive or 0.0}</ThresholdReceive>")
         lines.append(f"      <MinimumTransferAmountPay>{ns.mta_pay or 0.0}</MinimumTransferAmountPay>")
         lines.append(f"      <MinimumTransferAmountReceive>{ns.mta_receive or 0.0}</MinimumTransferAmountReceive>")
+        lines.append(f"      <MarginPeriodOfRisk>{ns.margin_period_of_risk or '0D'}</MarginPeriodOfRisk>")
         lines.append("    </CSADetails>")
         lines.append("  </NettingSet>")
     lines.append("</NettingSetDefinitions>")
@@ -279,6 +381,16 @@ def _collateral_to_xml(collateral: CollateralConfig) -> str:
 def _empty_xml(name: str) -> str:
     root = name.split(".")[0].replace("_", "")
     return f"<{root}/>"
+
+
+def _is_generated_placeholder_xml(xml: str, name: str) -> bool:
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return False
+    expected = name.split(".")[0].replace("_", "").lower()
+    text = (root.text or "").strip()
+    return root.tag.lower() == expected and not root.attrib and len(root) == 0 and not text
 
 
 def _fmt_yyyymmdd(asof: str) -> str:
@@ -311,9 +423,7 @@ def _default_index_for_ccy(ccy: str) -> str:
 
 
 def _runtime_xml_buffers(snapshot: XVASnapshot) -> Dict[str, str]:
-    runtime = snapshot.config.runtime
-    if runtime is None:
-        return {}
+    runtime = snapshot.config.runtime or RuntimeConfig()
     # Strict template mode uses a fully in-memory compatibility template set
     # to provide complete XVA runtime wiring without external file loading.
     if runtime.simulation.strict_template:
@@ -847,6 +957,115 @@ def _apply_num_paths_to_simulation_xml(xml: str, num_paths: int) -> str:
     if "<Parameters>" in xml:
         return xml.replace("<Parameters>", f"<Parameters><Samples>{num_paths}</Samples>", 1)
     return xml
+
+
+def _resolve_mpor_config(snapshot: XVASnapshot, xml_buffers: Dict[str, str]) -> MporConfig:
+    mode = str(snapshot.config.params.get("python.mpor_mode", "sticky")).strip().lower()
+    if mode and mode != "sticky":
+        raise MappingError(
+            f"Unsupported python.mpor_mode '{mode}'. Only 'sticky' is supported."
+        )
+
+    override_period = str(snapshot.config.params.get("python.mpor_source_override", "")).strip()
+    override_days = str(snapshot.config.params.get("python.mpor_days", "")).strip()
+    has_python_override = bool(override_period or override_days)
+
+    if snapshot.config.mpor != MporConfig() and not has_python_override:
+        return snapshot.config.mpor
+
+    period = ""
+    source = "disabled"
+    sim_xml = xml_buffers.get("simulation.xml", "")
+    if sim_xml:
+        try:
+            root = ET.fromstring(sim_xml)
+            period = (root.findtext("./Parameters/CloseOutLag") or "").strip()
+            if period:
+                source = "simulation.xml"
+        except Exception:
+            pass
+
+    for ns in snapshot.netting.netting_sets.values():
+        if ns.margin_period_of_risk:
+            period = str(ns.margin_period_of_risk).strip()
+            source = f"netting:{ns.netting_set_id}"
+            break
+
+    if override_period:
+        period = override_period
+        source = "python.mpor_source_override"
+    elif override_days:
+        try:
+            period = f"{max(int(float(override_days)), 0)}D"
+            source = "python.mpor_days"
+        except Exception:
+            pass
+
+    years = _period_to_years(period)
+    days = _period_to_days(period)
+    return MporConfig(
+        enabled=years > 0.0 or days > 0,
+        mpor_years=years,
+        mpor_days=days,
+        closeout_lag_period=period,
+        sticky=True,
+        cashflow_mode="NonePay",
+        source=source if (years > 0.0 or days > 0) else "disabled",
+    )
+
+
+def _apply_mpor_to_simulation_xml(xml: str, mpor: MporConfig) -> str:
+    if not xml:
+        return xml
+    period = mpor.closeout_lag_period or "0D"
+    injection = ""
+    if "<CloseOutLag>" in xml:
+        xml = re.sub(r"(<CloseOutLag>)([^<]*)(</CloseOutLag>)", rf"\g<1>{period}\g<3>", xml, count=1)
+    else:
+        injection += f"<CloseOutLag>{period}</CloseOutLag>"
+    if "<MporMode>" in xml:
+        xml = re.sub(r"(<MporMode>)([^<]*)(</MporMode>)", r"\g<1>StickyDate\g<3>", xml, count=1)
+    else:
+        injection += "<MporMode>StickyDate</MporMode>"
+    if injection and "<Parameters>" in xml:
+        xml = xml.replace("<Parameters>", f"<Parameters>{injection}", 1)
+    return xml
+
+
+def _period_to_years(period: str) -> float:
+    p = str(period).strip().upper()
+    if not p:
+        return 0.0
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([DWMY])", p)
+    if not m:
+        return 0.0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit == "D":
+        return n / 365.25
+    if unit == "W":
+        return (7.0 * n) / 365.25
+    if unit == "M":
+        return n / 12.0
+    return n
+
+
+def _period_to_days(period: str) -> int:
+    p = str(period).strip().upper()
+    if not p:
+        return 0
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([DWMY])", p)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit == "D":
+        return int(round(n))
+    if unit == "W":
+        return int(round(5.0 * n))
+    if unit == "M":
+        return int(round(21.0 * n))
+    return int(round(252.0 * n))
 
 
 def _maybe_set(target: object, method_name: str, value: Any) -> None:

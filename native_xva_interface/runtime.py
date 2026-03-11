@@ -1,8 +1,48 @@
+"""XVA runtime: orchestration layer for Python-native and ORE-SWIG XVA computation.
+
+Architecture
+------------
+The module is organised in three layers:
+
+* **Orchestration** – :class:`XVAEngine` is the top-level entry point.  It holds a
+  :class:`RunnerAdapter` and creates :class:`XVASession` objects.  ``XVASession``
+  owns the live computation state and exposes incremental-update helpers
+  (``update_market``, ``update_portfolio``, ``update_config``).
+
+* **Python-LGM path** – :class:`PythonLgmAdapter` implements the native Python LGM
+  pricing pipeline.  It simulates LGM state-variable paths, prices IRS and
+  FXForward trades, assembles XVA metrics, and optionally delegates unsupported
+  trade types to the ORE SWIG fallback.
+
+* **ORE SWIG fallback** – :class:`ORESwigAdapter` drives the ORE C++ engine through
+  the Python SWIG bindings when they are available in the environment.
+
+Input regimes
+-------------
+Two snapshot formats are supported:
+
+1. **Full ORE-backed snapshot** – the snapshot was loaded from an ORE Input
+   directory via ``XVALoader.from_files``.  ``snapshot.config.xml_buffers`` contains
+   at minimum ``simulation.xml``, and the ORE output directory may hold
+   ``curves.csv`` and ``calibration.xml`` artefacts that are consumed directly.
+
+2. **Lightweight dataclass snapshot** – only ``snapshot.market.raw_quotes`` is
+   populated.  Curves are bootstrapped on-the-fly from the market quotes without
+   any ORE output artefacts.
+
+Testing
+-------
+:class:`DeterministicToyAdapter` is the default in-memory adapter.  It applies
+simple closed-form formulas to produce deterministic XVA numbers suitable for
+unit-test assertions without requiring the full LGM or SWIG stack.
+"""
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import importlib
+import os
 import re
 from pathlib import Path
 import sys
@@ -16,11 +56,12 @@ import numpy as np
 from .dataclasses import (
     FXForward,
     IRS,
+    MporConfig,
     Trade,
     XVASnapshot,
 )
 from .exceptions import EngineRunError
-from .mapper import MappedInputs, _default_index_for_ccy, build_input_parameters, map_snapshot
+from .mapper import MappedInputs, _default_index_for_ccy, _resolve_mpor_config, build_input_parameters, map_snapshot
 from .results import CubeAccessor, XVAResult
 
 
@@ -30,6 +71,14 @@ class RunnerAdapter(Protocol):
 
 @dataclass
 class SessionState:
+    """Frozen snapshot of the input state tracked by an :class:`XVASession`.
+
+    Holds the current :class:`XVASnapshot`, its stable hash key (used to detect
+    redundant rebuilds), the pre-mapped ORE input lines, and per-component
+    rebuild counters that record how many times each of market, portfolio, and
+    config has been updated since the session was created.
+    """
+
     snapshot: XVASnapshot
     snapshot_key: str
     mapped_inputs: MappedInputs
@@ -37,6 +86,14 @@ class SessionState:
 
 
 class XVAEngine:
+    """Orchestration entry point for XVA computation.
+
+    Holds a :class:`RunnerAdapter` that performs the actual pricing, and
+    creates :class:`XVASession` objects that wrap a specific input state.
+    Use :meth:`python_lgm_default` to obtain an engine backed by the native
+    Python LGM stack, or pass a custom adapter to the constructor.
+    """
+
     def __init__(self, adapter: Optional[RunnerAdapter] = None):
         self.adapter = adapter or DeterministicToyAdapter()
 
@@ -97,6 +154,16 @@ class XVAEngine:
 
 
 class XVASession:
+    """Live computation session wrapping a :class:`SessionState`.
+
+    Supports incremental updates to market data, portfolio composition, and
+    configuration through :meth:`update_market`, :meth:`update_portfolio`, and
+    :meth:`update_config`.  Each update re-maps the snapshot only when the
+    stable key has actually changed, avoiding redundant rebuilds.  Call
+    :meth:`run` to execute the full XVA pipeline and obtain an
+    :class:`XVAResult`.
+    """
+
     def __init__(self, engine: XVAEngine, state: SessionState):
         self.engine = engine
         self.state = state
@@ -228,35 +295,51 @@ class DeterministicToyAdapter:
         )
 
 
+@dataclass
+class _CurveBundle:
+    """Curve artefacts produced by the market-curve building paths."""
+    discount_curves: dict[str, Callable[[float], float]]
+    forward_curves: dict[str, Callable[[float], float]]
+    forward_curves_by_tenor: dict[str, dict[str, Callable[[float], float]]]
+    xva_discount_curve: Callable[[float], float] | None
+    funding_borrow_curve: Callable[[float], float] | None
+    funding_lend_curve: Callable[[float], float] | None
+
+
 @dataclass(frozen=True)
 class _TradeSpec:
-    trade: Trade
-    kind: str
-    notional: float
-    ccy: str
-    legs: Dict[str, np.ndarray] | None = None
+    trade: Trade          # Original Trade dataclass instance.
+    kind: str             # Pricing branch selector: "IRS" or "FXForward".
+    notional: float       # Absolute notional in the trade currency.
+    ccy: str              # ISO currency code for the trade (domestic leg for FX).
+    legs: Dict[str, np.ndarray] | None = None  # Leg schedule arrays loaded from ORE flows output; None for FX trades.
+    sticky_state: Dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
 class _PythonLgmInputs:
-    times: np.ndarray
-    observation_times: np.ndarray
-    discount_curves: Dict[str, Callable[[float], float]]
-    forward_curves: Dict[str, Callable[[float], float]]
-    forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]
-    xva_discount_curve: Optional[Callable[[float], float]]
-    funding_borrow_curve: Optional[Callable[[float], float]]
-    funding_lend_curve: Optional[Callable[[float], float]]
-    hazard_times: Dict[str, np.ndarray]
-    hazard_rates: Dict[str, np.ndarray]
+    times: np.ndarray              # Full simulation grid (valuation grid plus sticky closeout grid).
+    valuation_times: np.ndarray    # Augmented valuation grid (union of exposure grid and trade cash-flow dates).
+    observation_times: np.ndarray  # Subset of times used as XVA observation points (from simulation.xml or fallback).
+    observation_closeout_times: np.ndarray  # Sticky closeout times associated with observation_times.
+    discount_curves: Dict[str, Callable[[float], float]]   # Risk-free discount curves keyed by ISO currency.
+    forward_curves: Dict[str, Callable[[float], float]]    # Composite forward/index curves keyed by ISO currency.
+    forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]  # Forward curves keyed by (ccy, tenor string).
+    xva_discount_curve: Optional[Callable[[float], float]]  # Simulation-market discount curve used for XVA deflation; falls back to discount_curves[base_ccy].
+    funding_borrow_curve: Optional[Callable[[float], float]]  # Own-name borrowing curve used in FCA calculation; None when not configured.
+    funding_lend_curve: Optional[Callable[[float], float]]    # Own-name lending curve used in FBA calculation; None when not configured.
+    survival_curves: Dict[str, Callable[[float], float]]  # Optional ORE-style survival curves keyed by counterparty / own-name.
+    hazard_times: Dict[str, np.ndarray]   # Piecewise-constant hazard rate node times keyed by counterparty / own-name.
+    hazard_rates: Dict[str, np.ndarray]   # Piecewise-constant hazard rate values aligned with hazard_times.
     recovery_rates: Dict[str, float]
-    lgm_params: Dict[str, object]
+    lgm_params: Dict[str, object]         # Parsed LGM calibration parameters (alpha_times, alpha_values, kappa_times, kappa_values, shift, scaling).
     model_ccy: str
     seed: int
     fx_spots: Dict[str, float]
     trade_specs: Tuple[_TradeSpec, ...]
     unsupported: Tuple[Trade, ...]
-    input_provenance: Dict[str, str]
+    mpor: MporConfig
+    input_provenance: Dict[str, str]  # Diagnostic dict recording which source was used for each input (model_params, market, grid, portfolio).
 
 
 class PythonLgmAdapter:
@@ -271,6 +354,13 @@ class PythonLgmAdapter:
         self._ore_snapshot_mod = None
 
     def run(self, snapshot: XVASnapshot, mapped: MappedInputs, run_id: str) -> XVAResult:
+        """Execute the Python-LGM XVA computation pipeline.
+
+        Simulates LGM state paths, prices each supported trade (IRS and
+        FXForward), optionally falls back to the ORE SWIG adapter for
+        unsupported trade types, then assembles and returns an
+        :class:`XVAResult` with per-metric XVA figures and exposure cubes.
+        """
         self._ensure_py_lgm_imports()
         inputs = self._extract_inputs(snapshot, mapped)
 
@@ -402,6 +492,13 @@ class PythonLgmAdapter:
         return out
 
     def _ensure_py_lgm_imports(self) -> None:
+        """Lazily load the py_ore_tools modules required by the LGM pipeline.
+
+        Tries the installed ``py_ore_tools`` package first, then falls back to
+        importing directly from the relative path within the Engine repository
+        (``Tools/PythonOreRunner/py_ore_tools``).  Raises :class:`EngineRunError`
+        if neither path succeeds.
+        """
         if self._loaded:
             return
         try:
@@ -435,26 +532,10 @@ class PythonLgmAdapter:
         except Exception as exc:
             raise EngineRunError(f"Failed to import Python LGM toolchain: {exc}") from exc
 
-    def _extract_inputs(self, snapshot: XVASnapshot, mapped: MappedInputs) -> _PythonLgmInputs:
-        xml = snapshot.config.xml_buffers
-        model_ccy = snapshot.config.base_currency.upper()
-
-        # There are two supported input regimes here:
-        # 1. An ORE-backed snapshot with simulation.xml / todaysmarket.xml and,
-        #    ideally, output artifacts like curves.csv and calibration.xml.
-        # 2. A lightweight dataclass snapshot with only raw quotes, where we
-        #    intentionally fall back to a simplified market-overlay build.
-        #
-        # The fragile case is "almost ORE-backed": if an ore.xml case is supplied
-        # but the key XML buffers are missing, silent fallback gives plausible but
-        # misleading numbers. Treat that as an input incompatibility instead.
-        if self._is_ore_case_snapshot(snapshot) and "simulation.xml" not in xml:
-            raise EngineRunError(
-                "PythonLgmAdapter requires 'simulation.xml' in snapshot.config.xml_buffers "
-                "for ORE-backed snapshots. Fix: load the snapshot with XVALoader.from_files(...) "
-                "from the full ORE Input directory, or include simulation.xml explicitly in xml_buffers."
-            )
-
+    def _parse_model_params(
+        self, xml: Dict[str, str], model_ccy: str, snapshot: "XVASnapshot"
+    ) -> tuple[Dict[str, object], str]:
+        """Return (lgm_params, param_source)."""
         param_source = "simulation"
         if "calibration.xml" in xml:
             lgm_params = _parse_lgm_params_from_calibration_xml_text(xml["calibration.xml"], ccy_key=model_ccy)
@@ -474,7 +555,12 @@ class PythonLgmAdapter:
             lgm_params["alpha_values"] = np.array([0.01], dtype=float)
         if np.asarray(lgm_params["kappa_values"], dtype=float).size == 0:
             lgm_params["kappa_values"] = np.array([0.03], dtype=float)
+        return lgm_params, param_source
 
+    def _build_exposure_grid(
+        self, snapshot: "XVASnapshot", xml: Dict[str, str]
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """Return (times, observation_times, grid_source)."""
         grid_source = "fallback"
         if "simulation.xml" in xml:
             times = _parse_exposure_times_from_simulation_xml_text(xml["simulation.xml"])
@@ -487,14 +573,12 @@ class PythonLgmAdapter:
         if times.size < 2:
             times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
         observation_times = np.asarray(times, dtype=float)
+        return times, observation_times, grid_source
 
-        overlay = _parse_market_overlay(snapshot.market.raw_quotes)
-        fx_spots = overlay["fx"]
-        zero_curves = overlay["zero"]
-        fwd_curves_raw = overlay.get("fwd", {})
-        hazards = overlay["hazard"]
-        recoveries = overlay["recovery"]
-
+    def _classify_portfolio_trades(
+        self, snapshot: "XVASnapshot", mapped: "MappedInputs"
+    ) -> tuple[list["_TradeSpec"], list["Trade"], set[str]]:
+        """Return (trade_specs, unsupported, ccy_set)."""
         trade_specs: List[_TradeSpec] = []
         unsupported: List[Trade] = []
         for t in snapshot.portfolio.trades:
@@ -519,111 +603,19 @@ class PythonLgmAdapter:
                 )
             else:
                 unsupported.append(t)
-
-        ccy_set = {snapshot.config.base_currency.upper()}
+        ccy_set: set[str] = {snapshot.config.base_currency.upper()}
         for t in snapshot.portfolio.trades:
             if isinstance(t.product, IRS):
                 ccy_set.add(t.product.ccy.upper())
             if isinstance(t.product, FXForward):
                 ccy_set.add(t.product.pair[:3].upper())
                 ccy_set.add(t.product.pair[3:].upper())
-        for c in list(ccy_set):
-            zero_curves.setdefault(c, [(0.0, 0.02), (max(float(snapshot.config.horizon_years), 1.0), 0.02)])
+        return trade_specs, unsupported, ccy_set
 
-        curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs)
-        if curve_payload is not None:
-            (
-                discount_curves,
-                forward_curves,
-                forward_curves_by_tenor,
-                xva_discount_curve,
-                funding_borrow_curve,
-                funding_lend_curve,
-            ) = curve_payload
-            curve_source = "ore_output_curves"
-        else:
-            discount_curves = {}
-            forward_curves = {}
-            forward_curves_by_tenor = {}
-            xva_discount_curve = None
-            funding_borrow_curve = None
-            funding_lend_curve = None
-            for ccy, pts in zero_curves.items():
-                by_time: Dict[float, List[float]] = {}
-                for t, r in pts:
-                    by_time.setdefault(float(t), []).append(float(r))
-                dedup: Dict[float, float] = {}
-                for t, vals in by_time.items():
-                    # Prefer economically plausible nodes over flat placeholder quotes
-                    # by taking the value closest to par (smallest absolute rate).
-                    dedup[t] = min(vals, key=lambda x: abs(x))
-                sorted_pts = sorted(dedup.items(), key=lambda x: x[0])
-                if len(sorted_pts) == 1:
-                    sorted_pts = [(0.0, sorted_pts[0][1]), (max(float(snapshot.config.horizon_years), 1.0), sorted_pts[0][1])]
-                discount_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(sorted_pts)
-                fwd_pts = []
-                buckets: Mapping[str, List[Tuple[float, float]]] = fwd_curves_raw.get(ccy, {})
-                tenor_curves: Dict[str, Callable[[float], float]] = {}
-                for tenor_key, bucket_pts in buckets.items():
-                    tenor_by_t: Dict[float, List[float]] = {}
-                    for t, r in bucket_pts:
-                        tenor_by_t.setdefault(float(t), []).append(float(r))
-                    if tenor_by_t:
-                        pts_tenor = sorted(
-                            ((t, min(vals, key=lambda x: abs(x))) for t, vals in tenor_by_t.items()),
-                            key=lambda x: x[0],
-                        )
-                        if len(pts_tenor) == 1:
-                            pts_tenor = [(0.0, pts_tenor[0][1]), (max(float(snapshot.config.horizon_years), 1.0), pts_tenor[0][1])]
-                        tenor_curves[tenor_key.upper()] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(pts_tenor)
-                if buckets:
-                    merged_by_t: Dict[float, List[float]] = {}
-                    for bucket_pts in buckets.values():
-                        for t, r in bucket_pts:
-                            merged_by_t.setdefault(float(t), []).append(float(r))
-                    if merged_by_t:
-                        fwd_pts = [(t, min(vals, key=lambda x: abs(x))) for t, vals in merged_by_t.items()]
-                if fwd_pts:
-                    fwd_by_t: Dict[float, float] = {}
-                    for t, r in fwd_pts:
-                        fwd_by_t[float(t)] = float(r)
-                    sp = sorted(fwd_by_t.items(), key=lambda x: x[0])
-                    if len(sp) == 1:
-                        sp = [(0.0, sp[0][1]), (max(float(snapshot.config.horizon_years), 1.0), sp[0][1])]
-                    forward_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(sp)
-                else:
-                    forward_curves[ccy] = discount_curves[ccy]
-                forward_curves_by_tenor[ccy] = tenor_curves
-            curve_source = "market_overlay"
-
-        calibrated_specs: List[_TradeSpec] = []
-        for spec in trade_specs:
-            if spec.kind != "IRS" or spec.legs is None:
-                calibrated_specs.append(spec)
-                continue
-            fwd_tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-            p_fwd = forward_curves_by_tenor.get(spec.ccy, {}).get(
-                fwd_tenor,
-                forward_curves.get(spec.ccy, discount_curves.get(spec.ccy)),
-            )
-            if p_fwd is None:
-                calibrated_specs.append(spec)
-                continue
-            calibrated_specs.append(
-                _TradeSpec(
-                    trade=spec.trade,
-                    kind=spec.kind,
-                    notional=spec.notional,
-                    ccy=spec.ccy,
-                    legs=self._irs_utils.calibrate_float_spreads_from_coupon(spec.legs, p_fwd, t0=0.0),
-                )
-            )
-        trade_specs = calibrated_specs
-
-        times = self._augment_exposure_grid_with_trade_dates(times, trade_specs)
-        if times.size < 2:
-            times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
-
+    def _build_hazard_rates(
+        self, snapshot: "XVASnapshot", hazards: Dict, recoveries: Dict
+    ) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, float]]:
+        """Return (hazard_times, hazard_rates, recovery_rates)."""
         hazard_times: Dict[str, np.ndarray] = {}
         hazard_rates: Dict[str, np.ndarray] = {}
         recovery_rates: Dict[str, float] = {}
@@ -645,16 +637,253 @@ class PythonLgmAdapter:
             hazard_times[ns] = np.asarray([x[0] for x in hz], dtype=float)
             hazard_rates[ns] = np.asarray([x[1] for x in hz], dtype=float)
             recovery_rates[ns] = float(recoveries.get(ns, 0.4))
+        return hazard_times, hazard_rates, recovery_rates
+
+    def _build_survival_curves(
+        self,
+        snapshot: "XVASnapshot",
+        hazard_times: Dict[str, np.ndarray],
+        hazard_rates: Dict[str, np.ndarray],
+    ) -> Dict[str, Callable[[float], float]]:
+        """Return survival curves, preferring explicit stressed survival nodes if present."""
+        explicit = snapshot.config.params.get("python.credit_survival_curves", {})
+        curves: Dict[str, Callable[[float], float]] = {}
+        if isinstance(explicit, dict):
+            for name, cfg in explicit.items():
+                if not isinstance(cfg, dict):
+                    continue
+                node_times = np.asarray(cfg.get("node_times", []), dtype=float)
+                node_surv = np.asarray(cfg.get("survival_probabilities", []), dtype=float)
+                if node_times.size == 0 or node_surv.size == 0 or node_times.size != node_surv.size:
+                    continue
+                extrapolation = str(cfg.get("extrapolation", "flat_zero")).strip().lower()
+                curves[str(name).upper()] = self._irs_utils.build_survival_probability_curve_from_nodes(
+                    node_times,
+                    node_surv,
+                    extrapolation=extrapolation,
+                )
+        for name, times in hazard_times.items():
+            uname = str(name).upper()
+            if uname in curves:
+                continue
+            rates = hazard_rates.get(name)
+            if rates is None:
+                continue
+            curves[uname] = lambda t, ht=times, hr=rates: float(
+                self._irs_utils.survival_probability_from_hazard(
+                    np.asarray([float(t)], dtype=float),
+                    np.asarray(ht, dtype=float),
+                    np.asarray(hr, dtype=float),
+                )[0]
+            )
+        return curves
+
+    def _extract_inputs(self, snapshot: XVASnapshot, mapped: MappedInputs) -> _PythonLgmInputs:
+        """Resolve all model inputs from the snapshot and mapped inputs.
+
+        Handles both the ORE-backed input regime (simulation.xml present, ORE
+        output artefacts optionally available) and the lightweight-dataclass
+        regime (raw_quotes only).  Classifies portfolio trades, builds or loads
+        discount/forward curves, parses LGM calibration parameters, assembles
+        the hazard-rate term structures, and returns a fully-populated
+        :class:`_PythonLgmInputs` ready for simulation.
+        """
+        xml = snapshot.config.xml_buffers
+        model_ccy = snapshot.config.base_currency.upper()
+
+        # There are two supported input regimes here:
+        # 1. An ORE-backed snapshot with simulation.xml / todaysmarket.xml and,
+        #    ideally, output artifacts like curves.csv and calibration.xml.
+        # 2. A lightweight dataclass snapshot with only raw quotes, where we
+        #    intentionally fall back to a simplified market-overlay build.
+        #
+        # The fragile case is "almost ORE-backed": if an ore.xml case is supplied
+        # but the key XML buffers are missing, silent fallback gives plausible but
+        # misleading numbers. Treat that as an input incompatibility instead.
+        if self._is_ore_case_snapshot(snapshot) and "simulation.xml" not in xml:
+            raise EngineRunError(
+                "PythonLgmAdapter requires 'simulation.xml' in snapshot.config.xml_buffers "
+                "for ORE-backed snapshots. Fix: load the snapshot with XVALoader.from_files(...) "
+                "from the full ORE Input directory, or include simulation.xml explicitly in xml_buffers."
+            )
+
+        lgm_params, param_source = self._parse_model_params(xml, model_ccy, snapshot)
+        valuation_times, observation_times, grid_source = self._build_exposure_grid(snapshot, xml)
+        mpor = _resolve_mpor_config(snapshot, xml)
+
+        overlay = _parse_market_overlay(snapshot.market.raw_quotes)
+        fx_spots = overlay["fx"]
+        zero_curves = overlay["zero"]
+        fwd_curves_raw = overlay.get("fwd", {})
+        hazards = overlay["hazard"]
+        recoveries = overlay["recovery"]
+
+        trade_specs, unsupported, ccy_set = self._classify_portfolio_trades(snapshot, mapped)
+
+        for c in list(ccy_set):
+            zero_curves.setdefault(c, [(0.0, 0.02), (max(float(snapshot.config.horizon_years), 1.0), 0.02)])
+
+        curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs)
+        if curve_payload is not None:
+            discount_curves = curve_payload.discount_curves
+            forward_curves = curve_payload.forward_curves
+            forward_curves_by_tenor = curve_payload.forward_curves_by_tenor
+            xva_discount_curve = curve_payload.xva_discount_curve
+            funding_borrow_curve = curve_payload.funding_borrow_curve
+            funding_lend_curve = curve_payload.funding_lend_curve
+            curve_source = "ore_output_curves"
+        else:
+            discount_curves = {}
+            forward_curves = {}
+            forward_curves_by_tenor = {}
+            xva_discount_curve = None
+            funding_borrow_curve = None
+            funding_lend_curve = None
+            fitted_curve_mode = str(snapshot.config.params.get("python.curve_fit_mode", "")).strip().lower()
+            fitted_curves = None
+            if fitted_curve_mode == "ore_fit":
+                fitted_curves = self._fit_curves_from_market_quotes(snapshot, trade_specs)
+            if fitted_curves is not None:
+                discount_curves = fitted_curves.discount_curves
+                forward_curves = fitted_curves.forward_curves
+                forward_curves_by_tenor = fitted_curves.forward_curves_by_tenor
+                xva_discount_curve = fitted_curves.xva_discount_curve
+                funding_borrow_curve = fitted_curves.funding_borrow_curve
+                funding_lend_curve = fitted_curves.funding_lend_curve
+                curve_source = "ore_quote_fit"
+            else:
+                for ccy, pts in zero_curves.items():
+                    by_time: Dict[float, List[float]] = {}
+                    for t, r in pts:
+                        by_time.setdefault(float(t), []).append(float(r))
+                    dedup: Dict[float, float] = {}
+                    for t, vals in by_time.items():
+                        dedup[t] = min(vals, key=lambda x: abs(x))
+                    sorted_pts = sorted(dedup.items(), key=lambda x: x[0])
+                    if len(sorted_pts) == 1:
+                        sorted_pts = [(0.0, sorted_pts[0][1]), (max(float(snapshot.config.horizon_years), 1.0), sorted_pts[0][1])]
+                    discount_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(sorted_pts)
+                    fwd_pts = []
+                    buckets: Mapping[str, List[Tuple[float, float]]] = fwd_curves_raw.get(ccy, {})
+                    tenor_curves: Dict[str, Callable[[float], float]] = {}
+                    for tenor_key, bucket_pts in buckets.items():
+                        tenor_by_t: Dict[float, List[float]] = {}
+                        for t, r in bucket_pts:
+                            tenor_by_t.setdefault(float(t), []).append(float(r))
+                        if tenor_by_t:
+                            pts_tenor = sorted(
+                                ((t, min(vals, key=lambda x: abs(x))) for t, vals in tenor_by_t.items()),
+                                key=lambda x: x[0],
+                            )
+                            if len(pts_tenor) == 1:
+                                pts_tenor = [(0.0, pts_tenor[0][1]), (max(float(snapshot.config.horizon_years), 1.0), pts_tenor[0][1])]
+                            tenor_curves[tenor_key.upper()] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(pts_tenor)
+                    if buckets:
+                        merged_by_t: Dict[float, List[float]] = {}
+                        for bucket_pts in buckets.values():
+                            for t, r in bucket_pts:
+                                merged_by_t.setdefault(float(t), []).append(float(r))
+                        if merged_by_t:
+                            fwd_pts = [(t, min(vals, key=lambda x: abs(x))) for t, vals in merged_by_t.items()]
+                    if fwd_pts:
+                        fwd_by_t: Dict[float, float] = {}
+                        for t, r in fwd_pts:
+                            fwd_by_t[float(t)] = float(r)
+                        sp = sorted(fwd_by_t.items(), key=lambda x: x[0])
+                        if len(sp) == 1:
+                            sp = [(0.0, sp[0][1]), (max(float(snapshot.config.horizon_years), 1.0), sp[0][1])]
+                        forward_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(sp)
+                    else:
+                        forward_curves[ccy] = discount_curves[ccy]
+                    forward_curves_by_tenor[ccy] = tenor_curves
+                curve_source = "market_overlay"
+
+        (
+            discount_curves,
+            forward_curves,
+            forward_curves_by_tenor,
+            xva_discount_curve,
+        ) = _apply_curve_node_shocks(
+            snapshot,
+            discount_curves,
+            forward_curves,
+            forward_curves_by_tenor,
+            xva_discount_curve,
+        )
+
+        calibrated_specs: List[_TradeSpec] = []
+        frozen_spreads = snapshot.config.params.get("python.frozen_float_spreads", {})
+        for spec in trade_specs:
+            if spec.kind != "IRS" or spec.legs is None:
+                calibrated_specs.append(spec)
+                continue
+            coupons = np.asarray(spec.legs.get("float_coupon", []), dtype=float)
+            if coupons.size == 0 or np.allclose(coupons, 0.0):
+                calibrated_specs.append(spec)
+                continue
+            frozen = None
+            if isinstance(frozen_spreads, dict):
+                frozen = frozen_spreads.get(spec.trade.trade_id)
+            if frozen is not None:
+                arr = np.asarray(frozen, dtype=float)
+                if arr.size == coupons.size:
+                    legs = {k: np.array(v, copy=True) for k, v in spec.legs.items()}
+                    legs["float_spread"] = arr.copy()
+                    calibrated_specs.append(
+                        _TradeSpec(
+                            trade=spec.trade,
+                            kind=spec.kind,
+                            notional=spec.notional,
+                            ccy=spec.ccy,
+                            legs=legs,
+                        )
+                    )
+                    continue
+            fwd_tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+            p_fwd = forward_curves_by_tenor.get(spec.ccy, {}).get(
+                fwd_tenor,
+                forward_curves.get(spec.ccy, discount_curves.get(spec.ccy)),
+            )
+            if p_fwd is None:
+                calibrated_specs.append(spec)
+                continue
+            calibrated_specs.append(
+                _TradeSpec(
+                    trade=spec.trade,
+                    kind=spec.kind,
+                    notional=spec.notional,
+                    ccy=spec.ccy,
+                    legs=self._irs_utils.calibrate_float_spreads_from_coupon(spec.legs, p_fwd, t0=0.0),
+                )
+            )
+        trade_specs = calibrated_specs
+
+        valuation_times = self._augment_exposure_grid_with_trade_dates(valuation_times, trade_specs)
+        if valuation_times.size < 2:
+            valuation_times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
+
+        closeout_times = _build_sticky_closeout_times(valuation_times, mpor.mpor_years)
+        observation_closeout_times = _build_sticky_closeout_times(observation_times, mpor.mpor_years)
+        times = np.asarray(
+            sorted(set(float(x) for x in np.concatenate((valuation_times, closeout_times)))),
+            dtype=float,
+        )
+
+        hazard_times, hazard_rates, recovery_rates = self._build_hazard_rates(snapshot, hazards, recoveries)
+        survival_curves = self._build_survival_curves(snapshot, hazard_times, hazard_rates)
 
         return _PythonLgmInputs(
             times=times,
+            valuation_times=valuation_times,
             observation_times=observation_times,
+            observation_closeout_times=observation_closeout_times,
             discount_curves=discount_curves,
             forward_curves=forward_curves,
             forward_curves_by_tenor=forward_curves_by_tenor,
             xva_discount_curve=xva_discount_curve,
             funding_borrow_curve=funding_borrow_curve,
             funding_lend_curve=funding_lend_curve,
+            survival_curves=survival_curves,
             hazard_times=hazard_times,
             hazard_rates=hazard_rates,
             recovery_rates=recovery_rates,
@@ -664,11 +893,13 @@ class PythonLgmAdapter:
             fx_spots=fx_spots,
             trade_specs=tuple(trade_specs),
             unsupported=tuple(unsupported),
+            mpor=mpor,
             input_provenance={
                 "model_params": param_source,
                 "market": curve_source,
                 "grid": "xml+trade_dates" if grid_source == "xml" else grid_source,
                 "portfolio": "dataclass",
+                "mpor": mpor.source,
             },
         )
 
@@ -677,16 +908,17 @@ class PythonLgmAdapter:
         snapshot: XVASnapshot,
         mapped: MappedInputs,
         trade_specs: Sequence[_TradeSpec],
-    ) -> Optional[
-        Tuple[
-            Dict[str, Callable[[float], float]],
-            Dict[str, Callable[[float], float]],
-            Dict[str, Dict[str, Callable[[float], float]]],
-            Optional[Callable[[float], float]],
-            Optional[Callable[[float], float]],
-            Optional[Callable[[float], float]],
-        ]
-    ]:
+    ) -> Optional[_CurveBundle]:
+        """Build discount, forward, and funding curves from ORE output artefacts.
+
+        Reads ``curves.csv`` from the ORE output directory, resolves the
+        relevant column names from ``todaysmarket.xml`` and ``ore.xml``, and
+        constructs callable discount-factor curves for all required currencies.
+        Returns ``None`` if the artefacts are absent, the feature is disabled,
+        or the snapshot does not point to a full ORE directory.
+        """
+        if str(snapshot.config.params.get("python.use_ore_output_curves", "Y")).strip().upper() in ("N", "FALSE", "0"):
+            return None
         ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
         if not ore_path_txt:
             return None
@@ -710,7 +942,6 @@ class PythonLgmAdapter:
         try:
             ore_root = ET.parse(ore_path).getroot()
             tm_root = ET.fromstring(todaysmarket_xml)
-            sim_root = ET.fromstring(simulation_xml)
             sim_config_id = snapshot.config.params.get("market.simulation", "default")
             pricing_config_id = str(snapshot.config.params.get("market.pricing", "")).strip()
             if not pricing_config_id:
@@ -723,9 +954,7 @@ class PythonLgmAdapter:
                     pricing_config_id = curves_cfg_params.get("configuration", "default")
                 else:
                     pricing_config_id = "default"
-            model_day_counter = self._ore_snapshot_mod._normalize_day_counter_name(
-                (sim_root.findtext("./DayCounter") or "A365F").strip()
-            )
+            model_day_counter = self._day_counter_from_sim_xml(simulation_xml)
             ccy_set = {snapshot.config.base_currency.upper()}
             for spec in trade_specs:
                 ccy_set.add(spec.ccy.upper())
@@ -761,14 +990,10 @@ class PythonLgmAdapter:
                 requested_columns.add(index_name)
                 forward_specs.setdefault(spec.ccy, {})[tenor_key] = index_name
 
-            xva_curve_name = None
+            xva_ccy = snapshot.config.base_currency.upper()
+            xva_curve_name = xva_discount_meta.get(xva_ccy, {}).get("source_column")
             runtime = snapshot.config.runtime
             if runtime is not None:
-                xva_ccy = snapshot.config.base_currency.upper()
-                try:
-                    xva_curve_name = xva_discount_meta.get(xva_ccy, {}).get("source_column")
-                except Exception:
-                    xva_curve_name = None
                 lend_curve_name = runtime.xva_analytic.fva_lending_curve
                 borrow_curve_name = runtime.xva_analytic.fva_borrowing_curve
             else:
@@ -792,20 +1017,14 @@ class PythonLgmAdapter:
 
             discount_curves: Dict[str, Callable[[float], float]] = {}
             for ccy, meta in discount_meta.items():
-                _, times, dfs = curve_data[meta["source_column"]]
-                discount_curves[ccy] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
-                    list(zip(times, dfs))
-                )
+                discount_curves[ccy] = self._curve_from_column(curve_data, meta["source_column"])
 
             forward_curves: Dict[str, Callable[[float], float]] = {}
             forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]] = {}
             for ccy, tenor_map in forward_specs.items():
                 tenor_curves: Dict[str, Callable[[float], float]] = {}
                 for tenor_key, column_name in tenor_map.items():
-                    _, times, dfs = curve_data[column_name]
-                    tenor_curves[tenor_key] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
-                        list(zip(times, dfs))
-                    )
+                    tenor_curves[tenor_key] = self._curve_from_column(curve_data, column_name)
                 forward_curves_by_tenor[ccy] = tenor_curves
                 if tenor_curves:
                     preferred = "6M" if "6M" in tenor_curves else sorted(tenor_curves)[0]
@@ -816,30 +1035,21 @@ class PythonLgmAdapter:
                 forward_curves_by_tenor.setdefault(ccy, {})
             xva_discount_curve = None
             if xva_curve_name and xva_curve_name in curve_data:
-                _, times, dfs = curve_data[xva_curve_name]
-                xva_discount_curve = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
-                    list(zip(times, dfs))
-                )
+                xva_discount_curve = self._curve_from_column(curve_data, xva_curve_name)
             funding_borrow_curve = None
             if borrow_curve_name and str(borrow_curve_name) in curve_data:
-                _, times, dfs = curve_data[str(borrow_curve_name)]
-                funding_borrow_curve = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
-                    list(zip(times, dfs))
-                )
+                funding_borrow_curve = self._curve_from_column(curve_data, str(borrow_curve_name))
             funding_lend_curve = None
             if lend_curve_name and str(lend_curve_name) in curve_data:
-                _, times, dfs = curve_data[str(lend_curve_name)]
-                funding_lend_curve = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
-                    list(zip(times, dfs))
-                )
+                funding_lend_curve = self._curve_from_column(curve_data, str(lend_curve_name))
 
-            return (
-                discount_curves,
-                forward_curves,
-                forward_curves_by_tenor,
-                xva_discount_curve,
-                funding_borrow_curve,
-                funding_lend_curve,
+            return _CurveBundle(
+                discount_curves=discount_curves,
+                forward_curves=forward_curves,
+                forward_curves_by_tenor=forward_curves_by_tenor,
+                xva_discount_curve=xva_discount_curve,
+                funding_borrow_curve=funding_borrow_curve,
+                funding_lend_curve=funding_lend_curve,
             )
         except Exception as exc:
             raise EngineRunError(
@@ -852,10 +1062,116 @@ class PythonLgmAdapter:
                 f"Original error: {exc}"
             ) from exc
 
+    def _fit_curves_from_market_quotes(
+        self,
+        snapshot: XVASnapshot,
+        trade_specs: Sequence[_TradeSpec],
+    ) -> Optional[_CurveBundle]:
+        """Bootstrap discount/forward curves from raw market quotes via the ORE SWIG curve-fitting path.
+
+        Used as an alternative to reading pre-computed ORE output artefacts
+        when ``python.curve_fit_mode`` is set to ``"ore_fit"``.  Returns
+        ``None`` on any failure so the caller can fall back to the market
+        overlay path.
+        """
+        try:
+            quote_dicts = [{"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes]
+            ccy_set = {snapshot.config.base_currency.upper()}
+            for spec in trade_specs:
+                ccy_set.add(spec.ccy.upper())
+
+            discount_curves: Dict[str, Callable[[float], float]] = {}
+            for ccy in sorted(ccy_set):
+                source_column = str(
+                    discount_meta.get(ccy, {}).get("source_column")
+                    or xva_discount_meta.get(ccy, {}).get("source_column")
+                    or ""
+                ).strip()
+                discount_quotes = [
+                    q
+                    for q in quote_dicts
+                    if _quote_matches_discount_curve(str(q["key"]), ccy, source_column)
+                ]
+                if not discount_quotes:
+                    continue
+                payload = self._ore_snapshot_mod.fit_discount_curves_from_programmatic_quotes(
+                    snapshot.config.asof,
+                    discount_quotes,
+                    fit_method="bootstrap_mm_irs_v1",
+                ).get(ccy)
+                if not payload:
+                    continue
+                discount_curves[ccy] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                    list(zip(payload["times"], payload["dfs"]))
+                )
+            if not discount_curves:
+                return None
+
+            forward_curves: Dict[str, Callable[[float], float]] = {}
+            forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]] = {}
+            needed_tenors: Dict[str, set[str]] = {}
+            for spec in trade_specs:
+                if spec.kind != "IRS" or spec.legs is None:
+                    continue
+                tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+                if tenor:
+                    needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+            for ccy, tenors in needed_tenors.items():
+                tenor_curves: Dict[str, Callable[[float], float]] = {}
+                for tenor in sorted(tenors):
+                    tenor_quotes = [
+                        q for q in quote_dicts if _quote_matches_forward_curve(str(q["key"]), ccy, tenor)
+                    ]
+                    if not tenor_quotes:
+                        continue
+                    payload = self._ore_snapshot_mod.fit_discount_curves_from_programmatic_quotes(
+                        snapshot.config.asof,
+                        tenor_quotes,
+                        fit_method="bootstrap_mm_irs_v1",
+                    ).get(ccy)
+                    if not payload:
+                        continue
+                    tenor_curves[tenor] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                        list(zip(payload["times"], payload["dfs"]))
+                    )
+                forward_curves_by_tenor[ccy] = tenor_curves
+                if tenor_curves:
+                    preferred = "6M" if "6M" in tenor_curves else sorted(tenor_curves)[0]
+                    forward_curves[ccy] = tenor_curves[preferred]
+                else:
+                    forward_curves[ccy] = discount_curves.get(ccy)
+
+            for ccy in ccy_set:
+                forward_curves.setdefault(ccy, discount_curves.get(ccy))
+                forward_curves_by_tenor.setdefault(ccy, {})
+
+            base_curve = discount_curves.get(snapshot.config.base_currency.upper())
+            return _CurveBundle(
+                discount_curves=discount_curves,
+                forward_curves=forward_curves,
+                forward_curves_by_tenor=forward_curves_by_tenor,
+                xva_discount_curve=base_curve,
+                funding_borrow_curve=None,
+                funding_lend_curve=None,
+            )
+        except Exception:
+            return None
+
     def _python_lgm_rng_mode(self, snapshot: XVASnapshot) -> str:
+        """Determine the RNG mode for LGM path simulation from config params.
+
+        Reads ``python.lgm_rng_mode`` from the snapshot config and returns a
+        normalised lower-case string (``"numpy"`` or ``"ore_parity"``).
+        """
         return str(snapshot.config.params.get("python.lgm_rng_mode", "numpy")).strip().lower()
 
     def _is_ore_case_snapshot(self, snapshot: XVASnapshot) -> bool:
+        """Return True if the snapshot was loaded from a full ORE directory.
+
+        Checks whether ``source_meta.path`` points to an ``.xml`` file (i.e.,
+        an ``ore.xml`` case file), which is the signature of a snapshot created
+        by ``XVALoader.from_files``.
+        """
         ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
         if not ore_path_txt:
             return False
@@ -881,6 +1197,13 @@ class PythonLgmAdapter:
         return out
 
     def _build_lgm_rng(self, seed: int, rng_mode: str):
+        """Construct the random number generator for LGM path simulation.
+
+        Supports ``"numpy"`` (NumPy default RNG, time-major draw order) and
+        ``"ore_parity"`` (ORE Gaussian RNG producing path-major draws that
+        match the ORE C++ simulation grid exactly).  Raises
+        :class:`EngineRunError` for any other mode string.
+        """
         if rng_mode == "numpy":
             return np.random.default_rng(seed), "time_major"
         if rng_mode == "ore_parity":
@@ -889,7 +1212,31 @@ class PythonLgmAdapter:
             f"Unsupported PythonLgmAdapter RNG mode '{rng_mode}'. Use 'numpy' or 'ore_parity'."
         )
 
+    def _day_counter_from_sim_xml(self, sim_xml: str) -> str:
+        """Return the normalised day-counter string from simulation.xml text."""
+        try:
+            root = ET.fromstring(sim_xml)
+            raw = (root.findtext("./DayCounter") or "A365F").strip()
+            return self._ore_snapshot_mod._normalize_day_counter_name(raw)
+        except Exception:
+            return "A365F"
+
+    def _curve_from_column(
+        self, curve_data: Dict[str, Any], col_name: str
+    ) -> Callable[[float], float]:
+        """Build a discount-factor curve callable from a *curve_data* column."""
+        _, times, dfs = curve_data[col_name]
+        return self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+            list(zip(times, dfs))
+        )
+
     def _price_fx_forward(self, trade: Trade, inputs: _PythonLgmInputs, n_times: int, n_paths: int) -> np.ndarray:
+        """Compute the NPV of an FX forward across all simulation times and paths under the LGM measure.
+
+        Builds a two-currency LGM-FX hybrid model, simulates joint spot and
+        state-variable paths, and evaluates the forward NPV at each
+        (time, path) grid point.  Returns a ``(n_times, n_paths)`` array.
+        """
         p = trade.product
         assert isinstance(p, FXForward)
         pair = f"{p.pair[:3].upper()}/{p.pair[3:].upper()}"
@@ -955,13 +1302,7 @@ class PythonLgmAdapter:
                     model_day_counter = "A365F"
                     sim_xml = mapped.xml_buffers.get("simulation.xml")
                     if sim_xml:
-                        try:
-                            sim_root = ET.fromstring(sim_xml)
-                            model_day_counter = self._ore_snapshot_mod._normalize_day_counter_name(
-                                (sim_root.findtext("./DayCounter") or "A365F").strip()
-                            )
-                        except Exception:
-                            pass
+                        model_day_counter = self._day_counter_from_sim_xml(sim_xml)
                     legs = self._irs_utils.load_ore_legs_from_flows(
                         str(flows_csv),
                         trade_id=trade.trade_id,
@@ -970,35 +1311,44 @@ class PythonLgmAdapter:
                     )
                     if sim_xml:
                         try:
-                            with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", encoding="utf-8", delete=True) as stmp:
-                                stmp.write(sim_xml)
-                                stmp.flush()
-                                legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(stmp.name)
+                            with _tmp_xml_path(sim_xml) as path:
+                                legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(path)
                         except Exception:
                             pass
+                    idx = str(trade.additional_fields.get("index", "")).upper()
+                    if idx:
+                        legs.setdefault("float_index", idx)
+                        if "float_index_tenor" not in legs or not str(legs.get("float_index_tenor", "")).strip():
+                            legs["float_index_tenor"] = idx.split("-")[-1].upper() if "-" in idx else ""
                     return self._apply_historical_fixings_to_legs(snapshot, trade, legs)
-            except Exception:
-                pass
+            except Exception as exc:
+                import warnings as _warnings
+                _warnings.warn(
+                    f"Failed to load legs from flows.csv for trade {trade.trade_id}: {exc}",
+                    UserWarning,
+                    stacklevel=2,
+                )
         portfolio_xml = mapped.xml_buffers.get("portfolio.xml")
         if portfolio_xml:
             asof = _normalize_asof_date(snapshot.config.asof)
             try:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", encoding="utf-8", delete=True) as tmp:
-                    tmp.write(portfolio_xml)
-                    tmp.flush()
-                    legs = self._irs_utils.load_swap_legs_from_portfolio(tmp.name, trade.trade_id, asof)
+                with _tmp_xml_path(portfolio_xml) as path:
+                    legs = self._irs_utils.load_swap_legs_from_portfolio(path, trade.trade_id, asof)
                 sim_xml = mapped.xml_buffers.get("simulation.xml")
                 if sim_xml:
                     try:
-                        with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", encoding="utf-8", delete=True) as stmp:
-                            stmp.write(sim_xml)
-                            stmp.flush()
-                            legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(stmp.name)
+                        with _tmp_xml_path(sim_xml) as path:
+                            legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(path)
                     except Exception:
                         pass
                 return self._apply_historical_fixings_to_legs(snapshot, trade, legs)
-            except Exception:
-                pass
+            except Exception as exc:
+                import warnings as _warnings
+                _warnings.warn(
+                    f"Failed to load legs from portfolio.xml for trade {trade.trade_id}: {exc}",
+                    UserWarning,
+                    stacklevel=2,
+                )
         return self._apply_historical_fixings_to_legs(snapshot, trade, _build_irs_legs_from_trade(trade))
 
     def _apply_historical_fixings_to_legs(
@@ -1099,19 +1449,37 @@ class PythonLgmAdapter:
         unsupported: List[Trade],
     ) -> XVAResult:
         times = inputs.times
+        valuation_times = inputs.valuation_times
         obs_times = inputs.observation_times
+        obs_closeout_times = inputs.observation_closeout_times
+        valuation_idx = np.searchsorted(times, valuation_times)
         obs_idx = np.searchsorted(times, obs_times)
+        obs_closeout_idx = np.searchsorted(times, obs_closeout_times)
         if (
             obs_idx.size != obs_times.size
             or np.any(obs_idx >= times.size)
             or np.any(np.abs(times[obs_idx] - obs_times) > 1.0e-10)
         ):
             raise EngineRunError("Observation times are not aligned with pricing grid after augmentation")
+        if (
+            valuation_idx.size != valuation_times.size
+            or np.any(valuation_idx >= times.size)
+            or np.any(np.abs(times[valuation_idx] - valuation_times) > 1.0e-10)
+        ):
+            raise EngineRunError("Valuation times are not aligned with pricing grid after augmentation")
+        if (
+            obs_closeout_idx.size != obs_closeout_times.size
+            or np.any(obs_closeout_idx >= times.size)
+            or np.any(np.abs(times[obs_closeout_idx] - obs_closeout_times) > 1.0e-10)
+        ):
+            raise EngineRunError("Sticky closeout times are not aligned with pricing grid after augmentation")
         df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
         df_vec = np.asarray([df_base(float(t)) for t in times], dtype=float)
         obs_df_vec = df_vec[obs_idx]
         epe_by_ns_paths: Dict[str, np.ndarray] = {}
         ene_by_ns_paths: Dict[str, np.ndarray] = {}
+        valuation_epe_by_ns_paths: Dict[str, np.ndarray] = {}
+        valuation_ene_by_ns_paths: Dict[str, np.ndarray] = {}
         xva_deflated_by_ns: Dict[str, bool] = {}
         pv_total = 0.0
         npv_cube_payload: Dict[str, Dict[str, object]] = {}
@@ -1121,7 +1489,7 @@ class PythonLgmAdapter:
             v = npv_by_trade.get(spec.trade.trade_id)
             if v is None:
                 continue
-            pv_total += float(np.mean(v[0, :]))
+            pv_total += float(np.mean(v[valuation_idx[0], :]))
             if spec.kind == "IRS":
                 p_disc = inputs.discount_curves[spec.ccy]
                 v_xva = self._irs_utils.deflate_lgm_npv_paths(
@@ -1136,18 +1504,27 @@ class PythonLgmAdapter:
                 v_xva = v
                 xva_deflated = False
             ns = spec.trade.netting_set
-            v_xva_obs = v_xva[obs_idx, :]
+            v_xva_val = v_xva[obs_idx, :]
+            v_xva_obs = v_xva[obs_closeout_idx, :]
+            valuation_epe = np.mean(np.maximum(v_xva_val, 0.0), axis=1)
+            valuation_ene = np.mean(np.maximum(-v_xva_val, 0.0), axis=1)
             epe = np.mean(np.maximum(v_xva_obs, 0.0), axis=1)
             ene = np.mean(np.maximum(-v_xva_obs, 0.0), axis=1)
+            valuation_epe_by_ns_paths[ns] = valuation_epe_by_ns_paths.get(ns, np.zeros_like(valuation_epe)) + valuation_epe
+            valuation_ene_by_ns_paths[ns] = valuation_ene_by_ns_paths.get(ns, np.zeros_like(valuation_ene)) + valuation_ene
             epe_by_ns_paths[ns] = epe_by_ns_paths.get(ns, np.zeros_like(epe)) + epe
             ene_by_ns_paths[ns] = ene_by_ns_paths.get(ns, np.zeros_like(ene)) + ene
             xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
             npv_cube_payload[spec.trade.trade_id] = {
-                "times": times.tolist(),
-                "npv_mean": np.mean(v, axis=1).tolist(),
-                "npv_xva_mean": np.mean(v_xva, axis=1).tolist(),
-                "epe": epe.tolist(),
-                "ene": ene.tolist(),
+                "times": valuation_times.tolist(),
+                "npv_mean": np.mean(v[valuation_idx, :], axis=1).tolist(),
+                "npv_xva_mean": np.mean(v_xva[valuation_idx, :], axis=1).tolist(),
+                "closeout_times": _build_sticky_closeout_times(valuation_times, inputs.mpor.mpor_years).tolist(),
+                "closeout_npv_mean": np.mean(v[np.searchsorted(times, _build_sticky_closeout_times(valuation_times, inputs.mpor.mpor_years)), :], axis=1).tolist(),
+                "valuation_epe": valuation_epe.tolist(),
+                "valuation_ene": valuation_ene.tolist(),
+                "closeout_epe": epe.tolist(),
+                "closeout_ene": ene.tolist(),
             }
 
         exposure_by_ns = {ns: float(vals[0]) for ns, vals in epe_by_ns_paths.items()}
@@ -1180,16 +1557,24 @@ class PythonLgmAdapter:
             ene_vec = ene_by_ns_paths.get(ns, np.zeros_like(epe_vec))
             cpty = _counterparty_for_netting(snapshot, ns)
             discount_weight = np.ones_like(obs_df_vec) if xva_deflated_by_ns.get(ns, False) else obs_df_vec
-            q_c = self._irs_utils.survival_probability_from_hazard(
-                obs_times,
-                inputs.hazard_times.get(cpty, np.array([1.0, 5.0])),
-                inputs.hazard_rates.get(cpty, np.array([0.02, 0.02])),
-            )
-            own_q = self._irs_utils.survival_probability_from_hazard(
-                obs_times,
-                inputs.hazard_times.get(own_name, np.array([1.0, 5.0])),
-                inputs.hazard_rates.get(own_name, np.array([0.015, 0.015])),
-            )
+            cpty_curve = inputs.survival_curves.get(cpty)
+            if cpty_curve is not None:
+                q_c = np.asarray([cpty_curve(float(t)) for t in obs_times], dtype=float)
+            else:
+                q_c = self._irs_utils.survival_probability_from_hazard(
+                    obs_times,
+                    inputs.hazard_times.get(cpty, np.array([1.0, 5.0])),
+                    inputs.hazard_rates.get(cpty, np.array([0.02, 0.02])),
+                )
+            own_curve = inputs.survival_curves.get(own_name)
+            if own_curve is not None:
+                own_q = np.asarray([own_curve(float(t)) for t in obs_times], dtype=float)
+            else:
+                own_q = self._irs_utils.survival_probability_from_hazard(
+                    obs_times,
+                    inputs.hazard_times.get(own_name, np.array([1.0, 5.0])),
+                    inputs.hazard_rates.get(own_name, np.array([0.015, 0.015])),
+                )
             dpd_c = np.clip(np.concatenate(([0.0], q_c[:-1] - q_c[1:])), 0.0, None)
             dpd_b = np.clip(np.concatenate(([0.0], own_q[:-1] - own_q[1:])), 0.0, None)
             lgd = 1.0 - float(inputs.recovery_rates.get(cpty, 0.4))
@@ -1210,7 +1595,14 @@ class PythonLgmAdapter:
             # Use a liability-side IM funding proxy with negative sign to align
             # with ORE report convention direction.
             mva_total += float(-np.sum(obs_df_vec * ene_vec * dt * 0.00012))
-            exposure_cube_payload[ns] = {"times": obs_times.tolist(), "epe": epe_vec.tolist(), "ene": ene_vec.tolist()}
+            exposure_cube_payload[ns] = {
+                "times": obs_times.tolist(),
+                "closeout_times": obs_closeout_times.tolist(),
+                "valuation_epe": valuation_epe_by_ns_paths.get(ns, np.zeros_like(epe_vec)).tolist(),
+                "valuation_ene": valuation_ene_by_ns_paths.get(ns, np.zeros_like(ene_vec)).tolist(),
+                "closeout_epe": epe_vec.tolist(),
+                "closeout_ene": ene_vec.tolist(),
+            }
 
         if "CVA" in metric_set:
             xva_by_metric["CVA"] = cva_total
@@ -1228,9 +1620,6 @@ class PythonLgmAdapter:
             "xva": [{"Metric": k, "Value": v} for k, v in xva_by_metric.items()],
             "exposure": [{"NettingSetId": k, "EPE": v} for k, v in exposure_by_ns.items()],
         }
-        if reports["xva"]:
-            reports["xva"].append({"Metric": "FBA", "Value": fba_total})
-            reports["xva"].append({"Metric": "FCA", "Value": fca_total})
         cubes = {
             "npv_cube": CubeAccessor(name="npv_cube", payload=npv_cube_payload),
             "exposure_cube": CubeAccessor(name="exposure_cube", payload=exposure_cube_payload),
@@ -1261,8 +1650,14 @@ class PythonLgmAdapter:
             "input_provenance": dict(inputs.input_provenance),
             "model_currency": inputs.model_ccy,
             "grid_size": int(times.size),
+            "valuation_grid_size": int(valuation_times.size),
             "observation_grid_size": int(obs_times.size),
+            "closeout_grid_size": int(np.unique(inputs.observation_closeout_times).size),
             "path_count": int(snapshot.config.num_paths),
+            "mpor_enabled": bool(inputs.mpor.enabled),
+            "mpor_days": int(inputs.mpor.mpor_days),
+            "mpor_mode": "sticky",
+            "mpor_source": inputs.mpor.source,
         }
         if fallback is not None:
             metadata["fallback_adapter"] = "ore-swig"
@@ -1347,8 +1742,11 @@ class ORESwigAdapter:
             raise EngineRunError(f"Failed to construct InputParameters: {exc}") from exc
 
     def _construct_app(self, input_parameters: Any) -> Any:
+        # The 5-arg form matches the OREApp(inputs, log_file, log_mask, console, file_log)
+        # signature used by ORE >= 6.x.  Fall back to the 1-arg form for older builds.
+        _ORE6_ARGS = ("", 31, False, True)  # log_file, log_mask, console_log, file_log
         candidates = [
-            (input_parameters, "", 31, False, True),
+            (input_parameters, *_ORE6_ARGS),
             (input_parameters,),
         ]
         for args in candidates:
@@ -1359,13 +1757,20 @@ class ORESwigAdapter:
         raise EngineRunError("Failed to construct OREApp from InputParameters")
 
     def _invoke_run(self, app: Any, market_data: Sequence[str], fixing_data: Sequence[str]) -> None:
+        import inspect as _inspect
         try:
-            app.run(list(market_data), list(fixing_data))
-            return
+            sig = _inspect.signature(app.run)
+            sig.bind(list(market_data), list(fixing_data))
+            accepts_args = True
         except TypeError:
-            pass
-        except Exception as exc:
-            raise EngineRunError(f"OREApp.run(marketData, fixingData) failed: {exc}") from exc
+            accepts_args = False
+
+        if accepts_args:
+            try:
+                app.run(list(market_data), list(fixing_data))
+                return
+            except Exception as exc:
+                raise EngineRunError(f"OREApp.run(marketData, fixingData) failed: {exc}") from exc
 
         try:
             app.run()
@@ -1450,6 +1855,10 @@ class ORESwigAdapter:
         if has_metric["MVA"]:
             xva["MVA"] = aggregates["MVA"]
         if has_metric["FBA"] or has_metric["FCA"]:
+            if has_metric["FBA"]:
+                xva["FBA"] = aggregates["FBA"]
+            if has_metric["FCA"]:
+                xva["FCA"] = aggregates["FCA"]
             # Approximate combined funding adjustment from borrowing/lending components.
             xva["FVA"] = aggregates["FBA"] + aggregates["FCA"]
         return xva
@@ -1547,6 +1956,21 @@ _TENOR_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([YMWD])$", re.IGNORECASE)
 _PERIOD_PART_RE = re.compile(r"([0-9]+(?:\\.[0-9]+)?)([YMWD])", re.IGNORECASE)
 
 
+@contextlib.contextmanager
+def _tmp_xml_path(xml_text: str):
+    """Write *xml_text* to a temp file, yield the file path, and delete on exit."""
+    fd, path = tempfile.mkstemp(suffix=".xml")
+    try:
+        os.write(fd, xml_text.encode("utf-8"))
+        os.close(fd)
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _parse_tenor_to_years(value: str) -> float:
     txt = value.strip()
     m = _TENOR_RE.match(txt)
@@ -1597,32 +2021,39 @@ def _date_from_time(asof: str, t: float) -> str:
     return (base + timedelta(days=int(round(float(t) * 365.25)))).isoformat()
 
 
-def _parse_lgm_params_from_simulation_xml_text(xml_text: str, ccy_key: str = "EUR") -> Dict[str, object]:
-    root = ET.fromstring(xml_text)
-    models = root.find("./CrossAssetModel/InterestRateModels")
-    if models is None:
-        raise EngineRunError("simulation.xml missing CrossAssetModel/InterestRateModels")
-
-    node = models.find(f"./LGM[@ccy='{ccy_key}']")
-    if node is None:
-        node = models.find("./LGM[@ccy='default']")
-    if node is None:
-        raise EngineRunError(f"simulation.xml missing LGM node for {ccy_key}")
-
+def _parse_lgm_params_from_xml_node(node: ET.Element, source_label: str) -> dict:
+    """Extract LGM parameters from an already-located LGM XML node."""
     vol_node = node.find("./Volatility")
     rev_node = node.find("./Reversion")
     trans_node = node.find("./ParameterTransformation")
     if vol_node is None or rev_node is None or trans_node is None:
-        raise EngineRunError("simulation.xml LGM node missing Volatility/Reversion/ParameterTransformation")
-
+        raise EngineRunError(
+            f"{source_label} LGM node missing Volatility/Reversion/ParameterTransformation"
+        )
     return {
         "alpha_times": _parse_float_grid(vol_node.findtext("./TimeGrid")),
         "alpha_values": _parse_float_grid(vol_node.findtext("./InitialValue")),
         "kappa_times": _parse_float_grid(rev_node.findtext("./TimeGrid")),
         "kappa_values": _parse_float_grid(rev_node.findtext("./InitialValue")),
-        "shift": float((trans_node.findtext("./ShiftHorizon") or "0").strip()),
+        # ORE's ShiftHorizon is not the same object as the additive H(t) shift
+        # used by the Python LGM kernel. Feeding it through materially breaks
+        # parity on calibrated Bermudan cases.
+        "shift": 0.0,
         "scaling": float((trans_node.findtext("./Scaling") or "1").strip()),
     }
+
+
+def _parse_lgm_params_from_simulation_xml_text(xml_text: str, ccy_key: str = "EUR") -> Dict[str, object]:
+    root = ET.fromstring(xml_text)
+    models = root.find("./CrossAssetModel/InterestRateModels")
+    if models is None:
+        raise EngineRunError("simulation.xml missing CrossAssetModel/InterestRateModels")
+    node = models.find(f"./LGM[@ccy='{ccy_key}']")
+    if node is None:
+        node = models.find("./LGM[@ccy='default']")
+    if node is None:
+        raise EngineRunError(f"simulation.xml missing LGM node for {ccy_key}")
+    return _parse_lgm_params_from_xml_node(node, "simulation.xml")
 
 
 def _parse_lgm_params_from_calibration_xml_text(xml_text: str, ccy_key: str = "EUR") -> Dict[str, object]:
@@ -1635,19 +2066,7 @@ def _parse_lgm_params_from_calibration_xml_text(xml_text: str, ccy_key: str = "E
         node = models.find(f"./LGM[@ccy='{ccy_key}']")
     if node is None:
         raise EngineRunError(f"calibration.xml missing LGM node for {ccy_key}")
-    vol_node = node.find("./Volatility")
-    rev_node = node.find("./Reversion")
-    trans_node = node.find("./ParameterTransformation")
-    if vol_node is None or rev_node is None or trans_node is None:
-        raise EngineRunError("calibration.xml LGM node missing Volatility/Reversion/ParameterTransformation")
-    return {
-        "alpha_times": _parse_float_grid(vol_node.findtext("./TimeGrid")),
-        "alpha_values": _parse_float_grid(vol_node.findtext("./InitialValue")),
-        "kappa_times": _parse_float_grid(rev_node.findtext("./TimeGrid")),
-        "kappa_values": _parse_float_grid(rev_node.findtext("./InitialValue")),
-        "shift": float((trans_node.findtext("./ShiftHorizon") or "0").strip()),
-        "scaling": float((trans_node.findtext("./Scaling") or "1").strip()),
-    }
+    return _parse_lgm_params_from_xml_node(node, "calibration.xml")
 
 
 def _parse_exposure_times_from_simulation_xml_text(xml_text: str) -> np.ndarray:
@@ -1695,6 +2114,16 @@ def _fallback_exposure_grid(snapshot: XVASnapshot) -> np.ndarray:
         max_mat = 1.0
     steps = max(4, int(np.ceil(max_mat * 4.0)))
     return np.linspace(0.0, max_mat, steps + 1)
+
+
+def _build_sticky_closeout_times(times: np.ndarray, mpor_years: float) -> np.ndarray:
+    t = np.asarray(times, dtype=float)
+    if t.size == 0:
+        return t.copy()
+    mpor = float(mpor_years)
+    if mpor <= 1.0e-15:
+        return t.copy()
+    return np.minimum(t + mpor, float(t[-1]))
 
 
 def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
@@ -1778,6 +2207,21 @@ def _default_index_for_ccy(ccy: str) -> str:
 
 
 def _build_irs_legs_from_trade(trade: Trade) -> Dict[str, np.ndarray]:
+    """Last-resort skeleton leg builder: assumes 6M fixed / 3M float, no historical fixings.
+
+    This path is reached only when neither flows.csv nor portfolio.xml loading
+    succeeded.  Results will be approximate — calendar, day-count and index
+    conventions are hard-coded.  Always prefer loading legs from ORE output
+    artifacts or a portfolio XML.
+    """
+    import warnings as _warnings
+    _warnings.warn(
+        f"Using skeleton leg schedule for trade {trade.trade_id} "
+        "(no flows.csv or portfolio.xml available). "
+        "Leg conventions are approximate (6M fixed / 3M float, A365F).",
+        UserWarning,
+        stacklevel=3,
+    )
     p = trade.product
     if not isinstance(p, IRS):
         raise EngineRunError(f"Cannot build IRS legs for non-IRS trade {trade.trade_id}")
@@ -1859,6 +2303,9 @@ def _effective_funding_spreads(snapshot: XVASnapshot, inputs: _PythonLgmInputs, 
     if runtime is not None:
         xva = runtime.xva_analytic
         # If dedicated funding curve handles are configured, widen spreads modestly.
+        # The 1.5× scalar is a conservative liability-side funding premium:
+        # own-name CDS spread alone understates the all-in funding cost because
+        # it excludes bid/offer and liquidity components.
         if xva.fva_borrowing_curve:
             borrow *= 1.5
         if xva.fva_lending_curve:
@@ -1901,6 +2348,149 @@ def _spot_from_quotes(pair6: str, inputs: _PythonLgmInputs, default: float = 1.0
     if inv in inputs.fx_spots:
         return 1.0 / max(float(inputs.fx_spots[inv]), 1.0e-12)
     return float(default)
+
+
+def _curve_family_from_source_column(source_column: str) -> str:
+    txt = str(source_column).strip().upper()
+    if not txt:
+        return ""
+    for tenor in ("ON", "O/N", "1D", "1W", "1M", "3M", "6M", "12M"):
+        if txt.endswith(f"-{tenor}") or txt.endswith(tenor):
+            return tenor
+    if any(tag in txt for tag in ("EONIA", "FEDFUNDS", "SONIA", "TOIS", "TONAR")):
+        return "1D"
+    return ""
+
+
+def _zero_rate_from_curve(curve: Callable[[float], float], t: float) -> float:
+    tt = max(float(t), 1.0e-8)
+    return float(-np.log(max(float(curve(tt)), 1.0e-18)) / tt)
+
+
+def _build_zero_rate_shocked_curve(
+    base_curve: Callable[[float], float],
+    node_times: Sequence[float],
+    node_shifts: Sequence[float],
+) -> Callable[[float], float]:
+    times = np.asarray([float(x) for x in node_times], dtype=float)
+    shifts = np.asarray([float(x) for x in node_shifts], dtype=float)
+    if times.size == 0 or times.size != shifts.size:
+        return base_curve
+    order = np.argsort(times)
+    times = times[order]
+    shifts = shifts[order]
+
+    shocked_node_logs = np.log(
+        np.clip(
+            np.asarray([float(base_curve(float(t))) for t in times], dtype=float)
+            * np.exp(-times * shifts),
+            1.0e-18,
+            None,
+        )
+    )
+
+    def shocked_curve(t: float) -> float:
+        tt = max(float(t), 0.0)
+        if tt <= 1.0e-12:
+            return 1.0
+
+        # ORE curve configs in the benchmark cases use Discount + LogLinear.
+        # Apply the node shocks at the bucket tenors, then interpolate the
+        # shocked discount factors in log-discount space between nodes.
+        if tt <= times[0]:
+            base_df = float(base_curve(tt))
+            return float(base_df * np.exp(-shifts[0] * tt))
+        if tt >= times[-1]:
+            base_df = float(base_curve(tt))
+            return float(base_df * np.exp(-shifts[-1] * tt))
+
+        shocked_log_df = float(np.interp(tt, times, shocked_node_logs))
+        return float(np.exp(shocked_log_df))
+
+    return shocked_curve
+
+
+def _apply_curve_node_shocks(
+    snapshot: XVASnapshot,
+    discount_curves: Dict[str, Callable[[float], float]],
+    forward_curves: Dict[str, Callable[[float], float]],
+    forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]],
+    xva_discount_curve: Optional[Callable[[float], float]],
+) -> Tuple[
+    Dict[str, Callable[[float], float]],
+    Dict[str, Callable[[float], float]],
+    Dict[str, Dict[str, Callable[[float], float]]],
+    Optional[Callable[[float], float]],
+]:
+    specs = snapshot.config.params.get("python.curve_node_shocks")
+    if not isinstance(specs, dict):
+        return discount_curves, forward_curves, forward_curves_by_tenor, xva_discount_curve
+
+    discount_specs = specs.get("discount", {}) if isinstance(specs.get("discount", {}), dict) else {}
+    forward_specs = specs.get("forward", {}) if isinstance(specs.get("forward", {}), dict) else {}
+
+    discount_curves = dict(discount_curves)
+    forward_curves = dict(forward_curves)
+    forward_curves_by_tenor = {ccy: dict(v) for ccy, v in forward_curves_by_tenor.items()}
+
+    for ccy, cfg in discount_specs.items():
+        if ccy not in discount_curves or not isinstance(cfg, dict):
+            continue
+        node_times = cfg.get("node_times", ())
+        node_shifts = cfg.get("node_shifts", ())
+        bumped = _build_zero_rate_shocked_curve(discount_curves[ccy], node_times, node_shifts)
+        discount_curves[ccy] = bumped
+        if snapshot.config.base_currency.upper() == str(ccy).upper() and xva_discount_curve is not None:
+            xva_discount_curve = bumped
+
+    for ccy, tenor_map in forward_specs.items():
+        if not isinstance(tenor_map, dict):
+            continue
+        tenor_curves = dict(forward_curves_by_tenor.get(ccy, {}))
+        for tenor, cfg in tenor_map.items():
+            if tenor not in tenor_curves or not isinstance(cfg, dict):
+                continue
+            node_times = cfg.get("node_times", ())
+            node_shifts = cfg.get("node_shifts", ())
+            bumped = _build_zero_rate_shocked_curve(tenor_curves[tenor], node_times, node_shifts)
+            tenor_curves[tenor] = bumped
+            if ccy in forward_curves:
+                preferred = "6M" if "6M" in tenor_curves else (sorted(tenor_curves)[0] if tenor_curves else "")
+                if preferred and preferred == tenor:
+                    forward_curves[ccy] = bumped
+        forward_curves_by_tenor[ccy] = tenor_curves
+
+    return discount_curves, forward_curves, forward_curves_by_tenor, xva_discount_curve
+
+
+def _quote_matches_discount_curve(key: str, ccy: str, source_column: str) -> bool:
+    parts = str(key).strip().upper().split("/")
+    if len(parts) < 3 or parts[2] != ccy.upper():
+        return False
+    family = _curve_family_from_source_column(source_column)
+    if parts[0] == "MM" and parts[1] == "RATE":
+        return True
+    if parts[0] == "IR_SWAP" and parts[1] == "RATE":
+        index_tenor = parts[4] if len(parts) > 5 else ""
+        if family in ("", "1D", "ON", "O/N"):
+            return index_tenor in ("1D", "ON", "O/N")
+        return index_tenor == family
+    if parts[0] == "FRA" and parts[1] == "RATE":
+        return family not in ("", "1D", "ON", "O/N") and len(parts) > 4 and parts[-1] == family
+    return False
+
+
+def _quote_matches_forward_curve(key: str, ccy: str, tenor: str) -> bool:
+    parts = str(key).strip().upper().split("/")
+    if len(parts) < 3 or parts[2] != ccy.upper():
+        return False
+    if parts[0] == "MM" and parts[1] == "RATE":
+        return True
+    if parts[0] == "IR_SWAP" and parts[1] == "RATE":
+        return len(parts) > 5 and parts[4] == tenor.upper()
+    if parts[0] == "FRA" and parts[1] == "RATE":
+        return len(parts) > 4 and parts[-1] == tenor.upper()
+    return False
 
 
 def _toy_trade_numbers(trade: Trade):

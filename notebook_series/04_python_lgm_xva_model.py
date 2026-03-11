@@ -24,36 +24,18 @@ from pathlib import Path
 import os
 import sys
 
-def _is_pythonorerunner_root(path: Path) -> bool:
-    return (
-        (path / "notebook_series" / "series_helpers.py").exists()
-        and (path / "native_xva_interface").exists()
-        and (path / "py_ore_tools").exists()
-    )
-
-def _is_engine_root(path: Path) -> bool:
-    return (path / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists()
-
 def _find_repo_root(start: Path) -> Path:
     current = start.resolve()
     for candidate in (current, *current.parents):
-        if _is_pythonorerunner_root(candidate) or _is_engine_root(candidate):
+        if (candidate / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
             return candidate
-    repo_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
-    if _is_pythonorerunner_root(repo_hint):
-        return repo_hint
     repo_hint = Path("/Users/gordonlee/Documents/Engine")
-    if _is_engine_root(repo_hint):
+    if (repo_hint / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists():
         return repo_hint
-    raise RuntimeError("Could not locate a PythonOreRunner or Engine repo root from the current notebook working directory")
-
-def _pythonorerunner_root(repo_root: Path) -> Path:
-    if _is_pythonorerunner_root(repo_root):
-        return repo_root
-    return repo_root / "Tools" / "PythonOreRunner"
+    raise RuntimeError("Could not locate the Engine repo root from the current notebook working directory")
 
 REPO_ROOT = _find_repo_root(Path.cwd())
-NOTEBOOK_DIR = _pythonorerunner_root(REPO_ROOT) / "notebook_series"
+NOTEBOOK_DIR = REPO_ROOT / "Tools" / "PythonOreRunner" / "notebook_series"
 for path in (NOTEBOOK_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
