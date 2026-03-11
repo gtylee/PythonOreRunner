@@ -76,6 +76,16 @@ These scripts read market/example inputs from `ENGINE_REPO_ROOT/Examples/...` an
 
 See [`py_ore_tools/benchmarks/README.md`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools/benchmarks/README.md) for per-script prerequisites, inputs, and output locations.
 
+## Notebook Series
+
+The five-part notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
+
+To regenerate the notebooks after editing the builder:
+
+```bash
+python3 notebook_series/build_series.py
+```
+
 ## License and ORE
 
 ORE itself is separate; build and install it from the [ORE repository](https://github.com/OpenSourceRisk/Engine). This project is an add-on layer and does not replace ORE.

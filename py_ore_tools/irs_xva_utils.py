@@ -1273,11 +1273,11 @@ def survival_probability_from_hazard(
         raise ValueError("hazard curve is empty")
 
     knots = np.concatenate(([0.0], hazard_times))
-    lambdas = np.concatenate(([hazard_rates[0]], hazard_rates))
+    lambdas = np.asarray(hazard_rates, dtype=float)
     out = np.empty_like(t)
     for i, x in enumerate(t):
         acc = 0.0
-        for j in range(len(knots) - 1):
+        for j in range(lambdas.size):
             a = knots[j]
             b = min(x, knots[j + 1])
             if b > a:

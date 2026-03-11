@@ -42,6 +42,12 @@ from .parity import ParityCheckResult, ParityTolerance, compare_results
 from .presets import stress_classic_native_preset, stress_classic_native_runtime
 from .results import CubeAccessor, XVAResult
 from .runtime import DeterministicToyAdapter, ORESwigAdapter, PythonLgmAdapter, XVAEngine, XVASession
+from .sensitivity import (
+    ORESensitivityEntry,
+    OreSnapshotPythonLgmSensitivityComparator,
+    PythonSensitivityEntry,
+    SensitivityComparisonEntry,
+)
 from .stress_classic_templates import stress_classic_fixing_lines, stress_classic_market_lines, stress_classic_xml_buffers
 
 # Backward-compatible aliases for prior prototype names.
@@ -81,7 +87,10 @@ __all__ = [
     "NettingConfig",
     "NettingSet",
     "ORESwigAdapter",
+    "ORESensitivityEntry",
+    "OreSnapshotPythonLgmSensitivityComparator",
     "PythonLgmAdapter",
+    "PythonSensitivityEntry",
     "ParityCheckResult",
     "ParityTolerance",
     "Portfolio",
@@ -92,6 +101,7 @@ __all__ = [
     "SimulationConfig",
     "SimulationMarketConfig",
     "SourceMeta",
+    "SensitivityComparisonEntry",
     "TodaysMarketConfig",
     "Trade",
     "XVAAnalyticConfig",

@@ -56,6 +56,45 @@ class XVAEngine:
             ),
         )
 
+    def prepare_sensitivity_snapshot(
+        self,
+        snapshot: XVASnapshot,
+        *,
+        curve_node_shocks: Optional[Dict[str, object]] = None,
+        curve_fit_mode: str = "ore_fit",
+        use_ore_output_curves: bool = False,
+        freeze_float_spreads: bool = False,
+        frozen_float_spreads: Optional[Dict[str, List[float]]] = None,
+    ) -> XVASnapshot:
+        params = dict(snapshot.config.params)
+        params["python.curve_fit_mode"] = str(curve_fit_mode)
+        params["python.use_ore_output_curves"] = "Y" if use_ore_output_curves else "N"
+        if curve_node_shocks is not None:
+            params["python.curve_node_shocks"] = curve_node_shocks
+        elif "python.curve_node_shocks" in params:
+            params.pop("python.curve_node_shocks", None)
+        if frozen_float_spreads is not None:
+            params["python.frozen_float_spreads"] = frozen_float_spreads
+        elif freeze_float_spreads and hasattr(self.adapter, "compute_frozen_float_spreads"):
+            frozen = self.adapter.compute_frozen_float_spreads(
+                replace(snapshot, config=replace(snapshot.config, params=params))
+            )
+            if frozen:
+                params["python.frozen_float_spreads"] = frozen
+        updated = replace(snapshot, config=replace(snapshot.config, params=params))
+        if hasattr(self.adapter, "prepare_sensitivity_snapshot"):
+            prepared = self.adapter.prepare_sensitivity_snapshot(
+                updated,
+                curve_node_shocks=curve_node_shocks,
+                curve_fit_mode=curve_fit_mode,
+                use_ore_output_curves=use_ore_output_curves,
+                freeze_float_spreads=freeze_float_spreads,
+                frozen_float_spreads=frozen_float_spreads,
+            )
+            if isinstance(prepared, XVASnapshot):
+                return prepared
+        return updated
+
 
 class XVASession:
     def __init__(self, engine: XVAEngine, state: SessionState):
@@ -320,6 +359,47 @@ class PythonLgmAdapter:
         )
         result.metadata["python_lgm_rng_mode"] = rng_mode
         return result
+
+    def prepare_sensitivity_snapshot(
+        self,
+        snapshot: XVASnapshot,
+        *,
+        curve_node_shocks: Optional[Dict[str, object]] = None,
+        curve_fit_mode: str = "ore_fit",
+        use_ore_output_curves: bool = False,
+        freeze_float_spreads: bool = False,
+        frozen_float_spreads: Optional[Dict[str, List[float]]] = None,
+    ) -> XVASnapshot:
+        params = dict(snapshot.config.params)
+        params["python.curve_fit_mode"] = str(curve_fit_mode)
+        params["python.use_ore_output_curves"] = "Y" if use_ore_output_curves else "N"
+        if curve_node_shocks is not None:
+            params["python.curve_node_shocks"] = curve_node_shocks
+        else:
+            params.pop("python.curve_node_shocks", None)
+        if frozen_float_spreads is not None:
+            params["python.frozen_float_spreads"] = frozen_float_spreads
+        elif freeze_float_spreads:
+            frozen = self.compute_frozen_float_spreads(replace(snapshot, config=replace(snapshot.config, params=params)))
+            if frozen:
+                params["python.frozen_float_spreads"] = frozen
+        return replace(snapshot, config=replace(snapshot.config, params=params))
+
+    def compute_frozen_float_spreads(self, snapshot: XVASnapshot) -> Dict[str, List[float]]:
+        self._ensure_py_lgm_imports()
+        try:
+            inputs = self._extract_inputs(snapshot, map_snapshot(snapshot))
+        except Exception:
+            return {}
+        out: Dict[str, List[float]] = {}
+        for spec in inputs.trade_specs:
+            if spec.kind != "IRS" or spec.legs is None:
+                continue
+            spread = np.asarray(spec.legs.get("float_spread", []), dtype=float)
+            coupon = np.asarray(spec.legs.get("float_coupon", []), dtype=float)
+            if spread.size and coupon.size == spread.size:
+                out[spec.trade.trade_id] = [float(x) for x in spread]
+        return out
 
     def _ensure_py_lgm_imports(self) -> None:
         if self._loaded:

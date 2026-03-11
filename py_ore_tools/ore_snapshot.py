@@ -172,6 +172,21 @@ class OreSnapshot:
     own_hazard_rates: Optional[np.ndarray] = None
     own_recovery: Optional[float] = None
 
+    # --- Provenance / parity audit ------------------------------------------
+    leg_source: str = "portfolio"
+    requested_xva_metrics: tuple[str, ...] = ()
+    own_name: Optional[str] = None
+    portfolio_xml_path: Optional[str] = None
+    todaysmarket_xml_path: Optional[str] = None
+    market_data_path: Optional[str] = None
+    simulation_xml_path: Optional[str] = None
+    calibration_xml_path: Optional[str] = None
+    curves_csv_path: Optional[str] = None
+    exposure_csv_path: Optional[str] = None
+    xva_csv_path: Optional[str] = None
+    npv_csv_path: Optional[str] = None
+    flows_csv_path: Optional[str] = None
+
     # -------------------------------------------------------------------------
     # Convenience methods
     # -------------------------------------------------------------------------
@@ -208,6 +223,166 @@ class OreSnapshot:
 
     def report_time_from_date(self, d: str | date) -> float:
         return _year_fraction_from_day_counter(self.asof_date, d, self.report_day_counter)
+
+    def parity_completeness_report(self) -> Dict[str, object]:
+        """Return a structured audit of parity-critical snapshot inputs."""
+        requested = tuple(self.requested_xva_metrics)
+        file_paths = {
+            "ore_xml": self.ore_xml_path,
+            "portfolio_xml": self.portfolio_xml_path,
+            "todaysmarket_xml": self.todaysmarket_xml_path,
+            "market_data": self.market_data_path,
+            "simulation_xml": self.simulation_xml_path,
+            "calibration_xml": self.calibration_xml_path,
+            "curves_csv": self.curves_csv_path,
+            "exposure_csv": self.exposure_csv_path,
+            "xva_csv": self.xva_csv_path,
+            "npv_csv": self.npv_csv_path,
+            "flows_csv": self.flows_csv_path,
+        }
+        files_present = {
+            key: (bool(path) and Path(str(path)).exists())
+            for key, path in file_paths.items()
+        }
+        trade_ok = bool(self.trade_id and self.counterparty and self.netting_set_id and self.legs)
+        curve_ok = bool(
+            self.discount_column
+            and self.forward_column
+            and self.curve_times_disc.size > 0
+            and self.curve_times_fwd.size > 0
+            and len(self.curve_times_disc) == len(self.curve_dfs_disc)
+            and len(self.curve_times_fwd) == len(self.curve_dfs_fwd)
+        )
+        cpty_credit_ok = bool(
+            self.hazard_times.size > 0
+            and self.hazard_rates.size > 0
+            and self.recovery is not None
+        )
+        own_credit_ok = bool(
+            self.own_hazard_times is not None
+            and self.own_hazard_rates is not None
+            and np.size(self.own_hazard_times) > 0
+            and np.size(self.own_hazard_rates) > 0
+            and self.own_recovery is not None
+        )
+        funding_ok = bool(
+            self.borrowing_curve_column
+            and self.lending_curve_column
+            and self.curve_times_borrow is not None
+            and self.curve_dfs_borrow is not None
+            and self.curve_times_lend is not None
+            and self.curve_dfs_lend is not None
+        )
+        exposure_ok = bool(
+            self.exposure_times.size > 1
+            and np.all(np.diff(self.exposure_times) > 0.0)
+            and len(self.exposure_times) == len(self.exposure_dates) == len(self.exposure_model_times)
+        )
+        issues: list[str] = []
+        if not trade_ok:
+            issues.append("trade/schedule inputs are incomplete")
+        if self.leg_source != "flows":
+            issues.append("legs are not sourced from flows.csv; portfolio-derived schedules may still differ from ORE cashflow signs")
+        if not curve_ok:
+            issues.append("discount/forward curve extraction is incomplete")
+        if not cpty_credit_ok:
+            issues.append("counterparty hazard/recovery inputs are incomplete")
+        if ("DVA" in requested or abs(self.ore_dva) > 1.0e-12) and not own_credit_ok:
+            issues.append("own-name hazard/recovery inputs are incomplete for DVA parity")
+        if ("FVA" in requested or abs(self.ore_fba) > 1.0e-12 or abs(self.ore_fca) > 1.0e-12) and not funding_ok:
+            issues.append("borrowing/lending curve inputs are incomplete for FVA parity")
+        if not exposure_ok:
+            issues.append("exposure grid is incomplete or inconsistent")
+
+        comparable_metrics = {
+            "CVA": trade_ok and curve_ok and cpty_credit_ok and exposure_ok,
+            "DVA": trade_ok and curve_ok and cpty_credit_ok and own_credit_ok and exposure_ok,
+            "FVA": trade_ok and curve_ok and funding_ok and exposure_ok,
+            "MVA": trade_ok and curve_ok and exposure_ok and ("MVA" in requested or False),
+        }
+
+        return {
+            "summary": {
+                "trade_id": self.trade_id,
+                "counterparty": self.counterparty,
+                "netting_set_id": self.netting_set_id,
+                "leg_source": self.leg_source,
+                "requested_xva_metrics": list(requested),
+                "own_name": self.own_name,
+            },
+            "conventions": {
+                "measure": self.measure,
+                "model_day_counter": self.model_day_counter,
+                "report_day_counter": self.report_day_counter,
+                "seed": self.seed,
+                "samples": self.n_samples,
+            },
+            "trade_setup": {
+                "complete": trade_ok,
+                "fixed_leg_count": int(np.size(self.legs.get("fixed_pay_time", []))) if self.legs else 0,
+                "float_leg_count": int(np.size(self.legs.get("float_pay_time", []))) if self.legs else 0,
+            },
+            "curve_setup": {
+                "complete": curve_ok,
+                "discount_column": self.discount_column,
+                "forward_column": self.forward_column,
+                "xva_discount_column": self.xva_discount_column,
+                "borrowing_curve_column": self.borrowing_curve_column,
+                "lending_curve_column": self.lending_curve_column,
+                "discount_points": int(self.curve_times_disc.size),
+                "forward_points": int(self.curve_times_fwd.size),
+            },
+            "credit_setup": {
+                "counterparty_credit_complete": cpty_credit_ok,
+                "own_credit_complete": own_credit_ok,
+                "counterparty_hazard_points": int(self.hazard_times.size),
+                "own_hazard_points": int(np.size(self.own_hazard_times)) if self.own_hazard_times is not None else 0,
+                "counterparty_recovery": float(self.recovery),
+                "own_recovery": None if self.own_recovery is None else float(self.own_recovery),
+            },
+            "funding_setup": {
+                "complete": funding_ok,
+                "ore_fba": float(self.ore_fba),
+                "ore_fca": float(self.ore_fca),
+            },
+            "exposure_setup": {
+                "complete": exposure_ok,
+                "exposure_points": int(self.exposure_times.size),
+                "ore_epe_points": int(self.ore_epe.size),
+                "ore_ene_points": int(self.ore_ene.size),
+            },
+            "comparability": comparable_metrics,
+            "files": {
+                key: {"path": path, "exists": files_present[key]}
+                for key, path in file_paths.items()
+            },
+            "issues": issues,
+            "parity_ready": bool(comparable_metrics["CVA"] and not issues),
+        }
+
+    def parity_completeness_dataframe(self):
+        import pandas as pd
+
+        report = self.parity_completeness_report()
+        rows = []
+        for section in ("trade_setup", "curve_setup", "credit_setup", "funding_setup", "exposure_setup", "comparability"):
+            payload = report.get(section, {})
+            for key, value in payload.items():
+                rows.append({"section": section, "field": key, "value": value})
+        return pd.DataFrame(rows)
+
+    def to_dict(self) -> Dict[str, object]:
+        """JSON-friendly representation of the snapshot contents.
+
+        Callable fields such as ``p0_disc`` are intentionally omitted because they
+        are derived from the exported curve arrays and are not directly serializable.
+        """
+        payload: Dict[str, object] = {}
+        for field in dataclasses.fields(self):
+            if field.name in {"p0_disc", "p0_fwd", "p0_xva_disc", "p0_borrow", "p0_lend"}:
+                continue
+            payload[field.name] = _jsonify_snapshot_value(getattr(self, field.name))
+        return payload
 
     def __repr__(self) -> str:  # keep repr readable even with large arrays
         return (
@@ -253,6 +428,27 @@ class CurveDFPayload:
             "dfs": [float(x) for x in self.dfs],
             "calendar_dates": list(self.calendar_dates),
         }
+
+
+def _jsonify_snapshot_value(value):
+    if dataclasses.is_dataclass(value):
+        return {
+            k: _jsonify_snapshot_value(v)
+            for k, v in dataclasses.asdict(value).items()
+        }
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, tuple):
+        return [_jsonify_snapshot_value(v) for v in value]
+    if isinstance(value, list):
+        return [_jsonify_snapshot_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonify_snapshot_value(v) for k, v in value.items()}
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
 
 
 def extract_discount_factors_by_currency(
@@ -834,6 +1030,16 @@ def load_from_ore_xml(
         {n.attrib.get("name", ""): (n.text or "").strip() for n in xva_analytic.findall("./Parameter")}
         if xva_analytic is not None else {}
     )
+    requested_xva_metrics = tuple(
+        metric
+        for metric, enabled in (
+            ("CVA", xva_params.get("cva", "Y")),
+            ("DVA", xva_params.get("dva", "N")),
+            ("FVA", xva_params.get("fva", "N")),
+            ("MVA", xva_params.get("mva", "N")),
+        )
+        if str(enabled).strip().upper() == "Y"
+    )
     borrowing_curve_column = (xva_params.get("fvaBorrowingCurve") or "").strip() or None
     lending_curve_column = (xva_params.get("fvaLendingCurve") or "").strip() or None
 
@@ -968,11 +1174,13 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     flows_csv = output_path / "flows.csv"
     legs = None
+    leg_source = "portfolio"
     if flows_csv.exists():
         try:
             legs = load_ore_legs_from_flows(
                 str(flows_csv), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
             )
+            leg_source = "flows"
         except (ValueError, FileNotFoundError):
             pass
     if legs is None:
@@ -1063,6 +1271,19 @@ def load_from_ore_xml(
         own_hazard_times=own_credit["hazard_times"] if own_credit else None,
         own_hazard_rates=own_credit["hazard_rates"] if own_credit else None,
         own_recovery=float(own_credit["recovery"]) if own_credit else None,
+        leg_source=leg_source,
+        requested_xva_metrics=requested_xva_metrics,
+        own_name=dva_name,
+        portfolio_xml_path=str(portfolio_xml),
+        todaysmarket_xml_path=str(todaysmarket_xml),
+        market_data_path=str(market_data_file),
+        simulation_xml_path=str(simulation_xml),
+        calibration_xml_path=str(calibration_xml) if calibration_xml.exists() else None,
+        curves_csv_path=str(curves_csv),
+        exposure_csv_path=str(exposure_csv),
+        xva_csv_path=str(xva_csv),
+        npv_csv_path=str(npv_csv),
+        flows_csv_path=str(flows_csv) if flows_csv.exists() else None,
     )
 
 
