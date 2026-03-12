@@ -24,5 +24,5 @@ The notebooks share a thin support layer in `series_helpers.py` and are generate
 To regenerate the notebooks after editing the builder:
 
 ```bash
-python3 notebook_series/build_series.py
+python3 Tools/PythonOreRunner/notebook_series/build_series.py
 ```
