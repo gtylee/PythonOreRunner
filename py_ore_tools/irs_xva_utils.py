@@ -50,11 +50,22 @@ def _year_fraction_actual_actual(start: date, end: date) -> float:
 
 def _time_from_dates(start: date, end: date, day_counter: str) -> float:
     dc = (day_counter or "A365F").strip().upper()
+    if dc in ("A360", "ACT/360", "ACTUAL/360", "ACTUAL360"):
+        return (end - start).days / 360.0
     if dc in ("A365F", "A365", "ACT/365(FIXED)", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
         return (end - start).days / 365.0
     if dc in ("AAISDA", "ACTUALACTUAL(ISDA)", "ACT/ACT(ISDA)", "ACTUALACTUALISDA"):
         return _year_fraction_actual_actual(start, end)
     return _year_fraction_actual_actual(start, end)
+
+
+def _infer_index_day_counter(index_name: str, fallback: str = "A365F") -> str:
+    name = (index_name or "").strip().upper()
+    if "USD-LIBOR" in name or "EUR-EURIBOR" in name or "EONIA" in name or "ESTER" in name:
+        return "A360"
+    if "GBP-LIBOR" in name or "SONIA" in name or "CAD-CDOR" in name or "CAD-CORRA" in name:
+        return "A365"
+    return fallback
 
 
 def build_discount_curve_from_zero_rate_pairs(
@@ -433,6 +444,7 @@ def load_ore_legs_from_flows(
     trade_id: str = "Swap_20",
     asof_date: Optional[str] = None,
     time_day_counter: str = "ActualActual(ISDA)",
+    index_day_counter: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     """Parse ORE flows.csv and return fixed/floating leg cashflow definitions in year-fraction times.
 
@@ -514,6 +526,18 @@ def load_ore_legs_from_flows(
     out["float_start_time"] = np.asarray([to_time(r["AccrualStartDate"]) for r in floating], dtype=float)
     out["float_end_time"] = np.asarray([to_time(r["AccrualEndDate"]) for r in floating], dtype=float)
     out["float_accrual"] = np.asarray([float(r["Accrual"]) for r in floating], dtype=float)
+    idx_dc = index_day_counter or time_day_counter
+    out["float_index_accrual"] = np.asarray(
+        [
+            _time_from_dates(
+                datetime.strptime(r["AccrualStartDate"], "%Y-%m-%d").date(),
+                datetime.strptime(r["AccrualEndDate"], "%Y-%m-%d").date(),
+                idx_dc,
+            )
+            for r in floating
+        ],
+        dtype=float,
+    )
     out["float_notional"] = np.asarray([float(r["Notional"]) for r in floating], dtype=float)
     out["float_sign"] = np.full(len(floating), float_leg_sign, dtype=float)
     out["float_coupon"] = np.asarray([float(r["Coupon"]) for r in floating], dtype=float)
@@ -522,8 +546,20 @@ def load_ore_legs_from_flows(
     # decomposition into index forward + spread.  Start with zero spread and let a
     # later calibration helper infer the spread if the user wants dual-curve parity.
     out["float_spread"] = np.zeros_like(out["float_accrual"])
-    # Fixing time: flows.csv has no explicit fixing date; use period start (standard convention).
-    out["float_fixing_time"] = np.asarray(out["float_start_time"], dtype=float)
+    # Prefer explicit fixing dates from flows.csv when present. Falling back to the
+    # accrual start silently shifts coupons on conventions with fixing lags.
+    fixing_key = None
+    for candidate in ("FixingDate", "fixingDate"):
+        if candidate in floating[0]:
+            fixing_key = candidate
+            break
+    if fixing_key is not None and all((r.get(fixing_key, "") or "").strip() for r in floating):
+        out["float_fixing_time"] = np.asarray([to_time(r[fixing_key]) for r in floating], dtype=float)
+        out["float_fixing_source"] = "flows_fixing_date"
+    else:
+        out["float_fixing_time"] = np.asarray(out["float_start_time"], dtype=float)
+        out["float_fixing_source"] = "accrual_start_fallback"
+    out["float_index_day_counter"] = idx_dc
 
     return out
 
@@ -601,10 +637,15 @@ def load_swap_legs_from_portfolio(
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
             float_index = (lx.findtext("./FloatingLegData/Index") or "").strip().upper()
             float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
+            index_dc = _infer_index_day_counter(float_index, fallback=dc)
             out["float_pay_time"] = p_t
             out["float_start_time"] = s_t
             out["float_end_time"] = e_t
             out["float_accrual"] = accr
+            out["float_index_accrual"] = np.asarray(
+                [_year_fraction(sd, ed, index_dc) for sd, ed in zip(s_dates, e_dates)],
+                dtype=float,
+            )
             out["float_notional"] = np.full_like(accr, notional)
             out["float_sign"] = np.full_like(accr, sign)
             out["float_spread"] = np.full_like(accr, spread)
@@ -613,8 +654,10 @@ def load_swap_legs_from_portfolio(
             # ORE stores fixing lag as business days relative to the accrual start.
             fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
             out["float_fixing_time"] = np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
+            out["float_fixing_source"] = "portfolio_fixing_days"
             out["float_index"] = float_index
             out["float_index_tenor"] = float_index_tenor
+            out["float_index_day_counter"] = index_dc
         else:
             raise ValueError(f"unsupported leg type '{ltype}'")
 
@@ -737,6 +780,7 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
         e = legs["float_end_time"][mask_future]
         pay = legs["float_pay_time"][mask_future]
         tau = legs["float_accrual"][mask_future]
+        index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"])[mask_future], dtype=float)
         n = legs["float_notional"][mask_future]
         sign = legs["float_sign"][mask_future]
         spread = legs["float_spread"][mask_future]
@@ -744,7 +788,7 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
         p_ts = _discount_bond_block(model, p0, t, s, x, p_t)
         p_te = _discount_bond_block(model, p0, t, e, x, p_t)
         p_tp = _discount_bond_block(model, p0, t, pay, x, p_t)
-        fwd = (p_ts / p_te - 1.0) / tau[:, None]
+        fwd = (p_ts / p_te - 1.0) / index_tau[:, None]
         cash = sign[:, None] * n[:, None] * (fwd + spread[:, None]) * tau[:, None]
         pv += np.sum(cash * p_tp, axis=0)
 
@@ -880,6 +924,7 @@ def swap_npv_from_ore_legs_dual_curve(
         e = legs["float_end_time"][live]
         pay = pay_all[live]
         tau = legs["float_accrual"][live]
+        index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"])[live], dtype=float)
         n = legs["float_notional"][live]
         sign = legs["float_sign"][live]
         spread = legs["float_spread"][live]
@@ -906,12 +951,13 @@ def swap_npv_from_ore_legs_dual_curve(
             s2 = s[~fixed]
             e2 = e[~fixed]
             tau2 = tau[~fixed]
+            index_tau2 = index_tau[~fixed]
             n2 = n[~fixed]
             sign2 = sign[~fixed]
             spread2 = spread[~fixed]
             p_ts_f2 = forward_bond_batch(s2)
             p_te_f2 = forward_bond_batch(e2)
-            fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / tau2[:, None]
+            fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None]
             amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv += np.sum(amount * p_tp_d, axis=0)
@@ -936,6 +982,7 @@ def compute_realized_float_coupons(
     s = np.asarray(legs["float_start_time"], dtype=float)
     e = np.asarray(legs["float_end_time"], dtype=float)
     tau = np.asarray(legs["float_accrual"], dtype=float)
+    index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"]), dtype=float)
     spr = np.asarray(legs["float_spread"], dtype=float)
     fix_t = np.asarray(legs.get("float_fixing_time", s), dtype=float)
     quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
@@ -945,14 +992,14 @@ def compute_realized_float_coupons(
     out = np.zeros((n_cf, n_paths), dtype=float)
 
     for i in range(n_cf):
-        if tau[i] <= 0.0:
+        if tau[i] <= 0.0 or index_tau[i] <= 0.0:
             out[i, :] = quoted_coupon[i]
             continue
         ft = float(fix_t[i])
         if ft <= 1.0e-12:
             ps = float(p0_fwd(max(0.0, float(s[i]))))
             pe = float(p0_fwd(float(e[i])))
-            fwd = (ps / pe - 1.0) / float(tau[i])
+            fwd = (ps / pe - 1.0) / float(index_tau[i])
             out[i, :] = fwd + float(spr[i])
             continue
         j = int(np.searchsorted(sim_times, ft))
@@ -967,7 +1014,7 @@ def compute_realized_float_coupons(
         be = float(p0_fwd(float(e[i])) / p0_disc(float(e[i])))
         p_t_s_f = p_t_s_d * (bs / bt)
         p_t_e_f = p_t_e_d * (be / bt)
-        fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(tau[i])
+        fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
         out[i, :] = fwd_path + float(spr[i])
     return out
 
@@ -992,11 +1039,12 @@ def calibrate_float_spreads_from_coupon(
         s = float(out["float_start_time"][i])
         e = float(out["float_end_time"][i])
         tau = float(out["float_accrual"][i])
-        if e <= t0 + 1e-12 or tau <= 0.0:
+        index_tau = float(np.asarray(out.get("float_index_accrual", out["float_accrual"]), dtype=float)[i])
+        if e <= t0 + 1e-12 or tau <= 0.0 or index_tau <= 0.0:
             continue
         ps = float(p0_fwd(max(t0, s)))
         pe = float(p0_fwd(e))
-        fwd0 = (ps / pe - 1.0) / tau
+        fwd0 = (ps / pe - 1.0) / index_tau
         if "float_coupon" in out and out["float_coupon"][i] != 0.0:
             spread[i] = float(out["float_coupon"][i]) - fwd0
         out["float_coupon"][i] = fwd0 + spread[i]

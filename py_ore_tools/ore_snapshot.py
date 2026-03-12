@@ -79,6 +79,7 @@ from .irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     build_discount_curve_from_discount_pairs,
     calibrate_float_spreads_from_coupon,
+    _infer_index_day_counter,
     load_ore_default_curve_inputs,
     load_ore_discount_pairs_by_columns,
     load_ore_discount_pairs_from_curves,
@@ -90,6 +91,8 @@ from .irs_xva_utils import (
     parse_lgm_params_from_simulation_xml,
     survival_probability_from_hazard,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +167,10 @@ class OreSnapshot:
     ore_dva: float = 0.0
     ore_fba: float = 0.0
     ore_fca: float = 0.0
+    ore_maturity_date: str = ""
+    ore_maturity_time: float = 0.0
+    ore_basel_epe: float = 0.0
+    ore_basel_eepe: float = 0.0
 
     # --- Optional funding curves for ORE-style FBA / FCA --------------------
     borrowing_curve_column: Optional[str] = None
@@ -487,6 +494,21 @@ _FX_DOMINANCE_ORDER: tuple[str, ...] = (
 )
 
 
+def _resolve_ore_path(raw_path: str | Path, base: Path) -> Path:
+    raw = Path(str(raw_path).strip())
+    if raw.is_absolute():
+        return raw.resolve()
+    candidates = [
+        (base / raw),
+        (REPO_ROOT / raw),
+        raw,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return (base / raw).resolve()
+
+
 def validate_ore_input_snapshot(
     ore_xml_path: str | Path,
     *,
@@ -527,12 +549,12 @@ def validate_ore_input_snapshot(
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
 
     base = ore_xml.parent
-    curveconfig_xml = (base / setup_params.get("curveConfigFile", "curveconfig.xml")).resolve()
-    conventions_xml = (base / setup_params.get("conventionsFile", "conventions.xml")).resolve()
-    todaysmarket_xml = (base / setup_params.get("marketConfigFile", "todaysmarket.xml")).resolve()
-    market_data_file = (base / setup_params.get("marketDataFile", "market.txt")).resolve()
-    fixing_data_file = (base / setup_params.get("fixingDataFile", "fixings.txt")).resolve()
-    portfolio_xml = (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    curveconfig_xml = _resolve_ore_path(setup_params.get("curveConfigFile", "curveconfig.xml"), base)
+    conventions_xml = _resolve_ore_path(setup_params.get("conventionsFile", "conventions.xml"), base)
+    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "todaysmarket.xml"), base)
+    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "market.txt"), base)
+    fixing_data_file = _resolve_ore_path(setup_params.get("fixingDataFile", "fixings.txt"), base)
+    portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), base)
     imply_todays_fixings = str(setup_params.get("implyTodaysFixings", "N")).strip().upper() in {"Y", "YES", "TRUE"}
 
     missing_files = [
@@ -1268,7 +1290,7 @@ def extract_discount_factors_by_currency(
 
     base = ore_xml.parent
     run_dir = base.parent
-    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
     curves_csv = output_path / "curves.csv"
     if not curves_csv.exists():
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {curves_csv}")
@@ -1280,7 +1302,7 @@ def extract_discount_factors_by_currency(
         n.attrib.get("name", ""): (n.text or "").strip()
         for n in simulation_analytic.findall("./Parameter")
     }
-    simulation_xml = (base / simulation_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    simulation_xml = _resolve_ore_path(simulation_params.get("simulationConfigFile", "simulation.xml"), base)
     if not simulation_xml.exists():
         raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
     simulation_root = ET.parse(simulation_xml).getroot()
@@ -1289,7 +1311,7 @@ def extract_discount_factors_by_currency(
     )
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
-    todaysmarket_xml = (base / todaysmarket_rel).resolve()
+    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, base)
     if not todaysmarket_xml.exists():
         raise FileNotFoundError(f"todaysmarket.xml not found: {todaysmarket_xml}")
     tm_root = ET.parse(todaysmarket_xml).getroot()
@@ -1819,17 +1841,18 @@ def load_from_ore_xml(
     # ore.xml lives inside that folder, so the ORE run-directory is base.parent.
     # outputPath is relative to that run-directory.
     run_dir = base.parent
-    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     market_data_rel = setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt")
     portfolio_rel = setup_params.get("portfolioFile", "portfolio_singleswap.xml")
 
-    todaysmarket_xml = (base / todaysmarket_rel).resolve()
-    market_data_file = (base / market_data_rel).resolve()
-    portfolio_xml = (base / portfolio_rel).resolve()
+    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, base)
+    market_data_file = _resolve_ore_path(market_data_rel, base)
+    portfolio_xml = _resolve_ore_path(portfolio_rel, base)
 
     sim_config_id = markets_params.get("simulation", "libor")
+    pricing_config_id = markets_params.get("pricing", sim_config_id)
 
     # Simulation config file from Analytics section
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
@@ -1840,23 +1863,7 @@ def load_from_ore_xml(
         for n in sim_analytic.findall("./Parameter")
     }
     sim_cfg_rel = sim_params.get("simulationConfigFile", "simulation_lgm.xml")
-    simulation_xml = (base / sim_cfg_rel).resolve()
-
-    # The curves.csv analytic configuration determines what discount-curve
-    # column appears in curves.csv.  Resolving from this configuration (usually
-    # "default" → OIS/EUR-EONIA) gives the discount curve that ORE uses in its
-    # CVA aggregation, and produces the best EPE/CVA parity with the Python LGM.
-    # Using the simulation config (e.g. "libor" → EUR-EURIBOR-6M) instead would
-    # match ORE's *simulation-measure* pricing but not the CVA discounting.
-    curves_analytic = ore_root.find("./Analytics/Analytic[@type='curves']")
-    if curves_analytic is not None:
-        curves_cfg_params = {
-            n.attrib.get("name", ""): (n.text or "").strip()
-            for n in curves_analytic.findall("./Parameter")
-        }
-        curves_config_id = curves_cfg_params.get("configuration", "default")
-    else:
-        curves_config_id = "default"
+    simulation_xml = _resolve_ore_path(sim_cfg_rel, base)
 
     # ------------------------------------------------------------------
     # 2. Parse simulation.xml
@@ -1865,7 +1872,11 @@ def load_from_ore_xml(
         raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
 
     sim_root = ET.parse(simulation_xml).getroot()
-    domestic_ccy = (sim_root.findtext("./DomesticCcy") or "EUR").strip()
+    domestic_ccy = (
+        sim_root.findtext("./DomesticCcy")
+        or sim_root.findtext("./CrossAssetModel/DomesticCcy")
+        or "EUR"
+    ).strip()
     measure = (sim_root.findtext("./Measure") or "LGM").strip()
     model_day_counter = _normalize_day_counter_name(
         (sim_root.findtext("./DayCounter") or "A365F").strip()
@@ -1898,7 +1909,7 @@ def load_from_ore_xml(
         raise FileNotFoundError(f"todaysmarket.xml not found: {todaysmarket_xml}")
 
     tm_root = ET.parse(todaysmarket_xml).getroot()
-    discount_column = _resolve_discount_column(tm_root, curves_config_id, domestic_ccy)
+    discount_column = _resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
     xva_discount_column = _resolve_discount_column(tm_root, sim_config_id, domestic_ccy)
 
     xva_analytic = ore_root.find("./Analytics/Analytic[@type='xva']")
@@ -2042,7 +2053,8 @@ def load_from_ore_xml(
     ore_fca = xva_row["fca"]
 
     # ORE t0 NPV
-    ore_t0_npv = _load_ore_npv(npv_csv, trade_id=trade_id)
+    npv_row = _load_ore_npv_details(npv_csv, trade_id=trade_id)
+    ore_t0_npv = npv_row["npv"]
 
     # ------------------------------------------------------------------
     # 7. Build swap legs: prefer flows.csv when present (ORE Amount signs = canonical
@@ -2054,7 +2066,11 @@ def load_from_ore_xml(
     if flows_csv.exists():
         try:
             legs = load_ore_legs_from_flows(
-                str(flows_csv), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
+                str(flows_csv),
+                trade_id=trade_id,
+                asof_date=asof_date,
+                time_day_counter=model_day_counter,
+                index_day_counter=_infer_index_day_counter(forward_column, fallback=model_day_counter),
             )
             leg_source = "flows"
         except (ValueError, FileNotFoundError):
@@ -2138,6 +2154,10 @@ def load_from_ore_xml(
         ore_ene=ore_ene,
         ore_t0_npv=ore_t0_npv,
         ore_cva=ore_cva,
+        ore_maturity_date=npv_row["maturity_date"],
+        ore_maturity_time=npv_row["maturity_time"],
+        ore_basel_epe=xva_row["basel_epe"],
+        ore_basel_eepe=xva_row["basel_eepe"],
         recovery=float(credit["recovery"]),
         hazard_times=credit["hazard_times"],
         hazard_rates=credit["hazard_rates"],
@@ -2507,10 +2527,10 @@ def _resolve_ore_run_files(
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
     base = ore_xml.parent
     run_dir = base.parent
-    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
-    todaysmarket_xml = (base / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
-    market_data_file = (base / setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt")).resolve()
-    portfolio_xml = (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
+    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml"), base)
+    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt"), base)
+    portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), base)
     return ore_xml, asof_date, market_data_file, todaysmarket_xml, output_path
 
 
@@ -3142,14 +3162,16 @@ def _load_ore_xva_aggregate(xva_csv: Path, cpty_or_netting: str) -> dict:
                     "dva": _float(row, "DVA"),
                     "fba": _float(row, "FBA"),
                     "fca": _float(row, "FCA"),
+                    "basel_epe": _float(row, "BaselEPE"),
+                    "basel_eepe": _float(row, "BaselEEPE"),
                 }
     raise ValueError(
         f"Aggregate XVA row not found for netting set '{cpty_or_netting}' in {xva_csv}"
     )
 
 
-def _load_ore_npv(npv_csv: Path, trade_id: str) -> float:
-    """Read the t0 NPV for *trade_id* from ORE's npv.csv."""
+def _load_ore_npv_details(npv_csv: Path, trade_id: str) -> dict:
+    """Read the key NPV row fields for *trade_id* from ORE's npv.csv."""
     with open(npv_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         tid_key = (
@@ -3159,5 +3181,14 @@ def _load_ore_npv(npv_csv: Path, trade_id: str) -> float:
         )
         for row in reader:
             if row.get(tid_key, "").strip() == trade_id:
-                return float(row["NPV"])
+                return {
+                    "npv": float(row["NPV"]),
+                    "maturity_date": (row.get("Maturity") or "").strip(),
+                    "maturity_time": float((row.get("MaturityTime") or "0").strip() or "0"),
+                }
     raise ValueError(f"Trade '{trade_id}' not found in {npv_csv}")
+
+
+def _load_ore_npv(npv_csv: Path, trade_id: str) -> float:
+    """Read the t0 NPV for *trade_id* from ORE's npv.csv."""
+    return _load_ore_npv_details(npv_csv, trade_id)["npv"]
