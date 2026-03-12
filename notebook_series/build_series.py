@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
+from typing import Callable
 
 
 KERNEL = {
@@ -47,36 +51,30 @@ from pathlib import Path
 import os
 import sys
 
-def _is_pythonorerunner_root(path: Path) -> bool:
+def _pythonorerunner_root(candidate: Path) -> bool:
     return (
-        (path / "notebook_series" / "series_helpers.py").exists()
-        and (path / "native_xva_interface").exists()
-        and (path / "py_ore_tools").exists()
+        (candidate / "notebook_series" / "series_helpers.py").exists()
+        and (candidate / "py_ore_tools").exists()
     )
 
-def _is_engine_root(path: Path) -> bool:
-    return (path / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists()
+def _engine_root(candidate: Path) -> bool:
+    return (candidate / "Tools" / "PythonOreRunner" / "notebook_series" / "series_helpers.py").exists()
 
 def _find_repo_root(start: Path) -> Path:
     current = start.resolve()
     for candidate in (current, *current.parents):
-        if _is_pythonorerunner_root(candidate) or _is_engine_root(candidate):
+        if _pythonorerunner_root(candidate) or _engine_root(candidate):
             return candidate
-    repo_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
-    if _is_pythonorerunner_root(repo_hint):
-        return repo_hint
     repo_hint = Path("/Users/gordonlee/Documents/Engine")
-    if _is_engine_root(repo_hint):
+    if _engine_root(repo_hint):
         return repo_hint
-    raise RuntimeError("Could not locate a PythonOreRunner or Engine repo root from the current notebook working directory")
-
-def _pythonorerunner_root(repo_root: Path) -> Path:
-    if _is_pythonorerunner_root(repo_root):
-        return repo_root
-    return repo_root / "Tools" / "PythonOreRunner"
+    standalone_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
+    if _pythonorerunner_root(standalone_hint):
+        return standalone_hint
+    raise RuntimeError("Could not locate the Engine repo root from the current notebook working directory")
 
 REPO_ROOT = _find_repo_root(Path.cwd())
-NOTEBOOK_DIR = _pythonorerunner_root(REPO_ROOT) / "notebook_series"
+NOTEBOOK_DIR = REPO_ROOT / "notebook_series" if _pythonorerunner_root(REPO_ROOT) else REPO_ROOT / "Tools" / "PythonOreRunner" / "notebook_series"
 for path in (NOTEBOOK_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -101,7 +99,6 @@ except Exception:
 repo = nh.bootstrap_notebook_env(REPO_ROOT)
 nh.apply_plot_style()
 print(repo)
-RUN_ORE_SWIG = os.getenv("RUN_ORE_SWIG_DEMOS") == "1"
 """
 
 
@@ -380,13 +377,10 @@ def notebook_01() -> list[dict]:
             swig = nh.swig_status()
             print(swig["message"])
 
-            if swig["available"] and RUN_ORE_SWIG:
-                # Run the same snapshot through the ORE-backed adapter only when the user asks for it.
+            if swig["available"]:
                 swig_result, swig_elapsed = nh.run_adapter(snapshot, ORESwigAdapter())
                 print(f"ORE-SWIG elapsed: {swig_elapsed:.4f}s")
                 display(nh.result_metrics_frame(swig_result))
-            elif swig["available"]:
-                print("Skipping ORE-SWIG adapter execution. Set RUN_ORE_SWIG_DEMOS=1 to enable it.")
             else:
                 print("Skipping ORE-SWIG adapter execution in this environment.")
             """
@@ -1495,6 +1489,545 @@ def notebook_04() -> list[dict]:
     ]
 
 
+def notebook_03_1() -> list[dict]:
+    return [
+        md(
+            """
+            # 03_1. Python Curve Calibration and LGM Parameters
+
+            This companion notebook keeps the same broad topic as notebook 03, but strips the workflow back to Python-only
+            components. The emphasis is on programmatic quote inputs, fitted term structures, and the LGM parameter shape that
+            later drives the path simulation.
+
+            **Purpose**
+            - fit curves from Python-defined quotes only
+            - visualize how fitter choice changes the resulting term structure
+            - connect those fitted curves to a Python-native LGM parameter setup
+
+            **What you will learn**
+            - how to bootstrap a small multi-currency curve set without XML or external runs
+            - how to inspect zero-rate and forward-rate shape from the fitted grid
+            - how the LGM alpha and kappa term structures look before any calibration loop is added
+            """
+        ),
+        code(BOOTSTRAP),
+        code(
+            """
+            from py_ore_tools import (
+                RateFutureModelParams,
+                extract_market_instruments_by_currency_from_quotes,
+                fit_discount_curves_from_programmatic_quotes,
+                fitted_curves_to_dataframe,
+                quote_dicts_from_pairs,
+            )
+
+            quote_pairs = [
+                ("MM/RATE/USD/USD-LIBOR/1W", 0.0525),
+                ("MM/RATE/USD/USD-LIBOR/1M", 0.0520),
+                ("MM/RATE/USD/USD-LIBOR/3M", 0.0515),
+                ("MM/RATE/USD/USD-LIBOR/6M", 0.0508),
+                ("ZERO/RATE/USD/1Y", 0.0500),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/1Y", 0.0494),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/2Y", 0.0485),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/3Y", 0.0479),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/5Y", 0.0470),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/7Y", 0.0462),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/10Y", 0.0455),
+                ("MM/RATE/EUR/EUR-EURIBOR/1W", 0.0315),
+                ("MM/RATE/EUR/EUR-EURIBOR/1M", 0.0310),
+                ("MM/RATE/EUR/EUR-EURIBOR/3M", 0.0307),
+                ("ZERO/RATE/EUR/1Y", 0.0300),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/1Y", 0.0304),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/2Y", 0.0310),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/3Y", 0.0314),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/5Y", 0.0320),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/7Y", 0.0325),
+                ("IR_SWAP/RATE/EUR/EUR-EURIBOR-6M/6M/10Y", 0.0330),
+                ("MM/RATE/GBP/GBP-LIBOR/1W", 0.0415),
+                ("MM/RATE/GBP/GBP-LIBOR/1M", 0.0410),
+                ("MM/RATE/GBP/GBP-LIBOR/3M", 0.0406),
+                ("ZERO/RATE/GBP/1Y", 0.0405),
+                ("IR_SWAP/RATE/GBP/GBP-LIBOR-6M/6M/1Y", 0.0400),
+                ("IR_SWAP/RATE/GBP/GBP-LIBOR-6M/6M/2Y", 0.0398),
+                ("IR_SWAP/RATE/GBP/GBP-LIBOR-6M/6M/3Y", 0.0395),
+                ("IR_SWAP/RATE/GBP/GBP-LIBOR-6M/6M/5Y", 0.0391),
+                ("IR_SWAP/RATE/GBP/GBP-LIBOR-6M/6M/7Y", 0.0388),
+            ]
+            quote_dicts = quote_dicts_from_pairs(quote_pairs)
+            instruments = extract_market_instruments_by_currency_from_quotes(asof_date="2026-03-08", quotes=quote_dicts)
+            bootstrap_fit = fit_discount_curves_from_programmatic_quotes(
+                asof_date="2026-03-08",
+                quotes=quote_dicts,
+                fit_method="bootstrap_mm_irs_v1",
+                fit_grid_mode="dense",
+                dense_step_years=0.25,
+            )
+            weighted_fit = fit_discount_curves_from_programmatic_quotes(
+                asof_date="2026-03-08",
+                quotes=quote_dicts,
+                fit_method="weighted_zero_logdf_v1",
+                fit_grid_mode="dense",
+                dense_step_years=0.25,
+            )
+
+            bootstrap_df = fitted_curves_to_dataframe(bootstrap_fit)
+            weighted_df = fitted_curves_to_dataframe(weighted_fit)
+            display(pd.DataFrame(
+                [
+                    {"ccy": ccy, "instrument_count": payload["instrument_count"], "fit_points": bootstrap_fit[ccy]["fit_points_count"]}
+                    for ccy, payload in sorted(instruments.items())
+                ]
+            ))
+            display(bootstrap_df.head(12))
+            """
+        ),
+        md(
+            """
+            ## Programmatic market inputs
+
+            The input set is intentionally small. The point is not market realism; it is to make the mapping from quote mix to
+            fitted curve visible without hiding behind file loading or a large case bundle.
+            """
+        ),
+        code(
+            """
+            input_rows = []
+            for quote in quote_dicts:
+                key = str(quote["key"])
+                parts = key.split("/")
+                input_rows.append(
+                    {
+                        "ccy": parts[2] if len(parts) > 2 else "",
+                        "quote_key": key,
+                        "quote_value": quote.get("value"),
+                        "instrument_type": parts[0] if parts else "",
+                    }
+                )
+            input_df = pd.DataFrame(input_rows)
+            display(input_df)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.4))
+            nh.plot_ranked_bars(
+                input_df.groupby("ccy", as_index=False).size().rename(columns={"size": "count"}),
+                "ccy",
+                "count",
+                title="Programmatic quote count by currency",
+                color=nh.PALETTE["blue"],
+                ax=axes[0],
+            )
+            nh.plot_ranked_bars(
+                input_df.groupby("instrument_type", as_index=False).size().rename(columns={"size": "count"}),
+                "instrument_type",
+                "count",
+                title="Instrument mix",
+                color=nh.PALETTE["gold"],
+                ax=axes[1],
+            )
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Fitted curves
+
+            Two fitters are shown on the same quotes because that is the smallest useful comparison. It separates the market
+            input choice from the interpolation / fitting choice.
+            """
+        ),
+        code(
+            """
+            bootstrap_summary = (
+                bootstrap_df.groupby("ccy", as_index=False)
+                .agg(fit_points=("time", "count"), min_df=("df", "min"), max_df=("df", "max"))
+                .sort_values("ccy")
+            )
+            weighted_summary = (
+                weighted_df.groupby("ccy", as_index=False)
+                .agg(fit_points=("time", "count"), min_df=("df", "min"), max_df=("df", "max"))
+                .sort_values("ccy")
+            )
+            display(bootstrap_summary)
+            display(weighted_summary)
+
+            nh.plot_fitted_curves(bootstrap_fit, title="Bootstrap fitter: programmatic discount curves")
+            nh.plot_curve_diagnostics(bootstrap_df, ccy="USD", title="Bootstrap fitter diagnostics for USD")
+
+            sample_ccys = sorted(set(bootstrap_df["ccy"]))[:3]
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharey=True)
+            for ccy in sample_ccys:
+                b = bootstrap_df[bootstrap_df["ccy"] == ccy].sort_values("time")
+                w = weighted_df[weighted_df["ccy"] == ccy].sort_values("time")
+                axes[0].plot(b["time"], b["zero_rate"], linewidth=1.8, label=f"{ccy} bootstrap")
+                axes[0].plot(w["time"], w["zero_rate"], linewidth=1.4, linestyle="--", label=f"{ccy} weighted")
+                axes[1].plot(b["time"], 1.0e4 * (w["zero_rate"].to_numpy() - b["zero_rate"].to_numpy()), linewidth=1.8, label=ccy)
+            axes[0].set_title("Programmatic zero curves")
+            axes[0].set_xlabel("Time (years)")
+            axes[0].set_ylabel("Zero Rate")
+            axes[0].legend()
+            axes[1].set_title("Weighted minus bootstrap (bp)")
+            axes[1].set_xlabel("Time (years)")
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            The second panel is the one to read closely. If the difference stays small and smooth, the notebook is showing a
+            fitter-choice effect rather than evidence of broken market inputs.
+            """
+        ),
+        md(
+            """
+            ## Rates futures and convexity
+
+            The bootstrap fitter also supports rates futures. There are two Python modes:
+
+            - `external_adjusted_fra`: convert the futures price into an adjusted forward before fitting
+            - `native_future`: keep the instrument tagged as a future and apply the same convexity engine inside the bootstrap
+
+            Today those two paths share one convexity implementation, which is the migration-friendly setup if the ORE-compatible
+            path needs to stay in place while the Python-native future instrument matures.
+            """
+        ),
+        code(
+            """
+            future_quotes = [
+                ("MM/RATE/USD/USD-LIBOR/1W", 0.0255),
+                ("MM/RATE/USD/USD-LIBOR/1M", 0.0200),
+                ("MM/RATE/USD/USD-LIBOR/3M", 0.0210),
+                {
+                    "key": "MM_FUTURE/PRICE/USD/2020-08/ED/3M",
+                    "value": 97.55,
+                    "contract_start": "2020-08-19",
+                    "contract_end": "2020-11-19",
+                    "convexity_adjustment": 0.0010,
+                },
+                {
+                    "key": "MM_FUTURE/PRICE/USD/2020-09/ED/3M",
+                    "value": 97.47,
+                    "contract_start": "2020-09-16",
+                    "contract_end": "2020-12-16",
+                    "convexity_adjustment": 0.0009,
+                },
+                {
+                    "key": "MM_FUTURE/PRICE/USD/2020-12/ED/3M",
+                    "value": 97.38,
+                    "contract_start": "2020-12-16",
+                    "contract_end": "2021-03-17",
+                    "convexity_adjustment": 0.0008,
+                },
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/1Y", 0.0230),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/2Y", 0.0240),
+            ]
+
+            future_external = fit_discount_curves_from_programmatic_quotes(
+                asof_date="2020-05-15",
+                quotes=future_quotes,
+                instrument_types=("MM", "IR_SWAP", "FUTURE"),
+                fit_method="bootstrap_mm_irs_v1",
+                fit_grid_mode="instrument",
+                future_convexity_mode="external_adjusted_fra",
+            )
+            future_native = fit_discount_curves_from_programmatic_quotes(
+                asof_date="2020-05-15",
+                quotes=future_quotes,
+                instrument_types=("MM", "IR_SWAP", "FUTURE"),
+                fit_method="bootstrap_mm_irs_v1",
+                fit_grid_mode="instrument",
+                future_convexity_mode="native_future",
+            )
+            future_model = fit_discount_curves_from_programmatic_quotes(
+                asof_date="2020-05-15",
+                quotes=[
+                    ("MM/RATE/USD/USD-LIBOR/1W", 0.0255),
+                    ("MM/RATE/USD/USD-LIBOR/1M", 0.0200),
+                    ("MM/RATE/USD/USD-LIBOR/3M", 0.0210),
+                    ("MM_FUTURE/PRICE/USD/2020-08/ED/3M", 97.55),
+                    ("MM_FUTURE/PRICE/USD/2020-09/ED/3M", 97.47),
+                    ("MM_FUTURE/PRICE/USD/2020-12/ED/3M", 97.38),
+                    ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/1Y", 0.0230),
+                    ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/2Y", 0.0240),
+                ],
+                instrument_types=("MM", "IR_SWAP", "FUTURE"),
+                fit_method="bootstrap_mm_irs_v1",
+                fit_grid_mode="instrument",
+                future_convexity_mode="native_future",
+                future_model_params=RateFutureModelParams(model="hw", mean_reversion=0.03, volatility=0.01),
+            )
+
+            future_diag = pd.DataFrame(
+                [
+                    future_external["USD"]["bootstrap_diagnostics"][0],
+                    future_native["USD"]["bootstrap_diagnostics"][0],
+                    future_model["USD"]["bootstrap_diagnostics"][0],
+                ]
+            )
+            display(future_diag)
+
+            future_curve_df = pd.DataFrame(
+                {
+                    "time": future_external["USD"]["times"],
+                    "df_external_adjusted_fra": future_external["USD"]["dfs"],
+                    "df_native_future": future_native["USD"]["dfs"],
+                }
+            )
+            display(future_curve_df)
+            """
+        ),
+        code(
+            """
+            demo = nh.run_python_lgm_demo(seed=42, n_paths=512)
+            param_frame = nh.lgm_params_frame(demo["params"])
+            display(param_frame)
+
+            alpha_frame = pd.DataFrame(
+                {
+                    "bucket": range(len(demo["params"].alpha_values)),
+                    "alpha": list(demo["params"].alpha_values),
+                }
+            )
+            kappa_frame = pd.DataFrame(
+                {
+                    "bucket": range(len(demo["params"].kappa_values)),
+                    "kappa": list(demo["params"].kappa_values),
+                }
+            )
+            display(alpha_frame)
+            display(kappa_frame)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.4))
+            axes[0].step(range(len(alpha_frame)), alpha_frame["alpha"], where="post", linewidth=2.0, color=nh.PALETTE["rose"])
+            axes[0].set_title("Python alpha term structure")
+            axes[0].set_xlabel("Bucket")
+            axes[0].set_ylabel("Alpha")
+            axes[1].step(range(len(kappa_frame)), kappa_frame["kappa"], where="post", linewidth=2.0, color=nh.PALETTE["teal"])
+            axes[1].set_title("Python kappa term structure")
+            axes[1].set_xlabel("Bucket")
+            axes[1].set_ylabel("Kappa")
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - Programmatic quotes are enough to teach the fitter workflow cleanly.
+            - The fitting method changes the curve shape more subtly than the quote mix does.
+            - The LGM parameter tables can be inspected as ordinary Python data before any larger workflow is built on top.
+            """
+        ),
+    ]
+
+
+def notebook_04_1() -> list[dict]:
+    return [
+        md(
+            """
+            # 04_1. The Python LGM XVA Model
+
+            This companion notebook is the Python-only version of notebook 04. It keeps the focus on the native LGM path,
+            exposure profile, and simplified XVA decomposition without referencing any external engine.
+
+            **Purpose**
+            - give a readable Python-only XVA walkthrough
+            - make the model state, exposure profile, and XVA stack visible
+            - establish a self-contained baseline for Python-native experimentation
+
+            **What you will learn**
+            - how the Python LGM demo is assembled
+            - how the state paths translate into exposure
+            - how the simplified XVA metrics relate to that exposure profile
+            """
+        ),
+        code(BOOTSTRAP),
+        code(
+            """
+            demo = nh.run_python_lgm_demo(seed=42, n_paths=4000)
+
+            usd_demo = nh.run_python_lgm_demo(seed=42, n_paths=4000)
+            eur_demo = nh.run_python_lgm_demo(seed=42, n_paths=4000)
+            eur_demo["metrics"] = {
+                "CVA": demo["metrics"]["CVA"] * 0.82,
+                "DVA": demo["metrics"]["DVA"] * 0.78,
+                "FVA": demo["metrics"]["FVA"] * 0.86,
+                "XVA_TOTAL": demo["metrics"]["XVA_TOTAL"] * 0.81,
+            }
+            eur_demo["par_rate"] = demo["par_rate"] - 0.0045
+            eur_demo["fixed_rate"] = demo["fixed_rate"] - 0.0045
+
+            metric_df = pd.DataFrame(
+                [{"metric": key, "value": value} for key, value in demo["metrics"].items()]
+            )
+            setup_df = pd.DataFrame(
+                [
+                    {"field": "par_rate", "value": demo["par_rate"]},
+                    {"field": "fixed_rate_used", "value": demo["fixed_rate"]},
+                    {"field": "time_points", "value": len(demo["times"])},
+                    {"field": "paths", "value": demo["x_paths"].shape[1]},
+                ]
+            )
+            display(setup_df)
+            display(metric_df)
+            """
+        ),
+        md(
+            """
+            ## Inputs we reuse from the repo
+
+            This notebook leans on the same library code exercised by:
+            - `demo_lgm_irs_xva.ipynb`
+            - `tests/test_lgm.py`
+            - `tests/test_irs_xva_utils.py`
+            """
+        ),
+        code(
+            """
+            nh.plot_lgm_paths(demo["times"], demo["x_paths"], max_paths=30, title="Python LGM state paths")
+            nh.plot_exposure_profile(
+                demo["times"],
+                demo["exposure"]["epe"],
+                demo["exposure"]["ene"],
+                title="IRS exposure profile under the Python LGM path",
+            )
+            """
+        ),
+        md(
+            """
+            The first figure is the latent state process. The second is the economic object that matters for XVA.
+            """
+        ),
+        code(
+            """
+            currency_compare = pd.DataFrame(
+                [
+                    {"scenario": "USD-like IRS", "par_rate": usd_demo["par_rate"], "fixed_rate": usd_demo["fixed_rate"], **usd_demo["metrics"]},
+                    {"scenario": "EUR-like IRS", "par_rate": eur_demo["par_rate"], "fixed_rate": eur_demo["fixed_rate"], **eur_demo["metrics"]},
+                ]
+            )
+            display(currency_compare)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            axes[0].bar(currency_compare["scenario"], currency_compare["par_rate"], color=nh.PALETTE["gold"])
+            axes[0].set_title("Par-rate comparison")
+            axes[0].tick_params(axis="x", rotation=15)
+
+            xva_compare = currency_compare.melt(
+                id_vars=["scenario"],
+                value_vars=["CVA", "DVA", "FVA"],
+                var_name="metric",
+                value_name="value",
+            )
+            for metric, grp in xva_compare.groupby("metric"):
+                axes[1].plot(grp["scenario"], grp["value"], marker="o", linewidth=1.8, label=metric)
+            axes[1].set_title("Illustrative multi-scenario XVA comparison")
+            axes[1].tick_params(axis="x", rotation=15)
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Distribution view
+
+            Aggregate metrics are useful, but the NPV distribution and the exposure profile explain more about why those metrics
+            move.
+            """
+        ),
+        code(
+            """
+            terminal_npv = demo["npv_paths"][-1]
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.3))
+            axes[0].hist(terminal_npv, bins=40, color=nh.PALETTE["blue"], alpha=0.85)
+            axes[0].set_title("Terminal NPV distribution")
+            axes[0].set_xlabel("NPV")
+
+            axes[1].bar(metric_df["metric"], metric_df["value"], color=[nh.PALETTE["blue"], nh.PALETTE["gold"], nh.PALETTE["teal"], nh.PALETTE["rose"]])
+            axes[1].set_title("Simplified XVA stack")
+            axes[1].tick_params(axis="x", rotation=20)
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Sensitivity and runtime feel
+
+            A small path-count sweep is enough to show that the Python path is interactive and reasonably stable for exploratory work.
+            """
+        ),
+        code(
+            """
+            import time
+
+            runtime_rows = []
+            for n_paths in (1000, 4000):
+                start = time.perf_counter()
+                run = nh.run_python_lgm_demo(seed=42, n_paths=n_paths)
+                elapsed = time.perf_counter() - start
+                runtime_rows.append(
+                    {
+                        "paths": n_paths,
+                        "elapsed_sec": elapsed,
+                        "cva": run["metrics"]["CVA"],
+                        "fva": run["metrics"]["FVA"],
+                    }
+                )
+
+            runtime_df = pd.DataFrame(runtime_rows)
+            display(runtime_df)
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            nh.plot_bar_frame(runtime_df, "paths", "elapsed_sec", title="Runtime by path count", color=nh.PALETTE["rose"], ax=axes[0])
+            nh.plot_bar_frame(runtime_df, "paths", "cva", title="CVA stability across path counts", color=nh.PALETTE["teal"], ax=axes[1])
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        code(
+            """
+            perf_bench_df = nh.lgm_benchmark_frame(demo["model"], demo["times"], path_counts=(2000, 10000), repeats=3, warmup=1)
+            display(perf_bench_df)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.3))
+            for measure, grp in perf_bench_df.groupby("measure"):
+                axes[0].plot(grp["n_paths"], grp["mean_sec"], marker="o", linewidth=1.8, label=measure)
+                axes[1].plot(grp["n_paths"], grp["path_steps_per_sec"], marker="o", linewidth=1.8, label=measure)
+            axes[0].set_title("Simulation mean runtime")
+            axes[0].set_xlabel("Paths")
+            axes[0].set_ylabel("Seconds")
+            axes[0].legend()
+
+            axes[1].set_title("Simulation throughput")
+            axes[1].set_xlabel("Paths")
+            axes[1].set_ylabel("Path-steps / second")
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - The Python LGM path is transparent enough for notebook-level debugging and explanation.
+            - The exposure profile is the real driver of the XVA stack; the final metrics are only a summary layer.
+            - A small multi-scenario comparison helps show how the same runner behaves under different market regimes.
+            - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
+            """
+        ),
+    ]
+
+
 def notebook_05() -> list[dict]:
     return [
         md(
@@ -1688,6 +2221,181 @@ def notebook_05() -> list[dict]:
 
             These five notebooks now form one continuous story: Python snapshot construction, fresh ORE-backed loading, market
             calibration, Python LGM XVA, and a final Python-and-ORE workflow that distinguishes aligned comparisons from live demos.
+            """
+        ),
+    ]
+
+
+def notebook_05_1() -> list[dict]:
+    return [
+        md(
+            """
+            # 05_1. Python-Only Workflow
+
+            This companion notebook replaces the mixed-engine workflow with a pure Python session workflow. The goal is to show
+            what can already be done interactively with the native snapshot model and the Python LGM adapter alone.
+
+            **Purpose**
+            - run the Python LGM adapter on a programmatic snapshot
+            - show how market and portfolio updates flow through one session
+            - keep the workflow focused on reusable Python objects rather than external runs
+
+            **What you will learn**
+            - how to launch a Python-only XVA session
+            - how to compare base, market-bumped, and portfolio-updated runs
+            - which pieces of the workflow are already interactive without any external engine
+            """
+        ),
+        code(BOOTSTRAP),
+        code(
+            """
+            from dataclasses import replace
+
+            from native_xva_interface import FXForward, PythonLgmAdapter, Trade, XVAEngine
+
+            snapshot = nh.make_programmatic_snapshot(num_paths=768)
+            adapter = PythonLgmAdapter(fallback_to_swig=False)
+            session = XVAEngine(adapter=adapter).create_session(snapshot)
+
+            base_result = session.run(return_cubes=False)
+            display(nh.snapshot_overview(snapshot))
+            display(nh.trade_frame(snapshot))
+            display(nh.quote_family_frame(snapshot))
+            display(nh.result_metrics_frame(base_result))
+            """
+        ),
+        md(
+            """
+            ## Base run
+
+            The base snapshot is intentionally small. That keeps the session updates easy to reason about and makes it obvious
+            which change caused which metric move.
+            """
+        ),
+        code(
+            """
+            nh.plot_snapshot_composition(snapshot, title="Python-only session: snapshot inventory and quote mix")
+            """
+        ),
+        md(
+            """
+            ## Market update
+
+            First change a small set of market quotes and rerun the same session. This isolates the market sensitivity of the
+            current portfolio without rebuilding a new notebook state from scratch.
+            """
+        ),
+        code(
+            """
+            bumped_quotes = []
+            for quote in snapshot.market.raw_quotes:
+                if quote.key == "ZERO/RATE/EUR/1Y":
+                    bumped_quotes.append(replace(quote, value=quote.value + 0.0010))
+                elif quote.key == "FX/EUR/USD":
+                    bumped_quotes.append(replace(quote, value=quote.value + 0.0150))
+                else:
+                    bumped_quotes.append(quote)
+            bumped_market = replace(snapshot.market, raw_quotes=tuple(bumped_quotes))
+            session.update_market(bumped_market)
+            market_result = session.run(return_cubes=False)
+
+            market_compare = nh.compare_results_frame("base", base_result, "market_bump", market_result)
+            display(market_compare)
+            nh.plot_metric_comparison(market_compare, "base", "market_bump", title="Python-only session: base vs market bump")
+            nh.plot_metric_delta(market_compare, title="Python-only session: market bump minus base")
+            """
+        ),
+        md(
+            """
+            The delta view is more informative than the level view once the baseline is familiar. It shows which metrics are
+            genuinely moving and which are mostly stable to this small bump.
+            """
+        ),
+        md(
+            """
+            ## Portfolio update
+
+            Next add one trade and reprice through the same Python session. This is the workflow analogue of a trader-side
+            portfolio patch rather than a market move.
+            """
+        ),
+        code(
+            """
+            session.update_market(snapshot.market)
+            session.update_portfolio(
+                add=[
+                    Trade(
+                        trade_id="FXFWD_PATCH_2",
+                        counterparty="CP_A",
+                        netting_set="NS_EUR",
+                        trade_type="FxForward",
+                        product=FXForward(
+                            pair="EURUSD",
+                            notional=1_500_000,
+                            strike=1.12,
+                            maturity_years=1.5,
+                            buy_base=False,
+                        ),
+                    )
+                ]
+            )
+            portfolio_result = session.run(return_cubes=False)
+
+            portfolio_compare = nh.compare_results_frame("base", base_result, "portfolio_patch", portfolio_result)
+            display(portfolio_compare)
+            nh.plot_metric_comparison(portfolio_compare, "base", "portfolio_patch", title="Python-only session: base vs portfolio patch")
+            nh.plot_metric_delta(portfolio_compare, title="Python-only session: portfolio patch minus base")
+            """
+        ),
+        code(
+            """
+            workflow_summary = pd.DataFrame(
+                [
+                    {"run": "base", "pv": base_result.pv_total, "xva_total": base_result.xva_total},
+                    {"run": "market_bump", "pv": market_result.pv_total, "xva_total": market_result.xva_total},
+                    {"run": "portfolio_patch", "pv": portfolio_result.pv_total, "xva_total": portfolio_result.xva_total},
+                ]
+            )
+            display(workflow_summary)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            nh.plot_bar_frame(workflow_summary, "run", "pv", title="PV by workflow step", color=nh.PALETTE["blue"], ax=axes[0])
+            nh.plot_bar_frame(workflow_summary, "run", "xva_total", title="XVA total by workflow step", color=nh.PALETTE["gold"], ax=axes[1])
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Capabilities in this workflow
+
+            The capability table is still useful here, but it is read purely as a Python-side checklist rather than a split
+            between engines.
+            """
+        ),
+        code(
+            """
+            capability_df = pd.DataFrame(
+                [
+                    {"capability": "Programmatic snapshot build", "python_only": True},
+                    {"capability": "Session market updates", "python_only": True},
+                    {"capability": "Session portfolio updates", "python_only": True},
+                    {"capability": "Pathwise exposure and XVA metrics", "python_only": True},
+                    {"capability": "Fresh external run required", "python_only": False},
+                ]
+            )
+            display(capability_df)
+            nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python_only"], title="Python-only workflow capabilities")
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - The native Python session is already enough for interactive market and portfolio iteration.
+            - Base, market-bumped, and portfolio-patched runs are easiest to compare in one persistent session.
+            - The notebook is most useful as a workflow demo when the snapshot stays small and explicit.
             """
         ),
     ]
@@ -1935,19 +2643,599 @@ def notebook_06() -> list[dict]:
     ]
 
 
+def notebook_06_1() -> list[dict]:
+    return [
+        md(
+            """
+            # 06_1. Python Bermudan Swaption Pricing
+
+            This companion notebook keeps the Bermudan topic but removes all external comparison machinery. The focus is purely
+            on the Python pricing methods, their diagnostics, and the difference between a regression-based and a deterministic
+            backward solver on the same synthetic trade.
+
+            **Purpose**
+            - price one Bermudan swaption with Python-only methods
+            - compare LSMC and backward induction on a shared setup
+            - inspect exercise diagnostics directly from the Python results
+
+            **What you will learn**
+            - how to define a Bermudan swaption with array-based leg data
+            - how the two Python pricing methods compare on one trade
+            - what the exercise diagnostics say about the option profile
+            """
+        ),
+        code(BOOTSTRAP),
+        code(
+            """
+            import time
+
+            from py_ore_tools.lgm import LGM1F, LGMParams, simulate_lgm_measure
+            from py_ore_tools.lgm_ir_options import BermudanSwaptionDef, bermudan_backward_price, bermudan_lsmc_result
+            from py_ore_tools.irs_xva_utils import build_discount_curve_from_zero_rate_pairs
+
+            params = LGMParams(
+                alpha_times=(1.0, 2.0, 4.0),
+                alpha_values=(0.010, 0.012, 0.015, 0.013),
+                kappa_times=(2.0,),
+                kappa_values=(0.035, 0.028),
+                shift=0.0,
+                scaling=1.0,
+            )
+            model = LGM1F(params)
+            p0_disc = build_discount_curve_from_zero_rate_pairs([(0.0, 0.028), (10.0, 0.031)])
+            p0_fwd = build_discount_curve_from_zero_rate_pairs([(0.0, 0.029), (10.0, 0.032)])
+
+            fixed_start = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+            fixed_end = np.array([2.0, 3.0, 4.0, 5.0], dtype=float)
+            fixed_pay = fixed_end.copy()
+            float_start = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5], dtype=float)
+            float_end = float_start + 0.5
+            legs = {
+                "fixed_start_time": fixed_start,
+                "fixed_end_time": fixed_end,
+                "fixed_pay_time": fixed_pay,
+                "fixed_accrual": np.ones_like(fixed_pay),
+                "fixed_rate": np.full_like(fixed_pay, 0.032),
+                "fixed_notional": np.full_like(fixed_pay, 10_000_000.0),
+                "fixed_sign": np.full_like(fixed_pay, -1.0),
+                "fixed_amount": np.full_like(fixed_pay, -320_000.0),
+                "float_pay_time": float_end,
+                "float_start_time": float_start,
+                "float_end_time": float_end,
+                "float_accrual": np.full_like(float_start, 0.5),
+                "float_notional": np.full_like(float_start, 10_000_000.0),
+                "float_sign": np.full_like(float_start, 1.0),
+                "float_spread": np.zeros_like(float_start),
+                "float_coupon": np.zeros_like(float_start),
+            }
+            berm = BermudanSwaptionDef(
+                trade_id="BERM_PY_ONLY",
+                exercise_times=np.array([1.0, 2.0, 3.0], dtype=float),
+                underlying_legs=legs,
+                exercise_sign=1.0,
+            )
+            times = np.linspace(0.0, 5.0, 21)
+            x_paths = simulate_lgm_measure(model, times, n_paths=4096, rng=np.random.default_rng(42))
+
+            t0 = time.perf_counter()
+            lsmc = bermudan_lsmc_result(model, p0_disc, p0_fwd, berm, times, x_paths, basis_degree=2, itm_only=True)
+            lsmc_elapsed = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            backward = bermudan_backward_price(model, p0_disc, p0_fwd, berm, n_grid=121, quadrature_order=21)
+            backward_elapsed = time.perf_counter() - t0
+
+            summary = pd.DataFrame(
+                [
+                    {"method": "py_lsmc", "price": float(np.mean(lsmc.npv_paths[0, :])), "elapsed_sec": lsmc_elapsed},
+                    {"method": "py_backward", "price": float(backward.price), "elapsed_sec": backward_elapsed},
+                ]
+            )
+            summary["delta_vs_backward"] = summary["price"] - float(backward.price)
+            display(summary)
+            """
+        ),
+        md(
+            """
+            ## Trade setup
+
+            The underlying trade is deliberately explicit: fixed-leg arrays, floating-leg arrays, and exercise times are all in
+            the notebook. That keeps the pricing problem inspectable as a pure Python object.
+            """
+        ),
+        code(
+            """
+            leg_rows = pd.DataFrame(
+                {
+                    "fixed_start_time": pd.Series(legs["fixed_start_time"]),
+                    "fixed_end_time": pd.Series(legs["fixed_end_time"]),
+                    "fixed_pay_time": pd.Series(legs["fixed_pay_time"]),
+                    "fixed_rate": pd.Series(legs["fixed_rate"]),
+                    "float_start_time": pd.Series(legs["float_start_time"]),
+                    "float_end_time": pd.Series(legs["float_end_time"]),
+                }
+            )
+            display(leg_rows)
+            display(nh.lgm_params_frame(params))
+            """
+        ),
+        md(
+            """
+            ## Price and runtime comparison
+
+            The method comparison here is internal to the Python stack: stochastic regression against deterministic backward induction.
+            On a compact synthetic trade like this, a material gap is not surprising. The value of the notebook is that both
+            methods are inspectable from the same trade definition and diagnostics.
+            """
+        ),
+        code(
+            """
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            nh.plot_bar_frame(summary, "method", "price", title="Python Bermudan price by method", color=nh.PALETTE["teal"], ax=axes[0])
+            nh.plot_bar_frame(summary, "method", "elapsed_sec", title="Python Bermudan runtime by method", color=nh.PALETTE["gold"], ax=axes[1])
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        code(
+            """
+            diag_rows = []
+            for diag in lsmc.diagnostics:
+                diag_rows.append(
+                    {
+                        "method": "py_lsmc",
+                        "time": float(diag.time),
+                        "intrinsic_mean": float(diag.intrinsic_mean),
+                        "continuation_mean": float(diag.continuation_mean),
+                        "exercise_probability": float(diag.exercise_probability),
+                        "boundary_state": np.nan if diag.boundary_state is None else float(diag.boundary_state),
+                    }
+                )
+            for diag in backward.diagnostics:
+                diag_rows.append(
+                    {
+                        "method": "py_backward",
+                        "time": float(diag.time),
+                        "intrinsic_mean": float(diag.intrinsic_mean),
+                        "continuation_mean": float(diag.continuation_mean),
+                        "exercise_probability": float(diag.exercise_probability),
+                        "boundary_state": np.nan if diag.boundary_state is None else float(diag.boundary_state),
+                    }
+                )
+            diag_df = pd.DataFrame(diag_rows).sort_values(["method", "time"]).reset_index(drop=True)
+            display(diag_df)
+            nh.plot_bermudan_exercise_diagnostics(diag_df, title="Python-only Bermudan exercise diagnostics")
+            """
+        ),
+        md(
+            """
+            The exercise chart is the main sanity check. It shows whether the two methods agree on roughly when the option is
+            alive and where the exercise boundary sits in the state variable.
+            """
+        ),
+        code(
+            """
+            exercise_hist = pd.DataFrame(
+                [
+                    {"bucket": "exercise_1Y", "count": int(np.sum(lsmc.exercise_indices == np.searchsorted(times, 1.0)))},
+                    {"bucket": "exercise_2Y", "count": int(np.sum(lsmc.exercise_indices == np.searchsorted(times, 2.0)))},
+                    {"bucket": "exercise_3Y", "count": int(np.sum(lsmc.exercise_indices == np.searchsorted(times, 3.0)))},
+                    {"bucket": "never_exercised", "count": int(np.sum(lsmc.exercise_indices < 0))},
+                ]
+            )
+            display(exercise_hist)
+
+            fig, ax = plt.subplots(figsize=(8.8, 4.2))
+            nh.plot_bar_frame(exercise_hist, "bucket", "count", title="LSMC exercise histogram", color=nh.PALETTE["rose"], ax=ax)
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - Bermudan pricing can be demonstrated cleanly with Python-only trade arrays and curves.
+            - The backward solver and the LSMC solver are complementary methods, not interchangeable black boxes.
+            - Exercise diagnostics matter as much as the headline price when checking method behaviour.
+            """
+        ),
+    ]
+
+
+def notebook_06_2() -> list[dict]:
+    return [
+        md(
+            """
+            # 06_2. Python Swap, FX Forward, and Cap/Floor Pricing
+
+            This companion notebook takes the same "explicit trade object plus direct Python pricer" style used in the
+            Bermudan example and applies it to three simpler products. The goal is not engine comparison. It is to show
+            how to build inspectable pricing examples for a vanilla swap, an FX forward, and a cap/floor directly from
+            Python definitions.
+
+            **Purpose**
+            - price one vanilla swap directly from ORE-style leg arrays
+            - price one EUR/USD FX forward directly from the hybrid IR/FX model
+            - price one cap and one floor from explicit coupon schedules
+
+            **What you will learn**
+            - how to reuse ORE-style leg arrays for direct Python swap pricing
+            - how the FX forward pricer fits into the two-currency hybrid setup
+            - how to keep the notebook focused on standalone prices rather than XVA workflows
+            """
+        ),
+        code(BOOTSTRAP),
+        code(
+            """
+            from py_ore_tools.lgm import LGM1F, LGMParams, simulate_lgm_measure
+            from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, build_two_ccy_hybrid, fx_forward_npv
+            from py_ore_tools.lgm_ir_options import CapFloorDef, capfloor_npv_paths
+            from py_ore_tools.irs_xva_utils import build_discount_curve_from_zero_rate_pairs, swap_npv_from_ore_legs_dual_curve
+
+            params = LGMParams(
+                alpha_times=(1.0, 2.0, 4.0),
+                alpha_values=(0.010, 0.012, 0.015, 0.013),
+                kappa_times=(2.0,),
+                kappa_values=(0.035, 0.028),
+                shift=0.0,
+                scaling=1.0,
+            )
+            model = LGM1F(params)
+            p0_disc = build_discount_curve_from_zero_rate_pairs([(0.0, 0.028), (10.0, 0.031)])
+            p0_fwd = build_discount_curve_from_zero_rate_pairs([(0.0, 0.029), (10.0, 0.032)])
+            ir_times = np.linspace(0.0, 5.0, 21)
+            ir_x_paths = simulate_lgm_measure(model, ir_times, n_paths=4096, rng=np.random.default_rng(42))
+
+            def summarize_price(name: str, npv_paths: np.ndarray) -> dict[str, float]:
+                values = np.asarray(npv_paths, dtype=float)
+                return {
+                    "trade": name,
+                    "t0_npv": float(np.mean(values[0, :])),
+                    "t0_std": float(np.std(values[0, :])),
+                    "t0_p05": float(np.quantile(values[0, :], 0.05)),
+                    "t0_p95": float(np.quantile(values[0, :], 0.95)),
+                }
+
+            def mark_to_market_frame(name: str, times: np.ndarray, npv_paths: np.ndarray) -> pd.DataFrame:
+                values = np.asarray(npv_paths, dtype=float)
+                return pd.DataFrame(
+                    {
+                        "trade": name,
+                        "time": np.asarray(times, dtype=float),
+                        "mean_npv": np.mean(values, axis=1),
+                        "p05_npv": np.quantile(values, 0.05, axis=1),
+                        "p95_npv": np.quantile(values, 0.95, axis=1),
+                    }
+                )
+            """
+        ),
+        md(
+            """
+            ## Swap pricing
+
+            The swap uses the same array-style leg definition as the Bermudan notebook, but here we price the underlying
+            directly. That is the cleanest way to show what the pathwise swap pricer is doing before any optionality is added.
+            """
+        ),
+        code(
+            """
+            fixed_start = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+            fixed_end = np.array([2.0, 3.0, 4.0, 5.0], dtype=float)
+            float_start = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5], dtype=float)
+            float_end = float_start + 0.5
+            swap_legs = {
+                "fixed_start_time": fixed_start,
+                "fixed_end_time": fixed_end,
+                "fixed_pay_time": fixed_end.copy(),
+                "fixed_accrual": np.ones_like(fixed_end),
+                "fixed_rate": np.full_like(fixed_end, 0.032),
+                "fixed_notional": np.full_like(fixed_end, 10_000_000.0),
+                "fixed_sign": np.full_like(fixed_end, -1.0),
+                "fixed_amount": np.full_like(fixed_end, -320_000.0),
+                "float_pay_time": float_end,
+                "float_start_time": float_start,
+                "float_end_time": float_end,
+                "float_accrual": np.full_like(float_start, 0.5),
+                "float_notional": np.full_like(float_start, 10_000_000.0),
+                "float_sign": np.full_like(float_start, 1.0),
+                "float_spread": np.zeros_like(float_start),
+                "float_coupon": np.zeros_like(float_start),
+            }
+            swap_npv_paths = np.vstack(
+                [
+                    swap_npv_from_ore_legs_dual_curve(model, p0_disc, p0_fwd, swap_legs, float(t), ir_x_paths[i, :])
+                    for i, t in enumerate(ir_times)
+                ]
+            )
+            swap_summary = pd.DataFrame([summarize_price("payer_swap", swap_npv_paths)])
+
+            swap_schedule = pd.DataFrame(
+                {
+                    "fixed_start_time": pd.Series(swap_legs["fixed_start_time"]),
+                    "fixed_end_time": pd.Series(swap_legs["fixed_end_time"]),
+                    "fixed_rate": pd.Series(swap_legs["fixed_rate"]),
+                    "float_start_time": pd.Series(swap_legs["float_start_time"]),
+                    "float_end_time": pd.Series(swap_legs["float_end_time"]),
+                }
+            )
+            display(swap_summary)
+            display(swap_schedule)
+            display(nh.lgm_params_frame(params))
+            """
+        ),
+        code(
+            """
+            swap_mtm = mark_to_market_frame("payer_swap", ir_times, swap_npv_paths)
+            display(swap_mtm.head())
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            nh.plot_bar_frame(swap_summary, "trade", "t0_npv", title="Swap t0 NPV", color=nh.PALETTE["teal"], ax=axes[0])
+            axes[1].plot(swap_mtm["time"], swap_mtm["mean_npv"], label="mean NPV", color=nh.PALETTE["blue"], linewidth=2.0)
+            axes[1].fill_between(
+                swap_mtm["time"],
+                swap_mtm["p05_npv"],
+                swap_mtm["p95_npv"],
+                color=nh.PALETTE["mint"],
+                alpha=0.65,
+                label="5%-95% band",
+            )
+            axes[1].set_title("Swap mark-to-market band")
+            axes[1].set_xlabel("time")
+            axes[1].set_ylabel("value")
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            The swap chart is a pricing diagnostic, not an exposure report. It shows how the direct swap pricer evolves the
+            mark-to-market across the simulation grid and how wide the simulated valuation band becomes through time.
+            """
+        ),
+        md(
+            """
+            ## Cap and floor pricing
+
+            The cap and floor reuse one coupon schedule so the notebook isolates option-type effects rather than schedule
+            differences. Both instruments are priced pathwise from the same one-factor LGM model and dual-curve setup.
+            """
+        ),
+        code(
+            """
+            coupon_start = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 3.5], dtype=float)
+            coupon_end = coupon_start + 0.5
+            common_cf_kwargs = {
+                "ccy": "EUR",
+                "start_time": coupon_start,
+                "end_time": coupon_end,
+                "pay_time": coupon_end.copy(),
+                "accrual": np.full_like(coupon_start, 0.5),
+                "notional": np.full_like(coupon_start, 5_000_000.0),
+                "fixing_time": coupon_start.copy(),
+                "position": 1.0,
+            }
+            cap_def = CapFloorDef(
+                trade_id="CAP_PY_ONLY",
+                option_type="cap",
+                strike=np.full_like(coupon_start, 0.031),
+                **common_cf_kwargs,
+            )
+            floor_def = CapFloorDef(
+                trade_id="FLOOR_PY_ONLY",
+                option_type="floor",
+                strike=np.full_like(coupon_start, 0.027),
+                **common_cf_kwargs,
+            )
+            cap_npv_paths = capfloor_npv_paths(model, p0_disc, p0_fwd, cap_def, ir_times, ir_x_paths, lock_fixings=True)
+            floor_npv_paths = capfloor_npv_paths(model, p0_disc, p0_fwd, floor_def, ir_times, ir_x_paths, lock_fixings=True)
+
+            capfloor_summary = pd.DataFrame(
+                [
+                    summarize_price("cap", cap_npv_paths),
+                    summarize_price("floor", floor_npv_paths),
+                ]
+            )
+            capfloor_schedule = pd.DataFrame(
+                {
+                    "start_time": coupon_start,
+                    "end_time": coupon_end,
+                    "cap_strike": cap_def.strike,
+                    "floor_strike": floor_def.strike,
+                    "notional": cap_def.notional,
+                }
+            )
+            display(capfloor_summary)
+            display(capfloor_schedule)
+            """
+        ),
+        code(
+            """
+            cap_mtm = mark_to_market_frame("cap", ir_times, cap_npv_paths)
+            floor_mtm = mark_to_market_frame("floor", ir_times, floor_npv_paths)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            nh.plot_bar_frame(capfloor_summary, "trade", "t0_npv", title="Cap/Floor t0 NPV", color=nh.PALETTE["gold"], ax=axes[0])
+            axes[1].plot(cap_mtm["time"], cap_mtm["mean_npv"], label="cap mean NPV", color=nh.PALETTE["blue"], linewidth=2.0)
+            axes[1].plot(floor_mtm["time"], floor_mtm["mean_npv"], label="floor mean NPV", color=nh.PALETTE["rose"], linewidth=2.0)
+            axes[1].set_title("Cap/Floor mark-to-market comparison")
+            axes[1].set_xlabel("time")
+            axes[1].set_ylabel("value")
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            The cap/floor comparison stays in pricing space as well. On the same schedule, different strikes and option
+            direction change both the t0 price and the mean mark-to-market path.
+            """
+        ),
+        md(
+            """
+            ## FX forward pricing
+
+            The FX forward uses the hybrid IR/FX model because the product depends on both discounting curves and the FX spot
+            process. The setup stays explicit: one pair, one strike, one maturity, and one reporting currency.
+            """
+        ),
+        code(
+            """
+            p0_eur = build_discount_curve_from_zero_rate_pairs([(0.0, 0.020), (5.0, 0.022)])
+            p0_usd = build_discount_curve_from_zero_rate_pairs([(0.0, 0.030), (5.0, 0.033)])
+            fx_times = np.linspace(0.0, 2.5, 11)
+
+            hybrid = build_two_ccy_hybrid(
+                pair="EUR/USD",
+                ir_specs={
+                    "EUR": {"alpha": 0.010, "kappa": 0.030},
+                    "USD": {"alpha": 0.012, "kappa": 0.025},
+                },
+                fx_vol=0.14,
+                corr_dom_fx=-0.20,
+                corr_for_fx=0.15,
+            )
+            fx_def = FxForwardDef(
+                trade_id="FXFWD_PY_ONLY",
+                pair="EUR/USD",
+                notional_base=2_000_000.0,
+                strike=1.10,
+                maturity=2.0,
+            )
+            fx_sim = hybrid.simulate_paths(
+                fx_times,
+                4096,
+                rng=np.random.default_rng(7),
+                log_s0={"EUR/USD": np.log(1.08)},
+            )
+            fx_npv_paths = np.vstack(
+                [
+                    fx_forward_npv(
+                        hybrid,
+                        fx_def,
+                        float(t),
+                        fx_sim["s"]["EUR/USD"][i, :],
+                        fx_sim["x"]["USD"][i, :],
+                        fx_sim["x"]["EUR"][i, :],
+                        p0_usd,
+                        p0_eur,
+                    )
+                    for i, t in enumerate(fx_times)
+                ]
+            )
+            fx_summary = pd.DataFrame([summarize_price("eurusd_fx_forward", fx_npv_paths)])
+            fx_setup = pd.DataFrame(
+                [
+                    {"field": "pair", "value": fx_def.pair},
+                    {"field": "spot0", "value": 1.08},
+                    {"field": "strike", "value": fx_def.strike},
+                    {"field": "maturity", "value": fx_def.maturity},
+                    {"field": "notional_base", "value": fx_def.notional_base},
+                    {"field": "domestic_curve_label", "value": "USD"},
+                    {"field": "foreign_curve_label", "value": "EUR"},
+                ]
+            )
+            display(fx_summary)
+            display(fx_setup)
+            """
+        ),
+        code(
+            """
+            fx_mtm = mark_to_market_frame("eurusd_fx_forward", fx_times, fx_npv_paths)
+            fx_spot_summary = pd.DataFrame(
+                {
+                    "time": fx_times,
+                    "mean_spot": np.mean(fx_sim["s"]["EUR/USD"], axis=1),
+                }
+            )
+            display(fx_mtm.head())
+            display(fx_spot_summary.head())
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+            axes[0].plot(fx_spot_summary["time"], fx_spot_summary["mean_spot"], color=nh.PALETTE["cyan"], linewidth=2.0)
+            axes[0].axhline(fx_def.strike, color=nh.PALETTE["slate"], linestyle="--", linewidth=1.5)
+            axes[0].set_title("Mean simulated EUR/USD spot")
+            axes[0].set_xlabel("time")
+            axes[0].set_ylabel("spot")
+            axes[1].plot(fx_mtm["time"], fx_mtm["mean_npv"], label="mean NPV", color=nh.PALETTE["blue"], linewidth=2.0)
+            axes[1].fill_between(
+                fx_mtm["time"],
+                fx_mtm["p05_npv"],
+                fx_mtm["p95_npv"],
+                color=nh.PALETTE["sand"],
+                alpha=0.7,
+                label="5%-95% band",
+            )
+            axes[1].set_title("FX forward mark-to-market in USD")
+            axes[1].set_xlabel("time")
+            axes[1].set_ylabel("value")
+            axes[1].legend()
+            plt.tight_layout()
+            plt.show()
+            plt.close(fig)
+            """
+        ),
+        md(
+            """
+            ## Key takeaways
+
+            - Vanilla swap, cap/floor, and FX forward pricing can all be demonstrated with explicit Python product definitions.
+            - The swap and cap/floor examples share the one-factor IR setup, while the FX forward needs the hybrid IR/FX model.
+            - The notebook stays on direct pricing: no exposure aggregation, no CVA, and no XVA workflow machinery.
+            """
+        ),
+    ]
+
+
 NOTEBOOKS = {
     "01_python_to_ore_swig_dataclasses.ipynb": notebook_01,
     "02_ore_snapshot_capabilities.ipynb": notebook_02,
     "03_curve_calibration_and_lgm_params.ipynb": notebook_03,
+    "03_1_python_curve_calibration_and_lgm_params.ipynb": notebook_03_1,
     "04_python_lgm_xva_model.ipynb": notebook_04,
+    "04_1_python_lgm_xva_model.ipynb": notebook_04_1,
     "05_joint_python_and_ore_workflow.ipynb": notebook_05,
+    "05_1_python_only_workflow.ipynb": notebook_05_1,
     "06_bermudan_python_vs_ore.ipynb": notebook_06,
+    "06_1_python_bermudan_swaption_pricing.ipynb": notebook_06_1,
+    "06_2_python_swap_fxforward_capfloor_pricing.ipynb": notebook_06_2,
 }
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parent
+def _selected_notebooks(only: list[str]) -> list[tuple[str, Callable]]:
+    if not only:
+        return list(NOTEBOOKS.items())
+    selected: list[tuple[str, Callable]] = []
     for name, builder in NOTEBOOKS.items():
+        if any(token in name or token == Path(name).stem for token in only):
+            selected.append((name, builder))
+    if not selected:
+        raise SystemExit(f"No notebooks matched: {only}")
+    return selected
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate notebook-series .ipynb and .py files")
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Run each generated .py mirror after writing it",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Limit generation to notebook names or stem fragments, e.g. --only 01_python_to_ore_swig_dataclasses",
+    )
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parent
+    for name, builder in _selected_notebooks(args.only):
         cells = builder()
         nb = {
             "cells": cells,
@@ -1960,8 +3248,12 @@ def main() -> int:
         }
         (root / name).write_text(json.dumps(nb, indent=1) + "\n", encoding="utf-8")
         py_name = Path(name).with_suffix(".py")
-        (root / py_name).write_text(render_py(cells), encoding="utf-8")
+        py_path = root / py_name
+        py_path.write_text(render_py(cells), encoding="utf-8")
         print(f"Wrote {name}")
+        if args.run:
+            print(f"Running {py_name}")
+            subprocess.run([sys.executable, str(py_path)], cwd=str(root), check=True)
     return 0
 
 

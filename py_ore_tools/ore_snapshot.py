@@ -68,6 +68,13 @@ from typing import Callable, Dict, Optional
 import numpy as np
 
 from .lgm import LGM1F, LGMParams
+from .rate_futures import (
+    RateFutureModelParams,
+    build_rate_future_quote,
+    future_forward_rate,
+    future_to_fra_rate,
+    year_fraction_365,
+)
 from .irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     build_discount_curve_from_discount_pairs,
@@ -1500,19 +1507,10 @@ def extract_market_instruments_by_currency(
             parsed = _parse_market_instrument_key(key)
             if parsed is None:
                 continue
-            if parsed["instrument_type"] not in allowed:
+            instrument_type = str(parsed["instrument_type"]).upper()
+            if instrument_type not in allowed and not (instrument_type.endswith("_FUTURE") and "FUTURE" in allowed):
                 continue
-            grouped[parsed["ccy"]].append(
-                {
-                    "instrument_type": parsed["instrument_type"],
-                    "quote_key": key,
-                    "quote_value": quote,
-                    "tenor": parsed["tenor"],
-                    "maturity": parsed["maturity"],
-                    "index": parsed["index"],
-                    "asof_date": asof_date,
-                }
-            )
+            grouped[parsed["ccy"]].append(_build_instrument_record(asof_date, parsed, key, quote))
 
     out: Dict[str, Dict[str, object]] = {}
     for ccy, instruments in sorted(grouped.items()):
@@ -1558,19 +1556,10 @@ def extract_market_instruments_by_currency_from_quotes(
         parsed = _parse_market_instrument_key(key)
         if parsed is None:
             continue
-        if parsed["instrument_type"] not in allowed:
+        instrument_type = str(parsed["instrument_type"]).upper()
+        if instrument_type not in allowed and not (instrument_type.endswith("_FUTURE") and "FUTURE" in allowed):
             continue
-        grouped[parsed["ccy"]].append(
-            {
-                "instrument_type": parsed["instrument_type"],
-                "quote_key": key,
-                "quote_value": quote,
-                "tenor": parsed["tenor"],
-                "maturity": parsed["maturity"],
-                "index": parsed["index"],
-                "asof_date": asof_date,
-            }
-        )
+        grouped[parsed["ccy"]].append(_build_instrument_record_from_quote(asof_date, parsed, q))
 
     out: Dict[str, Dict[str, object]] = {}
     for ccy, instruments in sorted(grouped.items()):
@@ -1593,6 +1582,8 @@ def fit_discount_curves_from_ore_market(
     fit_method: str = "weighted_zero_logdf_v1",
     fit_grid_mode: str = "instrument",
     dense_step_years: float = 0.25,
+    future_convexity_mode: str = "external_adjusted_fra",
+    future_model_params: RateFutureModelParams | dict[str, object] | None = None,
 ) -> Dict[str, Dict[str, object]]:
     """Fast per-currency curve fitter from ORE market quotes.
 
@@ -1614,6 +1605,8 @@ def fit_discount_curves_from_ore_market(
             fit_method=fit_method,
             fit_grid_mode=fit_grid_mode,
             dense_step_years=dense_step_years,
+            future_convexity_mode=future_convexity_mode,
+            future_model_params=future_model_params,
         )
         output[ccy] = {
             "asof_date": payload["asof_date"],
@@ -1629,6 +1622,8 @@ def fit_discount_curves_from_ore_market(
             "fit_points_count": int(len(fit["times"])),
             "instrument_times": [float(x) for x in fit["instrument_times"]],
             "instrument_zero_rates": [float(x) for x in fit["instrument_zero_rates"]],
+            "bootstrap_diagnostics": list(fit.get("bootstrap_diagnostics", [])),
+            "future_convexity_mode": str(future_convexity_mode),
             "input_instruments": instruments,
         }
     return output
@@ -1641,6 +1636,8 @@ def fit_discount_curves_from_programmatic_quotes(
     fit_method: str = "weighted_zero_logdf_v1",
     fit_grid_mode: str = "instrument",
     dense_step_years: float = 0.25,
+    future_convexity_mode: str = "external_adjusted_fra",
+    future_model_params: RateFutureModelParams | dict[str, object] | None = None,
 ) -> Dict[str, Dict[str, object]]:
     """Programmatic curve fitting API (no XML/files).
 
@@ -1662,6 +1659,8 @@ def fit_discount_curves_from_programmatic_quotes(
             fit_method=fit_method,
             fit_grid_mode=fit_grid_mode,
             dense_step_years=dense_step_years,
+            future_convexity_mode=future_convexity_mode,
+            future_model_params=future_model_params,
         )
         output[ccy] = {
             "asof_date": payload["asof_date"],
@@ -1677,6 +1676,8 @@ def fit_discount_curves_from_programmatic_quotes(
             "fit_points_count": int(len(fit["times"])),
             "instrument_times": [float(x) for x in fit["instrument_times"]],
             "instrument_zero_rates": [float(x) for x in fit["instrument_zero_rates"]],
+            "bootstrap_diagnostics": list(fit.get("bootstrap_diagnostics", [])),
+            "future_convexity_mode": str(future_convexity_mode),
             "input_instruments": instruments,
         }
     return output
@@ -2564,7 +2565,105 @@ def _parse_market_instrument_key(key: str) -> Optional[Dict[str, object]]:
             "maturity": maturity,
             "index": idx,
         }
+    if parts[0] in ("MM_FUTURE", "OI_FUTURE") and parts[1] == "PRICE" and len(parts) >= 6:
+        ccy = parts[2]
+        return {
+            "instrument_type": parts[0],
+            "ccy": ccy,
+            "tenor": parts[-1],
+            "maturity": None,
+            "index": "",
+            "contract": parts[3],
+            "exchange": parts[4],
+        }
     return None
+
+
+def _build_instrument_record(
+    asof_date: str,
+    parsed: Dict[str, object],
+    key: str,
+    quote: float,
+) -> Dict[str, object]:
+    instrument_type = str(parsed["instrument_type"]).upper()
+    record: Dict[str, object] = {
+        "instrument_type": instrument_type,
+        "quote_key": key,
+        "quote_value": quote,
+        "tenor": parsed["tenor"],
+        "maturity": parsed["maturity"],
+        "index": parsed["index"],
+        "asof_date": asof_date,
+    }
+    if instrument_type in ("MM_FUTURE", "OI_FUTURE"):
+        future_quote = build_rate_future_quote(
+            asof_date=_normalize_date_input(asof_date),
+            future_type=instrument_type,
+            ccy=str(parsed["ccy"]),
+            price=float(quote),
+            contract_label=str(parsed.get("contract", "")),
+            underlying_tenor=str(parsed["tenor"]),
+            quote_key=key,
+            exchange=str(parsed.get("exchange", "")),
+        )
+        record.update(
+            {
+                "maturity": future_quote.end_time_years,
+                "contract": future_quote.contract_label,
+                "exchange": future_quote.exchange,
+                "contract_start": future_quote.contract_start.isoformat(),
+                "contract_end": future_quote.contract_end.isoformat(),
+                "start_time": future_quote.start_time_years,
+                "end_time": future_quote.end_time_years,
+                "accrual": future_quote.accrual_years,
+            }
+        )
+    return record
+
+
+def _build_instrument_record_from_quote(
+    asof_date: str,
+    parsed: Dict[str, object],
+    quote_record: Dict[str, object],
+) -> Dict[str, object]:
+    key = str(quote_record.get("key", "")).strip()
+    quote = float(quote_record["value"])
+    record = _build_instrument_record(asof_date, parsed, key, quote)
+    if str(parsed["instrument_type"]).upper() not in ("MM_FUTURE", "OI_FUTURE"):
+        return record
+
+    start_override = quote_record.get("contract_start")
+    end_override = quote_record.get("contract_end")
+    future_quote = build_rate_future_quote(
+        asof_date=_normalize_date_input(asof_date),
+        future_type=str(parsed["instrument_type"]),
+        ccy=str(parsed["ccy"]),
+        price=float(quote),
+        contract_label=str(quote_record.get("contract", parsed.get("contract", ""))),
+        underlying_tenor=str(quote_record.get("tenor", parsed["tenor"])),
+        quote_key=key,
+        exchange=str(quote_record.get("exchange", parsed.get("exchange", ""))),
+        index=str(quote_record.get("index", parsed.get("index", ""))),
+        contract_start=_normalize_date_input(start_override) if start_override else None,
+        contract_end=_normalize_date_input(end_override) if end_override else None,
+        convexity_adjustment=float(quote_record.get("convexity_adjustment", 0.0) or 0.0),
+    )
+    record.update(
+        {
+            "index": future_quote.index,
+            "tenor": future_quote.underlying_tenor,
+            "maturity": future_quote.end_time_years,
+            "contract": future_quote.contract_label,
+            "exchange": future_quote.exchange,
+            "contract_start": future_quote.contract_start.isoformat(),
+            "contract_end": future_quote.contract_end.isoformat(),
+            "start_time": future_quote.start_time_years,
+            "end_time": future_quote.end_time_years,
+            "accrual": future_quote.accrual_years,
+            "convexity_adjustment": future_quote.convexity_adjustment,
+        }
+    )
+    return record
 
 
 def _normalize_programmatic_quotes(
@@ -2578,6 +2677,23 @@ def _normalize_programmatic_quotes(
         if isinstance(q, dict):
             out.append(q)
     return out
+
+
+def _coerce_future_model_params(
+    value: RateFutureModelParams | dict[str, object] | None,
+) -> RateFutureModelParams | None:
+    if value is None or isinstance(value, RateFutureModelParams):
+        return value
+    return RateFutureModelParams(
+        model=str(value.get("model", "none")),
+        mean_reversion=float(value.get("mean_reversion", 0.03)),
+        volatility=float(value.get("volatility", 0.0)),
+    )
+
+
+def _ccy_from_quote_key(key: str) -> str:
+    parts = str(key).strip().upper().split("/")
+    return parts[2] if len(parts) >= 3 else ""
 
 
 def _safe_tenor_years(tenor: str) -> Optional[float]:
@@ -2598,12 +2714,20 @@ def _fit_curve_from_instruments(
     fit_method: str = "weighted_zero_logdf_v1",
     fit_grid_mode: str = "instrument",
     dense_step_years: float = 0.25,
+    future_convexity_mode: str = "external_adjusted_fra",
+    future_model_params: RateFutureModelParams | dict[str, object] | None = None,
 ) -> Dict[str, object]:
     method = str(fit_method).strip().lower()
+    diagnostics: list[Dict[str, object]] = []
     if method == "weighted_zero_logdf_v1":
         times, zeros = _fit_weighted_zero_nodes(instruments)
     elif method == "bootstrap_mm_irs_v1":
-        times, zeros = _fit_bootstrap_mm_irs_nodes(instruments)
+        times, zeros, diagnostics = _fit_bootstrap_mm_irs_nodes(
+            asof_date,
+            instruments,
+            future_convexity_mode=future_convexity_mode,
+            future_model_params=future_model_params,
+        )
     elif method == "ql_helper_eur_v1":
         times, zeros = _fit_quantlib_helper_eur_nodes(asof_date, instruments)
     else:
@@ -2653,6 +2777,7 @@ def _fit_curve_from_instruments(
         "calendar_dates": _calendar_dates_from_times(asof_date, t_arr),
         "instrument_times": instr_t,
         "instrument_zero_rates": instr_z,
+        "bootstrap_diagnostics": diagnostics,
     }
 
 
@@ -2681,8 +2806,12 @@ def _fit_weighted_zero_nodes(
 
 
 def _fit_bootstrap_mm_irs_nodes(
+    asof_date: str,
     instruments: list[Dict[str, object]],
-) -> tuple[list[float], list[float]]:
+    *,
+    future_convexity_mode: str = "external_adjusted_fra",
+    future_model_params: RateFutureModelParams | dict[str, object] | None = None,
+) -> tuple[list[float], list[float], list[Dict[str, object]]]:
     def _avg_rate(items: list[Dict[str, object]]) -> float:
         return float(sum(float(x["quote_value"]) for x in items) / max(len(items), 1))
 
@@ -2690,7 +2819,13 @@ def _fit_bootstrap_mm_irs_nodes(
     for ins in instruments:
         by_type[str(ins["instrument_type"]).upper()].append(ins)
 
+    model_params = _coerce_future_model_params(future_model_params)
+    future_mode = str(future_convexity_mode).strip().lower()
+    if future_mode not in ("external_adjusted_fra", "native_future"):
+        raise ValueError("future_convexity_mode must be 'external_adjusted_fra' or 'native_future'")
+
     known_df: Dict[float, float] = {0.0: 1.0}
+    diagnostics: list[Dict[str, object]] = []
 
     # Seed with MM and ZERO quotes: treat as simple direct discount anchors.
     for tpe in ("MM", "ZERO"):
@@ -2717,6 +2852,48 @@ def _fit_bootstrap_mm_irs_nodes(
                 w = (t - t1) / max(t2 - t1, 1.0e-12)
                 return float(np.exp((1.0 - w) * np.log(max(p1, 1.0e-12)) + w * np.log(max(p2, 1.0e-12))))
         return known_df[xs[-1]]
+
+    future_instruments = by_type.get("MM_FUTURE", []) + by_type.get("OI_FUTURE", [])
+    future_instruments = sorted(
+        future_instruments,
+        key=lambda x: (float(x.get("start_time", x.get("maturity", 0.0)) or 0.0), float(x.get("maturity", 0.0) or 0.0)),
+    )
+
+    for ins in future_instruments:
+        future_quote = build_rate_future_quote(
+            asof_date=_normalize_date_input(asof_date),
+            future_type=str(ins["instrument_type"]),
+            ccy=_ccy_from_quote_key(str(ins.get("quote_key", ""))),
+            price=float(ins["quote_value"]),
+            contract_label=str(ins.get("contract", "")),
+            underlying_tenor=str(ins.get("tenor", "")),
+            quote_key=str(ins.get("quote_key", "")),
+            exchange=str(ins.get("exchange", "")),
+            index=str(ins.get("index", "")),
+            contract_start=_normalize_date_input(str(ins["contract_start"])) if ins.get("contract_start") else None,
+            contract_end=_normalize_date_input(str(ins["contract_end"])) if ins.get("contract_end") else None,
+            convexity_adjustment=float(ins.get("convexity_adjustment", 0.0) or 0.0),
+        )
+        forward_rate, futures_rate, convexity = future_forward_rate(future_quote, model_params)
+        df_start = _interp_df(future_quote.start_time_years)
+        df_end = df_start / max(1.0 + forward_rate * future_quote.accrual_years, 1.0e-12)
+        df_end = float(np.clip(df_end, 1.0e-12, df_start))
+        known_df[future_quote.end_time_years] = min(known_df.get(future_quote.end_time_years, 1.0), df_end)
+        diagnostics.append(
+            {
+                "instrument_type": str(ins["instrument_type"]),
+                "pricing_mode": future_mode,
+                "quote_key": str(ins.get("quote_key", "")),
+                "contract_start": future_quote.contract_start.isoformat(),
+                "contract_end": future_quote.contract_end.isoformat(),
+                "start_time": future_quote.start_time_years,
+                "end_time": future_quote.end_time_years,
+                "price": float(ins["quote_value"]),
+                "futures_rate": futures_rate,
+                "convexity_adjustment": convexity,
+                "adjusted_forward_rate": future_to_fra_rate(future_quote, model_params),
+            }
+        )
 
     # Bootstrap swap maturities ascending with annual fixed leg schedule.
     swap_buckets: Dict[float, list[Dict[str, object]]] = defaultdict(list)
@@ -2764,7 +2941,7 @@ def _fit_bootstrap_mm_irs_nodes(
             zeros.append(0.0)
         else:
             zeros.append(float(-np.log(max(known_df[t], 1.0e-12)) / t))
-    return times, zeros
+    return times, zeros, diagnostics
 
 
 def _fit_quantlib_helper_eur_nodes(

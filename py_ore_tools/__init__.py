@@ -1,3 +1,16 @@
+import os
+from pathlib import Path
+
+_PKG_DIR = Path(__file__).resolve().parent
+_CACHE_ROOT = _PKG_DIR / ".cache"
+_MPL_CACHE = _CACHE_ROOT / "matplotlib"
+_FONTCONFIG_CACHE = _CACHE_ROOT / "fontconfig"
+_MPL_CACHE.mkdir(parents=True, exist_ok=True)
+_FONTCONFIG_CACHE.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT))
+os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 from py_ore_tools.ore import OreBasic
 from py_ore_tools.lgm import (
     LGM1F,
@@ -50,16 +63,53 @@ from py_ore_tools.lgm_fx_xva_utils import (
     xccy_float_float_swap_npv,
 )
 from py_ore_tools.lgm_ir_options import (
+    BermudanBackwardResult,
+    BermudanExerciseDiagnostic,
+    BermudanLsmcResult,
     BermudanSwaptionDef,
     CapFloorDef,
+    bermudan_backward_price,
+    bermudan_lsmc_result,
     bermudan_npv_paths,
     bermudan_price,
     capfloor_npv,
     capfloor_npv_paths,
     forward_rate_from_bonds,
 )
+from py_ore_tools.lgm_calibration import (
+    BasketInstrument,
+    CalibratedParameterBlock,
+    CalibrationType,
+    CurrencyLgmConfig,
+    FallbackType,
+    FloatSpreadMapping,
+    LgmCalibrationConfig,
+    LgmCalibrationError,
+    LgmCalibrationPointResult,
+    LgmCalibrationResult,
+    LgmMarketInputs,
+    ParamType,
+    ParameterBlockConfig,
+    ParameterTransformationConfig,
+    QuantLibGsrCalibrationBackend,
+    ReversionType,
+    SwaptionSpec,
+    VolatilityType,
+    build_lgm_swaption_basket,
+    calibrate_lgm_batch,
+    calibrate_lgm_currency,
+)
+from py_ore_tools.rate_futures import (
+    RateFutureModelParams,
+    RateFutureQuote,
+    future_convexity_adjustment,
+    future_forward_rate,
+    future_to_fra_rate,
+    futures_price_to_rate,
+)
 from py_ore_tools.ore_snapshot import (
     CurveDFPayload,
+    OreSnapshot,
     discount_factors_to_dataframe,
     dump_discount_factors_json,
     extract_discount_factors_by_currency,
@@ -68,7 +118,12 @@ from py_ore_tools.ore_snapshot import (
     fit_discount_curves_from_ore_market,
     fit_discount_curves_from_programmatic_quotes,
     fitted_curves_to_dataframe,
+    load_from_ore_xml,
+    ore_input_validation_dataframe,
     quote_dicts_from_pairs,
+    validate_ore_input_snapshot,
+    validate_xva_snapshot_dataclasses,
+    xva_snapshot_validation_dataframe,
 )
 
 __all__ = [
@@ -119,13 +174,46 @@ __all__ = [
     "cva_terms_from_profile",
     "run_fx_forward_profile_xva",
     "CapFloorDef",
+    "BermudanBackwardResult",
+    "BermudanExerciseDiagnostic",
+    "BermudanLsmcResult",
     "BermudanSwaptionDef",
     "forward_rate_from_bonds",
     "capfloor_npv",
     "capfloor_npv_paths",
+    "bermudan_backward_price",
+    "bermudan_lsmc_result",
     "bermudan_npv_paths",
     "bermudan_price",
+    "CalibrationType",
+    "ParamType",
+    "ReversionType",
+    "VolatilityType",
+    "FloatSpreadMapping",
+    "FallbackType",
+    "ParameterBlockConfig",
+    "ParameterTransformationConfig",
+    "SwaptionSpec",
+    "CurrencyLgmConfig",
+    "LgmCalibrationConfig",
+    "LgmMarketInputs",
+    "BasketInstrument",
+    "CalibratedParameterBlock",
+    "LgmCalibrationPointResult",
+    "LgmCalibrationResult",
+    "LgmCalibrationError",
+    "QuantLibGsrCalibrationBackend",
+    "build_lgm_swaption_basket",
+    "calibrate_lgm_currency",
+    "calibrate_lgm_batch",
+    "RateFutureModelParams",
+    "RateFutureQuote",
+    "futures_price_to_rate",
+    "future_convexity_adjustment",
+    "future_forward_rate",
+    "future_to_fra_rate",
     "CurveDFPayload",
+    "OreSnapshot",
     "extract_discount_factors_by_currency",
     "discount_factors_to_dataframe",
     "dump_discount_factors_json",
@@ -134,5 +222,10 @@ __all__ = [
     "fit_discount_curves_from_ore_market",
     "fit_discount_curves_from_programmatic_quotes",
     "fitted_curves_to_dataframe",
+    "load_from_ore_xml",
+    "validate_ore_input_snapshot",
+    "ore_input_validation_dataframe",
+    "validate_xva_snapshot_dataclasses",
+    "xva_snapshot_validation_dataframe",
     "quote_dicts_from_pairs",
 ]
