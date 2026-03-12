@@ -24,6 +24,7 @@ env/
 
 # Generated benchmark and parity outputs (large; regenerate as needed)
 parity_artifacts/
+py_ore_tools/.cache/
 
 # Local / env overrides (do not commit secrets)
 .env
