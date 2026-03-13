@@ -53,6 +53,14 @@ class InputParametersLike(Protocol):
     def setCurveConfigs(self, xml: str, id: str = "") -> None: ...
     def setConventions(self, xml: str) -> None: ...
     def setRefDataManager(self, xml: str) -> None: ...
+    def setDimModel(self, s: str) -> None: ...
+    def setXvaCgDynamicIM(self, b: bool) -> None: ...
+    def setXvaCgDynamicIMStepSize(self, n: int) -> None: ...
+    def setXvaCgRegressionOrderDynamicIm(self, n: int) -> None: ...
+    def setXvaCgRegressionReportTimeStepsDynamicIM(self, s: Any) -> None: ...
+    def setStoreSensis(self, b: bool) -> None: ...
+    def setCurveSensiGrid(self, s: Any) -> None: ...
+    def setVegaSensiGrid(self, s: Any) -> None: ...
 
 
 def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
@@ -159,6 +167,7 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     _maybe_set_bool(input_parameters, "setMvaAnalytic", "MVA" in snapshot.config.analytics)
     _maybe_set_bool(input_parameters, "setExposureProfiles", True)
     _maybe_set_bool(input_parameters, "setExposureProfilesByTrade", True)
+    _apply_simulation_overrides(snapshot, input_parameters)
     _apply_xva_analytic_overrides(snapshot, input_parameters)
     _apply_credit_simulation(snapshot, mapped, input_parameters)
     return input_parameters
@@ -1243,6 +1252,32 @@ def _extract_xml_section(xml: str | None, tag: str) -> str | None:
     return ET.tostring(node, encoding="unicode")
 
 
+def _apply_simulation_overrides(snapshot: XVASnapshot, input_parameters: InputParametersLike) -> None:
+    runtime = snapshot.config.runtime
+    if runtime is None:
+        return
+    simulation = runtime.simulation
+    _maybe_set_bool(input_parameters, "setXvaCgDynamicIM", simulation.xva_cg_dynamic_im)
+    _maybe_set(input_parameters, "setXvaCgDynamicIMStepSize", int(simulation.xva_cg_dynamic_im_step_size))
+    if simulation.xva_cg_regression_order_dynamic_im is not None:
+        _maybe_set(
+            input_parameters,
+            "setXvaCgRegressionOrderDynamicIm",
+            int(simulation.xva_cg_regression_order_dynamic_im),
+        )
+    if simulation.xva_cg_regression_report_time_steps_dynamic_im:
+        _maybe_set(
+            input_parameters,
+            "setXvaCgRegressionReportTimeStepsDynamicIM",
+            list(simulation.xva_cg_regression_report_time_steps_dynamic_im),
+        )
+    _maybe_set_bool(input_parameters, "setStoreSensis", runtime.store_sensis)
+    if runtime.curve_sensi_grid:
+        _maybe_set(input_parameters, "setCurveSensiGrid", list(runtime.curve_sensi_grid))
+    if runtime.vega_sensi_grid:
+        _maybe_set(input_parameters, "setVegaSensiGrid", list(runtime.vega_sensi_grid))
+
+
 def _apply_xva_analytic_overrides(snapshot: XVASnapshot, input_parameters: InputParametersLike) -> None:
     runtime = snapshot.config.runtime
     if runtime is None:
@@ -1264,6 +1299,8 @@ def _apply_xva_analytic_overrides(snapshot: XVASnapshot, input_parameters: Input
         _maybe_set_bool(input_parameters, "setFlipViewXVA", bool(xva.flip_view_xva))
     if xva.collateral_floor_enabled is not None:
         _maybe_set_bool(input_parameters, "setCollateralFloorAnalytic", bool(xva.collateral_floor_enabled))
+    if xva.dim_model is not None:
+        _maybe_set(input_parameters, "setDimModel", str(xva.dim_model))
     if xva.dim_quantile is not None:
         _maybe_set(input_parameters, "setDimQuantile", float(xva.dim_quantile))
     if xva.dim_horizon_calendar_days is not None:
@@ -1272,6 +1309,10 @@ def _apply_xva_analytic_overrides(snapshot: XVASnapshot, input_parameters: Input
         _maybe_set(input_parameters, "setDimRegressionOrder", int(xva.dim_regression_order))
     if xva.dim_regressors is not None:
         _maybe_set(input_parameters, "setDimRegressors", str(xva.dim_regressors))
+    if xva.dim_evolution_file is not None:
+        _maybe_set(input_parameters, "setDimEvolutionFile", str(xva.dim_evolution_file))
+    if xva.dim_regression_files is not None:
+        _maybe_set(input_parameters, "setDimRegressionFiles", str(xva.dim_regression_files))
     if xva.dim_output_grid_points is not None:
         _maybe_set(input_parameters, "setDimOutputGridPoints", str(xva.dim_output_grid_points))
     if xva.dim_output_netting_set is not None:

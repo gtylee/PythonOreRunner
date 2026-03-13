@@ -49,11 +49,20 @@ from .bermudan import (
     price_bermudan_with_sensis_from_ore_case,
 )
 from .exceptions import ConflictError, EngineRunError, InputCompatibilityError, MappingError, ValidationError
+from .dim import (
+    PythonDeltaGammaVarHelper,
+    PythonDimInput,
+    PythonDynamicDeltaVarCalculator,
+    PythonDynamicSimmCalculator,
+    PythonSimpleDynamicSimm,
+    PythonSimpleDynamicSimmConfig,
+    PythonVarDimInput,
+)
 from .loader import XVALoader, merge_snapshots
 from .mapper import MappedInputs, build_input_parameters, map_snapshot
 from .parity import ParityCheckResult, ParityTolerance, compare_results
 from .presets import stress_classic_native_preset, stress_classic_native_runtime
-from .results import CubeAccessor, XVAResult
+from .results import CubeAccessor, DIMMarginComponents, DIMResult, XVAResult
 from .runtime import DeterministicToyAdapter, ORESwigAdapter, PythonLgmAdapter, XVAEngine, XVASession
 from .sensitivity import (
     ORESensitivityEntry,
@@ -84,6 +93,8 @@ __all__ = [
     "CrossAssetModelConfig",
     "CreditCurve",
     "CubeAccessor",
+    "DIMMarginComponents",
+    "DIMResult",
     "CurveConfig",
     "Curve",
     "CurvePoint",
@@ -109,7 +120,14 @@ __all__ = [
     "ORESwigAdapter",
     "ORESensitivityEntry",
     "OreSnapshotPythonLgmSensitivityComparator",
+    "PythonDimInput",
+    "PythonDeltaGammaVarHelper",
+    "PythonDynamicDeltaVarCalculator",
+    "PythonDynamicSimmCalculator",
     "PythonLgmAdapter",
+    "PythonSimpleDynamicSimm",
+    "PythonSimpleDynamicSimmConfig",
+    "PythonVarDimInput",
     "PythonSensitivityEntry",
     "ParityCheckResult",
     "ParityTolerance",

@@ -39,9 +39,11 @@ unit-test assertions without requiring the full LGM or SWIG stack.
 from __future__ import annotations
 
 import contextlib
+import csv
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import importlib
+import math
 import os
 import re
 from pathlib import Path
@@ -60,6 +62,7 @@ from .dataclasses import (
     Trade,
     XVASnapshot,
 )
+from .dim import calculate_python_dim
 from .exceptions import EngineRunError
 from .mapper import MappedInputs, _default_index_for_ccy, _resolve_mpor_config, build_input_parameters, map_snapshot
 from .results import CubeAccessor, XVAResult
@@ -336,10 +339,20 @@ class _PythonLgmInputs:
     model_ccy: str
     seed: int
     fx_spots: Dict[str, float]
+    fx_vols: Dict[str, List[Tuple[float, float]]]
+    stochastic_fx_pairs: Tuple[str, ...]
     trade_specs: Tuple[_TradeSpec, ...]
     unsupported: Tuple[Trade, ...]
     mpor: MporConfig
     input_provenance: Dict[str, str]  # Diagnostic dict recording which source was used for each input (model_params, market, grid, portfolio).
+    input_fallbacks: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SharedFxSimulation:
+    hybrid: Any
+    sim: Dict[str, Any]
+    pair_keys: Tuple[str, ...]
 
 
 class PythonLgmAdapter:
@@ -361,6 +374,23 @@ class PythonLgmAdapter:
         unsupported trade types, then assembles and returns an
         :class:`XVAResult` with per-metric XVA figures and exposure cubes.
         """
+        dim_mode = _active_dim_mode(snapshot)
+        supported_python_dim_models = {
+            "DynamicIM",
+            "SimmAnalytic",
+            "DeltaVaR",
+            "DeltaGammaNormalVaR",
+            "DeltaGammaVaR",
+        }
+        if dim_mode is not None and dim_mode not in supported_python_dim_models:
+            raise EngineRunError(
+                f"DIM mode '{dim_mode}' is not supported by the Python DIM port. "
+                "Supported Python DIM models are DynamicIM, SimmAnalytic, DeltaVaR, DeltaGammaNormalVaR, DeltaGammaVaR."
+            )
+        if dim_mode in supported_python_dim_models and snapshot.config.params.get("python.dim_feeder") is None:
+            raise EngineRunError(
+                f"DIM mode '{dim_mode}' requires snapshot.config.params['python.dim_feeder'] for the Python DIM port."
+            )
         self._ensure_py_lgm_imports()
         inputs = self._extract_inputs(snapshot, mapped)
 
@@ -386,6 +416,7 @@ class PythonLgmAdapter:
         x_paths = self._lgm_mod.simulate_lgm_measure(
             model, inputs.times, n_paths=n_paths, rng=rng, x0=0.0, draw_order=draw_order
         )
+        shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
 
         for spec in inputs.trade_specs:
             if spec.kind == "IRS":
@@ -417,7 +448,7 @@ class PythonLgmAdapter:
                     )
                 npv_by_trade[spec.trade.trade_id] = vals
             elif spec.kind == "FXForward":
-                vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths)
+                vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths, shared_sim=shared_fx_sim)
                 npv_by_trade[spec.trade.trade_id] = vals
             else:
                 unsupported.append(spec.trade)
@@ -448,6 +479,13 @@ class PythonLgmAdapter:
             unsupported=unsupported if fallback_result is None else [],
         )
         result.metadata["python_lgm_rng_mode"] = rng_mode
+        if dim_mode in supported_python_dim_models:
+            dim_result = calculate_python_dim(snapshot.config.params, dim_model=dim_mode)
+            result.reports.update(dim_result.reports)
+            result.cubes.update(dim_result.cubes)
+            result.metadata["dim_mode"] = dim_mode
+            result.metadata["dim_current"] = dict(dim_result.current_dim)
+            result.metadata["dim_engine"] = dim_result.metadata.get("engine", "python-dim")
         return result
 
     def prepare_sensitivity_snapshot(
@@ -713,15 +751,34 @@ class PythonLgmAdapter:
 
         overlay = _parse_market_overlay(snapshot.market.raw_quotes)
         fx_spots = overlay["fx"]
+        fx_vols = overlay.get("fx_vol", {})
         zero_curves = overlay["zero"]
         fwd_curves_raw = overlay.get("fwd", {})
         hazards = overlay["hazard"]
         recoveries = overlay["recovery"]
 
         trade_specs, unsupported, ccy_set = self._classify_portfolio_trades(snapshot, mapped)
+        stochastic_fx_pairs = _parse_stochastic_fx_pairs_from_simulation_xml_text(
+            xml.get("simulation.xml", ""),
+            model_ccy=model_ccy,
+            trade_specs=trade_specs,
+        )
+        input_fallbacks: List[str] = []
+        strict_ore_inputs = self._is_ore_case_snapshot(snapshot)
+
+        for spec in trade_specs:
+            if spec.kind != "FXForward":
+                continue
+            pair6 = str(spec.trade.product.pair).upper()
+            if pair6 not in fx_spots and pair6[3:] + pair6[:3] not in fx_spots:
+                input_fallbacks.append(f"missing_fx_spot:{pair6}")
+            if pair6 not in fx_vols and pair6[3:] + pair6[:3] not in fx_vols:
+                input_fallbacks.append(f"missing_fx_vol:{pair6}")
 
         for c in list(ccy_set):
-            zero_curves.setdefault(c, [(0.0, 0.02), (max(float(snapshot.config.horizon_years), 1.0), 0.02)])
+            if c not in zero_curves:
+                input_fallbacks.append(f"missing_zero_curve:{c}")
+                zero_curves.setdefault(c, [(0.0, 0.02), (max(float(snapshot.config.horizon_years), 1.0), 0.02)])
 
         curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs)
         if curve_payload is not None:
@@ -871,6 +928,20 @@ class PythonLgmAdapter:
 
         hazard_times, hazard_rates, recovery_rates = self._build_hazard_rates(snapshot, hazards, recoveries)
         survival_curves = self._build_survival_curves(snapshot, hazard_times, hazard_rates)
+        own_name = _own_name_from_runtime(snapshot).upper()
+        if own_name not in hazards and own_name not in overlay.get("cds_spreads", {}):
+            input_fallbacks.append(f"missing_own_credit_curve:{own_name}")
+        if runtime := snapshot.config.runtime:
+            xva = runtime.xva_analytic
+            if xva.fva_borrowing_curve and _market_yield_spread(snapshot, model_ccy, xva.fva_borrowing_curve) is None:
+                input_fallbacks.append(f"missing_funding_borrow_spread:{xva.fva_borrowing_curve}")
+            if xva.fva_lending_curve and _market_yield_spread(snapshot, model_ccy, xva.fva_lending_curve) is None:
+                input_fallbacks.append(f"missing_funding_lend_spread:{xva.fva_lending_curve}")
+        if strict_ore_inputs and input_fallbacks:
+            raise EngineRunError(
+                "ORE-backed Python parity run is missing required market inputs and would fall back to synthetic assumptions: "
+                + ", ".join(sorted(set(input_fallbacks)))
+            )
 
         return _PythonLgmInputs(
             times=times,
@@ -891,6 +962,8 @@ class PythonLgmAdapter:
             model_ccy=model_ccy,
             seed=int(snapshot.config.runtime.simulation.seed) if snapshot.config.runtime else 42,
             fx_spots=fx_spots,
+            fx_vols=fx_vols,
+            stochastic_fx_pairs=stochastic_fx_pairs,
             trade_specs=tuple(trade_specs),
             unsupported=tuple(unsupported),
             mpor=mpor,
@@ -901,6 +974,7 @@ class PythonLgmAdapter:
                 "portfolio": "dataclass",
                 "mpor": mpor.source,
             },
+            input_fallbacks=tuple(sorted(set(input_fallbacks))),
         )
 
     def _load_ore_output_curves(
@@ -1182,14 +1256,15 @@ class PythonLgmAdapter:
         out = np.asarray(times, dtype=float)
         extras: List[np.ndarray] = []
         for spec in trade_specs:
-            if spec.kind != "IRS" or spec.legs is None:
-                continue
-            legs = spec.legs
-            for key in ("fixed_pay_time", "float_pay_time", "float_fixing_time"):
-                vals = np.asarray(legs.get(key, np.array([], dtype=float)), dtype=float)
-                if vals.size == 0:
-                    continue
-                extras.append(vals[vals >= 0.0])
+            if spec.kind == "IRS" and spec.legs is not None:
+                legs = spec.legs
+                for key in ("fixed_pay_time", "float_pay_time", "float_fixing_time"):
+                    vals = np.asarray(legs.get(key, np.array([], dtype=float)), dtype=float)
+                    if vals.size == 0:
+                        continue
+                    extras.append(vals[vals >= 0.0])
+            elif spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward):
+                extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
         if extras:
             out = np.unique(np.concatenate([out, *extras]))
         if out.size == 0 or out[0] > 0.0:
@@ -1230,7 +1305,140 @@ class PythonLgmAdapter:
             list(zip(times, dfs))
         )
 
-    def _price_fx_forward(self, trade: Trade, inputs: _PythonLgmInputs, n_times: int, n_paths: int) -> np.ndarray:
+    def _build_shared_fx_simulation(
+        self,
+        snapshot: XVASnapshot,
+        inputs: _PythonLgmInputs,
+        n_paths: int,
+    ) -> _SharedFxSimulation | None:
+        all_fx_pairs = sorted(
+            {
+                f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+                for spec in inputs.trade_specs
+                if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
+            }
+        )
+        fx_pairs = sorted(pair for pair in all_fx_pairs if pair in set(inputs.stochastic_fx_pairs))
+        if not fx_pairs:
+            return None
+
+        ir_ccys = sorted(
+            {
+                snapshot.config.base_currency.upper(),
+                *[pair.split("/")[0] for pair in fx_pairs],
+                *[pair.split("/")[1] for pair in fx_pairs],
+            }
+        )
+        ir_params = {
+            ccy: self._fx_utils.build_lgm_params(
+                alpha=(
+                    tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                    tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                ),
+                kappa=(
+                    tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                    tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                ),
+                shift=float(inputs.lgm_params["shift"]),
+                scaling=float(inputs.lgm_params["scaling"]),
+            )
+            for ccy in ir_ccys
+        }
+        fx_vols = {}
+        log_s0 = {}
+        rd_minus_rf = {}
+        for pair in fx_pairs:
+            pair6 = pair.replace("/", "")
+            max_maturity = max(
+                float(spec.trade.product.maturity_years)
+                for spec in inputs.trade_specs
+                if spec.kind == "FXForward"
+                and isinstance(spec.trade.product, FXForward)
+                and f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}" == pair
+            )
+            fx_vol = _fx_vol_for_trade(inputs, pair6, max_maturity, default=0.15)
+            fx_vols[pair] = (tuple(), (float(fx_vol),))
+            spot = max(_spot_from_quotes(pair6, inputs, default=1.0), 1.0e-12)
+            log_s0[pair] = float(np.log(spot))
+            rd_minus_rf[pair] = _fx_carry_for_pair(pair, inputs, horizon=max_maturity)
+
+        corr = self._build_shared_fx_correlation(snapshot, tuple(ir_ccys), tuple(fx_pairs))
+        hybrid = self._fx_utils.LgmFxHybrid(
+            self._fx_utils.MultiCcyLgmParams(
+                ir_params=ir_params,
+                fx_vols=fx_vols,
+                corr=corr,
+            )
+        )
+        sim = hybrid.simulate_paths(
+            times=inputs.times,
+            n_paths=n_paths,
+            rng=np.random.default_rng(inputs.seed + 17),
+            log_s0=log_s0,
+            rd_minus_rf=rd_minus_rf,
+        )
+        return _SharedFxSimulation(hybrid=hybrid, sim=sim, pair_keys=tuple(fx_pairs))
+
+    def _build_shared_fx_correlation(
+        self,
+        snapshot: XVASnapshot,
+        ir_ccys: Tuple[str, ...],
+        fx_pairs: Tuple[str, ...],
+    ) -> np.ndarray:
+        labels = [f"IR:{ccy}" for ccy in ir_ccys] + [f"FX:{pair}" for pair in fx_pairs]
+        corr = np.eye(len(labels), dtype=float)
+        runtime = snapshot.config.runtime
+        if runtime is None:
+            return corr
+        entries = getattr(runtime.cross_asset_model, "correlations", ())
+        if not entries:
+            return corr
+        for raw_left, raw_right, raw_value in entries:
+            left = self._resolve_cam_factor(str(raw_left), ir_ccys, fx_pairs)
+            right = self._resolve_cam_factor(str(raw_right), ir_ccys, fx_pairs)
+            if left is None or right is None:
+                continue
+            li, ls = left
+            ri, rs = right
+            value = float(raw_value) * float(ls) * float(rs)
+            corr[li, ri] = value
+            corr[ri, li] = value
+        np.fill_diagonal(corr, 1.0)
+        return corr
+
+    def _resolve_cam_factor(
+        self,
+        label: str,
+        ir_ccys: Tuple[str, ...],
+        fx_pairs: Tuple[str, ...],
+    ) -> tuple[int, float] | None:
+        txt = str(label).strip().upper()
+        if txt.startswith("IR:"):
+            ccy = txt.split(":", 1)[1]
+            if ccy in ir_ccys:
+                return ir_ccys.index(ccy), 1.0
+            return None
+        if not txt.startswith("FX:"):
+            return None
+        pair_txt = txt.split(":", 1)[1].replace("-", "/")
+        if "/" not in pair_txt and len(pair_txt) == 6:
+            pair_txt = pair_txt[:3] + "/" + pair_txt[3:]
+        if pair_txt in fx_pairs:
+            return len(ir_ccys) + fx_pairs.index(pair_txt), 1.0
+        base, quote = pair_txt.split("/", 1)
+        rev = f"{quote}/{base}"
+        if rev in fx_pairs:
+            return len(ir_ccys) + fx_pairs.index(rev), -1.0
+        return None
+
+    def _price_fx_forward(
+        self,
+        trade: Trade,
+        inputs: _PythonLgmInputs,
+        n_times: int,
+        n_paths: int,
+        shared_sim: _SharedFxSimulation | None = None,
+    ) -> np.ndarray:
         """Compute the NPV of an FX forward across all simulation times and paths under the LGM measure.
 
         Builds a two-currency LGM-FX hybrid model, simulates joint spot and
@@ -1242,33 +1450,44 @@ class PythonLgmAdapter:
         pair = f"{p.pair[:3].upper()}/{p.pair[3:].upper()}"
         dom = p.pair[3:].upper()
         for_ccy = p.pair[:3].upper()
-        spot = _spot_from_quotes(p.pair, inputs, default=1.0)
         p_dom = inputs.discount_curves[dom]
         p_for = inputs.discount_curves[for_ccy]
-        ir_specs = {
-            for_ccy: {
-                "alpha": (tuple(float(x) for x in inputs.lgm_params["alpha_times"]), tuple(float(x) for x in inputs.lgm_params["alpha_values"])),
-                "kappa": (tuple(float(x) for x in inputs.lgm_params["kappa_times"]), tuple(float(x) for x in inputs.lgm_params["kappa_values"])),
-                "shift": float(inputs.lgm_params["shift"]),
-                "scaling": float(inputs.lgm_params["scaling"]),
-            },
-            dom: {
-                "alpha": (tuple(float(x) for x in inputs.lgm_params["alpha_times"]), tuple(float(x) for x in inputs.lgm_params["alpha_values"])),
-                "kappa": (tuple(float(x) for x in inputs.lgm_params["kappa_times"]), tuple(float(x) for x in inputs.lgm_params["kappa_values"])),
-                "shift": float(inputs.lgm_params["shift"]),
-                "scaling": float(inputs.lgm_params["scaling"]),
-            },
-        }
-        hybrid = self._fx_utils.build_two_ccy_hybrid(pair=pair, ir_specs=ir_specs, fx_vol=0.15)
-        sim = hybrid.simulate_paths(
-            times=inputs.times,
-            n_paths=n_paths,
-            log_s0={pair: float(np.log(max(spot, 1.0e-12)))},
-            rng=np.random.default_rng(inputs.seed + 17),
-        )
-        s_t = sim["s"][pair]
-        x_dom_t = sim["x"][dom]
-        x_for_t = sim["x"][for_ccy]
+        if shared_sim is not None and pair in shared_sim.sim["s"]:
+            hybrid = shared_sim.hybrid
+            sim = shared_sim.sim
+            s_t = sim["s"][pair]
+            x_dom_t = sim["x"][dom]
+            x_for_t = sim["x"][for_ccy]
+        elif pair not in set(inputs.stochastic_fx_pairs):
+            return self._price_fx_forward_deterministic(trade, inputs, n_times, n_paths)
+        else:
+            spot = _spot_from_quotes(p.pair, inputs, default=1.0)
+            fx_vol = _fx_vol_for_trade(inputs, p.pair, float(p.maturity_years), default=0.15)
+            ir_specs = {
+                for_ccy: {
+                    "alpha": (tuple(float(x) for x in inputs.lgm_params["alpha_times"]), tuple(float(x) for x in inputs.lgm_params["alpha_values"])),
+                    "kappa": (tuple(float(x) for x in inputs.lgm_params["kappa_times"]), tuple(float(x) for x in inputs.lgm_params["kappa_values"])),
+                    "shift": float(inputs.lgm_params["shift"]),
+                    "scaling": float(inputs.lgm_params["scaling"]),
+                },
+                dom: {
+                    "alpha": (tuple(float(x) for x in inputs.lgm_params["alpha_times"]), tuple(float(x) for x in inputs.lgm_params["alpha_values"])),
+                    "kappa": (tuple(float(x) for x in inputs.lgm_params["kappa_times"]), tuple(float(x) for x in inputs.lgm_params["kappa_values"])),
+                    "shift": float(inputs.lgm_params["shift"]),
+                    "scaling": float(inputs.lgm_params["scaling"]),
+                },
+            }
+            hybrid = self._fx_utils.build_two_ccy_hybrid(pair=pair, ir_specs=ir_specs, fx_vol=fx_vol)
+            sim = hybrid.simulate_paths(
+                times=inputs.times,
+                n_paths=n_paths,
+                log_s0={pair: float(np.log(max(spot, 1.0e-12)))},
+                rd_minus_rf={pair: _fx_carry_for_pair(pair, inputs, horizon=float(p.maturity_years))},
+                rng=np.random.default_rng(inputs.seed + 17),
+            )
+            s_t = sim["s"][pair]
+            x_dom_t = sim["x"][dom]
+            x_for_t = sim["x"][for_ccy]
         fx_def = self._fx_utils.FxForwardDef(
             trade_id=trade.trade_id,
             pair=pair,
@@ -1276,9 +1495,11 @@ class PythonLgmAdapter:
             strike=float(p.strike),
             maturity=float(p.maturity_years),
         )
+        direction = 1.0 if p.buy_base else -1.0
         vals = np.zeros((n_times, n_paths), dtype=float)
+        report_ccy = inputs.model_ccy.upper()
         for i, t in enumerate(inputs.times):
-            vals[i, :] = self._fx_utils.fx_forward_npv(
+            npv_quote = direction * self._fx_utils.fx_forward_npv(
                 hybrid=hybrid,
                 fx_def=fx_def,
                 t=float(t),
@@ -1288,7 +1509,89 @@ class PythonLgmAdapter:
                 p0_dom=p_dom,
                 p0_for=p_for,
             )
+            vals[i, :] = _convert_fx_forward_npv_to_reporting_ccy(
+                npv_quote=npv_quote,
+                report_ccy=report_ccy,
+                base_ccy=for_ccy,
+                quote_ccy=dom,
+                spot_path=s_t[i, :],
+                inputs=inputs,
+            )
         return vals
+
+    def _price_fx_forward_deterministic(
+        self,
+        trade: Trade,
+        inputs: _PythonLgmInputs,
+        n_times: int,
+        n_paths: int,
+    ) -> np.ndarray:
+        p = trade.product
+        assert isinstance(p, FXForward)
+        dom = p.pair[3:].upper()
+        for_ccy = p.pair[:3].upper()
+        direction = 1.0 if p.buy_base else -1.0
+        spot0 = _spot_from_quotes(p.pair, inputs, default=1.0)
+        p_dom = inputs.discount_curves[dom]
+        p_for = inputs.discount_curves[for_ccy]
+        report_ccy = inputs.model_ccy.upper()
+        vals = np.zeros((n_times, n_paths), dtype=float)
+        maturity = float(p.maturity_years)
+        forward0 = float(spot0) * float(p_for(maturity)) / float(p_dom(maturity))
+        for i, t in enumerate(inputs.times):
+            if t > maturity + 1.0e-12:
+                continue
+            p_d_t_T = float(p_dom(maturity)) / max(float(p_dom(float(t))), 1.0e-18)
+            npv_quote = direction * float(p.notional) * p_d_t_T * (forward0 - float(p.strike))
+            vals[i, :] = _convert_fx_forward_npv_to_reporting_ccy(
+                npv_quote=np.full(n_paths, npv_quote, dtype=float),
+                report_ccy=report_ccy,
+                base_ccy=for_ccy,
+                quote_ccy=dom,
+                spot_path=np.full(n_paths, max(float(spot0), 1.0e-12), dtype=float),
+                inputs=inputs,
+            )
+        return vals
+
+    def _fx_forward_closeout_paths(
+        self,
+        trade: Trade,
+        npv_paths: np.ndarray,
+        times: np.ndarray,
+        observation_times: np.ndarray,
+        closeout_times: np.ndarray,
+    ) -> np.ndarray:
+        p = trade.product
+        assert isinstance(p, FXForward)
+        maturity = float(p.maturity_years)
+        out = np.zeros((observation_times.size, npv_paths.shape[1]), dtype=float)
+        for i, (obs_t, co_t) in enumerate(zip(observation_times, closeout_times)):
+            if obs_t >= maturity - 1.0e-12:
+                continue
+            target = float(co_t)
+            if maturity <= co_t + 1.0e-12:
+                target = maturity
+            idx = int(np.searchsorted(times, target))
+            if idx >= times.size:
+                idx = times.size - 1
+            if abs(float(times[idx]) - target) > 1.0e-10:
+                if idx == 0:
+                    idx_lo = idx_hi = 0
+                elif idx >= times.size:
+                    idx_lo = idx_hi = times.size - 1
+                else:
+                    idx_lo = idx - 1
+                    idx_hi = idx
+                t_lo = float(times[idx_lo])
+                t_hi = float(times[idx_hi])
+                if idx_lo == idx_hi or abs(t_hi - t_lo) <= 1.0e-12:
+                    out[i, :] = npv_paths[idx_lo, :]
+                else:
+                    w = (target - t_lo) / (t_hi - t_lo)
+                    out[i, :] = (1.0 - w) * npv_paths[idx_lo, :] + w * npv_paths[idx_hi, :]
+            else:
+                out[i, :] = npv_paths[idx, :]
+        return out
 
     def _build_irs_legs(self, trade: Trade, mapped: MappedInputs, snapshot: XVASnapshot) -> Dict[str, np.ndarray]:
         ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
@@ -1476,10 +1779,8 @@ class PythonLgmAdapter:
         df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
         df_vec = np.asarray([df_base(float(t)) for t in times], dtype=float)
         obs_df_vec = df_vec[obs_idx]
-        epe_by_ns_paths: Dict[str, np.ndarray] = {}
-        ene_by_ns_paths: Dict[str, np.ndarray] = {}
-        valuation_epe_by_ns_paths: Dict[str, np.ndarray] = {}
-        valuation_ene_by_ns_paths: Dict[str, np.ndarray] = {}
+        ns_valuation_paths: Dict[str, np.ndarray] = {}
+        ns_closeout_paths: Dict[str, np.ndarray] = {}
         xva_deflated_by_ns: Dict[str, bool] = {}
         pv_total = 0.0
         npv_cube_payload: Dict[str, Dict[str, object]] = {}
@@ -1505,15 +1806,22 @@ class PythonLgmAdapter:
                 xva_deflated = False
             ns = spec.trade.netting_set
             v_xva_val = v_xva[obs_idx, :]
-            v_xva_obs = v_xva[obs_closeout_idx, :]
+            if spec.kind == "FXForward":
+                v_xva_obs = self._fx_forward_closeout_paths(
+                    spec.trade,
+                    v_xva,
+                    times,
+                    obs_times,
+                    obs_closeout_times,
+                )
+            else:
+                v_xva_obs = v_xva[obs_closeout_idx, :]
             valuation_epe = np.mean(np.maximum(v_xva_val, 0.0), axis=1)
             valuation_ene = np.mean(np.maximum(-v_xva_val, 0.0), axis=1)
             epe = np.mean(np.maximum(v_xva_obs, 0.0), axis=1)
             ene = np.mean(np.maximum(-v_xva_obs, 0.0), axis=1)
-            valuation_epe_by_ns_paths[ns] = valuation_epe_by_ns_paths.get(ns, np.zeros_like(valuation_epe)) + valuation_epe
-            valuation_ene_by_ns_paths[ns] = valuation_ene_by_ns_paths.get(ns, np.zeros_like(valuation_ene)) + valuation_ene
-            epe_by_ns_paths[ns] = epe_by_ns_paths.get(ns, np.zeros_like(epe)) + epe
-            ene_by_ns_paths[ns] = ene_by_ns_paths.get(ns, np.zeros_like(ene)) + ene
+            ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(v_xva_val)) + v_xva_val
+            ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(v_xva_obs)) + v_xva_obs
             xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
             npv_cube_payload[spec.trade.trade_id] = {
                 "times": valuation_times.tolist(),
@@ -1527,7 +1835,21 @@ class PythonLgmAdapter:
                 "closeout_ene": ene.tolist(),
             }
 
-        exposure_by_ns = {ns: float(vals[0]) for ns, vals in epe_by_ns_paths.items()}
+        epe_by_ns_paths: Dict[str, np.ndarray] = {}
+        ene_by_ns_paths: Dict[str, np.ndarray] = {}
+        valuation_epe_by_ns_paths: Dict[str, np.ndarray] = {}
+        valuation_ene_by_ns_paths: Dict[str, np.ndarray] = {}
+        for ns, valuation_paths in ns_valuation_paths.items():
+            closeout_paths = ns_closeout_paths[ns]
+            collateral_paths = _estimate_vm_collateral_paths(snapshot, ns, valuation_paths)
+            valuation_paths_net = valuation_paths - collateral_paths
+            closeout_paths_net = closeout_paths - collateral_paths
+            valuation_epe_by_ns_paths[ns] = np.mean(np.maximum(valuation_paths_net, 0.0), axis=1)
+            valuation_ene_by_ns_paths[ns] = np.mean(np.maximum(-valuation_paths_net, 0.0), axis=1)
+            epe_by_ns_paths[ns] = np.mean(np.maximum(closeout_paths_net, 0.0), axis=1)
+            ene_by_ns_paths[ns] = np.mean(np.maximum(-closeout_paths_net, 0.0), axis=1)
+
+        exposure_by_ns = {ns: float(np.max(vals)) for ns, vals in epe_by_ns_paths.items()}
         xva_by_metric: Dict[str, float] = {}
         metric_set = set(snapshot.config.analytics)
 
@@ -1648,6 +1970,8 @@ class PythonLgmAdapter:
                 "fallback_notional_pct": float(fallback_notional / total_notional),
             },
             "input_provenance": dict(inputs.input_provenance),
+            "input_fallbacks": list(inputs.input_fallbacks),
+            "using_fallback_inputs": bool(inputs.input_fallbacks),
             "model_currency": inputs.model_ccy,
             "grid_size": int(times.size),
             "valuation_grid_size": int(valuation_times.size),
@@ -1691,6 +2015,8 @@ class ORESwigAdapter:
 
         reports = self._extract_reports(app)
         cubes = self._extract_cubes(app)
+        dim_reports, dim_report_source = self._extract_dim_reports(snapshot, reports)
+        reports.update(dim_reports)
         xva_by_metric = self._extract_xva_metrics(reports)
         exposure_by_netting_set = self._extract_exposures(reports)
         xva_total = sum(xva_by_metric.values())
@@ -1704,7 +2030,12 @@ class ORESwigAdapter:
             exposure_by_netting_set=exposure_by_netting_set,
             reports=reports,
             cubes=cubes,
-            metadata={"adapter": "ore-swig", "module": getattr(self._module, "__name__", type(self._module).__name__)},
+            metadata={
+                "adapter": "ore-swig",
+                "module": getattr(self._module, "__name__", type(self._module).__name__),
+                "dim_mode": _active_dim_mode(snapshot),
+                "dim_report_source": dim_report_source,
+            },
         )
 
     def _discover_module(self) -> Any:
@@ -1805,6 +2136,57 @@ class ORESwigAdapter:
             except Exception:
                 pass
         return cubes
+
+    def _extract_dim_reports(self, snapshot: XVASnapshot, reports: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        dim_reports: Dict[str, Any] = {}
+        report_source = "absent"
+
+        report_aliases = {
+            "dim_evolution": ("dim_evolution", "dimevolution", "dimEvolution"),
+            "dim_regression": ("dim_regression", "dimregression", "dimRegression"),
+        }
+        for target, aliases in report_aliases.items():
+            for alias in aliases:
+                rows = self._rows_from_report(reports.get(alias))
+                if rows:
+                    dim_reports[target] = rows
+                    report_source = "report"
+                    break
+
+        if dim_reports:
+            return dim_reports, report_source
+
+        file_reports = self._read_dim_reports_from_files(snapshot)
+        if file_reports:
+            return file_reports, "file"
+
+        return {}, report_source
+
+    def _read_dim_reports_from_files(self, snapshot: XVASnapshot) -> Dict[str, Any]:
+        runtime = snapshot.config.runtime
+        if runtime is None:
+            return {}
+
+        xva = runtime.xva_analytic
+        configured = {
+            "dim_evolution": xva.dim_evolution_file,
+            "dim_regression": xva.dim_regression_files,
+        }
+        output_dir = _configured_output_dir(snapshot)
+        if output_dir is None:
+            return {}
+
+        out: Dict[str, Any] = {}
+        for key, rel_name in configured.items():
+            if not rel_name:
+                continue
+            path = Path(rel_name)
+            if not path.is_absolute():
+                path = output_dir / path
+            rows = _read_csv_report(path)
+            if rows:
+                out[key] = rows
+        return out
 
     def _extract_xva_metrics(self, reports: Dict[str, Any]) -> Dict[str, float]:
         xva: Dict[str, float] = {}
@@ -2009,6 +2391,35 @@ def _parse_float_grid(text: str | None) -> np.ndarray:
     return np.asarray([float(x.strip()) for x in txt.split(",") if x.strip()], dtype=float)
 
 
+def _active_dim_mode(snapshot: XVASnapshot) -> str | None:
+    runtime = snapshot.config.runtime
+    if runtime is None or runtime.xva_analytic is None:
+        return None
+    return runtime.xva_analytic.dim_model
+
+
+def _configured_output_dir(snapshot: XVASnapshot) -> Path | None:
+    configured = str(snapshot.config.params.get("outputPath", "")).strip()
+    if not configured:
+        return None
+    path = Path(configured)
+    if path.is_absolute():
+        return path
+    ore_xml_path = snapshot.source_meta.get("config")
+    if ore_xml_path and ore_xml_path.path and ore_xml_path.path.endswith(".xml"):
+        ore_path = Path(ore_xml_path.path)
+        return (ore_path.parent.parent / path).resolve()
+    return Path.cwd() / path
+
+
+def _read_csv_report(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return [dict(row) for row in reader]
+
+
 def _normalize_asof_date(asof: str) -> str:
     s = asof.strip()
     if len(s) == 8 and s.isdigit():
@@ -2103,6 +2514,59 @@ def _parse_exposure_times_from_simulation_xml_text(xml_text: str) -> np.ndarray:
     return arr
 
 
+def _parse_stochastic_fx_pairs_from_simulation_xml_text(
+    xml_text: str,
+    *,
+    model_ccy: str,
+    trade_specs: Sequence[_TradeSpec],
+) -> Tuple[str, ...]:
+    if not xml_text.strip():
+        return tuple(
+            sorted(
+                {
+                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+                    for spec in trade_specs
+                    if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
+                }
+            )
+        )
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return ()
+    domestic = str(
+        root.findtext("./CrossAssetModel/DomesticCcy")
+        or model_ccy
+    ).strip().upper()
+    foreign_nodes = root.findall("./CrossAssetModel/ForeignExchangeModels/CrossCcyLGM")
+    if not foreign_nodes:
+        return tuple(
+            sorted(
+                {
+                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+                    for spec in trade_specs
+                    if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
+                }
+            )
+        )
+    supported_foreigns = {
+        str(node.attrib.get("foreignCcy") or "").strip().upper()
+        for node in foreign_nodes
+        if str(node.attrib.get("foreignCcy") or "").strip()
+    }
+    out = []
+    for spec in trade_specs:
+        if spec.kind != "FXForward" or not isinstance(spec.trade.product, FXForward):
+            continue
+        base = spec.trade.product.pair[:3].upper()
+        quote = spec.trade.product.pair[3:].upper()
+        if base == domestic and quote in supported_foreigns:
+            out.append(f"{base}/{quote}")
+        elif quote == domestic and base in supported_foreigns:
+            out.append(f"{base}/{quote}")
+    return tuple(sorted(set(out)))
+
+
 def _fallback_exposure_grid(snapshot: XVASnapshot) -> np.ndarray:
     max_mat = float(snapshot.config.horizon_years)
     for t in snapshot.portfolio.trades:
@@ -2130,15 +2594,33 @@ def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
     zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     fx: Dict[str, float] = {}
+    fx_vol: Dict[str, List[Tuple[float, float]]] = {}
     hazard: Dict[str, List[Tuple[float, float]]] = {}
     recovery: Dict[str, float] = {}
+    cds_spreads: Dict[str, List[Tuple[float, float]]] = {}
     for q in raw_quotes:
         key = str(q.key).strip()
         up = key.upper()
         val = float(q.value)
         parts = up.split("/")
+        if len(parts) >= 4 and parts[0] == "FX" and parts[1] == "RATE":
+            fx[parts[2] + parts[3]] = val
+            continue
         if len(parts) >= 3 and parts[0] == "FX":
             fx[parts[1] + parts[2]] = val
+            continue
+        if len(parts) >= 6 and parts[0] == "FX_OPTION" and parts[1] == "RATE_LNVOL":
+            ccy1 = parts[2]
+            ccy2 = parts[3]
+            tenor = parts[4]
+            strike = parts[5]
+            if strike != "ATM":
+                continue
+            try:
+                t = _parse_tenor_to_years(tenor)
+            except Exception:
+                continue
+            fx_vol.setdefault(ccy1 + ccy2, []).append((t, val))
             continue
         if len(parts) >= 4 and parts[0] == "ZERO" and parts[1] == "RATE":
             ccy = parts[2]
@@ -2186,11 +2668,34 @@ def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
                 continue
             hazard.setdefault(cpty, []).append((t, val))
             continue
+        if len(parts) >= 6 and parts[0] == "CDS" and parts[1] == "CREDIT_SPREAD":
+            cpty = parts[2]
+            tenor = parts[-1]
+            try:
+                t = _parse_tenor_to_years(tenor)
+            except Exception:
+                continue
+            cds_spreads.setdefault(cpty, []).append((t, val))
+            continue
         if len(parts) >= 5 and parts[0] == "RECOVERY_RATE":
             cpty = parts[2]
             recovery[cpty] = val
             continue
-    return {"zero": zero, "fwd": fwd, "fx": fx, "hazard": hazard, "recovery": recovery}
+    for cpty, spreads in cds_spreads.items():
+        if cpty in hazard:
+            continue
+        rec = float(recovery.get(cpty, 0.4))
+        lgd = max(1.0 - rec, 1.0e-6)
+        hazard[cpty] = [(t, max(float(spread) / lgd, 0.0)) for t, spread in spreads]
+    return {
+        "zero": zero,
+        "fwd": fwd,
+        "fx": fx,
+        "fx_vol": fx_vol,
+        "hazard": hazard,
+        "cds_spreads": cds_spreads,
+        "recovery": recovery,
+    }
 
 
 def _default_index_for_ccy(ccy: str) -> str:
@@ -2263,6 +2768,28 @@ def _counterparty_for_netting(snapshot: XVASnapshot, netting_set: str) -> str:
         if t.netting_set == netting_set:
             return t.counterparty
     return netting_set
+
+
+def _estimate_vm_collateral_paths(snapshot: XVASnapshot, netting_set: str, valuation_paths: np.ndarray) -> np.ndarray:
+    ns_cfg = snapshot.netting.netting_sets.get(netting_set)
+    if ns_cfg is None or not bool(ns_cfg.active_csa):
+        return np.zeros_like(valuation_paths)
+
+    threshold_recv = float(ns_cfg.threshold_receive or 0.0)
+    threshold_pay = float(ns_cfg.threshold_pay or 0.0)
+    mta_recv = max(float(ns_cfg.mta_receive or 0.0), 0.0)
+    mta_pay = max(float(ns_cfg.mta_pay or 0.0), 0.0)
+
+    vm_balance = 0.0
+    for balance in snapshot.collateral.balances:
+        if balance.netting_set_id == netting_set:
+            vm_balance = float(balance.variation_margin)
+            break
+
+    collateral = np.full_like(valuation_paths, vm_balance, dtype=float)
+    collateral = np.where(valuation_paths > (threshold_recv + mta_recv), valuation_paths - threshold_recv, collateral)
+    collateral = np.where(valuation_paths < -(threshold_pay + mta_pay), valuation_paths + threshold_pay, collateral)
+    return collateral
 
 
 def _own_name_from_runtime(snapshot: XVASnapshot) -> str:
@@ -2348,6 +2875,55 @@ def _spot_from_quotes(pair6: str, inputs: _PythonLgmInputs, default: float = 1.0
     if inv in inputs.fx_spots:
         return 1.0 / max(float(inputs.fx_spots[inv]), 1.0e-12)
     return float(default)
+
+
+def _convert_fx_forward_npv_to_reporting_ccy(
+    *,
+    npv_quote: np.ndarray,
+    report_ccy: str,
+    base_ccy: str,
+    quote_ccy: str,
+    spot_path: np.ndarray,
+    inputs: _PythonLgmInputs,
+) -> np.ndarray:
+    report = report_ccy.upper()
+    base = base_ccy.upper()
+    quote = quote_ccy.upper()
+    if report == quote:
+        return np.asarray(npv_quote, dtype=float)
+    if report == base:
+        return np.asarray(npv_quote, dtype=float) / np.maximum(np.asarray(spot_path, dtype=float), 1.0e-12)
+    # Fallback cross conversion using asof spots when report ccy is neither leg.
+    cross = _spot_from_quotes(report + quote, inputs, default=0.0)
+    if cross > 0.0:
+        return np.asarray(npv_quote, dtype=float) / cross
+    cross_inv = _spot_from_quotes(quote + report, inputs, default=0.0)
+    if cross_inv > 0.0:
+        return np.asarray(npv_quote, dtype=float) * cross_inv
+    return np.asarray(npv_quote, dtype=float)
+
+
+def _fx_vol_for_trade(inputs: _PythonLgmInputs, pair6: str, maturity: float, default: float = 0.15) -> float:
+    pair = pair6.upper()
+    points = list(inputs.fx_vols.get(pair, ()))
+    if not points:
+        inv = pair[3:] + pair[:3]
+        points = list(inputs.fx_vols.get(inv, ()))
+    if not points:
+        return float(default)
+    target = max(float(maturity), 0.0)
+    best = min(points, key=lambda item: abs(float(item[0]) - target))
+    return float(best[1])
+
+
+def _fx_carry_for_pair(pair: str, inputs: _PythonLgmInputs, horizon: float) -> float:
+    base, quote = pair.upper().replace("-", "/").split("/")
+    h = max(min(float(horizon), 1.0), 1.0 / 12.0)
+    p_quote = max(float(inputs.discount_curves[quote](h)), 1.0e-18)
+    p_base = max(float(inputs.discount_curves[base](h)), 1.0e-18)
+    r_quote = -math.log(p_quote) / h
+    r_base = -math.log(p_base) / h
+    return float(r_quote - r_base)
 
 
 def _curve_family_from_source_column(source_column: str) -> str:

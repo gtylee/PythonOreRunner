@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 
 Metric = Literal["CVA", "DVA", "FVA", "MVA"]
+DimModel = Literal["Regression", "DeltaVaR", "DeltaGammaNormalVaR", "DeltaGammaVaR", "DynamicIM", "SimmAnalytic"]
 ProductType = Literal["IRS", "FXForward", "EuropeanOption", "BermudanSwaption", "Generic"]
 
 
@@ -272,10 +273,16 @@ class SimulationConfig:
     seed: int = 42
     dates: Tuple[str, ...] = ()
     strict_template: bool = False
+    xva_cg_dynamic_im: bool = False
+    xva_cg_dynamic_im_step_size: int = 1
+    xva_cg_regression_order_dynamic_im: Optional[int] = None
+    xva_cg_regression_report_time_steps_dynamic_im: Tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.samples <= 0:
             raise ValueError("SimulationConfig.samples must be > 0")
+        if self.xva_cg_dynamic_im_step_size <= 0:
+            raise ValueError("SimulationConfig.xva_cg_dynamic_im_step_size must be > 0")
 
 
 @dataclass(frozen=True)
@@ -313,10 +320,13 @@ class XVAAnalyticConfig:
     full_initial_collateralisation: Optional[bool] = None
     flip_view_xva: Optional[bool] = None
     collateral_floor_enabled: Optional[bool] = None
+    dim_model: Optional[DimModel] = None
     dim_quantile: Optional[float] = None
     dim_horizon_calendar_days: Optional[int] = None
     dim_regression_order: Optional[int] = None
     dim_regressors: Optional[str] = None
+    dim_evolution_file: Optional[str] = None
+    dim_regression_files: Optional[str] = None
     dim_output_grid_points: Optional[str] = None
     dim_output_netting_set: Optional[str] = None
     dim_local_regression_evaluations: Optional[int] = None
@@ -388,6 +398,9 @@ class RuntimeConfig:
     credit_simulation: CreditSimulationConfig = field(default_factory=CreditSimulationConfig)
     conventions: ConventionsConfig = field(default_factory=ConventionsConfig)
     counterparties: CounterpartyConfig = field(default_factory=CounterpartyConfig)
+    store_sensis: bool = False
+    curve_sensi_grid: Tuple[float, ...] = ()
+    vega_sensi_grid: Tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -578,6 +591,16 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             seed=sim.get("seed", 42),
             dates=tuple(sim.get("dates", ())),
             strict_template=bool(sim.get("strict_template", False)),
+            xva_cg_dynamic_im=bool(sim.get("xva_cg_dynamic_im", False)),
+            xva_cg_dynamic_im_step_size=int(sim.get("xva_cg_dynamic_im_step_size", 1)),
+            xva_cg_regression_order_dynamic_im=(
+                None
+                if sim.get("xva_cg_regression_order_dynamic_im") is None
+                else int(sim.get("xva_cg_regression_order_dynamic_im"))
+            ),
+            xva_cg_regression_report_time_steps_dynamic_im=tuple(
+                int(x) for x in sim.get("xva_cg_regression_report_time_steps_dynamic_im", ())
+            ),
         ),
         simulation_market=SimulationMarketConfig(
             base_currency=sim_market.get("base_currency", "EUR"),
@@ -610,6 +633,7 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             full_initial_collateralisation=xva.get("full_initial_collateralisation"),
             flip_view_xva=xva.get("flip_view_xva"),
             collateral_floor_enabled=xva.get("collateral_floor_enabled"),
+            dim_model=xva.get("dim_model"),
             dim_quantile=(None if xva.get("dim_quantile") is None else float(xva.get("dim_quantile"))),
             dim_horizon_calendar_days=(
                 None if xva.get("dim_horizon_calendar_days") is None else int(xva.get("dim_horizon_calendar_days"))
@@ -618,6 +642,8 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
                 None if xva.get("dim_regression_order") is None else int(xva.get("dim_regression_order"))
             ),
             dim_regressors=xva.get("dim_regressors"),
+            dim_evolution_file=xva.get("dim_evolution_file"),
+            dim_regression_files=xva.get("dim_regression_files"),
             dim_output_grid_points=xva.get("dim_output_grid_points"),
             dim_output_netting_set=xva.get("dim_output_netting_set"),
             dim_local_regression_evaluations=(
@@ -678,4 +704,7 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             saccr_risk_weights={str(k): float(v) for k, v in cp.get("saccr_risk_weights", {}).items()},
             sacva_risk_buckets={str(k): int(v) for k, v in cp.get("sacva_risk_buckets", {}).items()},
         ),
+        store_sensis=bool(data.get("store_sensis", False)),
+        curve_sensi_grid=tuple(float(x) for x in data.get("curve_sensi_grid", ())),
+        vega_sensi_grid=tuple(float(x) for x in data.get("vega_sensi_grid", ())),
     )

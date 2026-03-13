@@ -49,7 +49,7 @@ class FakeOREAppComprehensive:
         self.fixing_data = fixing_data or []
 
     def getReportNames(self):
-        return ["xva", "exposure_trade", "npv"]
+        return ["xva", "exposure_trade", "npv", "dim_evolution", "dim_regression"]
 
     def getReport(self, name):
         if name == "xva":
@@ -58,6 +58,10 @@ class FakeOREAppComprehensive:
             return [{"NettingSetId": "CPTY_A", "ExpectedPositiveExposure": "25.0"}]
         if name == "npv":
             return [{"NPV(Base)": "12.0"}, {"NPV(Base)": "8.0"}]
+        if name == "dim_evolution":
+            return [{"Date": "2025-02-10", "DIM": "12.5"}]
+        if name == "dim_regression":
+            return [{"TimeStep": "1", "PolynomialOrder": "4"}]
         return []
 
     def getCubeNames(self):
@@ -86,7 +90,15 @@ def _snapshot() -> XVASnapshot:
             CurveConfig(curve_id="EUR-EONIA", currency="EUR", tenors=("1Y", "2Y", "5Y")),
             CurveConfig(curve_id="USD-SOFR", currency="USD", tenors=("1Y", "2Y", "5Y")),
         ),
-        simulation=SimulationConfig(samples=77, seed=13, dates=("1Y", "2Y", "5Y")),
+        simulation=SimulationConfig(
+            samples=77,
+            seed=13,
+            dates=("1Y", "2Y", "5Y"),
+            xva_cg_dynamic_im=True,
+            xva_cg_dynamic_im_step_size=1,
+            xva_cg_regression_order_dynamic_im=4,
+            xva_cg_regression_report_time_steps_dynamic_im=(1, 2, 3),
+        ),
         simulation_market=SimulationMarketConfig(
             base_currency="EUR",
             currencies=("EUR", "USD"),
@@ -115,12 +127,15 @@ def _snapshot() -> XVASnapshot:
             mva_enabled=True,
             colva_enabled=False,
             dim_enabled=True,
+            dim_model="DynamicIM",
             full_initial_collateralisation=False,
             flip_view_xva=False,
             dim_quantile=0.99,
             dim_horizon_calendar_days=14,
             dim_regression_order=2,
             dim_regressors="",
+            dim_evolution_file="dim_evolution.csv",
+            dim_regression_files="dim_regression.csv",
             dim_output_netting_set="CPTY_A",
             dim_output_grid_points="0",
             dim_local_regression_evaluations=0,
@@ -138,6 +153,9 @@ def _snapshot() -> XVASnapshot:
         ),
         conventions=ConventionsConfig(day_counter="A365", calendar="TARGET"),
         counterparties=CounterpartyConfig(ids=("CPTY_A",)),
+        store_sensis=True,
+        curve_sensi_grid=(0.0417, 0.0833, 0.25),
+        vega_sensi_grid=(1.0, 2.0, 5.0),
     )
     return XVASnapshot(
         market=MarketData(
@@ -201,11 +219,21 @@ def test_comprehensive_mapping_sets_expected_swig_inputs():
     assert ip.calls["setDvaName"][0] == "BANK"
     assert ip.calls["setFvaBorrowingCurve"][0] == "BANK_EUR_BORROW"
     assert ip.calls["setFvaLendingCurve"][0] == "BANK_EUR_LEND"
+    assert ip.calls["setDimModel"][0] == "DynamicIM"
     assert ip.calls["setDimQuantile"][0] == 0.99
     assert ip.calls["setDimHorizonCalendarDays"][0] == 14
     assert ip.calls["setDimRegressionOrder"][0] == 2
+    assert ip.calls["setDimEvolutionFile"][0] == "dim_evolution.csv"
+    assert ip.calls["setDimRegressionFiles"][0] == "dim_regression.csv"
     assert ip.calls["setDimOutputNettingSet"][0] == "CPTY_A"
     assert ip.calls["setDimOutputGridPoints"][0] == "0"
+    assert ip.calls["setXvaCgDynamicIM"][0] is True
+    assert ip.calls["setXvaCgDynamicIMStepSize"][0] == 1
+    assert ip.calls["setXvaCgRegressionOrderDynamicIm"][0] == 4
+    assert ip.calls["setXvaCgRegressionReportTimeStepsDynamicIM"][0] == [1, 2, 3]
+    assert ip.calls["setStoreSensis"][0] is True
+    assert ip.calls["setCurveSensiGrid"][0] == [0.0417, 0.0833, 0.25]
+    assert ip.calls["setVegaSensiGrid"][0] == [1.0, 2.0, 5.0]
 
 
 def test_comprehensive_fake_swig_run_parses_metrics_and_reports():
@@ -219,5 +247,47 @@ def test_comprehensive_fake_swig_run_parses_metrics_and_reports():
     assert result.xva_by_metric["MVA"] == 2.0
     assert result.xva_by_metric["FVA"] == 5.0
     assert result.exposure_by_netting_set["CPTY_A"] == 25.0
+    assert result.reports["dim_evolution"][0]["DIM"] == "12.5"
+    assert result.reports["dim_regression"][0]["PolynomialOrder"] == "4"
+    assert result.metadata["dim_mode"] == "DynamicIM"
+    assert result.metadata["dim_report_source"] == "report"
     assert "cube" in result.cubes
     assert "market::mkt" in result.cubes
+
+
+def test_comprehensive_fake_swig_reads_dim_reports_from_output_files(tmp_path):
+    class FakeOREAppNoDimReports(FakeOREAppComprehensive):
+        def getReportNames(self):
+            return ["xva", "exposure_trade", "npv"]
+
+    class FakeModuleNoDimReports:
+        InputParameters = CaptureInputParameters
+        OREApp = FakeOREAppNoDimReports
+
+    (tmp_path / "dim_evolution.csv").write_text("Date,DIM\n2025-02-10,12.5\n", encoding="utf-8")
+    (tmp_path / "dim_regression.csv").write_text("TimeStep,PolynomialOrder\n1,4\n", encoding="utf-8")
+
+    snap = _snapshot()
+    snap = XVASnapshot(
+        market=snap.market,
+        fixings=snap.fixings,
+        portfolio=snap.portfolio,
+        netting=snap.netting,
+        collateral=snap.collateral,
+        source_meta=snap.source_meta,
+        config=XVAConfig(
+            asof=snap.config.asof,
+            base_currency=snap.config.base_currency,
+            analytics=snap.config.analytics,
+            num_paths=snap.config.num_paths,
+            runtime=snap.config.runtime,
+            params={**snap.config.params, "outputPath": str(tmp_path)},
+        ),
+    )
+
+    adapter = ORESwigAdapter(module=FakeModuleNoDimReports)
+    result = adapter.run(snap, mapped=map_snapshot(snap), run_id="r-file-dim")
+
+    assert result.reports["dim_evolution"][0]["DIM"] == "12.5"
+    assert result.reports["dim_regression"][0]["PolynomialOrder"] == "4"
+    assert result.metadata["dim_report_source"] == "file"
