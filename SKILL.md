@@ -2568,13 +2568,13 @@ with:
 
 A clean demo of the Python diagnostic fitter now exists at:
 
-- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/demo_python_curve_fitter.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/demo_python_curve_fitter.py)
+- [`/Users/gordonlee/Documents/PythonOreRunner/scripts/checks/demo_python_curve_fitter.py`](/Users/gordonlee/Documents/PythonOreRunner/scripts/checks/demo_python_curve_fitter.py)
 
 Run it with:
 
 ```bash
-cd /Users/gordonlee/Documents/Engine/Tools/PythonOreRunner
-python3 demo_python_curve_fitter.py --points 6 --quotes-per-segment 4
+cd /Users/gordonlee/Documents/PythonOreRunner
+python3 scripts/checks/demo_python_curve_fitter.py --points 6 --quotes-per-segment 4
 ```
 
 What it shows:

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from ore_curve_fit_parity import compare_python_vs_ore, trace_curve
+from py_ore_tools.repo_paths import local_parity_artifacts_root
 
 
-DEFAULT_ORE_XML = Path(
-    "/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/"
-    "multiccy_benchmark_final/cases/flat_USD_5Y_B/Input/ore.xml"
-)
+DEFAULT_ORE_XML = local_parity_artifacts_root() / "multiccy_benchmark_final" / "cases" / "flat_USD_5Y_B" / "Input" / "ore.xml"
 
 
 def build_parser() -> argparse.ArgumentParser:

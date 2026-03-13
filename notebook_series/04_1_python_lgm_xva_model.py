@@ -106,7 +106,7 @@ display(metric_df)
 ## Inputs we reuse from the repo
 
 This notebook leans on the same library code exercised by:
-- `demo_lgm_irs_xva.ipynb`
+- `notebook_series/legacy/demo_lgm_irs_xva.ipynb`
 - `tests/test_lgm.py`
 - `tests/test_irs_xva_utils.py`
 """
@@ -239,4 +239,3 @@ plt.close(fig)
 - A small multi-scenario comparison helps show how the same runner behaves under different market regimes.
 - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
 """
-

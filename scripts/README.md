@@ -13,7 +13,7 @@ Ad hoc utilities that do not belong in the tested library surface live here inst
 ### Relevance
 
 - Still active: `compare_bermudan_ore_sensitivities.py`, `dump_ore_lgm_rng_parity_case.py`, and the `diagnose_*` tools referenced by the notebook helpers or local ORE skill
-- Still usable but ad hoc: `check_demo_fx_examples.py`, `check_demo_fx_profiles_xva.py`, `check_lgm_irs_xva_calc.py`, `compare_bermudan_singlecurve_sensitivity.py`, `dump_ore_discount_factors.py`, `dump_ore_input_validation.py`, `plot_ore_snapshot_epe_ene_semianalytic.py`, `strict_native_vs_py_lgm_example.py`
+- Still usable but ad hoc: `check_demo_fx_examples.py`, `check_demo_fx_profiles_xva.py`, `check_lgm_irs_xva_calc.py`, `compare_bermudan_singlecurve_sensitivity.py`, `demo_python_curve_fitter.py`, `dump_ore_discount_factors.py`, `dump_ore_input_validation.py`, `plot_ore_snapshot_epe_ene_semianalytic.py`, `strict_native_vs_py_lgm_example.py`
 - Benchmarks are separate on purpose and remain under `py_ore_tools/benchmarks/`
 
 Run these from the repo root, for example:

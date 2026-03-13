@@ -1330,7 +1330,7 @@ def notebook_04() -> list[dict]:
             ## Inputs we reuse from the repo
 
             This notebook leans on the same library code exercised by:
-            - `demo_lgm_irs_xva.ipynb`
+            - `notebook_series/legacy/demo_lgm_irs_xva.ipynb`
             - `tests/test_lgm.py`
             - `tests/test_irs_xva_utils.py`
             """
@@ -1881,7 +1881,7 @@ def notebook_04_1() -> list[dict]:
             ## Inputs we reuse from the repo
 
             This notebook leans on the same library code exercised by:
-            - `demo_lgm_irs_xva.ipynb`
+            - `notebook_series/legacy/demo_lgm_irs_xva.ipynb`
             - `tests/test_lgm.py`
             - `tests/test_irs_xva_utils.py`
             """

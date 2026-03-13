@@ -2,7 +2,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-import demo_python_curve_fitter as demo
+from scripts.checks import demo_python_curve_fitter as demo
 
 
 class TestDemoPythonCurveFitter(unittest.TestCase):

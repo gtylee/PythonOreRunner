@@ -24,6 +24,8 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 | `native_xva_interface/` | Python dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
 | `example*.py` | Example scripts using `OreBasic` and snapshot tools |
 | `scripts/` | Ad hoc checks, diagnostics, dumps, plots, and parity comparison utilities; see [scripts/README.md](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md) |
+| `notebook_series/legacy/` | Older standalone demo notebooks retained for reference |
+| `docs/` | Project notes and longer-form writeups that do not belong at the root |
 | `tests/` | Unit tests for `py_ore_tools` |
 | `parity_artifacts/` | Generated benchmark/parity outputs (optional; can be recreated) |
 
@@ -84,6 +86,8 @@ Ad hoc root scripts now live under [`scripts/`](/Users/gordonlee/Documents/Pytho
 ## Notebook Series
 
 The five-part notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
+
+Older one-off demo notebooks now live under [`notebook_series/legacy/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/legacy).
 
 To regenerate the notebooks after editing the builder:
 
