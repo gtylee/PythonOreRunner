@@ -753,6 +753,7 @@ class PythonLgmAdapter:
         fx_spots = overlay["fx"]
         fx_vols = overlay.get("fx_vol", {})
         zero_curves = overlay["zero"]
+        named_zero_curves = overlay.get("named_zero", {})
         fwd_curves_raw = overlay.get("fwd", {})
         hazards = overlay["hazard"]
         recoveries = overlay["recovery"]
@@ -854,6 +855,27 @@ class PythonLgmAdapter:
                         forward_curves[ccy] = discount_curves[ccy]
                     forward_curves_by_tenor[ccy] = tenor_curves
                 curve_source = "market_overlay"
+
+        runtime = snapshot.config.runtime
+        xva_cfg = runtime.xva_analytic if runtime is not None else None
+        borrow_curve_name = (
+            str(xva_cfg.fva_borrowing_curve)
+            if xva_cfg is not None and xva_cfg.fva_borrowing_curve
+            else str(snapshot.config.params.get("xva.fvaBorrowingCurve", "")).strip()
+        )
+        lend_curve_name = (
+            str(xva_cfg.fva_lending_curve)
+            if xva_cfg is not None and xva_cfg.fva_lending_curve
+            else str(snapshot.config.params.get("xva.fvaLendingCurve", "")).strip()
+        )
+        if funding_borrow_curve is None and borrow_curve_name and borrow_curve_name in named_zero_curves:
+            funding_borrow_curve = self._irs_utils.build_discount_curve_from_zero_rate_pairs(
+                sorted(named_zero_curves[borrow_curve_name], key=lambda x: x[0])
+            )
+        if funding_lend_curve is None and lend_curve_name and lend_curve_name in named_zero_curves:
+            funding_lend_curve = self._irs_utils.build_discount_curve_from_zero_rate_pairs(
+                sorted(named_zero_curves[lend_curve_name], key=lambda x: x[0])
+            )
 
         (
             discount_curves,
@@ -2534,6 +2556,30 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
         root = ET.fromstring(xml_text)
     except Exception:
         return ()
+    market_pair_nodes = root.findall("./Market/FxVolatilities/CurrencyPairs/CurrencyPair")
+    market_pairs = {
+        str(node.text or "").strip().upper().replace("-", "/")
+        for node in market_pair_nodes
+        if str(node.text or "").strip()
+    }
+    normalized_market_pairs = set()
+    for item in market_pairs:
+        if "/" in item:
+            normalized_market_pairs.add(item)
+        elif len(item) == 6:
+            normalized_market_pairs.add(f"{item[:3]}/{item[3:]}")
+    if normalized_market_pairs:
+        return tuple(
+            sorted(
+                {
+                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+                    for spec in trade_specs
+                    if spec.kind == "FXForward"
+                    and isinstance(spec.trade.product, FXForward)
+                    and f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}" in normalized_market_pairs
+                }
+            )
+        )
     domestic = str(
         root.findtext("./CrossAssetModel/DomesticCcy")
         or model_ccy
@@ -2554,15 +2600,17 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
         for node in foreign_nodes
         if str(node.attrib.get("foreignCcy") or "").strip()
     }
+    has_default = "DEFAULT" in supported_foreigns
+    explicit_foreigns = {ccy for ccy in supported_foreigns if ccy != "DEFAULT"}
     out = []
     for spec in trade_specs:
         if spec.kind != "FXForward" or not isinstance(spec.trade.product, FXForward):
             continue
         base = spec.trade.product.pair[:3].upper()
         quote = spec.trade.product.pair[3:].upper()
-        if base == domestic and quote in supported_foreigns:
+        if base == domestic and (quote in explicit_foreigns or (has_default and quote != domestic)):
             out.append(f"{base}/{quote}")
-        elif quote == domestic and base in supported_foreigns:
+        elif quote == domestic and (base in explicit_foreigns or (has_default and base != domestic)):
             out.append(f"{base}/{quote}")
     return tuple(sorted(set(out)))
 
@@ -2592,6 +2640,7 @@ def _build_sticky_closeout_times(times: np.ndarray, mpor_years: float) -> np.nda
 
 def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
     zero: Dict[str, List[Tuple[float, float]]] = {}
+    named_zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     fx: Dict[str, float] = {}
     fx_vol: Dict[str, List[Tuple[float, float]]] = {}
@@ -2625,11 +2674,18 @@ def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
         if len(parts) >= 4 and parts[0] == "ZERO" and parts[1] == "RATE":
             ccy = parts[2]
             tenor = parts[3]
+            curve_name = None
+            if len(parts) >= 6:
+                curve_name = parts[3]
+                tenor = parts[-1]
             try:
                 t = _parse_tenor_to_years(tenor)
             except Exception:
                 continue
-            zero.setdefault(ccy, []).append((t, val))
+            if curve_name is not None:
+                named_zero.setdefault(curve_name, []).append((t, val))
+            else:
+                zero.setdefault(ccy, []).append((t, val))
             continue
         if len(parts) >= 6 and parts[0] == "IR_SWAP" and parts[1] == "RATE":
             ccy = parts[2]
@@ -2689,6 +2745,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
         hazard[cpty] = [(t, max(float(spread) / lgd, 0.0)) for t, spread in spreads]
     return {
         "zero": zero,
+        "named_zero": named_zero,
         "fwd": fwd,
         "fx": fx,
         "fx_vol": fx_vol,
