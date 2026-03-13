@@ -44,7 +44,7 @@ def _find_repo_root(start: Path) -> Path:
     standalone_hint = Path("/Users/gordonlee/Documents/PythonOreRunner")
     if _pythonorerunner_root(standalone_hint):
         return standalone_hint
-    raise RuntimeError("Could not locate the Engine repo root from the current notebook working directory")
+    raise RuntimeError("Could not locate the notebook repo root from the current notebook working directory")
 
 REPO_ROOT = _find_repo_root(Path.cwd())
 NOTEBOOK_DIR = REPO_ROOT / "notebook_series" if _pythonorerunner_root(REPO_ROOT) else REPO_ROOT / "Tools" / "PythonOreRunner" / "notebook_series"
@@ -239,3 +239,4 @@ plt.close(fig)
 - A small multi-scenario comparison helps show how the same runner behaves under different market regimes.
 - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
 """
+
