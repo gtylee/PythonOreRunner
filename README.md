@@ -48,18 +48,23 @@ If you have an Engine checkout available:
 export ENGINE_REPO_ROOT=/path/to/Engine
 export ORE_EXE="$ENGINE_REPO_ROOT/build/apple-make-relwithdebinfo-arm64/App/ore"
 
-python example_basic.py
+cd Examples/XvaRisk
+"$ORE_EXE" Input/ore_stress_classic.xml
 ```
 
-That uses the standard ORE example layout under `Examples/Legacy/Example_1` and produces outputs in the case `Output/` directory, such as `npv.csv`, `xva.csv`, and the other generated reports configured by the example.
+That runs a standard vendored ORE case against the stress portfolio in [`Examples/XvaRisk/Input/portfolio_stress.xml`](/Users/gordonlee/Documents/PythonOreRunner/Examples/XvaRisk/Input/portfolio_stress.xml). Results are written under [`Examples/XvaRisk/Output/stress/classic/`](/Users/gordonlee/Documents/PythonOreRunner/Examples/XvaRisk/Output/stress/classic), typically including `npv.csv`, `flows.csv`, `log.txt`, and the configured stress / XVA reports for that case.
 
-If you want a Python-only run on a single `ore.xml` snapshot instead of calling the ORE binary:
+For a simpler single-`ore.xml` Python-side parity run without calling the ORE binary:
 
 ```bash
-python example_ore_snapshot.py --ore-xml Examples/Exposure/Input/ore_measure_lgm.xml --paths 10000
+python -m py_ore_tools.ore_snapshot_cli \
+  Examples/Exposure/Input/ore_measure_lgm.xml \
+  --xva \
+  --paths 10000 \
+  --rng ore_parity
 ```
 
-That loads the ORE-style XML inputs, runs the standalone Python LGM path, and prints parity / exposure diagnostics directly in the terminal.
+That loads the ORE-style XML inputs, runs the standalone Python LGM parity/XVA path, and prints the pricing, XVA, and parity diagnostics directly in the terminal.
 
 ## Running tests
 
