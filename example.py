@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from py_ore_tools import OreBasic
-from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
+from py_ore_tools.repo_paths import default_ore_bin, require_engine_repo_root
 
 
 # configure your own ore runner as needed
@@ -18,7 +18,7 @@ class MyOreExampleRunner(OreBasic):
 
 # setup your folders (the Examples in this case)
 engine_root = require_engine_repo_root()
-my_example_folder = Path(os.environ.get("ORE_EXAMPLE_DIR", str(engine_root / "Examples" / "Legacy" / "Example_1")))
+my_example_folder = engine_root / "Examples" / "Legacy" / "Example_1"
 ore_exe = Path(os.environ.get("ORE_EXE", str(default_ore_bin())))
 
 # attach ore config folders to Python object
@@ -40,14 +40,17 @@ print(my_ore.output.csv['npv'][['#TradeId', 'TradeType', 'NPV(Base)']])
 print(my_ore.output.csv['xva'][['#TradeId', 'NettingSetId', 'BaselEEPE']])
 
 # plot every nettingset_exposure* and every trade_exposure*
-my_ore.plots.plot_nettingset_exposures()
-my_ore.plots.plot_trade_exposures()
+try:
+    my_ore.plots.plot_nettingset_exposures()
+    my_ore.plots.plot_trade_exposures()
+except Exception as exc:
+    print("Skipping plots due to plotting backend/data issue:", exc)
 
 # do some validation
 print("All trades processed: " + str(my_ore.all_trades_processed()))
 
 # backup current run to some safe location
-archiv_folder = local_parity_artifacts_root() / "ore_archive"
+archiv_folder = Path(__file__).resolve().parent / "parity_artifacts" / "ore_archive"
 current_run = "attempt_01"
 my_ore.backup_inputfiles_to(str(archiv_folder / current_run / "Input"))
 my_ore.backup_outputfolder_to(str(archiv_folder / current_run / "Output"))

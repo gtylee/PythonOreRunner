@@ -37,7 +37,6 @@ from py_ore_tools.irs_xva_utils import (
     swap_npv_from_ore_legs_dual_curve,
 )
 from py_ore_tools.ore_snapshot import OreSnapshot, load_from_ore_xml
-from py_ore_tools.repo_paths import require_engine_repo_root
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +382,8 @@ def _print_exposure_table(
 
 
 def _parse_args() -> argparse.Namespace:
-    default_xml = require_engine_repo_root() / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
+    repo_root = Path(__file__).resolve().parents[2]
+    default_xml = repo_root / "Examples/Exposure/Input/ore_measure_lgm.xml"
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
