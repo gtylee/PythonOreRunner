@@ -15,7 +15,7 @@ analytics stack.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Literal, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -25,12 +25,14 @@ try:
     from .irs_xva_utils import build_discount_curve_from_zero_rate_pairs, survival_probability_from_hazard
     from .lgm_fx_hybrid import LgmFxHybrid
     from .lgm_fx_hybrid import MultiCcyLgmParams
+    from .lgm_fx_hybrid_torch import TorchLgmFxHybrid, simulate_hybrid_paths_torch
 except ImportError:  # pragma: no cover - script-mode fallback
     from lgm import LGMParams
     from irs_xva_utils import swap_npv_from_ore_legs_dual_curve
     from irs_xva_utils import build_discount_curve_from_zero_rate_pairs, survival_probability_from_hazard
     from lgm_fx_hybrid import LgmFxHybrid
     from lgm_fx_hybrid import MultiCcyLgmParams
+    from lgm_fx_hybrid_torch import TorchLgmFxHybrid, simulate_hybrid_paths_torch
 
 
 @dataclass(frozen=True)
@@ -167,6 +169,60 @@ def _normalize_zero_rate_curve_input(zero_rate, horizon: float) -> List[Tuple[fl
     return pts
 
 
+TensorBackend = Literal["auto", "numpy", "torch-cpu", "torch-mps"]
+
+
+def _torch_mps_available() -> bool:
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch optional
+        return False
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+def _torch_cpu_available() -> bool:
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch optional
+        return False
+    return torch is not None
+
+
+def resolve_tensor_backend(
+    tensor_backend: TensorBackend = "auto",
+    *,
+    case_family: Literal["fx_forward_profile_xva", "fx_forward_portfolio"] = "fx_forward_profile_xva",
+) -> str:
+    """Resolve a backend preference to an executable backend.
+
+    ``auto`` is intentionally case-family aware rather than globally "prefer torch":
+    the single-trade FX profile path is still faster and simpler on NumPy, while the
+    batched portfolio path is the workflow where torch currently earns its keep.
+    """
+    backend = str(tensor_backend).lower()
+    if backend not in {"auto", "numpy", "torch-cpu", "torch-mps"}:
+        raise ValueError(f"unsupported tensor backend '{tensor_backend}'")
+    if backend == "numpy":
+        return "numpy"
+    if backend == "torch-cpu":
+        if not _torch_cpu_available():
+            raise RuntimeError("torch-cpu requested but torch is not installed")
+        return "torch-cpu"
+    if backend == "torch-mps":
+        if not _torch_cpu_available():
+            raise RuntimeError("torch-mps requested but torch is not installed")
+        if not _torch_mps_available():
+            raise RuntimeError("torch-mps requested but MPS is not available in this process")
+        return "torch-mps"
+    if case_family == "fx_forward_profile_xva":
+        return "numpy"
+    if _torch_mps_available():
+        return "torch-mps"
+    if _torch_cpu_available():
+        return "torch-cpu"
+    return "numpy"
+
+
 def fx_forward_npv(
     hybrid: LgmFxHybrid,
     fx_def: FxForwardDef,
@@ -198,6 +254,143 @@ def fx_forward_npv(
     p_f = hybrid.zc_bond(base, t, fx_def.maturity, x_for_t, float(p0_for(t)), float(p0_for(fx_def.maturity)))
     fwd = hybrid.fx_forward(fx_def.pair, t, fx_def.maturity, s_t, p_d, p_f)
     return fx_def.notional_base * p_d * (fwd - fx_def.strike)
+
+
+def fx_forward_npv_torch(
+    hybrid: LgmFxHybrid,
+    fx_def: FxForwardDef,
+    t: float,
+    s_t,
+    x_dom_t,
+    x_for_t,
+    p0_dom: Callable[[float], float],
+    p0_for: Callable[[float], float],
+):
+    import torch
+
+    s = torch.as_tensor(s_t)
+    if t > fx_def.maturity + 1.0e-12:
+        return torch.zeros_like(s)
+    base, quote = fx_def.pair.upper().replace("-", "/").split("/")
+    p_d = torch.as_tensor(
+        hybrid.zc_bond(quote, t, fx_def.maturity, torch.as_tensor(x_dom_t).detach().cpu().numpy(), float(p0_dom(t)), float(p0_dom(fx_def.maturity))),
+        dtype=s.dtype,
+        device=s.device,
+    )
+    p_f = torch.as_tensor(
+        hybrid.zc_bond(base, t, fx_def.maturity, torch.as_tensor(x_for_t).detach().cpu().numpy(), float(p0_for(t)), float(p0_for(fx_def.maturity))),
+        dtype=s.dtype,
+        device=s.device,
+    )
+    fwd = s * p_f / p_d
+    return float(fx_def.notional_base) * p_d * (fwd - float(fx_def.strike))
+
+
+def fx_forward_portfolio_npv_paths_torch(
+    hybrid: LgmFxHybrid,
+    fx_defs: Sequence[FxForwardDef],
+    times: np.ndarray,
+    sim: Mapping[str, object],
+    disc_curves: Mapping[str, Callable[[float], float]],
+    fwd_curves: Mapping[str, Callable[[float], float]],
+    *,
+    return_numpy: bool = True,
+):
+    import torch
+
+    if not fx_defs:
+        raise ValueError("fx_defs must not be empty")
+    t = np.asarray(times, dtype=float)
+    curves_d = _as_curve_map(disc_curves)
+    curves_f = _as_curve_map(fwd_curves)
+
+    pair_groups: dict[str, list[FxForwardDef]] = {}
+    for fx in fx_defs:
+        pair_groups.setdefault(fx.pair.upper().replace("-", "/"), []).append(fx)
+
+    sample_pair = next(iter(pair_groups))
+    sample_base, sample_quote = sample_pair.split("/")
+    s_any = sim["s"][sample_pair]
+    device = s_any.device if hasattr(s_any, "device") else None
+    dtype = s_any.dtype if hasattr(s_any, "dtype") else None
+    out = torch.zeros((t.size, s_any.shape[1]), dtype=dtype, device=device)
+
+    with torch.inference_mode():
+        for pair, defs in pair_groups.items():
+            base, quote = pair.split("/")
+            s = torch.as_tensor(sim["s"][pair], dtype=dtype, device=device)
+            x_dom = torch.as_tensor(sim["x"][quote], dtype=dtype, device=device)
+            x_for = torch.as_tensor(sim["x"][base], dtype=dtype, device=device)
+            maturities = np.asarray([float(d.maturity) for d in defs], dtype=float)
+            strikes = torch.as_tensor([float(d.strike) for d in defs], dtype=dtype, device=device)
+            notionals = torch.as_tensor([float(d.notional_base) for d in defs], dtype=dtype, device=device)
+            h_t = torch.as_tensor(np.asarray(hybrid.ir_models[quote].H(t), dtype=float), dtype=dtype, device=device)
+            z_t = torch.as_tensor(np.asarray(hybrid.ir_models[quote].zeta(t), dtype=float), dtype=dtype, device=device)
+            h_td = torch.as_tensor(np.asarray(hybrid.ir_models[quote].H(maturities), dtype=float), dtype=dtype, device=device)
+            h_tf = torch.as_tensor(np.asarray(hybrid.ir_models[base].H(maturities), dtype=float), dtype=dtype, device=device)
+            p0_t_d = torch.as_tensor([float(curves_d[quote](float(tt))) for tt in t], dtype=dtype, device=device)
+            p0_t_f = torch.as_tensor([float(curves_f[base](float(tt))) for tt in t], dtype=dtype, device=device)
+            p0_T_d = torch.as_tensor([float(curves_d[quote](float(T))) for T in maturities], dtype=dtype, device=device)
+            p0_T_f = torch.as_tensor([float(curves_f[base](float(T))) for T in maturities], dtype=dtype, device=device)
+            d_hd = h_td[None, :] - h_t[:, None]
+            d_h2d = h_td[None, :] * h_td[None, :] - h_t[:, None] * h_t[:, None]
+            d_hf = h_tf[None, :] - torch.as_tensor(np.asarray(hybrid.ir_models[base].H(t), dtype=float), dtype=dtype, device=device)[:, None]
+            d_h2f = h_tf[None, :] * h_tf[None, :] - torch.as_tensor(np.asarray(hybrid.ir_models[base].H(t), dtype=float), dtype=dtype, device=device)[:, None] ** 2
+            z_f = torch.as_tensor(np.asarray(hybrid.ir_models[base].zeta(t), dtype=float), dtype=dtype, device=device)
+
+            p_d = (p0_T_d[None, :] / p0_t_d[:, None])[:, :, None] * torch.exp(
+                -d_hd[:, :, None] * x_dom[:, None, :] - 0.5 * d_h2d[:, :, None] * z_t[:, None, None]
+            )
+            p_f = (p0_T_f[None, :] / p0_t_f[:, None])[:, :, None] * torch.exp(
+                -d_hf[:, :, None] * x_for[:, None, :] - 0.5 * d_h2f[:, :, None] * z_f[:, None, None]
+            )
+            fwd = s[:, None, :] * p_f / p_d
+            mtm = notionals[None, :, None] * p_d * (fwd - strikes[None, :, None])
+            live = torch.as_tensor((t[:, None] <= maturities[None, :] + 1.0e-12), dtype=dtype, device=device)[:, :, None]
+            out = out + torch.sum(mtm * live, dim=1)
+
+    return out.detach().cpu().numpy() if return_numpy else out
+
+
+def fx_forward_portfolio_npv_paths(
+    hybrid: LgmFxHybrid,
+    fx_defs: Sequence[FxForwardDef],
+    times: np.ndarray,
+    sim: Mapping[str, object],
+    disc_curves: Mapping[str, Callable[[float], float]],
+    fwd_curves: Mapping[str, Callable[[float], float]],
+    *,
+    tensor_backend: TensorBackend = "auto",
+    return_numpy: bool = True,
+):
+    """Unified portfolio pricer that dispatches to NumPy or torch underneath."""
+    backend = resolve_tensor_backend(tensor_backend, case_family="fx_forward_portfolio")
+    if backend == "numpy":
+        t = np.asarray(times, dtype=float)
+        if not fx_defs:
+            raise ValueError("fx_defs must not be empty")
+        out = np.zeros((t.size, np.asarray(sim["s"][fx_defs[0].pair.upper().replace("-", "/")], dtype=float).shape[1]), dtype=float)
+        curves_d = _as_curve_map(disc_curves)
+        curves_f = _as_curve_map(fwd_curves)
+        for fx in fx_defs:
+            base, quote = fx.pair.upper().replace("-", "/").split("/")
+            pair = f"{base}/{quote}"
+            s = np.asarray(sim["s"][pair], dtype=float)
+            x_dom = np.asarray(sim["x"][quote], dtype=float)
+            x_for = np.asarray(sim["x"][base], dtype=float)
+            for i, ti in enumerate(t):
+                out[i, :] += fx_forward_npv(hybrid, fx, float(ti), s[i, :], x_dom[i, :], x_for[i, :], curves_d[quote], curves_f[base])
+        return out
+    device = "mps" if backend == "torch-mps" else "cpu"
+    return fx_forward_portfolio_npv_paths_torch(
+        hybrid,
+        fx_defs,
+        times,
+        sim,
+        disc_curves,
+        fwd_curves,
+        return_numpy=return_numpy,
+    )
 
 
 def xccy_float_float_swap_npv(
@@ -492,6 +685,131 @@ def run_fx_forward_profile_xva(
     }
 
 
+def run_fx_forward_profile_xva_torch(
+    *,
+    name: str,
+    pair: str,
+    maturity: float,
+    spot0: float,
+    strike: float,
+    notional_base: float,
+    dom_zero_rate,
+    for_zero_rate,
+    fx_vol=0.12,
+    alpha_dom=0.010,
+    alpha_for=0.010,
+    kappa_dom=0.03,
+    kappa_for=0.03,
+    corr_dom_fx: float = 0.0,
+    corr_for_fx: float = 0.0,
+    n_paths: int = 30000,
+    seed: int = 2026,
+    cpty_hazard: float = 0.015,
+    own_hazard: float = 0.010,
+    recovery_cpty: float = 0.40,
+    recovery_own: float = 0.40,
+    funding_spread: float = 0.0015,
+    device: str = "cpu",
+) -> Dict[str, object]:
+    import torch
+
+    base, quote = pair.upper().replace("-", "/").split("/")
+    times = np.unique(np.concatenate([np.array([0.0, float(maturity)]), np.linspace(0.0, float(maturity), 25)]))
+    dom_curve = _normalize_zero_rate_curve_input(dom_zero_rate, float(maturity) + 10.0)
+    for_curve = _normalize_zero_rate_curve_input(for_zero_rate, float(maturity) + 10.0)
+    p0_dom = build_discount_curve_from_zero_rate_pairs(dom_curve)
+    p0_for = build_discount_curve_from_zero_rate_pairs(for_curve)
+
+    hybrid_np = build_two_ccy_hybrid(
+        pair=pair,
+        ir_specs={
+            quote: {"alpha": alpha_dom, "kappa": kappa_dom},
+            base: {"alpha": alpha_for, "kappa": kappa_for},
+        },
+        fx_vol=fx_vol,
+        corr_dom_fx=corr_dom_fx,
+        corr_for_fx=corr_for_fx,
+    )
+    hybrid = TorchLgmFxHybrid(hybrid_np.params)
+
+    fx_def = FxForwardDef(
+        trade_id=name,
+        pair=f"{base}/{quote}",
+        notional_base=float(notional_base),
+        strike=float(strike),
+        maturity=float(maturity),
+    )
+    rd_rf = float(dom_curve[0][1]) - float(for_curve[0][1])
+    sim = simulate_hybrid_paths_torch(
+        hybrid,
+        times=times,
+        n_paths=int(n_paths),
+        rng=np.random.default_rng(int(seed)),
+        log_s0={f"{base}/{quote}": float(np.log(spot0))},
+        rd_minus_rf={f"{base}/{quote}": rd_rf},
+        device=device,
+        return_numpy=False,
+    )
+
+    x_dom = sim["x"][quote]
+    x_for = sim["x"][base]
+    s = sim["s"][f"{base}/{quote}"]
+
+    with torch.inference_mode():
+        npv_paths = torch.empty((times.size, int(n_paths)), dtype=s.dtype, device=s.device)
+        for i, t in enumerate(times):
+            npv_paths[i, :] = fx_forward_npv_torch(hybrid_np, fx_def, float(t), s[i, :], x_dom[i, :], x_for[i, :], p0_dom, p0_for)
+        npv_np = npv_paths.detach().cpu().numpy()
+
+    exp = aggregate_exposure_profile(npv_np)
+    ee = exp["ee"]
+    epe = exp["epe"]
+    ene = exp["ene"]
+    df = np.asarray([p0_dom(float(t)) for t in times], dtype=float)
+    hz_times = np.array([float(maturity)], dtype=float)
+    q_cpty = survival_probability_from_hazard(times, hz_times, np.array([float(cpty_hazard)], dtype=float))
+    q_own = survival_probability_from_hazard(times, hz_times, np.array([float(own_hazard)], dtype=float))
+    cva_pack = cva_terms_from_profile(times, epe, df, q_cpty, recovery_cpty)
+    dva_pack = cva_terms_from_profile(times, -ene, df, q_own, recovery_own)
+    dpd_own = np.zeros_like(times)
+    dpd_own[1:] = np.clip(q_own[:-1] - q_own[1:], 0.0, None)
+    fca_terms = funding_spread * epe * df * dpd_own
+
+    cva = float(cva_pack["cva"][0])
+    dva = float(dva_pack["cva"][0])
+    fva = float(np.sum(fca_terms))
+    return {
+        "name": name,
+        "pair": f"{base}/{quote}",
+        "times": times,
+        "ee": ee,
+        "epe": epe,
+        "ene": ene,
+        "npv_paths": npv_np,
+        "cva": cva,
+        "dva": dva,
+        "fva": fva,
+        "xva_total": cva - dva + fva,
+    }
+
+
+def run_fx_forward_profile_xva_backend(
+    *,
+    tensor_backend: TensorBackend = "auto",
+    **kwargs,
+) -> Dict[str, object]:
+    """Unified FX forward profile/XVA entrypoint with backend dispatch."""
+    backend = resolve_tensor_backend(tensor_backend, case_family="fx_forward_profile_xva")
+    if backend == "numpy":
+        out = run_fx_forward_profile_xva(**kwargs)
+        out["backend_used"] = "numpy"
+        return out
+    device = "mps" if backend == "torch-mps" else "cpu"
+    out = run_fx_forward_profile_xva_torch(**kwargs, device=device)
+    out["backend_used"] = backend
+    return out
+
+
 def run_fx_forward_example(
     *,
     name: str,
@@ -558,16 +876,23 @@ def run_fx_forward_example(
 
 
 __all__ = [
+    "TensorBackend",
+    "resolve_tensor_backend",
     "FxForwardDef",
     "XccyFloatLegDef",
     "build_lgm_params",
     "build_two_ccy_hybrid",
     "fx_forward_npv",
+    "fx_forward_npv_torch",
+    "fx_forward_portfolio_npv_paths",
+    "fx_forward_portfolio_npv_paths_torch",
     "xccy_float_float_swap_npv",
     "single_ccy_irs_npv",
     "aggregate_exposure_profile",
     "apply_mpor_closeout",
     "cva_terms_from_profile",
     "run_fx_forward_profile_xva",
+    "run_fx_forward_profile_xva_backend",
+    "run_fx_forward_profile_xva_torch",
     "run_fx_forward_example",
 ]

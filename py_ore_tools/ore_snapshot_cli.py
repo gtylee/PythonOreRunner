@@ -6,15 +6,23 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 
 import py_ore_tools.ore_snapshot as ore_snapshot_mod
+from py_ore_tools.benchmarks import (
+    benchmark_lgm_fx_forward_torch,
+    benchmark_lgm_fx_hybrid_torch,
+    benchmark_lgm_fx_portfolio_torch,
+    benchmark_lgm_torch,
+    benchmark_lgm_torch_swap,
+)
 from py_ore_tools.irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     calibrate_float_spreads_from_coupon,
@@ -33,13 +41,32 @@ from py_ore_tools.ore_snapshot import (
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
 )
-from py_ore_tools.repo_paths import local_parity_artifacts_root, require_engine_repo_root
+from py_ore_tools.repo_paths import find_engine_repo_root, local_parity_artifacts_root
 
 
-ENGINE_REPO_ROOT = require_engine_repo_root()
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
-VERSION_HEADER = ENGINE_REPO_ROOT / "QuantExt" / "qle" / "version.hpp"
-HASH_HEADER = ENGINE_REPO_ROOT / "QuantExt" / "qle" / "gitversion.hpp"
+EXAMPLE_CHOICES = (
+    "lgm_torch",
+    "lgm_torch_swap",
+    "lgm_fx_hybrid",
+    "lgm_fx_forward",
+    "lgm_fx_portfolio",
+    "lgm_fx_portfolio_256",
+)
+TENSOR_BACKEND_CHOICES = ("auto", "numpy", "torch-cpu", "torch-mps")
+
+
+def _example_devices_for_backend(tensor_backend: str) -> list[str]:
+    backend = str(tensor_backend).lower()
+    if backend == "auto":
+        return ["cpu", "gpu"]
+    if backend == "numpy":
+        return []
+    if backend == "torch-cpu":
+        return ["cpu"]
+    if backend == "torch-mps":
+        return ["mps"]
+    raise ValueError(f"unsupported tensor backend '{tensor_backend}'")
 
 
 @dataclass(frozen=True)
@@ -50,15 +77,22 @@ class ModeSelection:
 
 
 def _parse_version() -> str:
-    text = VERSION_HEADER.read_text(encoding="utf-8")
+    engine_root = find_engine_repo_root()
+    if engine_root is None:
+        return "unknown"
+    text = (engine_root / "QuantExt" / "qle" / "version.hpp").read_text(encoding="utf-8")
     match = re.search(r'#define OPEN_SOURCE_RISK_VERSION "([^"]+)"', text)
     return match.group(1) if match else "unknown"
 
 
 def _parse_hash() -> str:
-    if not HASH_HEADER.exists():
+    engine_root = find_engine_repo_root()
+    if engine_root is None:
         return "unavailable"
-    text = HASH_HEADER.read_text(encoding="utf-8")
+    hash_header = engine_root / "QuantExt" / "qle" / "gitversion.hpp"
+    if not hash_header.exists():
+        return "unavailable"
+    text = hash_header.read_text(encoding="utf-8")
     match = re.search(r'#define GIT_HASH "([^"]+)"', text)
     return match.group(1) if match else "unavailable"
 
@@ -146,6 +180,81 @@ class SnapshotComputation:
     py_pfe: list[float]
     ore_basel_epe: float
     ore_basel_eepe: float
+
+
+@dataclass(frozen=True)
+class PurePythonRunOptions:
+    engine: str = "compare"
+    price: bool = False
+    xva: bool = False
+    sensi: bool = False
+    paths: int = 500
+    seed: int = 42
+    rng: str = "ore_parity"
+    xva_mode: str = "ore"
+    anchor_t0_npv: bool = False
+    own_hazard: float = 0.01
+    own_recovery: float = 0.4
+    netting_set: str | None = None
+    sensi_metric: str = "CVA"
+    top: int = 10
+    max_npv_abs_diff: float = 1000.0
+    max_cva_rel: float = 0.05
+    max_dva_rel: float = 0.05
+    max_fba_rel: float = 0.05
+    max_fca_rel: float = 0.05
+    ore_output_only: bool = False
+
+
+@dataclass(frozen=True)
+class BufferCaseInputs:
+    input_files: dict[str, str]
+    output_files: dict[str, str] = field(default_factory=dict)
+    ore_xml_name: str = "ore.xml"
+
+
+@dataclass(frozen=True)
+class PurePythonCaseResult:
+    summary: dict[str, Any]
+    comparison_rows: list[dict[str, str]]
+    input_validation_rows: list[dict[str, str]]
+    report_markdown: str
+    ore_output_files: dict[str, str]
+
+
+@dataclass(frozen=True)
+class OreSnapshotApp:
+    case: BufferCaseInputs
+    options: PurePythonRunOptions = field(default_factory=PurePythonRunOptions)
+
+    @classmethod
+    def from_strings(
+        cls,
+        *,
+        input_files: dict[str, str],
+        output_files: dict[str, str] | None = None,
+        ore_xml_name: str = "ore.xml",
+        options: PurePythonRunOptions | None = None,
+    ) -> "OreSnapshotApp":
+        return cls(
+            case=BufferCaseInputs(
+                input_files=input_files,
+                output_files={} if output_files is None else output_files,
+                ore_xml_name=ore_xml_name,
+            ),
+            options=options or PurePythonRunOptions(),
+        )
+
+    @classmethod
+    def from_buffers(
+        cls,
+        case: BufferCaseInputs,
+        options: PurePythonRunOptions | None = None,
+    ) -> "OreSnapshotApp":
+        return cls(case=case, options=options or PurePythonRunOptions())
+
+    def run(self) -> PurePythonCaseResult:
+        return run_case_from_buffers(self.case, self.options)
 
 
 class _ConsoleProgressBar:
@@ -676,6 +785,258 @@ def _flatten_summary_rows(case_summary: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _buffer_file_map(files: dict[str, str]) -> dict[str, str]:
+    return {Path(name).name: text for name, text in files.items()}
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _normalize_buffer_engine(engine: str) -> str:
+    normalized = str(engine).strip().lower()
+    if normalized not in {"compare", "python", "ore"}:
+        raise ValueError(f"unsupported engine '{engine}'; expected one of compare, python, ore")
+    return normalized
+
+
+def _find_first_trade_context(portfolio_xml: Path) -> tuple[str, str, str]:
+    root = ET.parse(portfolio_xml).getroot()
+    trade = root.find("./Trade")
+    if trade is None:
+        trade = root.find(".//Trade")
+    if trade is None:
+        raise ValueError(f"no Trade node found in {portfolio_xml}")
+    trade_id = (trade.attrib.get("id", "") or "").strip()
+    if not trade_id:
+        raise ValueError(f"first Trade node in {portfolio_xml} is missing an id attribute")
+    counterparty = (trade.findtext("./Envelope/CounterParty") or "").strip()
+    netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(root, trade_id)
+    return trade_id, counterparty, netting_set_id
+
+
+def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
+    result = dict(case_summary)
+    pricing = case_summary.get("pricing")
+    if isinstance(pricing, dict):
+        result["pricing"] = {
+            key: value
+            for key, value in pricing.items()
+            if not str(key).startswith("ore_") and not str(key).endswith("_diff")
+        }
+    xva = case_summary.get("xva")
+    if isinstance(xva, dict):
+        result["xva"] = {
+            key: value
+            for key, value in xva.items()
+            if key.startswith("py_") or key == "own_credit_source"
+        }
+    diagnostics = dict(case_summary.get("diagnostics") or {})
+    diagnostics["engine"] = "python"
+    result["diagnostics"] = diagnostics
+    result["pass_flags"] = {}
+    result["pass_all"] = True
+    result["parity"] = None
+    return result
+
+
+def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any]:
+    validation = validate_ore_input_snapshot(ore_xml)
+    output_dir = _resolve_case_output_dir(ore_xml)
+    trade_id, counterparty, netting_set_id = _find_first_trade_context(ore_xml.resolve().parent / "portfolio.xml")
+    case_summary: dict[str, Any] = {
+        "ore_xml": str(ore_xml),
+        "modes": [name for name, enabled in asdict(modes).items() if enabled],
+        "trade_id": trade_id,
+        "counterparty": counterparty,
+        "netting_set_id": netting_set_id,
+        "pricing": None,
+        "xva": None,
+        "parity": None,
+        "diagnostics": {"engine": "ore_reference"},
+        "input_validation": validation,
+        "pass_flags": {},
+        "pass_all": True,
+    }
+    if modes.price:
+        npv_details = ore_snapshot_mod._load_ore_npv_details(output_dir / "npv.csv", trade_id=trade_id)
+        case_summary["maturity_date"] = str(npv_details["maturity_date"])
+        case_summary["maturity_time"] = float(npv_details["maturity_time"])
+        case_summary["pricing"] = {"ore_t0_npv": float(npv_details["npv"])}
+    else:
+        case_summary["maturity_date"] = ""
+        case_summary["maturity_time"] = 0.0
+    if modes.xva:
+        xva_row = ore_snapshot_mod._load_ore_xva_aggregate(output_dir / "xva.csv", cpty_or_netting=netting_set_id)
+        case_summary["xva"] = {
+            "ore_cva": float(xva_row["cva"]),
+            "ore_dva": float(xva_row["dva"]),
+            "ore_fba": float(xva_row["fba"]),
+            "ore_fca": float(xva_row["fca"]),
+            "ore_basel_epe": float(xva_row["basel_epe"]),
+            "ore_basel_eepe": float(xva_row["basel_eepe"]),
+        }
+        exposure_path = output_dir / f"exposure_trade_{trade_id}.csv"
+        if exposure_path.exists():
+            exposure = ore_snapshot_mod.load_ore_exposure_profile(str(exposure_path))
+            case_summary["exposure_dates"] = [str(x) for x in exposure["date"]]
+            case_summary["exposure_times"] = [float(x) for x in exposure["time"]]
+            case_summary["ore_epe"] = [float(x) for x in exposure["epe"]]
+            case_summary["ore_ene"] = [float(x) for x in exposure["ene"]]
+    return case_summary
+
+
+def _materialize_buffer_case(case: BufferCaseInputs, root: Path) -> Path:
+    input_files = _buffer_file_map(case.input_files)
+    output_files = _buffer_file_map(case.output_files)
+    ore_xml_name = Path(case.ore_xml_name).name
+    if ore_xml_name not in input_files:
+        raise ValueError(f"missing required input file: {ore_xml_name}")
+    input_dir = root / "Input"
+    output_dir = root / "Output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in input_files.items():
+        (input_dir / name).write_text(text, encoding="utf-8")
+    for name, text in output_files.items():
+        (output_dir / name).write_text(text, encoding="utf-8")
+
+    ore_xml_path = input_dir / ore_xml_name
+    tree = ET.parse(ore_xml_path)
+    doc = tree.getroot()
+
+    setup = doc.find("./Setup")
+    if setup is not None:
+        input_path_node = setup.find("inputPath")
+        if input_path_node is not None:
+            input_path_node.text = str(input_dir)
+        output_path_node = setup.find("outputPath")
+        if output_path_node is not None:
+            output_path_node.text = str(output_dir)
+        for child in list(setup):
+            if child.text is None:
+                continue
+            basename = Path(child.text).name
+            if child.tag.endswith("File") and basename in input_files:
+                child.text = str(input_dir / basename)
+            elif child.tag in {
+                "logFile",
+                "outputFile",
+                "outputFileName",
+                "cubeFile",
+                "aggregationScenarioDataFileName",
+                "scenarioFile",
+                "rawCubeOutputFile",
+                "netCubeOutputFile",
+            }:
+                child.text = basename
+
+    analytics = doc.find("./Analytics")
+    if analytics is not None:
+        for node in analytics.iter():
+            if node.tag == "simulationConfigFile" and node.text:
+                basename = Path(node.text).name
+                if basename in input_files:
+                    node.text = str(input_dir / basename)
+
+    tree.write(ore_xml_path, encoding="unicode")
+    return ore_xml_path
+
+
+def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        ore_xml=None,
+        version=False,
+        show_hash=False,
+        help=False,
+        price=options.price,
+        xva=options.xva,
+        sensi=options.sensi,
+        pack=False,
+        cases=[],
+        output_root=output_root,
+        ore_output_only=options.ore_output_only,
+        paths=int(options.paths),
+        seed=int(options.seed),
+        rng=options.rng,
+        xva_mode=options.xva_mode,
+        anchor_t0_npv=options.anchor_t0_npv,
+        own_hazard=float(options.own_hazard),
+        own_recovery=float(options.own_recovery),
+        netting_set=options.netting_set,
+        sensi_metric=options.sensi_metric,
+        top=int(options.top),
+        max_npv_abs_diff=float(options.max_npv_abs_diff),
+        max_cva_rel=float(options.max_cva_rel),
+        max_dva_rel=float(options.max_dva_rel),
+        max_fba_rel=float(options.max_fba_rel),
+        max_fca_rel=float(options.max_fca_rel),
+    )
+
+
+def run_case_from_buffers(
+    case: BufferCaseInputs,
+    options: PurePythonRunOptions | None = None,
+) -> PurePythonCaseResult:
+    run_options = options or PurePythonRunOptions()
+    engine = _normalize_buffer_engine(run_options.engine)
+    with tempfile.TemporaryDirectory(prefix="ore_snapshot_buffers_") as tmp:
+        temp_root = Path(tmp) / "case"
+        ore_xml = _materialize_buffer_case(case, temp_root)
+        artifact_root = Path(tmp) / "artifacts"
+        case_out_dir = artifact_root / _case_slug(ore_xml)
+        if engine == "ore":
+            modes = _infer_modes(_namespace_from_run_options(run_options, output_root=artifact_root), ore_xml)
+            case_summary = _ore_reference_summary(ore_xml, modes)
+            case_out_dir.mkdir(parents=True, exist_ok=True)
+            _copy_native_ore_reports(ore_xml, case_out_dir)
+        else:
+            args = _namespace_from_run_options(run_options, output_root=artifact_root)
+            case_summary = _run_case(ore_xml, args, artifact_root=artifact_root)
+            if engine == "python":
+                case_summary = _python_only_summary(case_summary)
+
+        comparison_rows: list[dict[str, str]] = []
+        if engine == "compare":
+            comparison_path = case_out_dir / "comparison.csv"
+            if comparison_path.exists():
+                comparison_rows = _read_csv_rows(comparison_path)
+
+        input_validation_rows: list[dict[str, str]] = []
+        if engine == "compare":
+            input_validation_path = case_out_dir / "input_validation.csv"
+            if input_validation_path.exists():
+                input_validation_rows = _read_csv_rows(input_validation_path)
+        else:
+            validation_df = ore_input_validation_dataframe(case_summary.get("input_validation") or {})
+            input_validation_rows = validation_df.to_dict(orient="records")
+
+        if engine == "compare":
+            report_markdown = ""
+            report_path = case_out_dir / "report.md"
+            if report_path.exists():
+                report_markdown = report_path.read_text(encoding="utf-8")
+        else:
+            report_markdown = _render_case_markdown(case_summary)
+
+        ore_output_files: dict[str, str] = {}
+        for path in sorted(case_out_dir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.name in {"summary.json", "comparison.csv", "input_validation.csv", "report.md"}:
+                continue
+            ore_output_files[path.name] = path.read_text(encoding="utf-8", errors="ignore")
+
+        return PurePythonCaseResult(
+            summary=case_summary,
+            comparison_rows=comparison_rows,
+            input_validation_rows=input_validation_rows,
+            report_markdown=report_markdown,
+            ore_output_files=ore_output_files,
+        )
+
+
 def _case_slug(ore_xml: Path) -> str:
     parent = ore_xml.resolve().parents[1].name
     return parent or ore_xml.stem
@@ -1133,6 +1494,37 @@ def _emit_ore_style_footer(modes: ModeSelection, elapsed_seconds: float) -> None
     print("ORE done.")
 
 
+def _run_cli_example(args: argparse.Namespace) -> int:
+    if not args.example:
+        raise ValueError("example name is required")
+    devices = args.example_devices if args.example_devices is not None else _example_devices_for_backend(args.tensor_backend)
+    argv = [
+        "--paths",
+        *[str(x) for x in args.example_path_counts],
+        "--repeats",
+        str(args.example_repeats),
+        "--warmup",
+        str(args.example_warmup),
+        "--seed",
+        str(args.seed),
+    ]
+    if args.example in ("lgm_torch", "lgm_torch_swap", "lgm_fx_hybrid", "lgm_fx_forward", "lgm_fx_portfolio", "lgm_fx_portfolio_256") and devices:
+        argv.extend(["--devices", *devices])
+    if args.example == "lgm_torch":
+        return benchmark_lgm_torch.main(argv)
+    if args.example == "lgm_torch_swap":
+        return benchmark_lgm_torch_swap.main(argv)
+    if args.example == "lgm_fx_hybrid":
+        return benchmark_lgm_fx_hybrid_torch.main(argv)
+    if args.example == "lgm_fx_forward":
+        return benchmark_lgm_fx_forward_torch.main(argv)
+    if args.example in ("lgm_fx_portfolio", "lgm_fx_portfolio_256"):
+        trade_count = 256 if args.example == "lgm_fx_portfolio_256" else args.example_trades
+        argv.extend(["--trades", str(trade_count)])
+        return benchmark_lgm_fx_portfolio_torch.main(argv)
+    raise ValueError(f"unsupported example '{args.example}'")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ore_snapshot_cli",
@@ -1143,6 +1535,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--version", action="store_true")
     parser.add_argument("-h", "--hash", dest="show_hash", action="store_true")
     parser.add_argument("--help", action="store_true")
+    parser.add_argument("--example", choices=EXAMPLE_CHOICES, default=None)
+    parser.add_argument("--example-path-counts", nargs="+", type=int, default=[10000, 50000])
+    parser.add_argument("--example-devices", nargs="+", default=None)
+    parser.add_argument("--tensor-backend", choices=TENSOR_BACKEND_CHOICES, default="auto")
+    parser.add_argument("--example-repeats", type=int, default=2)
+    parser.add_argument("--example-warmup", type=int, default=1)
+    parser.add_argument("--example-trades", type=int, default=64)
     parser.add_argument("--price", action="store_true")
     parser.add_argument("--xva", action="store_true")
     parser.add_argument("--sensi", action="store_true")
@@ -1176,6 +1575,7 @@ def _print_help(parser: argparse.ArgumentParser) -> None:
     print("  - -v/--version matches ore.exe version flag")
     print("  - -h/--hash matches ore.exe hash flag")
     print("  - use --help for help output")
+    print("  - use --example <name> with --tensor-backend auto|numpy|torch-cpu|torch-mps for built-in backend-dispatch examples")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1190,6 +1590,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_hash:
         print(f"Git hash {_parse_hash()}")
         return 0
+    if args.example:
+        return _run_cli_example(args)
     if not args.ore_xml and not args.pack:
         parser.error("the following arguments are required: ore_xml")
 

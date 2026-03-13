@@ -30,6 +30,81 @@ REAL_CASE_XML = (
 
 
 class TestOreSnapshotCli(unittest.TestCase):
+    @staticmethod
+    def _real_case_buffers() -> tuple[dict[str, str], dict[str, str]]:
+        input_files = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in REAL_CASE_XML.parent.iterdir()
+            if path.is_file()
+        }
+        output_dir = REAL_CASE_XML.parents[1] / "Output"
+        output_files = {}
+        for path in output_dir.iterdir():
+            if path.is_file() and path.suffix in {".xml", ".csv", ".txt"}:
+                output_files[path.name] = path.read_text(encoding="utf-8")
+        return input_files, output_files
+
+    def test_run_case_from_buffers_returns_object_result(self):
+        input_files, output_files = self._real_case_buffers()
+        result = ore_snapshot_cli.run_case_from_buffers(
+            ore_snapshot_cli.BufferCaseInputs(input_files=input_files, output_files=output_files),
+            ore_snapshot_cli.PurePythonRunOptions(price=True, xva=True, paths=32),
+        )
+        self.assertEqual(result.summary["trade_id"], "SWAP_EUR_5Y_A_flat")
+        self.assertIn("pricing", result.summary)
+        self.assertIn("xva", result.summary)
+        self.assertTrue(result.summary["diagnostics"]["sample_count_mismatch"])
+        self.assertIn("npv.csv", result.ore_output_files)
+        self.assertIn("xva.csv", result.ore_output_files)
+        self.assertTrue(result.report_markdown)
+        self.assertTrue(result.comparison_rows)
+        self.assertTrue(result.input_validation_rows)
+
+    def test_run_case_from_buffers_python_engine_returns_python_only_summary(self):
+        input_files, output_files = self._real_case_buffers()
+        result = ore_snapshot_cli.run_case_from_buffers(
+            ore_snapshot_cli.BufferCaseInputs(input_files=input_files, output_files=output_files),
+            ore_snapshot_cli.PurePythonRunOptions(engine="python", price=True, xva=True, paths=32),
+        )
+        self.assertEqual(result.summary["diagnostics"]["engine"], "python")
+        self.assertIn("py_t0_npv", result.summary["pricing"])
+        self.assertNotIn("ore_t0_npv", result.summary["pricing"])
+        self.assertIn("py_cva", result.summary["xva"])
+        self.assertNotIn("ore_cva", result.summary["xva"])
+        self.assertEqual(result.comparison_rows, [])
+        self.assertIsNone(result.summary["parity"])
+
+    def test_run_case_from_buffers_ore_engine_returns_reference_summary(self):
+        input_files, output_files = self._real_case_buffers()
+        result = ore_snapshot_cli.run_case_from_buffers(
+            ore_snapshot_cli.BufferCaseInputs(input_files=input_files, output_files=output_files),
+            ore_snapshot_cli.PurePythonRunOptions(engine="ore", price=True, xva=True),
+        )
+        self.assertEqual(result.summary["diagnostics"]["engine"], "ore_reference")
+        self.assertIn("ore_t0_npv", result.summary["pricing"])
+        self.assertNotIn("py_t0_npv", result.summary["pricing"])
+        self.assertIn("ore_cva", result.summary["xva"])
+        self.assertNotIn("py_cva", result.summary["xva"])
+        self.assertEqual(result.comparison_rows, [])
+        self.assertIn("npv.csv", result.ore_output_files)
+
+    def test_ore_snapshot_app_wrapper_runs_from_strings(self):
+        input_files, output_files = self._real_case_buffers()
+        app = ore_snapshot_cli.OreSnapshotApp.from_strings(
+            input_files=input_files,
+            output_files=output_files,
+            options=ore_snapshot_cli.PurePythonRunOptions(engine="python", price=True, xva=True, paths=16),
+        )
+        result = app.run()
+        self.assertEqual(result.summary["trade_id"], "SWAP_EUR_5Y_A_flat")
+        self.assertEqual(result.summary["diagnostics"]["engine"], "python")
+
+    def test_run_case_from_buffers_requires_ore_xml(self):
+        with self.assertRaises(ValueError):
+            ore_snapshot_cli.run_case_from_buffers(
+                ore_snapshot_cli.BufferCaseInputs(input_files={"portfolio.xml": "<Portfolio />"})
+            )
+
     def test_version_flag_matches_ore_shape(self):
         out = io.StringIO()
         with redirect_stdout(out):
@@ -47,6 +122,142 @@ class TestOreSnapshotCli(unittest.TestCase):
     def test_requires_positional_ore_xml_for_normal_run(self):
         with self.assertRaises(SystemExit):
             ore_snapshot_cli.main([])
+
+    def test_example_mode_runs_without_ore_xml(self):
+        with patch("py_ore_tools.ore_snapshot_cli.benchmark_lgm_torch.main", return_value=0) as bench:
+            rc = ore_snapshot_cli.main(["--example", "lgm_torch", "--example-path-counts", "2000", "4000"])
+        self.assertEqual(rc, 0)
+        bench.assert_called_once_with(
+            [
+                "--paths",
+                "2000",
+                "4000",
+                "--repeats",
+                "2",
+                "--warmup",
+                "1",
+                "--seed",
+                "42",
+                "--devices",
+                "cpu",
+                "gpu",
+            ]
+        )
+
+    def test_example_numpy_backend_omits_torch_devices(self):
+        with patch("py_ore_tools.ore_snapshot_cli.benchmark_lgm_torch.main", return_value=0) as bench:
+            rc = ore_snapshot_cli.main(["--example", "lgm_torch", "--tensor-backend", "numpy", "--example-path-counts", "2000"])
+        self.assertEqual(rc, 0)
+        bench.assert_called_once_with(
+            [
+                "--paths",
+                "2000",
+                "--repeats",
+                "2",
+                "--warmup",
+                "1",
+                "--seed",
+                "42",
+            ]
+        )
+
+    def test_example_swap_mode_dispatches_to_full_pipeline_benchmark(self):
+        with patch("py_ore_tools.ore_snapshot_cli.benchmark_lgm_torch_swap.main", return_value=0) as bench:
+            rc = ore_snapshot_cli.main(
+                [
+                    "--example",
+                    "lgm_torch_swap",
+                    "--example-path-counts",
+                    "10000",
+                    "--example-devices",
+                    "cpu",
+                    "mps",
+                    "--example-repeats",
+                    "3",
+                    "--example-warmup",
+                    "2",
+                    "--seed",
+                    "7",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        bench.assert_called_once_with(
+            [
+                "--paths",
+                "10000",
+                "--repeats",
+                "3",
+                "--warmup",
+                "2",
+                "--seed",
+                "7",
+                "--devices",
+                "cpu",
+                "mps",
+            ]
+        )
+
+    def test_example_fx_portfolio_mode_dispatches_with_trade_count(self):
+        with patch("py_ore_tools.ore_snapshot_cli.benchmark_lgm_fx_portfolio_torch.main", return_value=0) as bench:
+            rc = ore_snapshot_cli.main(
+                [
+                    "--example",
+                    "lgm_fx_portfolio",
+                    "--tensor-backend",
+                    "torch-cpu",
+                    "--example-path-counts",
+                    "50000",
+                    "--example-trades",
+                    "96",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        bench.assert_called_once_with(
+            [
+                "--paths",
+                "50000",
+                "--repeats",
+                "2",
+                "--warmup",
+                "1",
+                "--seed",
+                "42",
+                "--devices",
+                "cpu",
+                "--trades",
+                "96",
+            ]
+        )
+
+    def test_example_fx_portfolio_256_mode_uses_canned_trade_count(self):
+        with patch("py_ore_tools.ore_snapshot_cli.benchmark_lgm_fx_portfolio_torch.main", return_value=0) as bench:
+            rc = ore_snapshot_cli.main(
+                [
+                    "--example",
+                    "lgm_fx_portfolio_256",
+                    "--tensor-backend",
+                    "torch-cpu",
+                    "--example-path-counts",
+                    "10000",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        bench.assert_called_once_with(
+            [
+                "--paths",
+                "10000",
+                "--repeats",
+                "2",
+                "--warmup",
+                "1",
+                "--seed",
+                "42",
+                "--devices",
+                "cpu",
+                "--trades",
+                "256",
+            ]
+        )
 
     def test_infers_modes_from_ore_xml(self):
         modes = ore_snapshot_cli._infer_modes(
