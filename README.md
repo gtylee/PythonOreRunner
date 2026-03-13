@@ -38,6 +38,29 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 pip install -r requirements.txt
 ```
 
+## Quick Start
+
+This repo includes an ORE-style Python CLI flow: point it at an ORE case directory with `Input/` and `Output/`, run the case, then inspect the same style of artifacts you would expect from an ORE run.
+
+If you have an Engine checkout available:
+
+```bash
+export ENGINE_REPO_ROOT=/path/to/Engine
+export ORE_EXE="$ENGINE_REPO_ROOT/build/apple-make-relwithdebinfo-arm64/App/ore"
+
+python example_basic.py
+```
+
+That uses the standard ORE example layout under `Examples/Legacy/Example_1` and produces outputs in the case `Output/` directory, such as `npv.csv`, `xva.csv`, and the other generated reports configured by the example.
+
+If you want a Python-only run on a single `ore.xml` snapshot instead of calling the ORE binary:
+
+```bash
+python example_ore_snapshot.py --ore-xml Examples/Exposure/Input/ore_measure_lgm.xml --paths 10000
+```
+
+That loads the ORE-style XML inputs, runs the standalone Python LGM path, and prints parity / exposure diagnostics directly in the terminal.
+
 ## Running tests
 
 From the project root:
