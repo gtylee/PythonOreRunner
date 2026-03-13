@@ -1,10 +1,130 @@
 ---
+name: python-ore-runner
 description: Use when working with ORE (Open Risk Engine): configuring AMC/AMC-CG runs, benchmarking, number matching/parity, performance optimization, build setup, SWIG/native XVA, or debugging ORE output. Invoke when the user asks about ORE configuration, XVA calculations, AMC-CG routing, or troubleshooting ORE runs.
 ---
 
 # ORE Expert Context
 
 This skill provides hard-won, non-obvious knowledge about ORE (Open Risk Engine) accumulated from hands-on build, benchmark, and parity experiments on this codebase. Apply this knowledge whenever working with ORE configs, code, or debugging.
+
+---
+
+## Pure Python HW 2F
+
+### There is now a pure-Python HW 2F model kernel in `py_ore_tools`
+
+The repo now contains a Python extraction of the core QuantExt Hull-White n-factor machinery for the 2-factor case:
+
+- `Tools/PythonOreRunner/py_ore_tools/hw2f.py`
+- `Tools/PythonOreRunner/py_ore_tools/hw2f_integration.py`
+
+This is not just an `ore` process wrapper. The Python side now implements:
+
+- piecewise-constant `sigma_x(t)` and `kappa(t)`
+- the deterministic HW transforms `y(t)` and `g(t,T)`
+- pathwise discount-bond pricing
+- BA-measure Euler simulation for the HW state and auxiliary bank-account integral
+- swap pricing from ORE-style leg arrays loaded from `portfolio.xml` / `curves.csv`
+
+The formulas were extracted from the existing C++ implementation:
+
+- `QuantExt/qle/models/hwpiecewiseparametrization.hpp`
+- `QuantExt/qle/models/hwmodel.cpp`
+- `QuantExt/qle/processes/irhwstateprocess.cpp`
+
+### Current usage split: case orchestration vs model calc
+
+There are now two distinct layers:
+
+- `hw2f_ore_runner.py`
+  - builds/runs an ORE case directory
+  - useful for generating authoritative ORE outputs
+- `hw2f.py` + `hw2f_integration.py`
+  - pure-Python model calc
+  - useful for pricing / exposure work without calling back into ORE's model engine
+
+Do not confuse them:
+
+- if the task is "run the ORE case", use the runner
+- if the task is "extract the model calc into Python", use the HW 2F kernel + integration layer
+
+### Current parity status of the pure-Python HW 2F path
+
+On the current generated single-swap case, the Python t0 swap PV is reasonably close to ORE:
+
+- example relative difference was about `-1.5%`
+
+That means:
+
+- the Python model calc is live and coherent
+- it is good enough for iterative Python-side diagnostics and XVA experimentation
+- it is not yet a claim of full ORE parity across products or all scenarios
+
+Treat the current state as:
+
+- pricing-capable
+- exposure-capable
+- not yet a complete production-equivalent ORE replica
+
+### How it works with XVA today
+
+The pure-Python HW 2F path can already feed the existing Python XVA formulas.
+
+Current flow:
+
+1. `simulate_hw2f_exposure_paths(...)` in `hw2f_integration.py`
+   - produces `times`, `x_paths`, `npv_paths`
+2. existing XVA helpers in `irs_xva_utils.py`
+   - `aggregate_exposure_profile_from_npv_paths(...)`
+   - `compute_xva_from_npv_paths(...)`
+   - `compute_portfolio_xva_from_trade_paths(...)`
+
+So the current HW 2F XVA stack is:
+
+- pure-Python HW 2F state simulation
+- pure-Python pathwise swap valuation
+- existing Python exposure/XVA aggregation
+
+### Current XVA limitations of the HW 2F Python path
+
+What is implemented:
+
+- single-trade swap exposure generation
+- pathwise NPVs on a simulation grid
+- reuse of existing Python CVA/DVA/FVA formulas
+
+What is not yet fully packaged:
+
+- one-call `run_hw2f_xva(...)` convenience entrypoint
+- ORE-style numeraire-deflated cube output for HW 2F
+- broad multi-trade / multi-netting-set HW 2F portfolio plumbing
+- full counterparty/default/funding loader wiring inside the HW 2F integration layer
+- full product coverage beyond the current swap path
+
+So if the user asks "does HW 2F work with XVA?", the accurate answer is:
+
+- yes, for Python-side pathwise exposure and XVA computation on the current swap workflow
+- no, not yet as a complete drop-in replacement for all of ORE's XVA runtime features
+
+### Relevant commands
+
+Build/run an ORE HW 2F case:
+
+```bash
+python3 Tools/PythonOreRunner/run_hw2f_ore_case.py --case-dir /tmp/hw2f_case
+```
+
+Compare pure-Python HW 2F pricing against ORE output on the same case:
+
+```bash
+python3 Tools/PythonOreRunner/run_hw2f_python_case.py /tmp/hw2f_case
+```
+
+Relevant tests:
+
+```bash
+python3 -m pytest Tools/PythonOreRunner/tests/test_hw2f_ore_runner.py Tools/PythonOreRunner/tests/test_hw2f_python_model.py -q
+```
 
 ---
 
@@ -88,6 +208,533 @@ If a rerun is materially slower, suspect process overlap, file contention, or ch
 
 ## Number Matching and Parity
 
+### For parity, prefer fresh ORE reruns over baked `Output/` folders
+
+Several benchmark cases under `Tools/PythonOreRunner/parity_artifacts/...` ship with static `Output/` files. Those are useful for inspection, but they are not authoritative when testing:
+
+- sticky MPOR overrides
+- toggling `dva=Y/N`
+- changes to native report generation
+- changes to Python runtime semantics
+
+Use a fresh isolated rerun whenever the comparison depends on runtime settings. The current side-by-side helper is:
+
+```bash
+PYTHONPATH=Tools/PythonOreRunner \
+python3 Tools/PythonOreRunner/example_ore_snapshot_side_by_side.py \
+  --case-dir Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A \
+  --paths 2000 \
+  --rng ore_parity \
+  --mpor-days 10 \
+  --rerun-ore \
+  --ore-dva
+```
+
+This script now:
+- clones the case into a fresh run directory
+- rewrites `ore.xml` / `simulation.xml`
+- runs the local `build/App/ore`
+- compares Python LGM against those fresh ORE outputs
+
+### Sticky MPOR changes exposure semantics at `t=0`
+
+---
+
+## Torch Backend Dispatch
+
+### Use one CLI/runtime surface, not separate NumPy vs torch workflows
+
+The current preferred pattern is:
+
+- one user-facing CLI
+- one case definition
+- backend dispatch underneath
+
+Do not present NumPy and torch as separate products unless the user explicitly asks for an internal comparison.
+
+### Unified backend selector
+
+The Python side now has a unified backend selector for torch-capable FX workflows:
+
+- `tensor_backend=auto|numpy|torch-cpu|torch-mps`
+- CLI flag: `--tensor-backend auto|numpy|torch-cpu|torch-mps`
+
+Relevant code:
+
+- `Tools/PythonOreRunner/py_ore_tools/lgm_fx_xva_utils.py`
+  - `resolve_tensor_backend(...)`
+  - `run_fx_forward_profile_xva_backend(...)`
+  - `fx_forward_portfolio_npv_paths(...)`
+- `Tools/PythonOreRunner/py_ore_tools/ore_snapshot_cli.py`
+
+### Current `auto` policy is case-family aware
+
+Do not assume `auto` always prefers torch.
+
+Current behavior:
+
+- single-trade FX forward profile/XVA:
+  - `auto -> numpy`
+  - reason: this workflow is too small/lightly batched to justify torch
+- batched FX forward portfolio:
+  - `auto -> torch-mps` if available
+  - else `torch-cpu` if torch is available
+  - else `numpy`
+
+This is deliberate. The goal is one front door with capability/perf-aware dispatch, not forcing torch onto cases where it loses.
+
+### Current torch-backed workflows worth using
+
+These are the torch paths that have shown real value in this repo:
+
+- single-ccy LGM simulation
+- fused single-ccy swap/XVA benchmark path
+- multi-ccy hybrid simulation
+- batched FX forward portfolio path
+
+These are not yet blanket guarantees for every ORE-style CLI case.
+
+### Known failure modes
+
+When debugging backend behavior, check these first:
+
+- unsupported product/logic branches in the fused torch path
+- MPS numerical drift from `float32`
+- small-workload slowdown where launch/setup overhead dominates
+- partial offload where data moves back to NumPy/Python too early
+- calibration / QuantLib orchestration bottlenecks that torch cannot help
+
+If the user wants “torch everywhere”, push back. The correct target is unified dispatch with explicit support boundaries.
+
+### Useful CLI examples
+
+Built-in examples now include:
+
+- `--example lgm_torch`
+- `--example lgm_torch_swap`
+- `--example lgm_fx_hybrid`
+- `--example lgm_fx_forward`
+- `--example lgm_fx_portfolio`
+- `--example lgm_fx_portfolio_256`
+
+Example commands:
+
+```bash
+PYTHONPATH=Tools/PythonOreRunner python3 -m py_ore_tools.ore_snapshot_cli \
+  --example lgm_fx_portfolio \
+  --tensor-backend auto
+```
+
+```bash
+PYTHONPATH=Tools/PythonOreRunner python3 -m py_ore_tools.ore_snapshot_cli \
+  --example lgm_fx_portfolio_256 \
+  --tensor-backend auto
+```
+
+### Current benchmark shape to remember
+
+The batched multi-ccy FX forward portfolio is the strongest current torch example.
+
+Representative result already observed:
+
+- `10k` paths, `256` trades
+  - `numpy/cpu`: about `1.55s`
+  - `torch/cpu`: about `0.17s`
+  - parity max abs: about `1.8e-07`
+
+This is the kind of workload where torch is clearly worthwhile; the earlier single-trade FX profile example was not.
+
+With sticky MPOR enabled, Python XVA uses closeout-date valuation along the same path. That means the first closeout exposure point is not the same object as valuation-date PV.
+
+- **Valuation exposure** at `t=0` should line up with trade PV / ORE `exposure_nettingset_*.csv`
+- **Sticky closeout exposure** at `t=0` is effectively the exposure at `t + MPOR` mapped back to the valuation observation point
+
+If Python `EPE(t0)` looks much larger than PV after enabling MPOR, first check whether you are looking at the closeout profile rather than the valuation profile.
+
+The current runtime now exposes both:
+- `valuation_epe` / `valuation_ene`
+- `closeout_epe` / `closeout_ene`
+
+Do not collapse them into a single printed number in diagnostics.
+
+### DVA mismatches can be a metric-enable mismatch, not a model bug
+
+When an ORE case has `dva = N` in `ore.xml`, the loader will carry `analytics=("CVA",)` unless explicitly overridden. If a fresh native rerun forces `dva=Y` but the Python snapshot still runs with the original analytics tuple, Python DVA will appear to be zero even though the formula path works.
+
+Before debugging DVA numerics, confirm all three:
+- `ore.xml` or fresh rerun has `dva=Y`
+- Python snapshot `config.analytics` includes `DVA`
+
+---
+
+## Python DIM / SIMM Port
+
+### The native Python DIM port is feeder-driven
+
+The Python-side DIM implementation under `Tools/PythonOreRunner/native_xva_interface/dim.py` does not generate its own AAD / AMC-CG sensitivities. It expects a prepared feeder payload in:
+
+```python
+snapshot.config.params["python.dim_feeder"]
+```
+
+Current supported Python DIM models are:
+
+- `DynamicIM`
+- `SimmAnalytic`
+- `DeltaVaR`
+- `DeltaGammaNormalVaR`
+- `DeltaGammaVaR`
+
+`Regression` is not yet ported to Python and should fail clearly rather than silently falling back.
+
+### There are two feeder families
+
+SIMM-style feeder:
+
+- top-level keys:
+  - `currencies`
+  - `ir_delta_terms`
+  - `ir_vega_terms`
+  - `fx_vega_terms`
+  - `simm_config`
+  - `netting_sets`
+- per-slice arrays:
+  - `numeraire`: shape `(samples,)`
+  - `ir_delta`: shape `(currencies, ir_delta_terms, samples)`
+  - `ir_vega`: shape `(currencies, ir_vega_terms, samples)`
+  - `fx_delta`: shape `(currencies - 1, samples)`
+  - `fx_vega`: shape `(currencies - 1, fx_vega_terms, samples)`
+
+Variance-style feeder:
+
+- top-level keys:
+  - `var_config`
+  - `netting_sets`
+- `var_config`:
+  - `quantile`
+  - optional `horizon_calendar_days`
+- per-netting-set `current_slice`:
+  - `covariance`
+  - `delta`
+  - `gamma`
+  - optional `theta`
+- per future slice:
+  - `time`
+  - `date`
+  - `days_in_period`
+  - `numeraire`
+  - `covariance`
+  - `delta`
+  - `gamma`
+  - optional `theta`
+  - optional `flow`
+
+### Low `dim_current` often means a toy feeder, not a DIM bug
+
+If `dim_current` looks too small, first check whether the feeder itself is tiny.
+
+For example, a variance feeder like:
+
+```python
+covariance = [[4.0, 1.0], [1.0, 9.0]]
+delta = [2.0, -1.0]
+gamma = 0
+```
+
+will naturally produce a small `DeltaVaR` DIM because:
+
+- there are only 2 factors
+- the delta magnitudes are small
+- gamma is zero
+- no `current_im` scaling is applied
+
+In that case a low `dim_current` is expected. It does not mean the live trade notionals from the portfolio are being fed automatically into DIM. The feeder is the source of truth.
+
+### Real standalone native runs need `PYTHONPATH=Tools/PythonOreRunner`
+
+When running the native Python DIM / LGM path directly from the shell, use:
+
+```bash
+PYTHONPATH=Tools/PythonOreRunner python3 ...
+```
+
+Without that, imports can fail in `py_ore_tools` / `ore_snapshot.py` with errors like:
+
+```text
+attempted relative import with no known parent package
+```
+
+This is an environment issue, not a DIM calculation issue.
+
+### Current report behavior
+
+The Python DIM port attaches DIM outputs to the main `XVAResult`:
+
+- `result.metadata["dim_mode"]`
+- `result.metadata["dim_engine"]`
+- `result.metadata["dim_current"]`
+- `result.reports["dim_evolution"]`
+- `result.reports["dim_distribution"]`
+- `result.reports["dim_cube"]`
+- optional `result.reports["dim_regression"]`
+- `result.cubes["dim_cube"]`
+
+This means native XVA and native DIM are already composable in one run as long as the feeder is provided.
+- own-name credit data for `dvaName` exists in the market snapshot
+
+### For exposure comparison, use netting-set exposure files, not trade row 0
+
+For ORE-vs-Python exposure shape checks, compare against:
+
+- `exposure_nettingset_<NETTING_SET>.csv`
+
+not just the first row of `exposure_trade_*.csv`.
+
+Trade-row `t0` is easy to print but mixes the wrong level of aggregation. Netting-set files are the correct counterpart to Python's netting-set exposure cube payload.
+
+### Match Monte Carlo sample counts before calling a parity gap "real"
+
+If Python is rerun at a much larger path count than the stored native ORE outputs, apparent CVA/DVA gaps can be mostly ORE-side MC noise.
+
+This showed up clearly on long-dated convention-`B` USD/CAD swaps:
+- Python `5000` vs stored ORE `500` still showed about `6%` CVA gaps
+- fresh native ORE `5000` vs Python `5000` collapsed those same cases to about `0.5%` to `0.7%`
+
+Rule of thumb:
+- if pricing is already tight and exposure shape looks qualitatively similar, rerun native ORE at the same sample count before debugging model code
+- do not treat `5000`-vs-`500` XVA deltas as proof of a structural parity bug
+
+### For ORE template comparisons, align the trade dates to the template `asofDate`
+
+When benchmarking Python against a file-driven ORE template such as `Example_9`, do not keep generating trades off a synthetic benchmark date like `2026-03-08` if the template market is on `2016-02-05`.
+
+If you do:
+- ORE will see supposedly "short-dated" FX forwards as roughly 10-year trades
+- PV can still look superficially plausible
+- XVA and exposure will be materially distorted in a way that looks like a model bug
+
+Practical rule:
+- when the benchmark uses a template-backed ORE case, generate the portfolio off the template `asofDate`
+- treat date alignment as a first-order parity precondition, not cleanup
+
+### For ORE `xva.csv`, use the aggregate row instead of summing trade rows
+
+ORE `xva.csv` contains:
+- one aggregate netting-set row with blank `TradeId`
+- then per-trade rows
+
+If you sum all rows, you double count badly and can conclude that ORE XVA is orders of magnitude larger than Python for no real reason.
+
+Practical rule:
+- parse the blank-`TradeId` aggregate row for top-level CVA / DVA / FBA / FCA
+- use trade rows only for drill-down, not book totals
+
+### Netting-set exposure must be aggregated pathwise before `max(.,0)`
+
+A common Python-side bug is:
+
+```text
+sum_i E[max(V_i, 0)]
+```
+
+instead of the correct netting-set quantity:
+
+```text
+E[max(sum_i V_i, 0)]
+```
+
+On offsetting FX-forward books this can blow up Python EPE/CVA even when PV parity is already good.
+
+Practical rule:
+- aggregate trade NPVs pathwise to the netting-set cube first
+- only then apply positive/negative exposure clipping
+- if PV is close but EPE is wildly too large, check this before touching spreads or hazard curves
+
+### Example_9 own-name credit can come from CDS spreads, not hazard quotes
+
+In `Examples/ORE-Python/Notebooks/Example_9/Input/market_20160205.txt`:
+- `CPTY_A` is provided via `HAZARD_RATE/...`
+- `BANK` is provided via `CDS/CREDIT_SPREAD/...` plus recovery
+
+If the Python loader only consumes `HAZARD_RATE/...`, own-name DVA / funding terms fall back to a conservative default hazard and appear too large.
+
+Practical rule:
+- when explicit hazard quotes are absent, convert CDS spread quotes to hazard using LGD
+- if DVA/FBA remain too large after exposure parity is fixed, inspect whether own-name credit came from real quotes or a fallback
+
+### Close the benchmark plumbing gap before blaming the XVA model
+
+The large-FX benchmark work on this repo showed a repeatable order of operations:
+
+1. align portfolio subset
+2. align `asofDate`
+3. align analytics flags (`cva/dva/fva/...`)
+4. fix ORE aggregate parsing
+5. fix Python pathwise netting aggregation
+6. only then investigate real XVA methodology differences
+
+If you skip those steps, Python-vs-ORE XVA gaps can look huge for purely mechanical reasons.
+
+### On the parity path, prefer fresh ORE output curves over raw market-overlay reconstruction
+
+For an ORE-backed Python run, there are two very different market-input regimes:
+
+- `ore_output_curves`
+  Python reads fresh `curves.csv` / calibration artifacts generated by ORE for that case
+- `market_overlay`
+  Python reconstructs curves from raw market quotes
+
+If the goal is parity with a specific ORE case, `market_overlay` is only a fallback. It can be directionally sensible but still leave a visible PV gap even after spots, vols, and spreads are aligned.
+
+Practical rule:
+- for template/file-driven parity runs, execute the prepared ORE case first
+- then load the Python snapshot from that same case so the native runtime can use `ore_output_curves`
+- record the chosen path in metadata (`input_provenance["market"]`)
+
+If Python PV is still off after the obvious plumbing fixes, check whether Python is still on `market_overlay` instead of `ore_output_curves`.
+
+### `FX/RATE/...` is the spot format used in Example_9
+
+Do not assume FX spot quotes arrive only as `FX/EUR/USD`.
+
+`Example_9` uses:
+
+```text
+FX/RATE/EUR/USD
+```
+
+If the parser only accepts the shorter key shape, the parity path will silently miss FX spot data and drop onto synthetic defaults.
+
+Practical rule:
+- support both `FX/RATE/CCY1/CCY2` and `FX/CCY1/CCY2`
+- when strict parity mode is on, missing FX spot quotes should fail fast rather than fall back
+
+### `flows.csv` fixing dates matter for floating-leg exposure parity
+
+`flows.csv` exports in this repo do carry floating fixing dates:
+- field name is typically `fixingDate` (lowercase `f`), not `FixingDate`
+
+If the Python loader ignores that field and falls back to `AccrualStartDate`, coupons with fixing lags get treated as fixing too late. That does not necessarily break `t=0` PV, but it can bias future exposure and therefore CVA/DVA.
+
+Practical guidance:
+- in `load_ore_legs_from_flows()`, prefer explicit fixing dates from `flows.csv`
+- only fall back to accrual start when the fixing-date field is genuinely absent
+- this is especially relevant on quarterly float legs with `FixingDays=2`
+
+### Separate coupon accrual from index accrual on floating legs
+
+A subtle but important parity trap:
+- the coupon cash amount uses the leg accrual factor
+- the floating forward rate must be annualized on the index accrual basis, not necessarily the coupon accrual basis
+
+This matters on synthetic or stress-test conventions where the leg day counter differs from the index basis. In the multicurrency benchmark:
+- convention `B` used `A365` coupon accrual with `USD-LIBOR-3M`
+- `USD-LIBOR-3M` is still an `A360` index
+
+If the forward projection divides by coupon accrual instead of index accrual:
+- the loader will infer a fake persistent floating spread at `t=0`
+- that synthetic spread can then leak into every future path
+- the result is clean `t=0` PV parity but overstated EPE/CVA on long-dated swaps
+
+Implementation guidance:
+- carry a separate `float_index_accrual`
+- use `float_index_accrual` for forward-rate annualization and spread calibration
+- still use coupon accrual for the final cash amount
+
+### `A360` support in helper time conversions is easy to miss
+
+There are two different year-fraction helper paths in this codebase:
+- `_year_fraction(...)`
+- `_time_from_dates(...)`
+
+It is not enough for `_year_fraction(...)` to support `A360` if `_time_from_dates(...)` silently falls back to Actual/Actual or `A365`. That can reintroduce the same annualization bug through fixing-time or accrual reconstruction code.
+
+When debugging floating-leg exposure mismatches:
+- confirm both helper paths understand `A360`
+- check the actual inferred accruals on the offending case, not just the nominal convention labels
+
+### Sticky MPOR verification workflow
+
+Use the focused verification runner:
+
+```bash
+PYTHONPATH=Tools/PythonOreRunner \
+python3 Tools/PythonOreRunner/run_sticky_mpor_verification.py
+```
+
+Current behavior:
+- runs fresh Python-vs-ORE reruns on a small vanilla case pack
+- forces sticky MPOR (`10D` by default)
+- forces DVA on in the fresh ORE rerun
+- writes JSON summary to:
+  - `Tools/PythonOreRunner/parity_artifacts/sticky_mpor_verification_latest.json`
+
+This is the quickest broader-scope check before claiming sticky-MPOR parity on the Python side.
+
+### If notebook 5 suddenly shows a huge negative IRS PV, check flow-loaded fixed leg dates first
+
+There is a specific regression pattern that looks like a catastrophic model failure but is actually a leg-loading bug:
+
+- Python IRS PV jumps from a small ORE-like number to a large negative number
+- for `flat_EUR_5Y_A`, the broken value was about `-940605.84` instead of about `823.56`
+- valuation `t=0` exposure shows large ENE and near-zero EPE, as if only the floating leg were present
+
+The root cause on this repo was in:
+- `Tools/PythonOreRunner/py_ore_tools/irs_xva_utils.py`
+- `load_ore_legs_from_flows()`
+
+`flows.csv`-loaded swaps were missing:
+- `fixed_start_time`
+- `fixed_end_time`
+
+The dual-curve pricer uses `fixed_start_time` to decide whether a fixed coupon is still alive:
+- if those fields are missing, the fixed leg can be dropped entirely at `t=0`
+- the resulting PV then looks like "just the floating leg", which is a large false negative number on receive-fixed swaps
+
+The fix was to populate fixed accrual dates from `flows.csv`:
+- `AccrualStartDate -> fixed_start_time`
+- `AccrualEndDate -> fixed_end_time`
+
+Guardrail:
+- regression test lives in `native_xva_interface/tests/test_python_lgm_adapter.py`
+- test name: `test_flow_loaded_fixed_leg_dates_preserve_t0_pv_parity`
+
+Post-fix status:
+- notebook 5 / side-by-side PV is back in line on `flat_EUR_5Y_A`
+- example result is again about `Python 823.46` vs `ORE 823.56`
+- if PV is broken but the curve loader and trade signs look sane, inspect leg completeness before touching model code
+
+Do not confuse this with the remaining parity gaps:
+- this fix restores the missing fixed leg and the `t=0` PV anchor
+- CVA/DVA / exposure-shape mismatches can still remain after the PV is fixed
+
+### Current sticky-MPOR verification status on this repo
+
+On the current codebase, the focused fresh-rerun pack is in reasonable shape on selected vanilla cases:
+- PV differences are tiny
+- CVA is within low single-digit percent on most checked cases
+- DVA is within roughly high-single-digit percent on the checked cases
+- valuation-start exposure aligns closely with ORE
+
+Do not overclaim from that result:
+- this is not a full regression pack
+- it is concentrated on vanilla parity artifacts
+- it does not prove parity for unsupported products or all native paths
+
+### Native AMC-CG is still a separate sign-off item
+
+The representative native AMC-CG check is not clean enough for broad sign-off yet.
+
+Useful facts from the current repo state:
+- `Examples/AmericanMonteCarlo/Input/simulation_amccg.xml` already carries `CloseOutLag=2W` and `MporMode=StickyDate`
+- classic native run on that example completes and writes full XVA outputs
+- AMC-CG can enter `XvaEngineCG` graph build and start the AMC cube
+- but parity against classic is not currently good enough to treat as signed off from this verification pass
+
+So:
+- Python sticky-MPOR parity on the checked vanilla cases: reasonably healthy
+- native AMC-CG sticky-closeout parity: still requires dedicated investigation
+
 ### "Same benchmark" means more than same portfolio
 
 To compare two ORE runs fairly, all of the following must be locked:
@@ -113,7 +760,143 @@ Also verify:
 Common examples:
 - Truncated `flows.csv` rows → concurrent process collision, not a model bug
 - Valid `#N/A` placeholders in report columns (cap/floor vol fields for non-cap/floor trades) → expected, not data corruption
+
+### Bermudan LGM parity: treat `Output/classic/calibration.xml` as the primary model source
+
+For Bermudan swaption parity against an existing ORE classic run, the main lesson is:
+- if `Output/classic/calibration.xml` exists, prefer it over rebuilding a trade-specific model in Python
+
+Why this matters on this repo:
+- the Python-side approximation of ORE's trade-specific `LgmBuilder` path can be materially worse than the actual calibrated model emitted by ORE
+- on the Bermudan benchmark pack, using ORE's `calibration.xml` collapsed the large price gap, while the Python trade-specific GSR rebuild made parity worse
+
+Concrete outcome from the benchmark cases:
+- `berm_100bp`: Python backward moved to about `96382.62` vs ORE `96185.09`
+- `berm_200bp`: Python backward moved to about `52294.67` vs ORE `52289.13`
+- `berm_300bp`: Python backward moved to about `24337.23` vs ORE `24384.66`
+
+Practical rule:
+- when benchmarking Python backward Bermudan pricing against ORE classic outputs, use this precedence:
+1. `Output/classic/calibration.xml`
+2. only if absent, attempt a Python trade-specific rebuild from `pricingengine.xml`
+3. only if that fails, fall back to `simulation.xml`
+
+Do not assume that "more ORE-like builder logic in Python" is automatically more accurate than consuming the calibration ORE already produced.
+
+### Bermudan backward parity depends on reduced-value rollback, not plain PV rollback
+
+For the Python backward Bermudan pricer in `py_ore_tools/lgm_ir_options.py`:
+- rollback should operate on reduced values, not raw PVs
+- intrinsic exercise values should be converted from PV to reduced value by dividing by the LGM numeraire before `max(intrinsic, continuation)`
+- the convolution rollback should mirror `LgmConvolutionSolver2` state-grid scaling (`sx/nx`, `sy/ny`) rather than using a generic Gauss-Hermite expectation step
+
+Observed effect on this repo:
+- once reduced-value convolution rollback was implemented, Python backward moved from materially above Python LSMC to near-equality with it
+- after also preferring ORE `calibration.xml`, Python backward was effectively in classic ORE parity on the benchmark Bermudans
+
+Interpretation rule:
+- if `backward` and `lsmc` are far apart, the problem is likely in the backward solver
+- if `backward` and `lsmc` are close but both differ from ORE, the problem is more likely in model source or intrinsic/cashflow treatment
+
+### Do not reuse generic swap cashflow liveness rules for Bermudan intrinsic valuation
+
+There is a specific and easy-to-reintroduce regression here:
+- generic swap PV / exposure logic and Bermudan exercise intrinsic logic do **not** use the same coupon liveness rule
+
+What is safe for generic swap valuation:
+- keep fixed and floating coupons alive until payment date
+- this is appropriate for swap exposure / remaining-swap PV views
+
+What is required for Bermudan intrinsic valuation:
+- exercise into whole periods
+- a coupon must drop out once exercise is past the accrual start, not only after payment date
+
+Why this matters:
+- reverting Bermudan intrinsic to pay-date liveness crushed late-exercise cases on this repo
+- the concrete regression was:
+  - `single_last` fell from about `5896.18` back to about `1377.96`
+  - `berm_200bp` fell from about `52294.67` back to about `49308.75`
+
+Current safe pattern:
+- `swap_npv_from_ore_legs_dual_curve()` in `py_ore_tools/irs_xva_utils.py` takes an explicit flag:
+  - `exercise_into_whole_periods=False` for generic swap valuation / exposure
+  - `exercise_into_whole_periods=True` for Bermudan intrinsic valuation
+- `py_ore_tools/lgm_ir_options.py` Bermudan backward code must call the helper with `exercise_into_whole_periods=True`
+
+Guardrail:
+- if a Bermudan late-exercise benchmark collapses while generic swap PV tests remain fine, suspect coupon inclusion timing first
+- especially inspect `single_last` in `parity_artifacts/bermudan_method_compare`, because it is the fastest canary for this bug
 - Surprisingly fast run → likely failed early, not a genuine speedup
+
+### Modern XVA sensitivities come from `xvaSensitivity`, not plain `xva`
+
+If you want ORE factor sensitivities like `xva_zero_sensitivity_cva.csv`, enable the separate `xvaSensitivity` analytic. Plain `xva` does not emit those reports.
+
+- Typical outputs live in `Output/xva_sensitivity/`, not necessarily directly under `Output/`
+- In SWIG/native integration, treat this as a separate analytic run, not an extension of the plain `xva` contract
+
+### Rate sensitivity parity: use direct curve-node shocks, not raw quote bumps
+
+For ORE-vs-Python sensitivity comparison, raw quote bumping is too indirect and mixes bootstrapping differences into the result. The better comparison path is:
+
+1. Read ORE zero-sensitivity rows
+2. Map `DiscountCurve/...` and `IndexCurve/...` factors to direct node shocks
+3. Rerun the Python engine with those curve-node shocks applied
+
+This is the path used by the current comparator and it materially improved parity.
+
+### Freeze floating spreads across shocked reruns
+
+If the Python IRS path recalibrates `float_spread` on each bumped run, forward sensitivities collapse or get muted because the all-in coupon is re-anchored after the shock.
+
+- Calibrate base floating spreads once
+- Reuse them for all shocked reruns
+
+This was required to make forward sensitivities like `IndexCurve/EUR-EURIBOR-6M/1/5Y` behave sensibly.
+
+### Bucket labels can be right even when parity is wrong
+
+For the benchmark sensitivity cases, Python bucket weights were already matching ORE bucket weights. The remaining mismatch came from downstream repricing behavior, not from the bucket interpolation formula itself.
+
+- Do not assume a bad bucket delta means the bucket shape is wrong
+- First compare the actual shocked curve values on the tenor grid before changing factor mapping logic
+
+### ORE benchmark curve shocks are effectively `Discount + LogLinear`
+
+For the benchmark cases here, ORE discount/index curves are configured with:
+
+- `InterpolationVariable = Discount`
+- `InterpolationMethod = LogLinear`
+
+Applying node shocks in Python as direct zero-rate perturbations on an already-built curve overstated short-end discount sensitivities. Much better parity came from:
+
+1. shocking the discount factors at the node tenors
+2. interpolating the shocked curve in log-discount space between nodes
+3. keeping flat-end behavior outside the node range
+
+This change materially improved `flat_EUR_5Y_A` rate parity:
+
+- `zero:EUR:1Y` moved from a large mismatch to roughly `-6.9%` relative error
+- `zero:EUR:5Y` moved to roughly `-5.1%`
+- `fwd:EUR:6M:5Y` moved to roughly `+2.0%`
+
+### Credit sensitivity parity is still approximate
+
+ORE `SurvivalProbability/...` XVA sensitivities are generated through ORE's scenario-market machinery and are not reproduced faithfully from the Python snapshot layer alone.
+
+- Keep credit factors explicitly marked unsupported/approximate in the comparator output
+- Do not present credit parity numbers as equivalent to the rate-side compare quality
+
+### Useful diagnostics for sensitivity mismatches
+
+When rate parity drifts, use these scripts first:
+
+- `diagnose_sensitivity_bucket.py`
+  - compares ORE bucket weights with Python applied shocks on sample tenors
+- `diagnose_sensitivity_cashflows.py`
+  - decomposes fixed-leg and floating-leg t0 PV response for a chosen factor
+
+These are faster and more informative than jumping straight into full XVA debugging.
 
 ---
 
@@ -880,31 +1663,16 @@ In this repo's simple IRS probe, that forward-curve merge reduced the residual C
 
 ### Historical floating coupons must not be reprojected
 
-Once a coupon is fixed on a path, lock that realized fixing and reuse it at later valuation dates. Reprojecting post-fixing coupons is a first-order parity bug.
+The native `PythonLgmAdapter` still has a parity risk if generated IRS legs keep `float_coupon = 0` for already-fixed periods and rely on projection instead of historical fixings. ORE cashflow reports exposed this clearly on the first front coupon.
 
-**Implemented in core helpers**:
-- Added `compute_realized_float_coupons(...)` to `py_ore_tools.irs_xva_utils`.
-- The helper computes pathwise `forward + spread` at each fixing time using the same discount/forward mapping used by `swap_npv_from_ore_legs_dual_curve`.
-- `example_ore_snapshot.py` now simulates on `exposure_times ∪ fixing_times` and passes `realized_float_coupon=...` into pricing.
+**Current gap**: `_build_irs_legs_from_trade()` in `native_xva_interface.runtime` still sets `float_coupon = 0` and does not map historical fixings into already-fixed coupons. Fixing injection is not yet implemented.
 
-**Observed effect (flat_EUR_5Y_A, 2000 paths, seed 42)**:
-- CVA rel diff improved from about `17.9%` to about `4.4%`.
-- EPE profile parity improved materially (`p95` roughly from `26.9%` to `4.7%`).
+When trade-level parity matters:
+- map snapshot fixings onto generated floating coupons in `PythonLgmAdapter` / `_build_irs_legs_from_trade()`
+- treat already-fixed coupons as deterministic cashflows
+- only project future coupons
 
-**Native-interface status**:
-- `native_xva_interface.runtime.PythonLgmAdapter` still needs the same treatment fully wired for its generated-leg path to reach OreSnapshot-level parity.
-- Keep fixing-injection in the next-step list for native adapter parity.
-
-### Portfolio-loaded floating-leg index tenor must be propagated
-
-If legs are loaded from portfolio XML but `float_index_tenor` is missing, fallback forwarding selection can choose the wrong curve bucket and distort floating-leg PV/exposure.
-
-**Implemented**:
-- In `load_swap_legs_from_portfolio(...)` (`py_ore_tools.irs_xva_utils`), floating legs now carry:
-  - `float_index` (e.g. `EUR-EURIBOR-6M`)
-  - `float_index_tenor` (e.g. `6M`)
-
-This is critical for both file-based parity and native adapter runs that consume portfolio-derived legs.
+**Suggested next step**: Implement fixing injection; rerun the simple receiver-fixed IRS case with `python.lgm_rng_mode=ore_parity`; compare the first few ORE `cashflow` rows to the resulting Python deterministic front coupons to see if the ~3% CVA gap closes further.
 
 ### "Same curves" means same ORE column and same economic role
 
@@ -1051,13 +1819,6 @@ Repeated valuations are dominated by market build and framework overhead, not th
 ---
 
 ## Native Interface Pipeline (`Tools/PythonOreRunner/native_xva_interface`)
-
-### Two native packages exist; capabilities differ
-
-- `Tools/PythonOreRunner/native_xva_interface` includes `PythonLgmAdapter` (Python-LGM parity path).
-- `PythonIntegration/native_xva_interface` currently exports toy/SWIG adapters but not `PythonLgmAdapter`.
-
-When a user asks for Python-LGM parity via "native interface", default to the `Tools/PythonOreRunner` package unless/until parity features are ported.
 
 ### The pipeline has three separate checkpoints
 
@@ -1304,6 +2065,38 @@ Another correct but smaller fix:
 
 This fix is now in the pricer and covered by regression tests, but it was **not** the main source of the large `t0` gap on `Swap_20`.
 
+### Coupons remain alive until payment date, not accrual start
+
+Another major IRS exposure bug appeared after the `t0` PV anchor was already back in line:
+
+- PV looked close to ORE
+- `EPE` was too low after `t=0`
+- `ENE` was too high
+- CVA was low and DVA was high
+
+The cause was in:
+
+- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/py_ore_tools/irs_xva_utils.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/py_ore_tools/irs_xva_utils.py)
+  - `swap_npv_from_ore_legs_dual_curve()`
+
+The pricer was treating coupons as dead once accrual had started. For swap valuation that is wrong: a coupon remains part of the NPV until its payment date. Dropping it at accrual start can leave `t0` PV looking acceptable while still materially understating future exposure.
+
+Fix:
+
+- fixed coupons are live while `fixed_pay_time > t`
+- floating coupons are live while `float_pay_time > t`
+
+This was the decisive CVA-parity fix for the notebook/file-based IRS cases. After it:
+
+- `flat_EUR_10Y_B` moved to about:
+  - Python CVA `34,446`
+  - ORE CVA `34,481`
+- `flat_USD_5Y_A` moved to about:
+  - Python CVA `8,141`
+  - ORE CVA `8,156`
+
+If PV is fine but CVA is still structurally low and DVA high, inspect coupon life through payment date before changing model or credit formulas.
+
 ### The leg time axis must use the ORE model day counter, not an ad hoc basis
 
 The leg loaders originally turned dates into times using Actual/Actual-style fractions, even when the ORE run was using `A365F`.
@@ -1428,3 +2221,495 @@ The “battle” was won in layers:
 5. discover that the huge `t0` gap was actually the node-tenor interpolation shortcut at `t=0`
 
 That last point is the one most likely to save time in future work. If swap parity is wildly wrong at `t=0`, inspect the node-interpolation shortcut before blaming fixings, curves, or model parameters.
+
+### Notebook 5 aligned benchmark should be `flat_EUR_10Y_B`
+
+The notebook-series parity workflow regressed for two different reasons:
+
+1. huge negative PV from missing `fixed_start_time` / `fixed_end_time`
+2. large CVA gap from coupons being dropped at accrual start instead of payment date
+
+After those fixes, the aligned benchmark case for notebook 5 should be:
+
+- `flat_EUR_10Y_B`
+
+That case is now good enough for the headline notebook parity section:
+
+- PV essentially exact
+- CVA within about `0.1%`
+
+If notebook 5 suddenly looks bad again:
+
+1. verify the notebook is still using `flat_EUR_10Y_B`
+2. verify the standalone `ore_snapshot` / `PythonLgmAdapter` path first
+3. only then debug notebook presentation code
+
+---
+
+## Regression Pack and Multicurrency Follow-ups
+
+### `market.pricing` is the right first choice for live native trade discount curves
+
+For live native multicurrency IRS cases, the most important curve-role correction after the EUR work was:
+
+- use `Markets/pricing` from `ore.xml` for trade repricing discount curves
+- keep the XVA comparator / funding logic separate
+
+Using the `curves` analytic configuration as the pricing-curve source was acceptable on the `measure_lgm` family, but it broke the live non-EUR multicurrency cases badly because it routed discounting through cross-currency handles like:
+
+- `Yield/USD/USD-IN-EUR`
+- `Yield/GBP/GBP-IN-EUR`
+
+That produced large live native gaps, for example on `flat_USD_5Y_A`:
+
+- before the fix:
+  - Python PV about `299,759`
+  - ORE PV about `420,394`
+  - Python CVA about `6,169`
+  - ORE CVA about `8,156`
+
+- after switching native trade repricing to `market.pricing`:
+  - Python PV about `420,392`
+  - ORE PV about `420,394`
+  - Python CVA about `8,124`
+  - ORE CVA about `8,156`
+
+So for native live trade valuation:
+
+- default rule: prefer `market.pricing`
+- do **not** assume the `curves` analytic config is the right trade repricing source
+
+### Cross-currency discount handles in `todaysmarket.xml` can collapse to bare-currency columns in `curves.csv`
+
+The multicurrency benchmark cases exposed a non-obvious ORE artifact convention:
+
+- `todaysmarket.xml` may use handles such as:
+  - `Yield/USD/USD-IN-EUR`
+  - `Yield/GBP/GBP-IN-EUR`
+
+- but `curves.csv` may only expose columns such as:
+  - `USD`
+  - `GBP`
+
+There may be no explicit `YieldCurve name="USD-IN-EUR"` or `GBP-IN-EUR` entry to bridge them.
+
+This required a shared fallback in [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/py_ore_tools/ore_snapshot.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/py_ore_tools/ore_snapshot.py):
+
+- when `_handle_to_curve_name()` sees a handle of the form:
+  - `Yield/<CCY>/<CCY>-IN-...`
+- it now falls back to the bare currency column:
+  - `<CCY>`
+
+This change was necessary to get live native USD/GBP cases onto ORE output curves at all.
+
+### Live native multicurrency cases are now good enough to replace stale artifact summaries for CVA
+
+The regression pack originally relied on old `artifact_summary` JSON files for many USD/GBP benchmark cases.
+That became misleading once the live native path improved.
+
+The multicurrency IRS cases in the regression pack now run live as `native_ore_case` for:
+
+- `flat_USD_5Y_A`
+- `flat_USD_5Y_B`
+- `flat_USD_10Y_A`
+- `flat_USD_10Y_B`
+- `full_USD_5Y_A`
+- `full_USD_10Y_A`
+- `flat_GBP_5Y_A`
+- `flat_GBP_5Y_B`
+- `flat_GBP_10Y_A`
+- `flat_GBP_10Y_B`
+- `full_GBP_5Y_A`
+- `full_GBP_10Y_A`
+
+Observed live CVA parity after the fixes:
+
+- `flat_USD_5Y_A`: about `0.39%`
+- `flat_USD_10Y_B`: about `1.11%`
+- `flat_GBP_5Y_A`: about `0.44%`
+- `flat_GBP_10Y_B`: about `1.14%`
+
+This is much better than the stale artifact-based diffs that were previously showing `~7-8%`.
+
+### Pass/fail in the regression pack must respect the case’s configured metric scope
+
+One subtle but important clean-up:
+
+- many multicurrency benchmark cases request only `CVA`
+- ORE output files may still contain other columns or zeros for `DVA/FBA/FCA`
+- Python may be able to compute those metrics anyway if the runtime is forced into a broader analytic set
+
+If the regression pack blindly computes relative diffs on every metric, the summary becomes noisy and misleading.
+
+The correct rule for the pack is:
+
+- gate pass/fail only on metrics the source case actually requested
+- keep other metrics as informational only, or mark them `n/a`
+
+This is now how [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/run_xva_regression_pack.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/run_xva_regression_pack.py) behaves.
+
+### Clean regression outputs matter; `n/a` is better than fake precision
+
+The regression pack was updated to clean inactive metrics instead of emitting misleading giant relative diffs or zero placeholders.
+
+Current outputs:
+
+- machine-readable:
+  - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary.json`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary.json)
+  - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary.csv`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary.csv)
+- human-readable:
+  - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary_pretty.md`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/xva_regression_pack_latest/summary_pretty.md)
+
+Meaningful presentation rules now are:
+
+- inactive metric in JSON/CSV: `null`
+- inactive metric in console / markdown: `n/a`
+- pack pass/fail: based only on active metrics
+
+### Current clean headline for the regression pack
+
+With the latest live/native and reporting fixes at `1000` paths, seed `42`:
+
+- cases run: `23`
+- hard failures: `0`
+- passes: `23`
+
+This is the current best top-level “is parity in shape?” sanity signal in this repo.
+
+### Current residual parity gap is mostly DVA, not CVA
+
+After the coupon-life-through-payment-date fix, the big systematic CVA problem on the vanilla notebook/file cases largely collapsed. The remaining visible gap on the representative checked cases is now mostly DVA.
+
+Current rough status:
+
+- `flat_EUR_10Y_B`
+  - CVA close enough for notebook parity
+  - DVA still a few-to-several percent high
+- `flat_EUR_5Y_A`
+  - CVA back near ORE
+  - DVA still needs more caution
+- `flat_USD_5Y_A`
+  - CVA back near ORE
+  - DVA still not as tight as CVA
+
+So if you see:
+
+- PV close
+- CVA close
+- DVA still off
+
+do **not** reopen the IRS exposure-dynamics debugging from scratch. The next likely area is own-credit / DVA aggregation detail, not the swap exposure core.
+
+### Modern ORE XVA sensitivities are a separate analytic, not part of plain `xva`
+
+If you want factor-by-factor XVA sensitivities from ORE, plain `xva` is not enough.
+
+- the modern output comes from the separate `xvaSensitivity` analytic
+- the key report files are:
+  - `xva_zero_sensitivity_<metric>.csv`
+  - optionally `xva_par_sensitivity_<metric>.csv`
+- for the demo cases, ORE may write them under:
+  - `Output/xva_sensitivity/`
+  - not only directly under `Output/`
+
+If a case only runs `xva`, you may still see legacy files like `cva_sensitivity_nettingset_*.csv`, but that is not the same format and should not be treated as modern factor parity input.
+
+### Native sensitivity runs should go through runtime preparation, not ad hoc config params
+
+The native Python sensitivity path now has a runtime-side setup hook in [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/native_xva_interface/runtime.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/native_xva_interface/runtime.py):
+
+- `XVAEngine.prepare_sensitivity_snapshot(...)`
+
+Use that instead of manually stuffing sensitivity-specific values into `snapshot.config.params` from compare code.
+
+Current runtime-owned knobs:
+
+- `python.curve_fit_mode`
+- `python.use_ore_output_curves`
+- `python.curve_node_shocks`
+- `python.frozen_float_spreads`
+
+This matters because the comparator should decide **what** to shock, while runtime should own **how** shocked reruns are prepared.
+
+### Freeze base floating spreads across shocked reruns or forward sensitivities get washed out
+
+For IRS sensitivities, recalibrating `float_spread` on every bumped run can neutralize the forward shock by preserving the all-in coupon.
+
+The correct native rule for this codebase is:
+
+- calibrate base floating spreads once
+- freeze them across the shocked reruns
+
+That is now part of the runtime-side sensitivity preparation path. If forward sensitivity is suspiciously near zero while the fitted forward curve did move, check spread freezing before changing pricing formulas.
+
+### Rate parity is credible; credit parity is still approximate
+
+Current useful rule for the ore-snapshot compare path:
+
+- compare rate factors (`DiscountCurve/...`, `IndexCurve/...`)
+- do **not** claim strong parity on credit factors yet
+
+Reason:
+
+- ORE `xvaSensitivity` shocks simulated `SurvivalProbability/...` factors via its scenario-market machinery
+- the Python snapshot path only has an approximate today-curve reconstruction for credit
+
+So the compare tool now treats credit factors as unsupported for parity output and prints them separately. This is more honest than reporting misleading credit diffs.
+
+### For this demo case, the remaining rate mismatch is concentrated in short-end forward coverage
+
+On `flat_EUR_5Y_A`, after the runtime/sensitivity fixes:
+
+- `zero:EUR:5Y` is close
+- `fwd:EUR:6M:5Y` is in the right sign and ballpark
+- `zero:EUR:1Y` still has a noticeable residual gap
+- `fwd:EUR:6M:1Y` is still unmatched in the compare output
+
+So if rate parity regresses again, first check:
+
+1. the fitted curve actually moved for the shocked node
+2. the trade kept its real floating index tenor through the runtime path
+3. frozen floating spreads were reused on the bumped run
+4. the compare is using ORE bump-change convention, not derivative-per-shift scaling
+
+---
+
+## SWIG-first curve parity fitter
+
+### What was added
+
+There is now a dedicated SWIG-first curve parity service under:
+
+- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/ore_curve_fit_parity/service.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/ore_curve_fit_parity/service.py)
+
+and the trace layer in:
+
+- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/ore_curve_fit_parity/curve_trace.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/ore_curve_fit_parity/curve_trace.py)
+
+was extended to expose:
+
+- generic trace-by-handle for yield curves
+- richer curve config metadata:
+  - `bootstrap_config`
+  - `pillar_choice`
+  - `extrapolation`
+- native ORE calibration nodes extracted from `todaysmarketcalibration.csv`
+- handle listing from `todaysmarket.xml`
+
+The public Python surface now includes:
+
+- `CurveBuildRequest`
+- `CurveBuildResult`
+- `CurveTrace`
+- `CurveComparison`
+- `build_curves_from_ore_inputs(...)`
+- `trace_curve(...)`
+- `compare_python_vs_ore(...)`
+- `swig_module_available()`
+
+### The intended architecture
+
+For “as close as possible to ORE”, the primary path should be:
+
+1. clone or point at a real ORE case
+2. run ORE through ORE-SWIG
+3. read the generated:
+   - `curves.csv`
+   - `todaysmarketcalibration.csv`
+4. trace and compare from those native outputs
+
+Do **not** start by reimplementing ORE helper construction in pure Python if the goal is parity.
+
+The current rule is:
+
+- `swig` path = parity baseline
+- `python` path = diagnostic comparator only
+
+### How the SWIG-first build works
+
+The build service currently:
+
+1. takes an `ore.xml`
+2. clones the whole case to a temp run directory
+3. rewrites absolute case-local paths in `ore.xml` to point at the cloned case
+4. runs ORE via:
+   - `ORE.Parameters().fromFile(...)`
+   - `ORE.OREApp(...)`
+5. reads the generated output artifacts
+6. traces selected yield curves from the fresh run
+
+This is important because it avoids mutating the checked-in parity artifacts while still using the exact ORE builder path.
+
+### Demo case that was verified
+
+The cleanest verified demo is:
+
+- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_5Y_B/Input/ore.xml`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_5Y_B/Input/ore.xml)
+
+Using:
+
+- `currency='USD'`
+- `index_name='USD-LIBOR-6M'`
+
+the SWIG build produced:
+
+- `Yield/USD/USD3M`
+- `Yield/USD/USD6M`
+
+with:
+
+- `USD3M` dependencies:
+  - `USD1D`
+- `USD6M` dependencies:
+  - `USD1D`
+  - `USD3M`
+
+### Clean demo script
+
+A clean demo of the Python diagnostic fitter now exists at:
+
+- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/demo_python_curve_fitter.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/demo_python_curve_fitter.py)
+
+Run it with:
+
+```bash
+cd /Users/gordonlee/Documents/Engine/Tools/PythonOreRunner
+python3 demo_python_curve_fitter.py --points 6 --quotes-per-segment 4
+```
+
+What it shows:
+
+- input instruments grouped by segment
+  - deposits
+  - FRAs
+  - swaps
+- market quotes for each instrument
+- mapped ORE pillar outputs
+  - time
+  - discount factor
+  - zero rate
+- fitted Python outputs on the ORE report grid
+- ORE vs Python error
+
+### Lessons learned
+
+#### 1. The right SWIG module is usually `ORE`, not the repo namespace `OREAnalytics`
+
+In this repo, importing `OREAnalytics` by itself can just resolve the source namespace package directory and **not** the SWIG runtime module.
+
+For actual live runs:
+
+- bootstrap `sys.path` with:
+  - `ORE-SWIG/`
+  - or `ORE-SWIG/build/lib.*`
+- then import:
+  - `ORE`
+
+The service now probes module candidates, but `ORE` is the one that actually exposed `Parameters` and `OREApp` in the verified run.
+
+#### 2. `Parameters.fromFile(ore.xml)` is the cleanest parity entry point
+
+If the goal is curve parity against ORE, prefer:
+
+- `Parameters.fromFile(...)`
+
+over trying to synthesize `InputParameters` manually from Python buffers.
+
+Reason:
+
+- it uses the same file-driven path ORE cases already use
+- it avoids silent divergence in setup fields
+- it makes the parity service behave like a real ORE case run
+
+#### 3. Clone the case first; do not run directly in checked-in parity artifacts
+
+The temp-case clone is not optional hygiene; it is the safe default.
+
+Reason:
+
+- ORE writes `Output/*`
+- some runs can rewrite or append logs and reports
+- parity tooling should not mutate the checked-in benchmark cases
+
+#### 4. Do not rewrite relative paths like `log.txt`
+
+One bug hit during implementation:
+
+- relative `log.txt` in `ore.xml` was rewritten to an absolute path
+- ORE then tried to resolve it under `Output/` and produced a broken doubled path
+
+Rule:
+
+- rewrite absolute case-local paths
+- leave relative filenames like `log.txt` alone
+
+#### 5. `curves.csv` and `todaysmarketcalibration.csv` remain the real external parity oracles
+
+Even with a programmatic SWIG run, the parity-grade outputs are still:
+
+- `curves.csv`
+- `todaysmarketcalibration.csv`
+
+Use them as the external truth for:
+
+- grid values
+- pillar values
+- day counter
+- zero / forward / discount outputs
+
+#### 6. The current Python fitter is interpolation parity, not bootstrap parity
+
+The Python comparator currently rebuilds the curve from native ORE nodes using:
+
+- `Discount`
+- `LogLinear`
+
+and compares that to ORE report-grid values.
+
+This is useful and credible, but it is not the same as claiming:
+
+- Python helper construction matches ORE helper construction
+- Python bootstrap numerics match ORE bootstrap numerics
+
+Do not over-claim what the Python side is doing today.
+
+#### 7. Tiny grid differences on the order of `1e-9` are normal here
+
+On the verified USD3M demo case, the Python diagnostic comparator matched ORE’s report grid with:
+
+- max abs error around `4.8e-09`
+- max rel error around `5.2e-09`
+
+That is good enough for the current interpolation-parity diagnostic.
+
+Do not set default demo tolerances to `1e-12` and then misread harmless noise as a structural failure.
+
+#### 8. Use one benchmark with mixed instrument types for the cleanest fitter demo
+
+The best “show me the fitter” case so far is the USD3M curve in `flat_USD_5Y_B` because it contains:
+
+- deposits
+- FRAs
+- swaps
+
+in one curve.
+
+That makes it much easier to show:
+
+- inputs by instrument type
+- fitted pillar outputs
+- final report-grid comparison
+
+without switching cases.
+
+#### 9. Multi-ccy FX XVA needs one shared portfolio FX simulation and MPOR-aware settlement handling
+
+Do not price each FX forward on its own standalone two-ccy simulation if the target is netting-set XVA parity.
+
+On the large-FX benchmark, three structural fixes mattered:
+
+- use one shared multi-ccy FX scenario set across the whole FX-forward book
+- only make FX pairs stochastic if they are actually modeled in the loaded ORE `simulation.xml`
+- keep FX forward maturity payoffs alive when maturity falls inside the MPOR closeout window
+
+Without those, PV can look acceptable while CVA/DVA/FVA are overstated by an order of magnitude on short-dated offsetting books.
