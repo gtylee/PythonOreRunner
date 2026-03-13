@@ -801,7 +801,7 @@ def run_bermudan_sensitivity_comparison(
 ):
     repo = bootstrap_notebook_env()
     py_runner = _pythonorerunner_root(repo)
-    compare_script = py_runner / "compare_bermudan_ore_sensitivities.py"
+    compare_script = py_runner / "scripts" / "compare" / "compare_bermudan_ore_sensitivities.py"
     output_root = py_runner / "parity_artifacts" / "bermudan_sensitivity_compare"
     cmd = [
         sys.executable,

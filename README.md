@@ -23,6 +23,7 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 | `py_ore_tools/` | Standalone Python LGM (IRS, FX fwd, cap/floor, Bermudans, multi-ccy), ORE runner, XVA helpers, benchmarks, demos |
 | `native_xva_interface/` | Python dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
 | `example*.py` | Example scripts using `OreBasic` and snapshot tools |
+| `scripts/` | Ad hoc checks, diagnostics, dumps, plots, and parity comparison utilities; see [scripts/README.md](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md) |
 | `tests/` | Unit tests for `py_ore_tools` |
 | `parity_artifacts/` | Generated benchmark/parity outputs (optional; can be recreated) |
 
@@ -75,6 +76,10 @@ python py_ore_tools/benchmarks/benchmark_ore_ir_options.py
 These scripts read market/example inputs from `ENGINE_REPO_ROOT/Examples/...` and emit local results under `parity_artifacts/`.
 
 See [`py_ore_tools/benchmarks/README.md`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools/benchmarks/README.md) for per-script prerequisites, inputs, and output locations.
+
+## Diagnostics And Utilities
+
+Ad hoc root scripts now live under [`scripts/`](/Users/gordonlee/Documents/PythonOreRunner/scripts), leaving `tests/` and `py_ore_tools/benchmarks/` as the maintained automated surfaces.
 
 ## Notebook Series
 

@@ -6,13 +6,20 @@ import csv
 import json
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOLS_DIR = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from py_ore_tools.repo_paths import (
+    default_ore_bin,
+    local_parity_artifacts_root,
+    require_examples_repo_root,
+)
 
 
 @dataclass(frozen=True)
@@ -56,8 +63,8 @@ class SingleCurveBermudanOREComparison:
         self.case_name = case_name
         self.trade_id = trade_id
         self.shift_size = float(shift_size)
-        self.output_root = output_root or (TOOLS_DIR / "parity_artifacts" / "bermudan_singlecurve_compare")
-        self.case_input = TOOLS_DIR / "parity_artifacts" / "bermudan_method_compare" / case_name / "Input"
+        self.output_root = output_root or (local_parity_artifacts_root() / "bermudan_singlecurve_compare")
+        self.case_input = local_parity_artifacts_root() / "bermudan_method_compare" / case_name / "Input"
         self.run_root = self.output_root / case_name
 
     def run(self) -> SingleCurveComparisonResult:
@@ -99,14 +106,10 @@ class SingleCurveBermudanOREComparison:
         return result
 
     def _locate_ore_exe(self) -> Path:
-        for candidate in (
-            REPO_ROOT / "build" / "App" / "ore",
-            REPO_ROOT / "build" / "ore" / "App" / "ore",
-            REPO_ROOT / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore",
-        ):
-            if candidate.exists():
-                return candidate
-        raise FileNotFoundError("ORE executable not found under the local build tree")
+        candidate = default_ore_bin()
+        if candidate.exists():
+            return candidate
+        raise FileNotFoundError(f"ORE executable not found: {candidate}")
 
     def _prepare_run_root(self) -> None:
         if self.run_root.exists():
@@ -119,7 +122,7 @@ class SingleCurveBermudanOREComparison:
         self._write_text(self.run_root / "Input" / "sensitivity.xml", self._sensitivity_xml())
 
     def _write_single_curve_curveconfig(self, dest: Path) -> None:
-        src = REPO_ROOT / "Examples" / "Input" / "curveconfig.xml"
+        src = require_examples_repo_root() / "Examples" / "Input" / "curveconfig.xml"
         root = ET.parse(src).getroot()
         for yc in root.findall(".//YieldCurve"):
             if (yc.findtext("CurveId", "") or "").strip() == "EUR6M":
@@ -143,6 +146,7 @@ class SingleCurveBermudanOREComparison:
 
     def _write_ore_xml(self, xml_name: str, market_file: str, output_subdir: str, include_sensi: bool) -> Path:
         root = ET.parse(self.case_input / "ore_classic.xml").getroot()
+        examples_input = require_examples_repo_root() / "Examples" / "Input"
         setup = root.find("Setup")
         assert setup is not None
         for node in setup.findall("Parameter"):
@@ -158,11 +162,11 @@ class SingleCurveBermudanOREComparison:
             elif name == "marketDataFile":
                 node.text = str(self.run_root / "Input" / market_file)
             elif name == "fixingDataFile":
-                node.text = str(REPO_ROOT / "Examples" / "Input" / "fixings_20160205.txt")
+                node.text = str(examples_input / "fixings_20160205.txt")
             elif name == "curveConfigFile":
                 node.text = str(self.run_root / "Input" / "curveconfig_single.xml")
             elif name == "conventionsFile":
-                node.text = str(REPO_ROOT / "Examples" / "Input" / "conventions.xml")
+                node.text = str(examples_input / "conventions.xml")
             elif name == "marketConfigFile":
                 node.text = str(self.run_root / "Input" / "todaysmarket_single.xml")
         analytics = root.find("Analytics")
@@ -289,7 +293,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=TOOLS_DIR / "parity_artifacts" / "bermudan_singlecurve_compare",
+        default=local_parity_artifacts_root() / "bermudan_singlecurve_compare",
     )
     args = parser.parse_args()
 

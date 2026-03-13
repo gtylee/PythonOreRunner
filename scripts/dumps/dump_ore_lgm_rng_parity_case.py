@@ -10,9 +10,9 @@ import sys
 
 import numpy as np
 
-TOOLS_ROOT = Path(__file__).resolve().parent
-if str(TOOLS_ROOT) not in sys.path:
-    sys.path.insert(0, str(TOOLS_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from py_ore_tools.lgm import (
     LGM1F,
@@ -21,6 +21,7 @@ from py_ore_tools.lgm import (
     make_ore_gaussian_rng,
     simulate_lgm_measure,
 )
+from py_ore_tools.repo_paths import local_parity_artifacts_root
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output",
         type=Path,
-        default=TOOLS_ROOT / "parity_artifacts" / "lgm_rng_alignment" / "mt_seed_42_constant.json",
+        default=local_parity_artifacts_root() / "lgm_rng_alignment" / "mt_seed_42_constant.json",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--paths", type=int, default=4)

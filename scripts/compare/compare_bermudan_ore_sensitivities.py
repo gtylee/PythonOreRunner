@@ -6,6 +6,7 @@ import csv
 import json
 import shutil
 import subprocess
+import sys
 import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -13,20 +14,21 @@ from typing import Any
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-TOOLS_DIR = Path(__file__).resolve().parent
-
-if str(TOOLS_DIR) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(TOOLS_DIR))
-
-from py_ore_tools.repo_paths import default_ore_bin, local_parity_artifacts_root, require_engine_repo_root
+from py_ore_tools.repo_paths import (
+    default_ore_bin,
+    local_parity_artifacts_root,
+    require_engine_repo_root,
+    require_examples_repo_root,
+)
 
 
 def _bootstrap() -> None:
-    import sys
-
-    if str(TOOLS_DIR) not in sys.path:
-        sys.path.insert(0, str(TOOLS_DIR))
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
 
 
 def _locate_ore_exe() -> Path:
@@ -37,7 +39,7 @@ def _locate_ore_exe() -> Path:
 
 
 def _case_input_dir(case_name: str) -> Path:
-    return TOOLS_DIR / "parity_artifacts" / "bermudan_method_compare" / case_name / "Input"
+    return local_parity_artifacts_root() / "bermudan_method_compare" / case_name / "Input"
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -229,6 +231,7 @@ def _prepare_ore_sensitivity_run(case_input: Path, output_root: Path, shift_size
     )
 
     root = ET.parse(case_input / "ore_classic.xml").getroot()
+    examples_input = require_examples_repo_root() / "Examples" / "Input"
     setup = root.find("Setup")
     assert setup is not None
     for node in setup.findall("Parameter"):
@@ -244,11 +247,11 @@ def _prepare_ore_sensitivity_run(case_input: Path, output_root: Path, shift_size
         elif name == "marketDataFile":
             node.text = str(case_input / "market_20160205_flat_fixed_fxfwd.txt")
         elif name == "fixingDataFile":
-            node.text = str(REPO_ROOT / "Examples" / "Input" / "fixings_20160205.txt")
+            node.text = str(examples_input / "fixings_20160205.txt")
         elif name == "curveConfigFile":
-            node.text = str(REPO_ROOT / "Examples" / "Input" / "curveconfig.xml")
+            node.text = str(examples_input / "curveconfig.xml")
         elif name == "conventionsFile":
-            node.text = str(REPO_ROOT / "Examples" / "Input" / "conventions.xml")
+            node.text = str(examples_input / "conventions.xml")
         elif name == "marketConfigFile":
             node.text = str(run_root / "Input" / "todaysmarket.xml")
 

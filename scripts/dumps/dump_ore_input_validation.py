@@ -6,19 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from py_ore_tools.ore_snapshot import (
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
 )
+from py_ore_tools.repo_paths import local_parity_artifacts_root
 
 
 def _parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[2]
-    default_xml = (
-        repo_root
-        / "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml"
-    )
+    default_xml = local_parity_artifacts_root() / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A" / "Input" / "ore.xml"
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(

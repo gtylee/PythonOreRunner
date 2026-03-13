@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from py_ore_tools.irs_xva_utils import load_swap_legs_from_portfolio
 from py_ore_tools.ore_snapshot import (
@@ -15,11 +20,11 @@ from py_ore_tools.ore_snapshot import (
     _resolve_ore_run_files,
     load_from_ore_xml,
 )
+from py_ore_tools.repo_paths import require_examples_repo_root
 
 
 def _parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[2]
-    default_xml = repo_root / "Examples/Exposure/Input/ore_measure_lgm.xml"
+    default_xml = require_examples_repo_root() / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
     p = argparse.ArgumentParser(
         description="Compare ORE direct cashflows, Python cashflows, and XVA-state cashflow treatment."
     )

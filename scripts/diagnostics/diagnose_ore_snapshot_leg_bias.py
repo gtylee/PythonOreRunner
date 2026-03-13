@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from py_ore_tools.lgm import simulate_lgm_measure
 from py_ore_tools.ore_snapshot import load_from_ore_xml

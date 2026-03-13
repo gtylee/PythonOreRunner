@@ -10,7 +10,7 @@ def _bootstrap() -> Path:
     here = Path(__file__).resolve()
     repo_root = here.parents[2]
     py_integration = repo_root / "PythonIntegration"
-    py_ore_tools = here.parent / "py_ore_tools"
+    py_ore_tools = repo_root / "py_ore_tools"
     swig_build = repo_root / "ORE-SWIG" / "build" / "lib.macosx-10.13-universal2-cpython-313"
 
     for p in (str(py_integration), str(py_ore_tools), str(swig_build)):

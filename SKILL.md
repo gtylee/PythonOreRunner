@@ -891,9 +891,9 @@ ORE `SurvivalProbability/...` XVA sensitivities are generated through ORE's scen
 
 When rate parity drifts, use these scripts first:
 
-- `diagnose_sensitivity_bucket.py`
+- `scripts/diagnostics/diagnose_sensitivity_bucket.py`
   - compares ORE bucket weights with Python applied shocks on sample tenors
-- `diagnose_sensitivity_cashflows.py`
+- `scripts/diagnostics/diagnose_sensitivity_cashflows.py`
   - decomposes fixed-leg and floating-leg t0 PV response for a chosen factor
 
 These are faster and more informative than jumping straight into full XVA debugging.
@@ -1327,7 +1327,7 @@ The first Python LGM simulator consumed normals in time-major order (`step -> al
 - **Implemented in** `py_ore_tools.lgm`: `OreMersenneTwisterGaussianRng`, `make_ore_gaussian_rng()`, and `simulate_lgm_measure(..., draw_order="ore_path_major")` use QuantLib-backed MT Gaussian draws and match Ore's path-by-path variate order.
 - **Implemented parity mode**: `draw_order="ore_path_major"` in `simulate_lgm_measure`
 - **Implemented native switch**: `snapshot.config.params["python.lgm_rng_mode"] = "ore_parity"` routes `PythonLgmAdapter` (in `native_xva_interface.runtime`) through the Ore-compatible RNG and draw order.
-- **Oracle / tests**: `dump_ore_lgm_rng_parity_case.py`, artifact `parity_artifacts/lgm_rng_alignment/mt_seed_42_constant.json`, and tests in `tests/test_lgm.py` validate RNG alignment.
+- **Oracle / tests**: `scripts/dumps/dump_ore_lgm_rng_parity_case.py`, artifact `parity_artifacts/lgm_rng_alignment/mt_seed_42_constant.json`, and tests in `tests/test_lgm.py` validate RNG alignment.
 
 If parity tests still differ after aligning the seed, verify draw ordering before changing formulas.
 
@@ -1971,7 +1971,7 @@ Operational rule:
 
 The triptych diagnostic added during this effort:
 
-- [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_cashflow_triptych.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_cashflow_triptych.py)
+- [`/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_cashflow_triptych.py`](/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_cashflow_triptych.py)
 - output example:
   - [`/Users/gordonlee/Documents/Engine/Examples/Exposure/Output/measure_lgm/cashflow_triptych.csv`](/Users/gordonlee/Documents/Engine/Examples/Exposure/Output/measure_lgm/cashflow_triptych.csv)
 
@@ -2204,9 +2204,9 @@ Expected after the latest fixes:
 Useful ad hoc diagnostics added during the work:
 
 - cashflow triptych:
-  - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_cashflow_triptych.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_cashflow_triptych.py)
+  - [`/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_cashflow_triptych.py`](/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_cashflow_triptych.py)
 - leg bias diagnostic:
-  - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_ore_snapshot_leg_bias.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/diagnose_ore_snapshot_leg_bias.py)
+  - [`/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_ore_snapshot_leg_bias.py`](/Users/gordonlee/Documents/PythonOreRunner/scripts/diagnostics/diagnose_ore_snapshot_leg_bias.py)
 - snapshot parity example:
   - [`/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/example_ore_snapshot.py`](/Users/gordonlee/Documents/Engine/Tools/PythonOreRunner/example_ore_snapshot.py)
 

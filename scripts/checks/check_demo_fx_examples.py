@@ -2,7 +2,8 @@ import numpy as np
 import sys
 from pathlib import Path
 
-TOOLS_DIR = Path(__file__).resolve().parent / "py_ore_tools"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOLS_DIR = REPO_ROOT / "py_ore_tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 

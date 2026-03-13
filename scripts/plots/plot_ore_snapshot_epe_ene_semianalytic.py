@@ -3,19 +3,25 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from py_ore_tools.lgm import simulate_lgm_measure
 from py_ore_tools.irs_xva_utils import swap_npv_from_ore_legs_dual_curve
 from py_ore_tools.ore_snapshot import load_from_ore_xml
+from py_ore_tools.repo_paths import local_parity_artifacts_root
 
 
 def _parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[2]
-    default_xml = repo_root / "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml"
-    default_out = repo_root / "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Output/epe_ene_py_vs_ore_vs_lgm1d.png"
+    default_case_dir = local_parity_artifacts_root() / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
+    default_xml = default_case_dir / "Input" / "ore.xml"
+    default_out = default_case_dir / "Output" / "epe_ene_py_vs_ore_vs_lgm1d.png"
 
     p = argparse.ArgumentParser(description="Plot ORE vs Python MC vs LGM 1D semi-analytic EPE/ENE")
     p.add_argument("--ore-xml", type=Path, default=default_xml)
