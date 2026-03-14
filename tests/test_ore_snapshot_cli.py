@@ -1147,6 +1147,17 @@ class TestOreSnapshotCli(unittest.TestCase):
             }
             self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "expected_output_fallback_pass")
 
+    def test_bucket_case_reclassifies_unsupported_price_only_fallbacks(self):
+        case_summary = {
+            "pass_all": True,
+            "ore_xml": str(TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml"),
+            "diagnostics": {
+                "pricing_fallback_reason": "missing_simulation_analytic",
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "unsupported_python_snapshot_fallback")
+
     def test_bucket_case_splits_no_reference_artifacts_passes(self):
         case_summary = {
             "pass_all": True,

@@ -352,6 +352,26 @@ After the split:
 
 That is the current stable deterministic `LGM/Grid` parity level.
 
+### Native ORE itself prices `CallableBondNoCall` differently from the plain bond
+
+This was a crucial checkpoint.
+
+A temporary native ORE run with the commented standalone bond trade enabled gave:
+
+- `CallableBondNoCall`: `111,858,499.784284`
+- `UnderlyingBondTrade` (`Bond`): `114,184,634.212881`
+
+So native ORE itself has a gap of about `2.326m` between:
+- the callable engine's no-call trade
+- the equivalent standalone bond
+
+Implication:
+- the remaining Python `CallableBondNoCall` miss is **not** a standalone bond-pricer miss
+- it is a callable-engine-underlying miss
+
+Do **not** try to force Python `CallableBondNoCall` to equal the standalone bond.
+That would be source-inconsistent with native ORE.
+
 ### The calibration path had a silent failure mode
 
 There was a real bug in callable calibration:
@@ -437,6 +457,12 @@ Why it was hard:
 
 The eventual large improvement did **not** come from another rollback rewrite.
 It came from the option-layer native reference curve split described above.
+
+Also, after the native no-call vs plain-bond check:
+- the remaining conceptual gap is no longer “mixed put/call only”
+- it is that Python still reuses the standalone risky-bond helper for the
+  callable stripped layer, while native ORE reports the callable engine's own
+  internal underlying value
 
 So if parity worsens again specifically on `PutCallBondTrade`, check these in order:
 

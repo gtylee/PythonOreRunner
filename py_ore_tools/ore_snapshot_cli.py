@@ -2668,11 +2668,15 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
     diagnostics = dict(case_summary.get("diagnostics") or {})
     input_validation = case_summary.get("input_validation") or {}
     pass_all = bool(case_summary.get("pass_all"))
+    ore_xml_path = Path(case_summary.get("ore_xml", "."))
     reference_dirs = [Path(p) for p in diagnostics.get("reference_output_dirs", []) if p]
-    reference_kinds = {_classify_reference_dir(Path(case_summary.get("ore_xml", ".")), p) for p in reference_dirs if p.exists()}
+    reference_kinds = {_classify_reference_dir(ore_xml_path, p) for p in reference_dirs if p.exists()}
     if diagnostics.get("error"):
         return "hard_error"
     if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
+        first_trade_type = _first_trade_type(ore_xml_path)
+        if not _supports_native_price_only(first_trade_type, ore_xml_path):
+            return "unsupported_python_snapshot_fallback"
         return "price_only_reference_fallback"
     if diagnostics.get("fallback_reason") == "missing_native_output" and pass_all and not reference_kinds:
         return "no_reference_artifacts_pass"
