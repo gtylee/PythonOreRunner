@@ -605,6 +605,28 @@ Practical rule:
 
 If Python PV is still off after the obvious plumbing fixes, check whether Python is still on `market_overlay` instead of `ore_output_curves`.
 
+### FX forward `t=0` price parity should use the static discounted-forward formula
+
+For file-driven `FxForward` price-only parity, do not start with the hybrid-model
+forward pricer.
+
+On `Example_28`, ORE's reported `npv.csv` value matched the simple static formula
+exactly on the exported maturity-date curve row:
+
+- `NPV = N * (S0 * P_for(T) - K * P_dom(T))`
+- with `S0` from the ORE market quote
+- and `P_for(T)`, `P_dom(T)` taken from the exported `curves.csv` row for the
+  trade maturity date
+
+The hybrid-model forward pricer was the wrong tool for this `t=0` price-only
+check and introduced an avoidable gap. Practical rule:
+
+- for `FxForward` `t=0` price parity, use the static discounted-forward formula
+- prefer the exact maturity-date curve row when present instead of interpolating
+  by `MaturityTime`
+- keep the hybrid model for pathwise FX exposure / XVA work, not for this static
+  price-only comparison
+
 ### `FX/RATE/...` is the spot format used in Example_9
 
 Do not assume FX spot quotes arrive only as `FX/EUR/USD`.

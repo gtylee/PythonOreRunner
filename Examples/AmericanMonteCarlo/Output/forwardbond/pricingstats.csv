@@ -1,0 +1,3 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+FwdBond,ForwardBond,2,80000,40000
+NoFwdContract,Bond,2,60000,30000

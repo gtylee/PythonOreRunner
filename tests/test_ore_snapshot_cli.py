@@ -29,6 +29,8 @@ REAL_CASE_XML = (
 )
 BOND_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "ore.xml"
 CALLABLE_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond.xml"
+FX_FORWARD_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_28" / "Input" / "ore_eur_base.xml"
+FX_OPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_E0.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -61,6 +63,56 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertTrue(result.report_markdown)
         self.assertTrue(result.comparison_rows)
         self.assertTrue(result.input_validation_rows)
+
+    def test_is_plain_vanilla_swap_trade_distinguishes_cross_currency_swap(self):
+        self.assertFalse(
+            ore_snapshot_cli._is_plain_vanilla_swap_trade(
+                TOOLS_DIR / "Examples" / "Legacy" / "Example_29" / "Input" / "ore.xml"
+            )
+        )
+        self.assertTrue(
+            ore_snapshot_cli._is_plain_vanilla_swap_trade(
+                TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_6" / "Input" / "ore.xml"
+            )
+        )
+
+    def test_price_only_fx_forward_runs_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(FX_FORWARD_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / "Example_28" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
+            self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_fx_option_runs_python_path_without_native_npv_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(FX_OPTION_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / "Example_13" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_option")
+            self.assertTrue(payload["diagnostics"]["missing_native_pricing_reference"])
+            self.assertEqual(payload["pricing"]["trade_type"], "FxOption")
+            self.assertIn("py_t0_npv", payload["pricing"])
+            self.assertNotIn("ore_t0_npv", payload["pricing"])
 
     def test_run_case_from_buffers_python_engine_returns_python_only_summary(self):
         input_files, output_files = self._real_case_buffers()

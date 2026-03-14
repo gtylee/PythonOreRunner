@@ -5,6 +5,7 @@ import concurrent.futures as cf
 import csv
 import io
 import json
+import math
 import re
 import shutil
 import sys
@@ -40,6 +41,7 @@ from py_ore_tools.irs_xva_utils import (
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
+from py_ore_tools.lgm_fx_xva_utils import FxForwardDef
 from py_ore_tools.lgm import make_ore_gaussian_rng, simulate_ba_measure, simulate_lgm_measure
 from py_ore_tools.ore_snapshot import (
     load_from_ore_xml,
@@ -414,6 +416,10 @@ def _build_minimal_pricing_payload(
     counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
     netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
     forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
+    if trade_type == "FxForward":
+        return _build_fx_forward_pricing_payload(ore_xml)
+    if trade_type == "FxOption":
+        return _build_fx_option_pricing_payload(ore_xml)
 
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
@@ -443,7 +449,7 @@ def _build_minimal_pricing_payload(
         )
         node_tenors = load_simulation_yield_tenors(str(simulation_xml))
     else:
-        if trade_type != "Swap":
+        if trade_type != "Swap" or not _is_plain_vanilla_swap_trade(ore_xml):
             raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
         npv_analytic = ore_root.find("./Analytics/Analytic[@type='npv']")
         domestic_ccy = (
@@ -567,6 +573,373 @@ def _build_minimal_pricing_payload(
         "using_expected_output": any(
             _classify_reference_dir(ore_xml, path.parent) == "expected_output"
             for path in (curves_csv, npv_csv, flows_csv)
+            if path is not None
+        ),
+    }
+
+
+def _load_market_quote_value(market_data_path: Path, asof_date: str, quote_id: str) -> float:
+    asof_compact = asof_date.replace("-", "")
+    asof_dash = asof_date
+    with open(market_data_path, encoding="utf-8") as handle:
+        for line in handle:
+            txt = line.strip()
+            if not txt or txt.startswith("#"):
+                continue
+            parts = txt.split()
+            if len(parts) < 3:
+                continue
+            if parts[0] not in {asof_compact, asof_dash}:
+                continue
+            if parts[1] == quote_id:
+                return float(parts[2])
+    raise ValueError(f"Quote '{quote_id}' not found for asof date {asof_date} in {market_data_path}")
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def _tenor_to_years(tenor: str) -> float:
+    text = str(tenor).strip().upper()
+    match = re.fullmatch(r"([0-9]+)([DWMY])", text)
+    if not match:
+        raise ValueError(f"Unsupported tenor '{tenor}'")
+    value = float(match.group(1))
+    unit = match.group(2)
+    if unit == "D":
+        return value / 365.0
+    if unit == "W":
+        return value * 7.0 / 365.0
+    if unit == "M":
+        return value / 12.0
+    if unit == "Y":
+        return value
+    raise ValueError(f"Unsupported tenor '{tenor}'")
+
+
+def _load_fx_atm_vol(
+    market_data_path: Path,
+    asof_date: str,
+    base_ccy: str,
+    quote_ccy: str,
+    maturity_time: float,
+) -> float:
+    asof_compact = asof_date.replace("-", "")
+    asof_dash = asof_date
+    prefix = f"FX_OPTION/RATE_LNVOL/{base_ccy}/{quote_ccy}/"
+    points: list[tuple[float, float]] = []
+    with open(market_data_path, encoding="utf-8") as handle:
+        for line in handle:
+            txt = line.strip()
+            if not txt or txt.startswith("#"):
+                continue
+            parts = txt.split()
+            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                continue
+            quote_id = parts[1]
+            if not quote_id.startswith(prefix) or not quote_id.endswith("/ATM"):
+                continue
+            tenor = quote_id[len(prefix) : -len("/ATM")]
+            try:
+                t = _tenor_to_years(tenor)
+                vol = float(parts[2])
+            except Exception:
+                continue
+            points.append((t, vol))
+    if not points:
+        raise ValueError(
+            f"No FX ATM volatility quotes found for {base_ccy}/{quote_ccy} in {market_data_path}"
+        )
+    points.sort(key=lambda item: item[0])
+    target = max(float(maturity_time), 0.0)
+    if target <= points[0][0]:
+        return float(points[0][1])
+    if target >= points[-1][0]:
+        return float(points[-1][1])
+    for (t0, v0), (t1, v1) in zip(points[:-1], points[1:]):
+        if t0 <= target <= t1:
+            if t1 <= t0:
+                return float(v1)
+            w = (target - t0) / (t1 - t0)
+            total_var0 = (float(v0) ** 2) * t0
+            total_var1 = (float(v1) ** 2) * t1
+            total_var = (1.0 - w) * total_var0 + w * total_var1
+            return math.sqrt(max(total_var / max(target, 1.0e-12), 0.0))
+    return float(points[-1][1])
+
+
+def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+    ore_xml_path = ore_xml.resolve()
+    ore_root = ET.parse(ore_xml_path).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    asof_date = setup_params.get("asofDate", "")
+    if not asof_date:
+        raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
+    base = ore_xml_path.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    market_data_path = (input_dir / setup_params.get("marketDataFile", "")).resolve()
+    todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+    portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    pricing_config_id = markets_params.get("pricing", "default")
+
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    if trade_type != "FxForward":
+        raise ValueError(f"Unsupported FX pricing trade type '{trade_type}' in {ore_xml_path}")
+    trade_node = None
+    for node in portfolio_root.findall("./Trade"):
+        if (node.attrib.get("id", "") or "").strip() == trade_id:
+            trade_node = node
+            break
+    if trade_node is None:
+        trade_node = portfolio_root.find(".//Trade")
+    if trade_node is None:
+        raise ValueError(f"Trade '{trade_id}' not found in {portfolio_xml}")
+    fx_data = trade_node.find("./FxForwardData")
+    if fx_data is None:
+        raise ValueError(f"FxForwardData missing for trade '{trade_id}' in {portfolio_xml}")
+    bought_ccy = (fx_data.findtext("./BoughtCurrency") or "").strip().upper()
+    sold_ccy = (fx_data.findtext("./SoldCurrency") or "").strip().upper()
+    bought_amount = float((fx_data.findtext("./BoughtAmount") or "0").strip())
+    sold_amount = float((fx_data.findtext("./SoldAmount") or "0").strip())
+    if not bought_ccy or not sold_ccy or bought_amount == 0.0:
+        raise ValueError(f"Incomplete FxForwardData for trade '{trade_id}' in {portfolio_xml}")
+    pair = f"{bought_ccy}/{sold_ccy}"
+    strike = sold_amount / bought_amount
+
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    mappings = ore_snapshot_mod._resolve_discount_columns_by_currency(tm_root, pricing_config_id)
+    if bought_ccy not in mappings or sold_ccy not in mappings:
+        raise ValueError(
+            f"todaysmarket.xml is missing discounting curve mappings for FX pair {pair} under config '{pricing_config_id}'"
+        )
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    if curves_csv is None:
+        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
+    if npv_csv is None:
+        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
+    curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+        str(curves_csv),
+        [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
+        asof_date=asof_date,
+        day_counter="A365F",
+    )
+    dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
+    dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
+    p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
+    p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+
+    fx_spots_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
+        tm_root,
+        pricing_config_id,
+        "FxSpotsId",
+        "FxSpots",
+    )
+    if not fx_spots_id:
+        fx_spots_id = "default"
+    fx_section = tm_root.find(f"./FxSpots[@id='{fx_spots_id}']")
+    fx_handle = None
+    if fx_section is not None:
+        spot_node = fx_section.find(f"./FxSpot[@pair='{bought_ccy}{sold_ccy}']")
+        if spot_node is not None:
+            fx_handle = (spot_node.text or "").strip()
+    if not fx_handle:
+        raise ValueError(f"todaysmarket.xml has no FxSpot pair='{bought_ccy}{sold_ccy}' for config '{pricing_config_id}'")
+    spot0 = _load_market_quote_value(market_data_path, asof_date, fx_handle.replace("FX/", "FX/RATE/"))
+
+    npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
+    maturity_time = float(npv_details["maturity_time"])
+    fx_def = FxForwardDef(
+        trade_id=trade_id,
+        pair=pair,
+        notional_base=bought_amount,
+        strike=strike,
+        maturity=maturity_time,
+    )
+    return {
+        "trade_id": trade_id,
+        "trade_type": trade_type,
+        "counterparty": ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id),
+        "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id),
+        "maturity_date": str(npv_details["maturity_date"]),
+        "maturity_time": maturity_time,
+        "ore_t0_npv": float(npv_details["npv"]),
+        "discount_column": mappings[sold_ccy]["source_column"],
+        "forward_column": mappings[bought_ccy]["source_column"],
+        "fx_def": fx_def,
+        "spot0": spot0,
+        "p0_dom": p0_dom,
+        "p0_for": p0_for,
+        "curve_dates_dom": list(dates_dom),
+        "curve_dfs_dom": [float(x) for x in dfs_dom],
+        "curve_dates_for": list(dates_for),
+        "curve_dfs_for": [float(x) for x in dfs_for],
+        "reference_output_dirs": sorted({str(curves_csv.parent), str(npv_csv.parent)}),
+        "using_expected_output": any(
+            _classify_reference_dir(ore_xml, path.parent) == "expected_output"
+            for path in (curves_csv, npv_csv)
+        ),
+    }
+
+
+def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+    ore_xml_path = ore_xml.resolve()
+    ore_root = ET.parse(ore_xml_path).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    asof_date = setup_params.get("asofDate", "")
+    if not asof_date:
+        raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
+    base = ore_xml_path.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    market_data_path = (input_dir / setup_params.get("marketDataFile", "")).resolve()
+    todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+    portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    pricing_config_id = markets_params.get("pricing", "default")
+
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    if trade_type != "FxOption":
+        raise ValueError(f"Unsupported FX pricing trade type '{trade_type}' in {ore_xml_path}")
+    trade_node = None
+    for node in portfolio_root.findall("./Trade"):
+        if (node.attrib.get("id", "") or "").strip() == trade_id:
+            trade_node = node
+            break
+    if trade_node is None:
+        trade_node = portfolio_root.find(".//Trade")
+    if trade_node is None:
+        raise ValueError(f"Trade '{trade_id}' not found in {portfolio_xml}")
+    fx_data = trade_node.find("./FxOptionData")
+    if fx_data is None:
+        raise ValueError(f"FxOptionData missing for trade '{trade_id}' in {portfolio_xml}")
+    option_data = fx_data.find("./OptionData")
+    if option_data is None:
+        raise ValueError(f"OptionData missing for trade '{trade_id}' in {portfolio_xml}")
+    style = (option_data.findtext("./Style") or "").strip().upper()
+    settlement = (option_data.findtext("./Settlement") or "").strip().upper()
+    if style != "EUROPEAN":
+        raise ValueError(f"Unsupported FxOption style '{style}' in {portfolio_xml}")
+    if settlement != "CASH":
+        raise ValueError(f"Unsupported FxOption settlement '{settlement}' in {portfolio_xml}")
+    bought_ccy = (fx_data.findtext("./BoughtCurrency") or "").strip().upper()
+    sold_ccy = (fx_data.findtext("./SoldCurrency") or "").strip().upper()
+    bought_amount = float((fx_data.findtext("./BoughtAmount") or "0").strip())
+    sold_amount = float((fx_data.findtext("./SoldAmount") or "0").strip())
+    exercise_date = (option_data.findtext("./ExerciseDates/ExerciseDate") or "").strip()
+    if not bought_ccy or not sold_ccy or bought_amount == 0.0 or not exercise_date:
+        raise ValueError(f"Incomplete FxOptionData for trade '{trade_id}' in {portfolio_xml}")
+    strike = sold_amount / bought_amount
+
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    mappings = ore_snapshot_mod._resolve_discount_columns_by_currency(tm_root, pricing_config_id)
+    if bought_ccy not in mappings or sold_ccy not in mappings:
+        raise ValueError(
+            f"todaysmarket.xml is missing discounting curve mappings for FX pair {bought_ccy}/{sold_ccy} under config '{pricing_config_id}'"
+        )
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is None:
+        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+        str(curves_csv),
+        [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
+        asof_date=asof_date,
+        day_counter="A365F",
+    )
+    dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
+    dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
+    p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
+    p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+
+    fx_spots_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
+        tm_root,
+        pricing_config_id,
+        "FxSpotsId",
+        "FxSpots",
+    )
+    if not fx_spots_id:
+        fx_spots_id = "default"
+    fx_section = tm_root.find(f"./FxSpots[@id='{fx_spots_id}']")
+    fx_handle = None
+    if fx_section is not None:
+        spot_node = fx_section.find(f"./FxSpot[@pair='{bought_ccy}{sold_ccy}']")
+        if spot_node is not None:
+            fx_handle = (spot_node.text or "").strip()
+    if not fx_handle:
+        raise ValueError(
+            f"todaysmarket.xml has no FxSpot pair='{bought_ccy}{sold_ccy}' for config '{pricing_config_id}'"
+        )
+    spot0 = _load_market_quote_value(market_data_path, asof_date, fx_handle.replace("FX/", "FX/RATE/"))
+    maturity_time = float(
+        ore_snapshot_mod._year_fraction_from_day_counter(
+            ore_snapshot_mod._normalize_date_input(asof_date),
+            ore_snapshot_mod._normalize_date_input(exercise_date),
+            "A365F",
+        )
+    )
+    atm_vol = _load_fx_atm_vol(
+        market_data_path=market_data_path,
+        asof_date=asof_date,
+        base_ccy=bought_ccy,
+        quote_ccy=sold_ccy,
+        maturity_time=maturity_time,
+    )
+    ore_t0_npv = None
+    if npv_csv is not None:
+        try:
+            ore_t0_npv = float(ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)["npv"])
+        except Exception:
+            ore_t0_npv = None
+    return {
+        "trade_id": trade_id,
+        "trade_type": trade_type,
+        "counterparty": ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id),
+        "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id),
+        "maturity_date": exercise_date,
+        "maturity_time": maturity_time,
+        "ore_t0_npv": ore_t0_npv,
+        "discount_column": mappings[sold_ccy]["source_column"],
+        "forward_column": mappings[bought_ccy]["source_column"],
+        "spot0": float(spot0),
+        "strike": float(strike),
+        "notional_base": float(bought_amount),
+        "bought_currency": bought_ccy,
+        "sold_currency": sold_ccy,
+        "option_type": (option_data.findtext("./OptionType") or "").strip().upper(),
+        "long_short": (option_data.findtext("./LongShort") or "").strip().upper(),
+        "atm_vol": float(atm_vol),
+        "p0_dom": p0_dom,
+        "p0_for": p0_for,
+        "curve_dates_dom": list(dates_dom),
+        "curve_dfs_dom": [float(x) for x in dfs_dom],
+        "curve_dates_for": list(dates_for),
+        "curve_dfs_for": [float(x) for x in dfs_for],
+        "reference_output_dirs": sorted({str(path.parent) for path in (curves_csv, npv_csv) if path is not None}),
+        "using_expected_output": any(
+            _classify_reference_dir(ore_xml, path.parent) == "expected_output"
+            for path in (curves_csv, npv_csv)
             if path is not None
         ),
     }
@@ -853,6 +1226,114 @@ def _compute_price_only_case(
             },
         }
     payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    if payload.get("trade_type") == "FxForward":
+        fx_def = payload["fx_def"]
+        maturity_date = str(payload["maturity_date"])
+        dom_by_date = {
+            str(d): float(df)
+            for d, df in zip(payload.get("curve_dates_dom", []), payload.get("curve_dfs_dom", []))
+        }
+        for_by_date = {
+            str(d): float(df)
+            for d, df in zip(payload.get("curve_dates_for", []), payload.get("curve_dfs_for", []))
+        }
+        df_dom = dom_by_date.get(maturity_date, float(payload["p0_dom"](float(fx_def.maturity))))
+        df_for = for_by_date.get(maturity_date, float(payload["p0_for"](float(fx_def.maturity))))
+        py_t0_npv = float(
+            fx_def.notional_base
+            * (
+                float(payload["spot0"]) * df_for
+                - float(fx_def.strike) * df_dom
+            )
+        )
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": payload["trade_type"],
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": {
+                "ore_t0_npv": float(payload["ore_t0_npv"]),
+                "py_t0_npv": py_t0_npv,
+                "t0_npv_abs_diff": abs(py_t0_npv - float(payload["ore_t0_npv"])),
+                "trade_type": payload["trade_type"],
+                "discount_column": payload["discount_column"],
+                "forward_column": payload["forward_column"],
+                "spot0": float(payload["spot0"]),
+                "fx_pair": payload["fx_def"].pair,
+                "fx_strike": float(payload["fx_def"].strike),
+            },
+            "diagnostics": {
+                "engine": "python_price_only",
+                "reference_output_dirs": payload.get("reference_output_dirs", []),
+                "using_expected_output": bool(payload.get("using_expected_output", False)),
+                "pricing_mode": "python_fx_forward",
+            },
+        }
+    if payload.get("trade_type") == "FxOption":
+        maturity_date = str(payload["maturity_date"])
+        dom_by_date = {
+            str(d): float(df)
+            for d, df in zip(payload.get("curve_dates_dom", []), payload.get("curve_dfs_dom", []))
+        }
+        for_by_date = {
+            str(d): float(df)
+            for d, df in zip(payload.get("curve_dates_for", []), payload.get("curve_dfs_for", []))
+        }
+        t = max(float(payload["maturity_time"]), 0.0)
+        df_dom = dom_by_date.get(maturity_date, float(payload["p0_dom"](t)))
+        df_for = for_by_date.get(maturity_date, float(payload["p0_for"](t)))
+        forward = float(payload["spot0"]) * df_for / max(df_dom, 1.0e-12)
+        strike = float(payload["strike"])
+        vol = max(float(payload["atm_vol"]), 0.0)
+        stddev = vol * math.sqrt(max(t, 0.0))
+        if stddev > 0.0 and forward > 0.0 and strike > 0.0:
+            d1 = (math.log(forward / strike) + 0.5 * stddev * stddev) / stddev
+            d2 = d1 - stddev
+            if str(payload["option_type"]).upper() == "CALL":
+                undiscounted = forward * _normal_cdf(d1) - strike * _normal_cdf(d2)
+            else:
+                undiscounted = strike * _normal_cdf(-d2) - forward * _normal_cdf(-d1)
+        else:
+            if str(payload["option_type"]).upper() == "CALL":
+                undiscounted = max(forward - strike, 0.0)
+            else:
+                undiscounted = max(strike - forward, 0.0)
+        sign = 1.0 if str(payload["long_short"]).upper() != "SHORT" else -1.0
+        py_t0_npv = sign * float(payload["notional_base"]) * df_dom * undiscounted
+        pricing = {
+            "py_t0_npv": py_t0_npv,
+            "trade_type": payload["trade_type"],
+            "discount_column": payload["discount_column"],
+            "forward_column": payload["forward_column"],
+            "spot0": float(payload["spot0"]),
+            "fx_pair": f"{payload['bought_currency']}/{payload['sold_currency']}",
+            "fx_strike": strike,
+            "fx_vol_atm": vol,
+            "option_type": payload["option_type"],
+        }
+        diagnostics = {
+            "engine": "python_price_only",
+            "reference_output_dirs": payload.get("reference_output_dirs", []),
+            "using_expected_output": bool(payload.get("using_expected_output", False)),
+            "pricing_mode": "python_fx_option",
+        }
+        if payload.get("ore_t0_npv") is not None:
+            pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(payload["ore_t0_npv"]))
+        else:
+            diagnostics["missing_native_pricing_reference"] = True
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": payload["trade_type"],
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": pricing,
+            "diagnostics": diagnostics,
+        }
     py_t0_npv = float(
         swap_npv_from_ore_legs_dual_curve(
             payload["model"],
@@ -1240,6 +1721,39 @@ def _first_trade_type(ore_xml: Path) -> str:
         return ore_snapshot_mod._get_trade_type(root, trade_id)
     except Exception:
         return ""
+
+
+def _is_plain_vanilla_swap_trade(ore_xml: Path) -> bool:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return False
+    try:
+        root = ET.parse(portfolio_xml).getroot()
+        trade_id = ore_snapshot_mod._get_first_trade_id(root)
+        if ore_snapshot_mod._get_trade_type(root, trade_id) != "Swap":
+            return False
+        legs = root.findall("./Trade/SwapData/LegData")
+        if not legs:
+            trade = root.find("./Trade") or root.find(".//Trade")
+            legs = [] if trade is None else trade.findall("./SwapData/LegData")
+        if len(legs) != 2:
+            return False
+        currencies = {(leg.findtext("./Currency") or "").strip() for leg in legs}
+        if len(currencies) != 1 or "" in currencies:
+            return False
+        leg_types = {(leg.findtext("./LegType") or "").strip() for leg in legs}
+        if leg_types != {"Fixed", "Floating"}:
+            return False
+        for leg in legs:
+            exchanges = leg.find("./Notionals/Exchanges")
+            if exchanges is None:
+                continue
+            for tag in ("NotionalInitialExchange", "NotionalFinalExchange", "NotionalAmortizingExchange"):
+                if (exchanges.findtext(f"./{tag}") or "").strip().lower() == "true":
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
@@ -2076,7 +2590,9 @@ def _run_case(
             )
     elif modes.price:
         try:
-            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond", "Swap"}:
+            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption"} or (
+                first_trade_type == "Swap" and _is_plain_vanilla_swap_trade(ore_xml)
+            ):
                 price_summary = _compute_price_only_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,

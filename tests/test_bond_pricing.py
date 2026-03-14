@@ -2,6 +2,7 @@ import sys
 import unittest
 from dataclasses import replace
 from datetime import date
+import csv
 import numpy as np
 from pathlib import Path
 
@@ -20,7 +21,10 @@ from py_ore_tools.bond_pricing import (
     _callable_price_amount,
     _build_lgm_model_for_callable,
     _fit_curve_for_currency,
+    _load_callable_option_curve_from_reference_output,
+    _load_curve_from_reference_output,
     _load_security_spread,
+    _parse_reference_grid_dates,
     _price_callable_bond_lgm,
     build_bond_scenario_grid_numpy,
     compile_bond_trade,
@@ -58,8 +62,10 @@ CALLABLE_REFERENCE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "reference_
 CALLABLE_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricingengine_callablebond.xml"
 CALLABLE_SIM = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "simulation_callablebond.xml"
 CALLABLE_LGM_GRID_ORE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond_lgm_grid_npv_only.xml"
+CALLABLE_LGM_GRID_CURVES_ORE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond_lgm_grid_curves.xml"
 CALLABLE_LGM_GRID_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricingengine_callablebond_lgm_grid.xml"
 CALLABLE_LGM_GRID_NPV = TOOLS_DIR / "Examples" / "Exposure" / "Output" / "callable_bond_lgm_grid_npv_only" / "npv.csv"
+CALLABLE_LGM_GRID_ADDITIONAL = TOOLS_DIR / "Examples" / "Exposure" / "Output" / "callable_bond_lgm_grid_npv_additional" / "additional_results.csv"
 EXAMPLE_SHARED_MARKET_FULL = TOOLS_DIR / "Examples" / "Input" / "market_20160205.txt"
 
 
@@ -68,6 +74,33 @@ def _flat_curve(rate: float):
 
 
 class TestBondPricing(unittest.TestCase):
+    def _load_native_callable_event_rows(self, trade_id: str):
+        rows = []
+        with open(CALLABLE_LGM_GRID_ADDITIONAL, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                if row.get("#TradeId") != trade_id:
+                    continue
+                result_id = row.get("ResultId", "")
+                if not result_id.startswith("event_") or result_id.endswith("!"):
+                    continue
+                payload = row.get("ResultValue", "")
+                cols = [c.strip() for c in payload.split("|")[1:-1]]
+                if len(cols) != 11:
+                    continue
+                rows.append(
+                    {
+                        "time": float(cols[0]) if cols[0] else 0.0,
+                        "date": cols[1],
+                        "notional": float(cols[2]) if cols[2] else 0.0,
+                        "accrual": float(cols[3]) if cols[3] else 0.0,
+                        "flow": float(cols[4]) if cols[4] else 0.0,
+                        "call": float(cols[5].replace("@", "")) if cols[5] else None,
+                        "put": float(cols[6].replace("@", "")) if cols[6] else None,
+                    }
+                )
+        return rows
+
     def _price_callable_variant(self, trade_id: str, *, spec_override=None, engine_override=None) -> dict:
         spec, engine = load_callable_bond_trade_spec(
             portfolio_xml=CALLABLE_PORTFOLIO,
@@ -106,6 +139,7 @@ class TestBondPricing(unittest.TestCase):
             recovery_rate=recovery_rate,
             security_spread=security_spread,
             model=model,
+            include_trace=True,
         )
 
     def _price_example18(self, trade_id: str) -> tuple[dict, float]:
@@ -466,12 +500,81 @@ class TestBondPricing(unittest.TestCase):
         self.assertGreater(float(base["py_npv"]), float(dense["py_npv"]))
         self.assertLess(abs(float(coarse["py_npv"]) - float(dense["py_npv"])), 5.0e4)
 
+    def test_put_call_trace_aligns_with_native_event_schedule(self):
+        out = self._price_callable_variant("PutCallBondTrade")
+        trace_rows = list(out["trace_rows"])
+        native_rows = self._load_native_callable_event_rows("PutCallBondTrade")
+        native_ex_rows = [r for r in native_rows if r["call"] is not None or r["put"] is not None]
+        py_rows = []
+        for ore_row in native_ex_rows:
+            match = min(trace_rows, key=lambda r: abs(r.time - ore_row["time"]))
+            py_rows.append(match)
+        self.assertEqual(len(py_rows), len(native_ex_rows))
+        for py_row, ore_row in zip(py_rows, native_ex_rows):
+            with self.subTest(time=ore_row["time"]):
+                self.assertAlmostEqual(py_row.time, ore_row["time"], delta=2.0e-3)
+                self.assertAlmostEqual(py_row.notional / 1.0e8, ore_row["notional"], delta=1.0e-10)
+                self.assertAlmostEqual(py_row.accrual / 1.0e8, ore_row["accrual"], delta=1.0e-3)
+                if ore_row["call"] is None:
+                    self.assertIsNone(py_row.call_price)
+                else:
+                    self.assertAlmostEqual(float(py_row.call_price), ore_row["call"], delta=1.0e-12)
+                if ore_row["put"] is None:
+                    self.assertIsNone(py_row.put_price)
+                else:
+                    self.assertAlmostEqual(float(py_row.put_price), ore_row["put"], delta=1.0e-12)
+
+    def test_reference_calibration_grid_uses_ore_dategrid_following_adjustment(self):
+        dates = _parse_reference_grid_dates(date(2016, 2, 5), date(2024, 2, 26), "400,3M")
+        self.assertGreaterEqual(len(dates), 4)
+        self.assertEqual(dates[:4], [date(2016, 5, 5), date(2016, 8, 5), date(2016, 11, 7), date(2017, 2, 6)])
+
+    def test_callable_reference_curve_loader_matches_native_event_refdsc(self):
+        curve_info = _load_curve_from_reference_output(
+            CALLABLE_LGM_GRID_CURVES_ORE_XML,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            curve_id="EUR-EURIBOR-3M",
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        self.assertIsNotNone(curve_info)
+        curve, column, curves_csv = curve_info
+        self.assertEqual(column, "EUR-EURIBOR-3M")
+        self.assertTrue(Path(curves_csv).exists())
+
+        native_rows = self._load_native_callable_event_rows("PutCallBondTrade")
+        native_ex_rows = [r for r in native_rows if r["call"] is not None or r["put"] is not None]
+        expected = {
+            4.72329: 1.00058,
+            5.06027: 0.99924,
+            6.72329: 0.987045,
+        }
+        for row in native_ex_rows:
+            key = round(float(row["time"]), 5)
+            if key not in expected:
+                continue
+            with self.subTest(time=key):
+                self.assertAlmostEqual(float(curve(float(row["time"]))), expected[key], delta=2.0e-3)
+
+    def test_callable_option_curve_loader_finds_sibling_curves_output(self):
+        curve_info = _load_callable_option_curve_from_reference_output(
+            CALLABLE_LGM_GRID_ORE_XML,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            curve_id="EUR-EURIBOR-3M",
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        self.assertIsNotNone(curve_info)
+        _, column, curves_csv = curve_info
+        self.assertEqual(column, "EUR-EURIBOR-3M")
+        self.assertIn("callable_bond_lgm_grid_curves", str(curves_csv))
+
     def test_callable_lgm_grid_parity_against_native_ore_npv(self):
         tolerances = {
-            "CallableBondTrade": 3.2e6,
+            "CallableBondTrade": 4.0e5,
             "CallableBondNoCall": 5.1e5,
-            "CallableBondCertainCall": 1.4e6,
-            "PutCallBondTrade": 2.15e6,
+            "CallableBondCertainCall": 3.0e5,
+            "PutCallBondTrade": 3.0e5,
         }
         for trade_id, tol in tolerances.items():
             with self.subTest(trade_id=trade_id):
@@ -487,6 +590,7 @@ class TestBondPricing(unittest.TestCase):
                     pricingengine_path=CALLABLE_LGM_GRID_PE,
                     flows_csv=None,
                 )
+                self.assertEqual(out.get("callable_option_reference_curve_column"), "EUR-EURIBOR-3M")
                 ore_npv = _load_ore_npv_details(CALLABLE_LGM_GRID_NPV, trade_id=trade_id)["npv"]
                 self.assertLess(abs(float(out["py_npv"]) - float(ore_npv)), tol)
 

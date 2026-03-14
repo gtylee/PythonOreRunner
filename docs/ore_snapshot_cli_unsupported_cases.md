@@ -13,10 +13,18 @@ Important distinction:
 ## Current Live Count
 
 Source:
-- `/tmp/ore_snapshot_cli_live_report_rebucketed3/live_summary.json`
+- `/tmp/ore_snapshot_cli_live_report_after_reclassify/live_summary.json`
 
 Current bucket:
-- `unsupported_python_snapshot_fallback`: `49`
+- `unsupported_python_snapshot_fallback`: `68`
+
+Important distinction:
+- this file is only about cases that pass today because the CLI falls back away
+  from native Python product/model handling
+- it is not about `expected_output_fallback_pass`
+- `expected_output_fallback_pass` means the case already works via explicit
+  `ExpectedOutput` fallback and belongs in
+  `docs/ore_snapshot_cli_remaining_buckets.md`, not here
 
 ## Product / Model Families Still Missing
 
@@ -94,6 +102,8 @@ native model support, not error handling.
 
 The following are not product-support tasks and should stay out of this file:
 - cases that already pass against `ExpectedOutput`
+- cases in `expected_output_fallback_pass`, which are already working because
+  the explicit fallback is in place
 - cases that only need native `Output/` artifacts
 - cases that only need a simulation analytic added to the example XML
 - report bucketing / classification issues

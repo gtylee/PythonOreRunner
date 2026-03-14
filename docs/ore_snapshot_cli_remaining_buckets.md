@@ -11,15 +11,23 @@ Important distinction:
 ## Current Live Report
 
 Source:
-- `/tmp/ore_snapshot_cli_live_report_rebucketed3/live_summary.json`
+- `/tmp/ore_snapshot_cli_live_report_after_reclassify/live_summary.json`
 
 Current totals:
 - Total scanned: `347`
-- `clean_pass`: `65`
-- `expected_output_fallback_pass`: `164`
+- `clean_pass`: `70`
+- `expected_output_fallback_pass`: `167`
 - `no_reference_artifacts_pass`: `20`
-- `price_only_reference_fallback`: `49`
-- `unsupported_python_snapshot_fallback`: `49`
+- `price_only_reference_fallback`: `15`
+- `unsupported_python_snapshot_fallback`: `68`
+
+Important distinction:
+- `clean_pass` means the case passes without needing the explicit `ExpectedOutput`
+  fallback classification
+- `expected_output_fallback_pass` means the case passes because the CLI
+  explicitly fell back to vendored `ExpectedOutput`
+- that bucket is working, but it is not the same as native case-local `Output/`
+  parity
 
 There are no remaining hard failures or parity-threshold failures in the shipped
 example set.
@@ -27,44 +35,47 @@ example set.
 ## Bucket: `price_only_reference_fallback`
 
 Count:
-- `49`
+- `15`
 
 Meaning:
 - the case runs in price mode only
-- the example XML does not have an active simulation analytic
-- the CLI therefore cannot produce Python-side compare/XVA output
+- the example still lacks a safe local Python pricing route
+- this is now mostly cases with no `simulation.xml`, or cases that are not true
+  vanilla IRS-style price-only targets
 - it falls back to reference price-only mode and emits `ore_t0_npv` only
 
 Representative cases:
 - `Examples/Academy/FC003_Reporting_Currency/Input/ore.xml`
 - `Examples/Academy/TA001_Equity_Option/Input/ore.xml`
-- `Examples/Academy/TA002_IR_Swap/Input/ore.xml`
-- `Examples/Legacy/Example_2/Input/ore_payer_swaption.xml`
-- `Examples/Legacy/Example_17/Input/ore_capfloor.xml`
-- `Examples/Legacy/Example_63/Input/ore_parstressconversion.xml`
+- `Examples/Legacy/Example_19/Input/ore_flat.xml`
+- `Examples/Legacy/Example_20/Input/ore.xml`
+- `Examples/Legacy/Example_28/Input/ore_eur_base.xml`
+- `Examples/Legacy/Example_51/Input/ore.xml`
 
 What would need to be added to eliminate this bucket:
-1. Add a simulation analytic to the example XMLs that only request price-style
-   reports today.
-2. Add or point to a valid `simulationConfigFile` for those cases.
-3. Ensure the case also has the minimum native outputs needed by the Python
-   compare path:
-   - `curves.csv`
-   - `npv.csv`
-   - `flows.csv` for swap-style cases where parity depends on ORE cashflows
-4. Only do this for families where Python compare mode is actually meaningful.
-   Some of these are intentionally static/reporting examples where price-only
-   reference mode may already be the right end state.
+1. For the one real vanilla swap holdout, add a local curve-build fallback for
+   price-only mode when `ExpectedOutput` has `npv.csv` and `flows.csv` but no
+   `curves.csv`:
+   - `Examples/Legacy/Example_51/Input/ore.xml`
+2. Reclassify the rest out of this bucket, because they are not meaningful
+   vanilla swap price-only targets:
+   - equity options
+   - swaptions
+   - FX forwards
+   - credit/structured products
+   - non-vanilla swaps with exchanges or cross-currency structure
+3. If native Python pricing is actually desired for those families, that work
+   belongs in the unsupported-product backlog, not here.
 
 What not to do:
-- do not just reclassify this bucket away
-- if the goal is true Python-side pricing parity here, the examples need a real
-  simulation setup, not another fallback
+- do not describe `expected_output_fallback_pass` as “native parity”
+- do not keep broadening the synthetic vanilla swap path to cover non-vanilla
+  products; those should move to unsupported/reference-only buckets instead
 
 ## Bucket: `unsupported_python_snapshot_fallback`
 
 Count:
-- `49`
+- `68`
 
 Meaning:
 - the case passes via ORE reference fallback
@@ -95,14 +106,15 @@ Where the detailed product backlog now lives:
 ## Bucket: `expected_output_fallback_pass`
 
 Count:
-- `164`
+- `167`
 
 Meaning:
 - the case already passes
-- but it is passing against vendored `ExpectedOutput` instead of native
-  case-local `Output`
-- the report treats this separately because the parity baseline exists, but the
-  artifacts are not native-run outputs from this checkout
+- and it passes because the CLI explicitly fell back to vendored
+  `ExpectedOutput`
+- this is a working fallback bucket, not a failure bucket
+- it is still distinct from native case-local `Output` parity, because the
+  comparison baseline did not come from `Output/` in this checkout
 
 Representative families:
 - `Examples/CurveBuilding/Input/ore_centralbank_*.xml`
@@ -124,7 +136,7 @@ Required outputs depend on the mode, but typically:
 - `xva.csv`
 - trade/netting exposure CSVs where XVA compare is expected
 
-This is not a Python-modeling bug bucket. It is an artifact-provenance bucket.
+This is not a Python-modeling bug bucket. It is a fallback/provenance bucket.
 
 ## Bucket: `no_reference_artifacts_pass`
 
@@ -174,10 +186,12 @@ Important note:
 
 If continuing cleanup, the next honest order is:
 1. `price_only_reference_fallback`
-   - requires real simulation setup additions to the examples
+   - now mostly requires one plain-swap fallback improvement plus reclassification
+     of non-vanilla products
 2. `no_reference_artifacts_pass`
    - requires generating or vendoring reference artifacts
 3. `expected_output_fallback_pass`
-   - only if native-output provenance matters
+   - only if native-output provenance matters; these already pass via explicit
+     fallback
 4. `unsupported_python_snapshot_fallback`
    - product/model implementation work, not report cleanup
