@@ -1898,13 +1898,21 @@ def load_from_ore_xml(
         or sim_root.findtext("./CrossAssetModel/DomesticCcy")
         or "EUR"
     ).strip()
-    measure = (sim_root.findtext("./Measure") or "LGM").strip()
+    measure = (
+        sim_root.findtext("./Measure")
+        or sim_root.findtext("./CrossAssetModel/Measure")
+        or "LGM"
+    ).strip()
     model_day_counter = _normalize_day_counter_name(
-        (sim_root.findtext("./DayCounter") or "A365F").strip()
+        (
+            sim_root.findtext("./DayCounter")
+            or sim_root.findtext("./Parameters/DayCounter")
+            or "A365F"
+        ).strip()
     )
     report_day_counter = "ActualActual(ISDA)"
-    seed = int((sim_root.findtext("./Seed") or "42").strip())
-    n_samples = int((sim_root.findtext("./Samples") or "1000").strip())
+    seed = int((sim_root.findtext("./Seed") or sim_root.findtext("./Parameters/Seed") or "42").strip())
+    n_samples = int((sim_root.findtext("./Samples") or sim_root.findtext("./Parameters/Samples") or "1000").strip())
     node_tenors = load_simulation_yield_tenors(str(simulation_xml))
 
     # ------------------------------------------------------------------

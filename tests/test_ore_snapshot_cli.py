@@ -28,6 +28,7 @@ REAL_CASE_XML = (
     / "ore.xml"
 )
 BOND_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "ore.xml"
+CALLABLE_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -833,6 +834,36 @@ class TestOreSnapshotCli(unittest.TestCase):
             with open(Path(tmp) / "npv.csv", newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
         self.assertEqual(rows[0]["TradeType"], "Bond")
+
+    def test_callable_bond_price_only_case_uses_python_dispatch(self):
+        fake_result = {
+            "trade_type": "CallableBond",
+            "py_npv": 101.25,
+            "reference_curve_id": "EUR-EURIBOR-3M",
+            "income_curve_id": "EUR-EURIBOR-3M",
+            "credit_curve_id": "CPTY_A",
+            "security_id": "SECURITY_CALL",
+            "security_spread": 0.0,
+            "settlement_dirty": True,
+            "spread_on_income_curve": True,
+            "call_schedule_count": 3,
+            "put_schedule_count": 0,
+            "exercise_time_steps_per_year": 24,
+            "callable_model_family": "LGM",
+            "callable_engine_variant": "Grid",
+            "stripped_bond_npv": 103.0,
+            "embedded_option_value": -1.75,
+        }
+        fake_npv = {"npv": 100.0, "maturity_date": "2024-02-26", "maturity_time": 8.0}
+        with patch("py_ore_tools.ore_snapshot_cli.price_bond_trade", return_value=fake_result):
+            with patch("py_ore_tools.ore_snapshot._load_ore_npv_details", return_value=fake_npv):
+                with patch("py_ore_tools.ore_snapshot_cli._find_reference_output_file", return_value=CALLABLE_CASE_XML):
+                    payload = ore_snapshot_cli._compute_price_only_case(CALLABLE_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_type"], "CallableBond")
+        self.assertEqual(payload["pricing"]["bond_pricing_mode"], "python_callable_lgm")
+        self.assertEqual(payload["diagnostics"]["bond_pricing_mode"], "python_callable_lgm")
+        self.assertEqual(payload["diagnostics"]["call_schedule_count"], 3)
+        self.assertEqual(payload["diagnostics"]["callable_model_family"], "LGM")
 
 
 if __name__ == "__main__":

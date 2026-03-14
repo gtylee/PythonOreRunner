@@ -2,7 +2,7 @@
 
 This module is intentionally not a generic bond library. It is a narrow port of
 the ORE C++ price-only path used by the snapshot CLI when the first trade is a
-`Bond` or `ForwardBond`.
+`Bond`, `ForwardBond`, or `CallableBond`.
 
 Source mapping to ORE C++:
 - `ored/portfolio/bond.cpp`
@@ -18,6 +18,12 @@ Source mapping to ORE C++:
 - `qle/pricingengines/discountingforwardbondengine.cpp`
   Mirrors the forward-bond payoff shape: underlying forward bond value minus
   strike, discounted to the effective settlement date, with optional premium.
+- `ored/portfolio/callablebond.cpp`
+  Mirrors how ORE merges `CallableBondData` with reference data, reuses the
+  underlying bond construction, and builds call / put schedules.
+- `qle/pricingengines/numericlgmcallablebondengine.cpp`
+  Mirrors the deterministic 1D LGM rollback used for callable bond pricing,
+  including American exercise expansion and clean/dirty call-price handling.
 
 The implementation here is deliberately pragmatic:
 - it focuses on price-only parity for `Bond` / `ForwardBond`
@@ -32,6 +38,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+import math
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
@@ -46,8 +53,11 @@ except Exception:  # pragma: no cover - torch is optional in some environments
 from py_ore_tools.irs_xva_utils import (
     _parse_yyyymmdd,
     load_ore_default_curve_inputs,
+    parse_lgm_params_from_simulation_xml,
     survival_probability_from_hazard,
 )
+from py_ore_tools.lgm import LGM1F, LGMParams
+from py_ore_tools.lgm_ir_options import _convolution_nodes_and_weights, _convolution_rollback
 from py_ore_tools.ore_snapshot import (
     build_discount_curve_from_discount_pairs,
     fit_discount_curves_from_ore_market,
@@ -234,6 +244,50 @@ class BondTradeSpec:
     settlement_dirty: bool = True
     compensation_payment: float = 0.0
     compensation_payment_date: date | None = None
+
+
+@dataclass(frozen=True)
+class CallableExerciseSpec:
+    exercise_date: date
+    exercise_type: str
+    price: float
+    price_type: str
+    include_accrual: bool
+
+
+@dataclass(frozen=True)
+class CallableBondEngineSpec:
+    model_family: str = "LGM"
+    engine_variant: str = "Grid"
+    spread_on_income_curve: bool = True
+    exercise_time_steps_per_year: int = 24
+    grid_sy: float = 3.0
+    grid_ny: int = 10
+    grid_sx: float = 6.0
+    grid_nx: int = 10
+    fd_max_time: float = 50.0
+    fd_state_grid_points: int = 121
+    fd_time_steps_per_year: int = 24
+    fd_mesher_epsilon: float = 1.0e-4
+    fd_scheme: str = "Douglas"
+    generate_additional_results: bool = True
+
+
+@dataclass(frozen=True)
+class CallableBondTradeSpec:
+    trade_id: str
+    currency: str
+    security_id: str
+    credit_curve_id: str
+    reference_curve_id: str
+    income_curve_id: str
+    settlement_days: int
+    calendar: str
+    issue_date: date
+    bond_notional: float
+    bond: BondTradeSpec
+    call_data: tuple[CallableExerciseSpec, ...]
+    put_data: tuple[CallableExerciseSpec, ...]
 
 
 @dataclass(frozen=True)
@@ -594,6 +648,24 @@ def _resolve_trade(root: ET.Element, trade_id: str) -> ET.Element:
     raise ValueError(f"trade '{trade_id}' not found in portfolio")
 
 
+def _scale_cashflows(cashflows: tuple[BondCashflow, ...], scale: float) -> tuple[BondCashflow, ...]:
+    if abs(float(scale) - 1.0) <= 1.0e-16:
+        return cashflows
+    out: list[BondCashflow] = []
+    for cf in cashflows:
+        out.append(
+            BondCashflow(
+                pay_date=cf.pay_date,
+                amount=float(cf.amount) * float(scale),
+                flow_type=cf.flow_type,
+                accrual_start=cf.accrual_start,
+                accrual_end=cf.accrual_end,
+                nominal=None if cf.nominal is None else float(cf.nominal) * float(scale),
+            )
+        )
+    return tuple(out)
+
+
 def _merge_reference_data(bond_node: ET.Element, reference_data_path: Path | None) -> ET.Element:
     # ORE's `Bond::build()` first populates the inline `BondData` from reference
     # data when a security id is present. We mimic the minimal part needed for
@@ -613,6 +685,131 @@ def _merge_reference_data(bond_node: ET.Element, reference_data_path: Path | Non
         elif child.tag == "LegData" and merged.find("./LegData") is None:
             merged.append(ET.fromstring(ET.tostring(child, encoding="unicode")))
     return merged
+
+
+def _merge_callable_reference_data(callable_node: ET.Element, reference_data_path: Path | None) -> ET.Element:
+    merged = ET.fromstring(ET.tostring(callable_node, encoding="unicode"))
+    security_id = (merged.findtext("./BondData/SecurityId") or "").strip()
+    if not security_id or reference_data_path is None or not reference_data_path.exists():
+        return merged
+    rd_root = ET.parse(reference_data_path).getroot()
+    ref_node = rd_root.find(f"./ReferenceDatum[@id='{security_id}']/CallableBondReferenceData")
+    if ref_node is None:
+        return merged
+    bond_node = merged.find("./BondData")
+    ref_bond = ref_node.find("./BondData")
+    if bond_node is None and ref_bond is not None:
+        merged.insert(0, ET.fromstring(ET.tostring(ref_bond, encoding="unicode")))
+    elif bond_node is not None and ref_bond is not None:
+        bond_merged = _merge_reference_data(bond_node, None)
+        for child in ref_bond:
+            if bond_merged.find(child.tag) is None:
+                bond_merged.append(ET.fromstring(ET.tostring(child, encoding="unicode")))
+            elif child.tag == "LegData" and bond_merged.find("./LegData") is None:
+                bond_merged.append(ET.fromstring(ET.tostring(child, encoding="unicode")))
+        merged.remove(bond_node)
+        merged.insert(0, bond_merged)
+    for tag in ("CallData", "PutData"):
+        if merged.find(f"./{tag}") is None and ref_node.find(f"./{tag}") is not None:
+            merged.append(ET.fromstring(ET.tostring(ref_node.find(f"./{tag}"), encoding="unicode")))
+    return merged
+
+
+def _parse_scheduled_block(node: ET.Element | None, container_tag: str, item_tag: str, parser) -> tuple[list[object], list[date | None]]:
+    if node is None:
+        return [], []
+    parent = node.find(f"./{container_tag}")
+    if parent is None:
+        return [], []
+    items = parent.findall(f"./{item_tag}")
+    values: list[object] = []
+    starts: list[date | None] = []
+    for item in items:
+        txt = (item.text or "").strip()
+        if not txt:
+            continue
+        values.append(parser(txt))
+        start_txt = (item.attrib.get("startDate", "") or "").strip()
+        starts.append(_parse_any_date(start_txt) if start_txt else None)
+    if not values and (parent.text or "").strip():
+        values = [parser((parent.text or "").strip())]
+        starts = [None]
+    return values, starts
+
+
+def _parse_call_schedule_dates(node: ET.Element) -> list[date]:
+    dates_parent = node.find("./ScheduleData/Dates/Dates")
+    if dates_parent is not None:
+        dates = [_parse_any_date((n.text or "").strip()) for n in dates_parent.findall("./Date") if (n.text or "").strip()]
+        if dates:
+            return dates
+    rules = node.find("./ScheduleData/Rules")
+    if rules is None:
+        raise ValueError("callable bond call/put data is missing schedule dates")
+    start = _parse_any_date(rules.findtext("./StartDate") or "")
+    end = _parse_any_date(rules.findtext("./EndDate") or "")
+    tenor = (rules.findtext("./Tenor") or "").strip()
+    calendar = (rules.findtext("./Calendar") or "TARGET").strip()
+    convention = (rules.findtext("./Convention") or "F").strip()
+    term_convention = (rules.findtext("./TermConvention") or convention).strip()
+    rule = (rules.findtext("./Rule") or "Forward").strip()
+    return _build_schedule(start, end, tenor, calendar, convention, term_convention, rule)
+
+
+def _expand_scheduled_values(values: list[object], starts: list[date | None], schedule_dates: list[date], default):
+    if not schedule_dates:
+        return []
+    if not values:
+        return [default for _ in schedule_dates]
+    if starts and any(s is not None for s in starts):
+        out: list[object] = []
+        schedule_plus = schedule_dates + [date.max]
+        normalized_starts = [date.min if s is None else s for s in starts]
+        for d in schedule_plus[:-1]:
+            idx = 0
+            for i, s in enumerate(normalized_starts):
+                if s <= d:
+                    idx = i
+            out.append(values[idx])
+        return out
+    if len(values) == 1:
+        return [values[0] for _ in schedule_dates]
+    if len(values) == len(schedule_dates):
+        return list(values)
+    raise ValueError("callable bond schedule block length does not match exercise dates")
+
+
+def _parse_callability_data(node: ET.Element | None) -> tuple[CallableExerciseSpec, ...]:
+    if node is None or not list(node):
+        return ()
+    schedule_dates = _parse_call_schedule_dates(node)
+    styles, style_starts = _parse_scheduled_block(node, "Styles", "Style", lambda x: x.strip())
+    prices, price_starts = _parse_scheduled_block(node, "Prices", "Price", lambda x: float(x))
+    price_types, price_type_starts = _parse_scheduled_block(node, "PriceTypes", "PriceType", lambda x: x.strip())
+    include_accruals, include_starts = _parse_scheduled_block(node, "IncludeAccruals", "IncludeAccrual", lambda x: _parse_bool(x, True))
+    styles_n = _expand_scheduled_values(styles, style_starts, schedule_dates, "Bermudan")
+    prices_n = _expand_scheduled_values(prices, price_starts, schedule_dates, 1.0)
+    price_types_n = _expand_scheduled_values(price_types, price_type_starts, schedule_dates, "Clean")
+    include_n = _expand_scheduled_values(include_accruals, include_starts, schedule_dates, True)
+    out: list[CallableExerciseSpec] = []
+    for i, d in enumerate(schedule_dates):
+        style = str(styles_n[i]).strip()
+        if style == "American":
+            exercise_type = "FromThisDateOn" if i < len(schedule_dates) - 1 else "OnThisDate"
+        elif style == "Bermudan":
+            exercise_type = "OnThisDate"
+        else:
+            raise ValueError(f"unsupported callable bond exercise style '{style}'")
+        out.append(
+            CallableExerciseSpec(
+                exercise_date=d,
+                exercise_type=exercise_type,
+                price=float(prices_n[i]),
+                price_type=str(price_types_n[i]).strip() or "Clean",
+                include_accrual=bool(include_n[i]),
+            )
+        )
+    return tuple(out)
 
 
 def _parse_fixed_leg_cashflows(leg_node: ET.Element, *, sign: float) -> tuple[str, str, tuple[BondCashflow, ...]]:
@@ -715,6 +912,51 @@ def _load_engine_spec(pricingengine_path: Path | None, trade_type: str) -> BondE
     )
 
 
+def _load_callable_engine_spec(pricingengine_path: Path | None) -> CallableBondEngineSpec:
+    if pricingengine_path is None or not pricingengine_path.exists():
+        return CallableBondEngineSpec()
+    root = ET.parse(pricingengine_path).getroot()
+    product = root.find("./Product[@type='CallableBond']")
+    if product is None:
+        return CallableBondEngineSpec()
+    model = (product.findtext("./Model") or "LGM").strip()
+    engine = (product.findtext("./Engine") or "Grid").strip()
+    model_params = {
+        (n.attrib.get("name", "") or "").strip(): (n.text or "").strip()
+        for n in product.findall("./ModelParameters/Parameter")
+    }
+    engine_params = {
+        (n.attrib.get("name", "") or "").strip(): (n.text or "").strip()
+        for n in product.findall("./EngineParameters/Parameter")
+    }
+    variant = engine if engine in {"Grid", "FD"} else "Grid"
+    state_grid_points = int((engine_params.get("StateGridPoints") or "121").strip() or "121")
+    if state_grid_points % 2 == 0:
+        state_grid_points += 1
+    return CallableBondEngineSpec(
+        model_family="LGM" if model in {"LGM", "CrossAssetModel"} else model,
+        engine_variant=variant,
+        spread_on_income_curve=_parse_bool(engine_params.get("SpreadOnIncomeCurve"), True),
+        exercise_time_steps_per_year=max(int((model_params.get("ExerciseTimeStepsPerYear") or "24").strip() or "24"), 0),
+        grid_sy=float((engine_params.get("sy") or "3.0").strip() or "3.0"),
+        grid_ny=max(int((engine_params.get("ny") or "10").strip() or "10"), 1),
+        grid_sx=float((engine_params.get("sx") or "6.0").strip() or "6.0"),
+        grid_nx=max(int((engine_params.get("nx") or "10").strip() or "10"), 1),
+        fd_max_time=float((engine_params.get("MaxTime") or "50.0").strip() or "50.0"),
+        fd_state_grid_points=state_grid_points,
+        fd_time_steps_per_year=max(int((engine_params.get("TimeStepsPerYear") or "24").strip() or "24"), 1),
+        fd_mesher_epsilon=float((engine_params.get("MesherEpsilon") or "1e-4").strip() or "1e-4"),
+        fd_scheme=(engine_params.get("Scheme") or "Douglas").strip() or "Douglas",
+        generate_additional_results=_parse_bool(
+            {
+                (n.attrib.get("name", "") or "").strip(): (n.text or "").strip()
+                for n in root.findall("./GlobalParameters/Parameter")
+            }.get("GenerateAdditionalResults"),
+            True,
+        ),
+    )
+
+
 def load_bond_trade_spec(
     *,
     portfolio_xml: Path,
@@ -785,6 +1027,63 @@ def load_bond_trade_spec(
             compensation_payment_date=_parse_any_date(fwd_node.findtext("./PremiumData/Date") or settlement.findtext("./ForwardMaturityDate") or ""),
         )
     return spec, _load_engine_spec(pricingengine_path, trade_type)
+
+
+def load_callable_bond_trade_spec(
+    *,
+    portfolio_xml: Path,
+    trade_id: str,
+    reference_data_path: Path | None,
+    pricingengine_path: Path | None,
+) -> tuple[CallableBondTradeSpec, CallableBondEngineSpec]:
+    root = ET.parse(portfolio_xml).getroot()
+    trade = _resolve_trade(root, trade_id)
+    trade_type = (trade.findtext("./TradeType") or "").strip()
+    if trade_type != "CallableBond":
+        raise ValueError(f"unsupported callable trade type '{trade_type}'")
+    callable_node = trade.find("./CallableBondData")
+    if callable_node is None:
+        raise ValueError("CallableBond missing CallableBondData")
+    merged = _merge_callable_reference_data(callable_node, reference_data_path)
+    bond_node = merged.find("./BondData")
+    if bond_node is None:
+        raise ValueError("CallableBondData missing BondData")
+    payer = _parse_bool(bond_node.findtext("./LegData/Payer"), False)
+    sign = -1.0 if payer else 1.0
+    currency, _, parsed_cashflows = _parse_fixed_leg_cashflows(bond_node.find("./LegData"), sign=sign)
+    scale = float((bond_node.findtext("./BondNotional") or "1").strip() or "1")
+    scaled_cashflows = _scale_cashflows(parsed_cashflows, scale)
+    bond_spec = BondTradeSpec(
+        trade_id=trade_id,
+        trade_type="Bond",
+        currency=currency,
+        payer=payer,
+        security_id=(bond_node.findtext("./SecurityId") or "").strip(),
+        credit_curve_id=(bond_node.findtext("./CreditCurveId") or "").strip(),
+        reference_curve_id=(bond_node.findtext("./ReferenceCurveId") or "").strip(),
+        income_curve_id=(bond_node.findtext("./IncomeCurveId") or "").strip(),
+        settlement_days=int((bond_node.findtext("./SettlementDays") or "0").strip() or "0"),
+        calendar=(bond_node.findtext("./Calendar") or "TARGET").strip(),
+        issue_date=_parse_any_date(bond_node.findtext("./IssueDate") or ""),
+        bond_notional=scale,
+        cashflows=scaled_cashflows,
+    )
+    spec = CallableBondTradeSpec(
+        trade_id=trade_id,
+        currency=bond_spec.currency,
+        security_id=bond_spec.security_id,
+        credit_curve_id=bond_spec.credit_curve_id,
+        reference_curve_id=bond_spec.reference_curve_id,
+        income_curve_id=bond_spec.income_curve_id,
+        settlement_days=bond_spec.settlement_days,
+        calendar=bond_spec.calendar,
+        issue_date=bond_spec.issue_date,
+        bond_notional=bond_spec.bond_notional,
+        bond=bond_spec,
+        call_data=_parse_callability_data(merged.find("./CallData")),
+        put_data=_parse_callability_data(merged.find("./PutData")),
+    )
+    return spec, _load_callable_engine_spec(pricingengine_path)
 
 
 def _load_security_spread(market_data_file: Path, security_id: str) -> float:
@@ -975,6 +1274,366 @@ def _accrued_amount(spec: BondTradeSpec, settlement_date: date) -> float:
     return 0.0
 
 
+def _resolve_simulation_config_path(ore_xml: Path) -> Path | None:
+    root = ET.parse(ore_xml).getroot()
+    base = ore_xml.resolve().parent
+    run_dir = base.parent
+    input_dir = base
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in root.findall("./Setup/Parameter")
+    }
+    if setup_params.get("inputPath"):
+        input_dir = (run_dir / setup_params["inputPath"]).resolve()
+    for analytic in root.findall("./Analytics/Analytic[@type='simulation']"):
+        for param in analytic.findall("./Parameter"):
+            if (param.attrib.get("name", "") or "").strip() == "simulationConfigFile" and (param.text or "").strip():
+                return (input_dir / (param.text or "").strip()).resolve()
+    return None
+
+
+def _build_lgm_model_for_callable(
+    *,
+    ore_xml: Path,
+    pricingengine_path: Path | None,
+    currency: str,
+) -> LGM1F:
+    sim_cfg = _resolve_simulation_config_path(ore_xml)
+    payload = None
+    if sim_cfg is not None and sim_cfg.exists():
+        try:
+            payload = parse_lgm_params_from_simulation_xml(str(sim_cfg), ccy_key=currency)
+        except Exception:
+            payload = None
+        if payload is None:
+            try:
+                payload = parse_lgm_params_from_simulation_xml(str(sim_cfg), ccy_key="default")
+            except Exception:
+                payload = None
+    if payload is None:
+        model_params = {}
+        if pricingengine_path is not None and pricingengine_path.exists():
+            root = ET.parse(pricingengine_path).getroot()
+            product = root.find("./Product[@type='CallableBond']")
+            if product is not None:
+                model_params = {
+                    (n.attrib.get("name", "") or "").strip(): (n.text or "").strip()
+                    for n in product.findall("./ModelParameters/Parameter")
+                }
+        vol = float((model_params.get("Volatility") or "0.01").strip() or "0.01")
+        rev = float((model_params.get("Reversion") or "0.03").strip() or "0.03")
+        payload = {
+            "alpha_times": np.asarray([], dtype=float),
+            "alpha_values": np.asarray([vol], dtype=float),
+            "kappa_times": np.asarray([], dtype=float),
+            "kappa_values": np.asarray([rev], dtype=float),
+            "shift": 0.0,
+            "scaling": 1.0,
+        }
+    params = LGMParams(
+        alpha_times=tuple(float(x) for x in np.asarray(payload["alpha_times"], dtype=float)),
+        alpha_values=tuple(float(x) for x in np.asarray(payload["alpha_values"], dtype=float)),
+        kappa_times=tuple(float(x) for x in np.asarray(payload["kappa_times"], dtype=float)),
+        kappa_values=tuple(float(x) for x in np.asarray(payload["kappa_values"], dtype=float)),
+        shift=float(payload.get("shift", 0.0)),
+        scaling=float(payload.get("scaling", 1.0)),
+    )
+    return LGM1F(params)
+
+
+def _effective_bond_discount_curve(reference_curve, hazard_times: np.ndarray, hazard_rates: np.ndarray, recovery_rate: float, security_spread: float):
+    rr = float(recovery_rate)
+    spread = float(security_spread)
+
+    def curve(t: float) -> float:
+        tt = max(float(t), 0.0)
+        ref = float(reference_curve(tt))
+        surv = float(_survival_from_piecewise(np.asarray([tt], dtype=float), hazard_times, hazard_rates)[0])
+        return ref * (surv ** max(1.0 - rr, 0.0)) * math.exp(-spread * tt)
+
+    return curve
+
+
+def _callable_notional_schedule(spec: CallableBondTradeSpec, asof_date: date, day_counter: str) -> tuple[np.ndarray, np.ndarray]:
+    coupon_rows = [
+        cf
+        for cf in spec.bond.cashflows
+        if cf.accrual_start is not None and cf.accrual_end is not None and cf.nominal is not None and not _cashflow_has_occurred(cf.pay_date, asof_date, False)
+    ]
+    if not coupon_rows:
+        return np.zeros(0, dtype=float), np.asarray([float(spec.bond_notional)], dtype=float)
+    notionals = [float(coupon_rows[0].nominal or spec.bond_notional)]
+    change_times: list[float] = []
+    last_nominal = notionals[0]
+    for cf in coupon_rows:
+        nominal = float(cf.nominal or last_nominal)
+        if not math.isclose(nominal, last_nominal, rel_tol=0.0, abs_tol=1.0e-12):
+            change_times.append(_time_from_dates(asof_date, cf.pay_date, day_counter))
+            notionals.append(nominal)
+            last_nominal = nominal
+    return np.asarray(change_times, dtype=float), np.asarray(notionals, dtype=float)
+
+
+def _callable_notional_at_time(change_times: np.ndarray, notionals: np.ndarray, t: float) -> float:
+    if notionals.size == 0:
+        return 0.0
+    idx = int(np.searchsorted(change_times, float(t), side="right"))
+    return float(notionals[min(idx, notionals.size - 1)])
+
+
+def _callable_accrual_at_time(spec: CallableBondTradeSpec, asof_date: date, day_counter: str, t: float) -> float:
+    tt = float(t)
+    for cf in spec.bond.cashflows:
+        if cf.accrual_start is None or cf.accrual_end is None or cf.nominal is None:
+            continue
+        pay_t = _time_from_dates(asof_date, cf.pay_date, day_counter)
+        start_t = _time_from_dates(asof_date, cf.accrual_start, day_counter)
+        end_t = _time_from_dates(asof_date, cf.accrual_end, day_counter)
+        if pay_t > tt > start_t and end_t > start_t:
+            return (tt - start_t) / max(end_t - start_t, 1.0e-18) * float(cf.amount)
+    return 0.0
+
+
+def _callable_price_amount(exercise: CallableExerciseSpec, notional: float, accruals: float) -> float:
+    amount = float(exercise.price) * float(notional)
+    if str(exercise.price_type).strip() == "Clean":
+        amount += float(accruals)
+    if not exercise.include_accrual:
+        amount -= float(accruals)
+    return amount
+
+
+def _callable_effective_income_curve(reference_curve, income_curve, security_spread: float, spread_on_income_curve: bool):
+    if spread_on_income_curve and abs(float(security_spread)) > 1.0e-16:
+        return _apply_spread(income_curve or reference_curve, float(security_spread))
+    return income_curve or reference_curve
+
+
+def _build_callable_grid_times(
+    mandatory_times: np.ndarray,
+    *,
+    max_time: float,
+    time_steps_per_year: int,
+) -> np.ndarray:
+    base = [0.0]
+    if max_time > 0.0 and time_steps_per_year > 0:
+        steps = max(int(round(float(time_steps_per_year) * float(max_time) + 0.5)), 1)
+        base.extend(np.linspace(0.0, float(max_time), steps + 1).tolist())
+    base.extend([float(x) for x in np.asarray(mandatory_times, dtype=float) if float(x) > 0.0])
+    return np.asarray(sorted(set(round(x, 12) for x in base)), dtype=float)
+
+
+def _find_time_index(grid: np.ndarray, t: float) -> int:
+    idx = int(np.searchsorted(grid, float(t), side="left"))
+    if idx >= grid.size:
+        return grid.size - 1
+    if idx > 0 and abs(grid[idx - 1] - float(t)) <= abs(grid[idx] - float(t)):
+        return idx - 1
+    return idx
+
+
+def _register_callable_exercises(
+    grid: np.ndarray,
+    exercises: tuple[CallableExerciseSpec, ...],
+    *,
+    asof_date: date,
+    day_counter: str,
+) -> dict[int, CallableExerciseSpec]:
+    out: dict[int, CallableExerciseSpec] = {}
+    for i, ex in enumerate(exercises):
+        ex_time = _time_from_dates(asof_date, ex.exercise_date, day_counter)
+        if ex.exercise_type == "OnThisDate":
+            start_idx = _find_time_index(grid, ex_time)
+            out[start_idx] = ex
+            continue
+        start_idx = _find_time_index(grid, ex_time)
+        next_time = _time_from_dates(asof_date, exercises[i + 1].exercise_date, day_counter) if i + 1 < len(exercises) else ex_time
+        end_idx = max(_find_time_index(grid, next_time) - 1, start_idx)
+        for j in range(start_idx, end_idx + 1):
+            out[j] = ex
+    return out
+
+
+def _callable_underlying_reduced_value(
+    spec: CallableBondTradeSpec,
+    model: LGM1F,
+    eff_discount_curve,
+    *,
+    asof_date: date,
+    day_counter: str,
+    t: float,
+    x_grid: np.ndarray,
+) -> np.ndarray:
+    value = np.zeros_like(np.asarray(x_grid, dtype=float))
+    for cf in spec.bond.cashflows:
+        pay_t = _time_from_dates(asof_date, cf.pay_date, day_counter)
+        if pay_t <= t + 1.0e-12:
+            continue
+        value += float(cf.amount) * np.asarray(model.discount_bond(float(t), float(pay_t), x_grid, eff_discount_curve, eff_discount_curve), dtype=float)
+    num = np.asarray(model.numeraire_lgm(float(t), x_grid, eff_discount_curve), dtype=float)
+    return value / num
+
+
+def _callable_stripped_bond_npv(
+    spec: CallableBondTradeSpec,
+    model: LGM1F,
+    eff_discount_curve,
+    eff_income_curve,
+    *,
+    asof_date: date,
+    day_counter: str,
+) -> float:
+    x0 = np.asarray([0.0], dtype=float)
+    reduced = _callable_underlying_reduced_value(spec, model, eff_discount_curve, asof_date=asof_date, day_counter=day_counter, t=0.0, x_grid=x0)
+    return float(reduced[0] / max(float(eff_income_curve(0.0)), 1.0e-18))
+
+
+def _price_callable_bond_lgm(
+    spec: CallableBondTradeSpec,
+    engine_spec: CallableBondEngineSpec,
+    *,
+    asof_date: date,
+    day_counter: str,
+    reference_curve,
+    income_curve,
+    hazard_times: np.ndarray,
+    hazard_rates: np.ndarray,
+    recovery_rate: float,
+    security_spread: float,
+    model: LGM1F,
+) -> dict[str, float | int | str]:
+    eff_discount_curve = _effective_bond_discount_curve(reference_curve, hazard_times, hazard_rates, recovery_rate, security_spread)
+    eff_income_curve = _callable_effective_income_curve(reference_curve, income_curve, security_spread, engine_spec.spread_on_income_curve)
+
+    pay_times = np.asarray(
+        [
+            _time_from_dates(asof_date, cf.pay_date, day_counter)
+            for cf in spec.bond.cashflows
+            if not _cashflow_has_occurred(cf.pay_date, asof_date, False)
+        ],
+        dtype=float,
+    )
+    exercise_times = np.asarray(
+        [
+            _time_from_dates(asof_date, ex.exercise_date, day_counter)
+            for ex in spec.call_data + spec.put_data
+            if ex.exercise_date > asof_date
+        ],
+        dtype=float,
+    )
+    mandatory_times = np.asarray(sorted(set([float(x) for x in np.concatenate((pay_times, exercise_times)) if float(x) > 0.0])), dtype=float)
+    max_time = float(np.max(mandatory_times)) if mandatory_times.size else 0.0
+    if engine_spec.engine_variant == "Grid":
+        mx = max(int(round(float(engine_spec.grid_sx) * float(engine_spec.grid_nx))), 1)
+        y_nodes, y_weights = _convolution_nodes_and_weights(float(engine_spec.grid_sy), int(engine_spec.grid_ny))
+        effective_steps = max(int(engine_spec.exercise_time_steps_per_year), 0)
+    else:
+        mx = max((int(engine_spec.fd_state_grid_points) - 1) // 2, 1)
+        nx = max(int(round(mx / max(6.0, 1.0e-12))), 1)
+        y_nodes, y_weights = _convolution_nodes_and_weights(3.0, 10)
+        engine_spec = replace(engine_spec, grid_nx=nx)
+        effective_steps = max(int(engine_spec.exercise_time_steps_per_year), int(engine_spec.fd_time_steps_per_year))
+    grid = _build_callable_grid_times(mandatory_times, max_time=max(max_time, engine_spec.fd_max_time if engine_spec.engine_variant == "FD" else max_time), time_steps_per_year=effective_steps)
+    if grid[-1] > max_time and max_time > 0.0:
+        grid = grid[grid <= max_time + 1.0e-12]
+        if grid.size == 0 or grid[-1] < max_time:
+            grid = np.append(grid, max_time)
+    zeta_grid = np.asarray(model.zeta(grid), dtype=float)
+    x_grids = []
+    for v in zeta_grid:
+        if abs(float(v)) <= 1.0e-18:
+            x_grids.append(np.zeros(2 * mx + 1, dtype=float))
+        else:
+            dx = np.sqrt(max(float(v), 0.0)) / float(max(engine_spec.grid_nx, 1))
+            x_grids.append(dx * (np.arange(2 * mx + 1, dtype=float) - mx))
+    call_map = _register_callable_exercises(
+        grid,
+        tuple(ex for ex in spec.call_data if ex.exercise_date > asof_date),
+        asof_date=asof_date,
+        day_counter=day_counter,
+    )
+    put_map = _register_callable_exercises(
+        grid,
+        tuple(ex for ex in spec.put_data if ex.exercise_date > asof_date),
+        asof_date=asof_date,
+        day_counter=day_counter,
+    )
+    cashflow_map: dict[int, list[BondCashflow]] = {}
+    for cf in spec.bond.cashflows:
+        if _cashflow_has_occurred(cf.pay_date, asof_date, False):
+            continue
+        idx = _find_time_index(grid, _time_from_dates(asof_date, cf.pay_date, day_counter))
+        cashflow_map.setdefault(idx, []).append(cf)
+    change_times, notionals = _callable_notional_schedule(spec, asof_date, day_counter)
+
+    values = np.zeros_like(x_grids[-1], dtype=float)
+    for i in range(len(grid) - 1, 0, -1):
+        t_from = float(grid[i])
+        t_to = float(grid[i - 1])
+        grid_i = x_grids[i]
+        if i < len(grid) - 1:
+            values = _convolution_rollback(
+                values,
+                zeta_t1=float(zeta_grid[i + 1]),
+                zeta_t0=float(zeta_grid[i]),
+                mx=mx,
+                nx=int(engine_spec.grid_nx),
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+        if i in cashflow_map:
+            num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
+            for cf in cashflow_map[i]:
+                values = values + float(cf.amount) / num
+        if i in call_map or i in put_map:
+            continuation = values.copy()
+            if i in call_map:
+                ex = call_map[i]
+                amt = _callable_price_amount(
+                    ex,
+                    _callable_notional_at_time(change_times, notionals, t_from),
+                    _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
+                )
+                num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
+                continuation = np.minimum(continuation, float(amt) / num)
+            if i in put_map:
+                ex = put_map[i]
+                amt = _callable_price_amount(
+                    ex,
+                    _callable_notional_at_time(change_times, notionals, t_from),
+                    _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
+                )
+                num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
+                continuation = np.maximum(continuation, float(amt) / num)
+            values = continuation
+    if len(grid) > 1:
+        values = _convolution_rollback(
+            values,
+            zeta_t1=float(zeta_grid[1]),
+            zeta_t0=float(zeta_grid[0]),
+            mx=mx,
+            nx=int(engine_spec.grid_nx),
+            y_nodes=y_nodes,
+            y_weights=y_weights,
+        )
+    price = float(values[mx]) / max(float(eff_income_curve(0.0)), 1.0e-18)
+    stripped = _callable_stripped_bond_npv(spec, model, eff_discount_curve, eff_income_curve, asof_date=asof_date, day_counter=day_counter)
+    maturity_date = max(cf.pay_date for cf in spec.bond.cashflows)
+    return {
+        "py_npv": float(price),
+        "py_settlement_value": float(price),
+        "maturity_date": maturity_date.isoformat(),
+        "maturity_time": float(_time_from_dates(asof_date, maturity_date, day_counter)),
+        "stripped_bond_npv": float(stripped),
+        "embedded_option_value": float(price - stripped),
+        "call_schedule_count": int(len(spec.call_data)),
+        "put_schedule_count": int(len(spec.put_data)),
+        "exercise_time_steps_per_year": int(engine_spec.exercise_time_steps_per_year),
+        "callable_model_family": str(engine_spec.model_family),
+        "callable_engine_variant": str(engine_spec.engine_variant),
+    }
+
+
 def price_bond_trade(
     *,
     ore_xml: Path,
@@ -999,13 +1658,24 @@ def price_bond_trade(
     #    - a risky bond directly, or
     #    - a forward contract on that underlying risky bond
     asof = _parse_any_date(asof_date)
-    spec, engine_spec = load_bond_trade_spec(
-        portfolio_xml=portfolio_xml,
-        trade_id=trade_id,
-        reference_data_path=reference_data_path,
-        pricingengine_path=pricingengine_path,
-        flows_csv=flows_csv,
-    )
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade = _resolve_trade(portfolio_root, trade_id)
+    trade_type = (trade.findtext("./TradeType") or "").strip()
+    if trade_type == "CallableBond":
+        spec, engine_spec = load_callable_bond_trade_spec(
+            portfolio_xml=portfolio_xml,
+            trade_id=trade_id,
+            reference_data_path=reference_data_path,
+            pricingengine_path=pricingengine_path,
+        )
+    else:
+        spec, engine_spec = load_bond_trade_spec(
+            portfolio_xml=portfolio_xml,
+            trade_id=trade_id,
+            reference_data_path=reference_data_path,
+            pricingengine_path=pricingengine_path,
+            flows_csv=flows_csv,
+        )
     try:
         credit = load_ore_default_curve_inputs(str(todaysmarket_xml), str(market_data_file), cpty_name=spec.credit_curve_id)
         hazard_times = np.asarray(credit["hazard_times"], dtype=float)
@@ -1024,6 +1694,9 @@ def price_bond_trade(
                 break
     security_spread = _load_security_spread(market_data_file, spec.security_id)
     use_flow_curve = (
+        trade_type != "CallableBond"
+        and isinstance(spec, BondTradeSpec)
+        and
         flows_csv is not None
         and flows_csv.exists()
         and abs(security_spread) <= 1.0e-16
@@ -1040,6 +1713,40 @@ def price_bond_trade(
     else:
         base_curve = _fit_curve_for_currency(ore_xml, spec.currency)
     income_curve = base_curve
+    if trade_type == "CallableBond":
+        model = _build_lgm_model_for_callable(
+            ore_xml=ore_xml,
+            pricingengine_path=pricingengine_path,
+            currency=spec.currency,
+        )
+        result = _price_callable_bond_lgm(
+            spec,
+            engine_spec,
+            asof_date=asof,
+            day_counter=model_day_counter,
+            reference_curve=base_curve,
+            income_curve=income_curve,
+            hazard_times=hazard_times,
+            hazard_rates=hazard_rates,
+            recovery_rate=recovery_rate,
+            security_spread=security_spread,
+            model=model,
+        )
+        result.update(
+            {
+                "trade_type": "CallableBond",
+                "currency": spec.currency,
+                "security_id": spec.security_id,
+                "credit_curve_id": spec.credit_curve_id,
+                "reference_curve_id": spec.reference_curve_id,
+                "income_curve_id": spec.income_curve_id,
+                "security_spread": float(security_spread),
+                "recovery_rate": float(recovery_rate),
+                "spread_on_income_curve": bool(engine_spec.spread_on_income_curve),
+                "settlement_dirty": True,
+            }
+        )
+        return result
     compiled = compile_bond_trade(spec, asof_date=asof, day_counter=model_day_counter, engine_spec=engine_spec)
     underlying_compiled = compiled if compiled.trade_type == "Bond" else replace(compiled, trade_type="Bond")
     spot_grid = build_bond_scenario_grid_numpy(

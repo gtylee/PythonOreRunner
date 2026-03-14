@@ -69,6 +69,20 @@ class TestOreSnapshotParityReport(unittest.TestCase):
         self.assertIsNotNone(snap.calibration_xml_path)
         self.assertAlmostEqual(snap.lgm_params.shift, 0.0, places=12)
 
+    def test_load_from_ore_xml_reads_cross_asset_measure_and_parameter_counts(self):
+        ore_xml = (
+            require_engine_repo_root()
+            / "Examples"
+            / "Exposure"
+            / "Input"
+            / "ore_measure_ba.xml"
+        )
+        snap = load_from_ore_xml(ore_xml)
+
+        self.assertEqual(snap.measure, "BA")
+        self.assertEqual(snap.seed, 42)
+        self.assertEqual(snap.n_samples, 1000)
+
 
 if __name__ == "__main__":
     unittest.main()

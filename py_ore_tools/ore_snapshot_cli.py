@@ -36,7 +36,7 @@ from py_ore_tools.irs_xva_utils import (
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
-from py_ore_tools.lgm import make_ore_gaussian_rng, simulate_lgm_measure
+from py_ore_tools.lgm import make_ore_gaussian_rng, simulate_ba_measure, simulate_lgm_measure
 from py_ore_tools.ore_snapshot import (
     load_from_ore_xml,
     ore_input_validation_dataframe,
@@ -142,21 +142,64 @@ def _simulate_with_fixing_grid(
     n_paths: int,
     rng: Any,
     draw_order: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    def _simulate(times: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        if str(getattr(model, "_measure", "LGM")).upper() == "BA":
+            if str(draw_order).strip().lower() == "ore_path_major" and hasattr(rng, "seed"):
+                local_rng = np.random.default_rng(int(getattr(rng, "seed")))
+            elif str(draw_order).strip().lower() == "ore_path_major":
+                local_rng = np.random.default_rng()
+            else:
+                local_rng = rng
+            return simulate_ba_measure(model, times, n_paths, rng=local_rng, x0=0.0, y0=0.0)
+        return simulate_lgm_measure(model, times, n_paths, rng=rng, x0=0.0, draw_order=draw_order), None
+
     if fixing_times is None or fixing_times.size == 0:
-        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
-        return x_exp, x_exp, exposure_times
+        x_exp, y_exp = _simulate(exposure_times)
+        return x_exp, x_exp, exposure_times, y_exp, y_exp
     extra = np.asarray(fixing_times, dtype=float)
     extra = extra[extra > 1.0e-12]
     if extra.size == 0:
-        x_exp = simulate_lgm_measure(model, exposure_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
-        return x_exp, x_exp, exposure_times
+        x_exp, y_exp = _simulate(exposure_times)
+        return x_exp, x_exp, exposure_times, y_exp, y_exp
     sim_times = np.unique(np.concatenate((exposure_times, extra)))
-    x_all = simulate_lgm_measure(model, sim_times, n_paths, rng=rng, x0=0.0, draw_order=draw_order)
+    x_all, y_all = _simulate(sim_times)
     idx = np.searchsorted(sim_times, exposure_times)
     if not np.allclose(sim_times[idx], exposure_times, atol=1.0e-12, rtol=0.0):
         raise ValueError("failed to align exposure times on simulated grid")
-    return x_all[idx, :], x_all, sim_times
+    y_exp = None if y_all is None else y_all[idx, :]
+    return x_all[idx, :], x_all, sim_times, y_exp, y_all
+
+
+def _deflate_npv_paths(
+    model: Any,
+    measure: str,
+    p0_disc: Any,
+    times: np.ndarray,
+    x_paths: np.ndarray,
+    npv_paths: np.ndarray,
+    y_paths: np.ndarray | None = None,
+) -> np.ndarray:
+    if str(measure).strip().upper() != "BA":
+        return deflate_lgm_npv_paths(
+            model=model,
+            p0_disc=p0_disc,
+            times=times,
+            x_paths=x_paths,
+            npv_paths=npv_paths,
+        )
+    if y_paths is None:
+        raise ValueError("BA measure deflation requires y_paths")
+    t = np.asarray(times, dtype=float)
+    x = np.asarray(x_paths, dtype=float)
+    y = np.asarray(y_paths, dtype=float)
+    v = np.asarray(npv_paths, dtype=float)
+    if not (x.shape == y.shape == v.shape):
+        raise ValueError("x_paths, y_paths and npv_paths must share the same shape")
+    out = np.empty_like(v, dtype=float)
+    for i, ti in enumerate(t):
+        out[i, :] = v[i, :] / model.numeraire_ba(float(ti), x[i, :], y[i, :], p0_disc)
+    return out
 
 
 @dataclass(frozen=True)
@@ -605,7 +648,7 @@ def _compute_price_only_case(
     portfolio_root = ET.parse(portfolio_xml).getroot()
     trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
-    if trade_type in {"Bond", "ForwardBond"}:
+    if trade_type in {"Bond", "ForwardBond", "CallableBond"}:
         ore_root = ET.parse(ore_xml).getroot()
         setup_params = {
             n.attrib.get("name", ""): (n.text or "").strip()
@@ -655,18 +698,20 @@ def _compute_price_only_case(
                 "py_t0_npv": float(pricing_result["py_npv"]),
                 "t0_npv_abs_diff": abs(float(pricing_result["py_npv"]) - float(npv_details["npv"])),
                 "trade_type": trade_type,
-                "bond_pricing_mode": "python_risky_bond",
+                "bond_pricing_mode": "python_callable_lgm" if trade_type == "CallableBond" else "python_risky_bond",
                 "discount_column": str(pricing_result["reference_curve_id"]),
                 "forward_column": "",
                 "credit_curve_id": str(pricing_result["credit_curve_id"]),
                 "security_id": str(pricing_result["security_id"]),
                 "security_spread": float(pricing_result["security_spread"]),
                 "settlement_dirty": bool(pricing_result["settlement_dirty"]),
-                "treat_security_spread_as_credit_spread": bool(pricing_result["treat_security_spread_as_credit_spread"]),
+                "treat_security_spread_as_credit_spread": bool(pricing_result.get("treat_security_spread_as_credit_spread", False)),
+                "stripped_bond_npv": pricing_result.get("stripped_bond_npv"),
+                "embedded_option_value": pricing_result.get("embedded_option_value"),
             },
             "diagnostics": {
                 "trade_type": trade_type,
-                "bond_pricing_mode": "python_risky_bond",
+                "bond_pricing_mode": "python_callable_lgm" if trade_type == "CallableBond" else "python_risky_bond",
                 "curve_ids": {
                     "reference": str(pricing_result["reference_curve_id"]),
                     "income": str(pricing_result["income_curve_id"]),
@@ -675,10 +720,17 @@ def _compute_price_only_case(
                 "security_id": str(pricing_result["security_id"]),
                 "security_spread_mode": (
                     "credit_curve"
-                    if pricing_result["treat_security_spread_as_credit_spread"]
+                    if pricing_result.get("treat_security_spread_as_credit_spread", False)
                     else ("discount_and_income" if pricing_result["spread_on_income_curve"] else "discount_only")
                 ),
                 "settlement_dirty": bool(pricing_result["settlement_dirty"]),
+                "call_schedule_count": int(pricing_result.get("call_schedule_count", 0)),
+                "put_schedule_count": int(pricing_result.get("put_schedule_count", 0)),
+                "exercise_time_steps_per_year": pricing_result.get("exercise_time_steps_per_year"),
+                "callable_model_family": pricing_result.get("callable_model_family"),
+                "callable_engine_variant": pricing_result.get("callable_engine_variant"),
+                "stripped_bond_npv": pricing_result.get("stripped_bond_npv"),
+                "embedded_option_value": pricing_result.get("embedded_option_value"),
             },
         }
     payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
@@ -725,13 +777,14 @@ def _compute_snapshot_case(
 ) -> SnapshotComputation:
     snap = load_from_ore_xml(ore_xml, anchor_t0_npv=anchor_t0_npv)
     model = snap.build_model()
+    setattr(model, "_measure", str(getattr(snap, "measure", "LGM")).upper())
     if rng_mode == "ore_parity":
         rng = make_ore_gaussian_rng(seed)
         draw_order = "ore_path_major"
     else:
         rng = np.random.default_rng(seed)
         draw_order = "time_major"
-    x, x_all, sim_times = _simulate_with_fixing_grid(
+    x, x_all, sim_times, y, y_all = _simulate_with_fixing_grid(
         model=model,
         exposure_times=snap.exposure_model_times,
         fixing_times=np.asarray(snap.legs.get("float_fixing_time", []), dtype=float),
@@ -767,12 +820,14 @@ def _compute_snapshot_case(
         if xva_cube_bar is not None:
             xva_cube_bar.update(i + 1, max(snap.exposure_model_times.size, 1))
     if ore_style_xva:
-        npv_xva = deflate_lgm_npv_paths(
+        npv_xva = _deflate_npv_paths(
             model=model,
+            measure=str(getattr(snap, "measure", "LGM")),
             p0_disc=snap.p0_disc,
             times=snap.exposure_model_times,
             x_paths=x,
             npv_paths=npv,
+            y_paths=y,
         )
         print("Classic valuation summary [s]: update=0.00, calibration=0.00, initScenario=0.00, qlUpdate=0.00, calculator=0.00, cpty=0.00, fixing=0.00")
         print("SimMarket update summary [s]: pre=0.00, date=0.00, scenarioFetch=0.00, applyScenario=0.00, refresh=0.00, fixings=0.00, asd=0.00")
@@ -1636,7 +1691,7 @@ def _run_case(
             )
     elif modes.price:
         try:
-            if _has_active_simulation_analytic(ore_xml) or _first_trade_type(ore_xml) in {"Bond", "ForwardBond"}:
+            if _has_active_simulation_analytic(ore_xml) or _first_trade_type(ore_xml) in {"Bond", "ForwardBond", "CallableBond"}:
                 price_summary = _compute_price_only_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,

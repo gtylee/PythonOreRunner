@@ -14,13 +14,16 @@ from py_ore_tools.bond_pricing import (
     BondEngineSpec,
     BondScenarioGrid,
     BondTradeSpec,
+    CallableExerciseSpec,
     CompiledBondTrade,
+    _callable_price_amount,
     build_bond_scenario_grid_numpy,
     compile_bond_trade,
     _bond_npv,
     _curve_from_flow_discounts,
     _load_bond_cashflows_from_flows,
     load_bond_trade_spec,
+    load_callable_bond_trade_spec,
     price_bond_scenarios_numpy,
     price_bond_scenarios_torch,
     price_bond_single_numpy,
@@ -43,6 +46,12 @@ EXAMPLE_78_NPV = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "ExpectedOut
 EXAMPLE_SHARED_MARKET = TOOLS_DIR / "Examples" / "Input" / "market_20160205_flat.txt"
 EXAMPLE_SHARED_TM = TOOLS_DIR / "Examples" / "Input" / "todaysmarket.xml"
 EXAMPLE_SHARED_PE = TOOLS_DIR / "Examples" / "Input" / "pricingengine.xml"
+CALLABLE_ORE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond.xml"
+CALLABLE_PORTFOLIO = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "portfolio_callablebond.xml"
+CALLABLE_REFERENCE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "reference_data_callablebond.xml"
+CALLABLE_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricingengine_callablebond.xml"
+CALLABLE_SIM = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "simulation_callablebond.xml"
+EXAMPLE_SHARED_MARKET_FULL = TOOLS_DIR / "Examples" / "Input" / "market_20160205.txt"
 
 
 def _flat_curve(rate: float):
@@ -240,6 +249,106 @@ class TestBondPricing(unittest.TestCase):
             self.skipTest("torch is not available in this environment")
         th_out = price_bond_scenarios_torch(compiled, grid).detach().cpu().numpy()
         np.testing.assert_allclose(np_out, th_out, rtol=0.0, atol=1.0e-12)
+
+    def test_load_callable_bond_trade_spec_merges_reference_and_expands_american(self):
+        spec, engine = load_callable_bond_trade_spec(
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+        )
+        self.assertEqual(spec.security_id, "SECURITY_CALL")
+        self.assertEqual(spec.credit_curve_id, "CPTY_A")
+        self.assertEqual(spec.reference_curve_id, "EUR-EURIBOR-3M")
+        self.assertEqual(spec.bond_notional, 100000000.0)
+        self.assertEqual(len(spec.call_data), 3)
+        self.assertEqual([x.exercise_type for x in spec.call_data], ["FromThisDateOn", "FromThisDateOn", "OnThisDate"])
+        self.assertEqual([x.price_type for x in spec.call_data], ["Clean", "Clean", "Clean"])
+        self.assertTrue(all(x.include_accrual for x in spec.call_data))
+        self.assertEqual(engine.model_family, "LGM")
+        self.assertEqual(engine.exercise_time_steps_per_year, 24)
+
+    def test_callable_price_amount_matches_clean_dirty_include_accrual_rules(self):
+        clean_with_accrual = CallableExerciseSpec(date(2020, 1, 1), "OnThisDate", 1.0, "Clean", True)
+        clean_without_accrual = CallableExerciseSpec(date(2020, 1, 1), "OnThisDate", 1.0, "Clean", False)
+        dirty_with_accrual = CallableExerciseSpec(date(2020, 1, 1), "OnThisDate", 1.0, "Dirty", True)
+        self.assertAlmostEqual(_callable_price_amount(clean_with_accrual, 100.0, 3.5), 103.5, places=12)
+        self.assertAlmostEqual(_callable_price_amount(clean_without_accrual, 100.0, 3.5), 100.0, places=12)
+        self.assertAlmostEqual(_callable_price_amount(dirty_with_accrual, 100.0, 3.5), 100.0, places=12)
+
+    def test_callable_no_call_price_matches_stripped_bond_within_tolerance(self):
+        out = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondNoCall",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        self.assertEqual(out["trade_type"], "CallableBond")
+        self.assertAlmostEqual(float(out["py_npv"]), float(out["stripped_bond_npv"]), delta=5.0e5)
+        self.assertAlmostEqual(float(out["embedded_option_value"]), 0.0, delta=5.0e5)
+
+    def test_callable_certain_call_is_no_more_valuable_than_no_call(self):
+        no_call = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondNoCall",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        certain_call = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondCertainCall",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        self.assertLess(float(certain_call["py_npv"]), float(no_call["py_npv"]))
+        self.assertLess(float(certain_call["embedded_option_value"]), 0.0)
+
+    def test_callable_put_overrides_call_and_increases_value(self):
+        call_only = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        put_call = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="PutCallBondTrade",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        self.assertGreater(float(put_call["py_npv"]), float(call_only["py_npv"]))
+        self.assertEqual(int(put_call["put_schedule_count"]), 3)
+        self.assertEqual(int(put_call["call_schedule_count"]), 3)
 
     def test_positive_hazard_reduces_bond_value(self):
         spec = BondTradeSpec(
