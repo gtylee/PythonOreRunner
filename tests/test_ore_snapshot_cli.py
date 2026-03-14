@@ -662,6 +662,9 @@ class TestOreSnapshotCli(unittest.TestCase):
             start = text.index('<Analytic type="simulation">')
             end = text.index("</Analytic>", start) + len("</Analytic>")
             ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
+            sim_xml = input_dir / "simulation.xml"
+            if sim_xml.exists():
+                sim_xml.unlink()
             rc = ore_snapshot_cli.main(
                 [
                     str(ore_xml_path),
@@ -679,6 +682,49 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertNotIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
+
+    def test_price_only_run_uses_sibling_simulation_xml_without_simulation_analytic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "price_only_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("curves.csv", "npv.csv", "flows.csv"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            ore_xml_path = input_dir / "ore.xml"
+            text = ore_xml_path.read_text(encoding="utf-8")
+            start = text.index('<Analytic type="simulation">')
+            end = text.index("</Analytic>", start) + len("</Analytic>")
+            ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
+            rc = ore_snapshot_cli.main(
+                [
+                    str(ore_xml_path),
+                    "--price",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads(
+                (tmp_root / "artifacts" / "price_only_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertNotIn("pricing_fallback_reason", payload["diagnostics"])
+            self.assertIn("py_t0_npv", payload["pricing"])
+            self.assertIn("ore_t0_npv", payload["pricing"])
+            self.assertTrue(payload["pass_all"])
+
+    def test_reference_fallback_classifier_accepts_todaysmarket_resolution_errors(self):
+        self.assertTrue(
+            ore_snapshot_cli._is_reference_fallback_error(
+                ValueError("DiscountingCurves[@id='default'] has no DiscountingCurve[@currency='EUR']")
+            )
+        )
 
     def test_run_case_without_supported_analytics_and_without_portfolio_does_not_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -953,7 +999,8 @@ class TestOreSnapshotCli(unittest.TestCase):
 
     def test_bucket_case_prefers_fallback_reason_over_missing_reference_pricing(self):
         case_summary = {
-            "pass_all": True,
+            "pass_all": False,
+            "ore_xml": str(TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore.xml"),
             "diagnostics": {
                 "fallback_reason": "missing_native_output",
                 "missing_reference_pricing": True,
@@ -962,6 +1009,39 @@ class TestOreSnapshotCli(unittest.TestCase):
             "input_validation": {"input_links_valid": True},
         }
         self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "missing_native_output_fallback")
+
+    def test_bucket_case_splits_expected_output_fallback_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case_root = root / "Examples" / "Demo"
+            input_dir = case_root / "Input"
+            expected_dir = case_root / "ExpectedOutput"
+            input_dir.mkdir(parents=True)
+            expected_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text("<ORE><Setup><Parameter name='outputPath'>Output</Parameter></Setup></ORE>", encoding="utf-8")
+            case_summary = {
+                "pass_all": True,
+                "ore_xml": str(ore_xml),
+                "diagnostics": {
+                    "fallback_reason": "missing_native_output",
+                    "reference_output_dirs": [str(expected_dir)],
+                },
+                "input_validation": {"input_links_valid": True},
+            }
+            self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "expected_output_fallback_pass")
+
+    def test_bucket_case_splits_no_reference_artifacts_passes(self):
+        case_summary = {
+            "pass_all": True,
+            "ore_xml": str(TOOLS_DIR / "Examples" / "Legacy" / "Example_35" / "Input" / "ore_Normal.xml"),
+            "diagnostics": {
+                "fallback_reason": "missing_native_output",
+                "reference_output_dirs": [],
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "no_reference_artifacts_pass")
 
     def test_write_live_report_artifacts_includes_next_fix_hint(self):
         with tempfile.TemporaryDirectory() as tmp:

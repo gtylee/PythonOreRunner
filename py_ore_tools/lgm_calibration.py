@@ -931,12 +931,19 @@ class QuantLibGsrCalibrationBackend:
         vol_dates = [_time_to_step_date(self.market_inputs.calibration_discount_curve.referenceDate(), t) for t in effective_vol_times]
         rev_dates = [_time_to_step_date(self.market_inputs.calibration_discount_curve.referenceDate(), t) for t in effective_rev_times]
 
+        # Use the last basket maturity as the GSR numeraire time instead of
+        # a hardcoded 60Y.  The calibration discount curve may not extend to 60Y
+        # (e.g. ~50Y for standard EUR curves), which causes QuantLib to raise
+        # "time (60) is past max curve time" and silently disables calibration.
+        # Adding a 2Y buffer beyond the last maturity is always sufficient and
+        # stays well within the curve range for typical callable bond tenors.
+        numeraire_time = (max(maturity_times) + 2.0) if maturity_times else 60.0
         gsr = ql.Gsr(
             self.market_inputs.model_discount_curve,
             _build_date_vector(vol_dates),
             _build_quote_handle_vector(effective_vol_values),
             _build_quote_handle_vector(effective_rev_values),
-            60.0,
+            numeraire_time,
         )
         engine = ql.Gaussian1dSwaptionEngine(gsr, 64, 7.0, True, False, self.market_inputs.calibration_discount_curve)
         for inst in self.basket:

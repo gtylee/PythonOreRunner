@@ -61,6 +61,8 @@ EXAMPLE_CHOICES = (
 TENSOR_BACKEND_CHOICES = ("auto", "numpy", "torch-cpu", "torch-mps")
 REPORT_BUCKET_HINTS = {
     "clean_pass": "No action needed; case is clean on the current parity path.",
+    "expected_output_fallback_pass": "Case is passing against vendored ExpectedOutput; only generate native Output if you want native-artifact parity as well.",
+    "no_reference_artifacts_pass": "Case has no native Output or vendored ExpectedOutput; generate native artifacts only if you want parity-grade references.",
     "parity_threshold_fail": "Inspect per-case summary and comparison metrics; use pricing vs XVA pass flags to choose the next subsystem.",
     "sample_count_mismatch": "Align Python paths with ORE samples before treating the diff as structural.",
     "missing_native_output_fallback": "Decide whether to vendor native outputs or accept expected-output-only parity.",
@@ -409,13 +411,17 @@ def _build_minimal_pricing_payload(
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
-    if sim_analytic is None:
-        raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
-    sim_params = {
-        n.attrib.get("name", ""): (n.text or "").strip()
-        for n in sim_analytic.findall("./Parameter")
-    }
-    simulation_xml = (input_dir / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    sim_params: dict[str, str] = {}
+    if sim_analytic is not None:
+        sim_params = {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in sim_analytic.findall("./Parameter")
+        }
+        simulation_xml = (input_dir / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    else:
+        simulation_xml = (input_dir / "simulation.xml").resolve()
+        if not simulation_xml.exists():
+            raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
     sim_root = ET.parse(simulation_xml).getroot()
     domestic_ccy = (
         sim_root.findtext("./DomesticCcy")
@@ -438,12 +444,12 @@ def _build_minimal_pricing_payload(
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
     xva_discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, sim_config_id, domestic_ccy)
 
-    curves_csv = output_path / "curves.csv"
-    npv_csv = output_path / "npv.csv"
-    if not curves_csv.exists():
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {curves_csv}")
-    if not npv_csv.exists():
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {npv_csv}")
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is None:
+        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    if npv_csv is None:
+        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
 
     curve_dates_by_col = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
         str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
@@ -493,10 +499,10 @@ def _build_minimal_pricing_payload(
     npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
     ore_t0_npv = float(npv_details["npv"])
 
-    flows_csv = output_path / "flows.csv"
+    flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
     legs = None
     leg_source = "portfolio"
-    if flows_csv.exists():
+    if flows_csv is not None and flows_csv.exists():
         try:
             legs = load_ore_legs_from_flows(
                 str(flows_csv), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
@@ -528,6 +534,18 @@ def _build_minimal_pricing_payload(
         "leg_source": leg_source,
         "discount_column": discount_column,
         "forward_column": forward_column,
+        "reference_output_dirs": sorted(
+            {
+                str(path.parent)
+                for path in (curves_csv, npv_csv, flows_csv)
+                if path is not None
+            }
+        ),
+        "using_expected_output": any(
+            _classify_reference_dir(ore_xml, path.parent) == "expected_output"
+            for path in (curves_csv, npv_csv, flows_csv)
+            if path is not None
+        ),
     }
 
 
@@ -841,6 +859,8 @@ def _compute_price_only_case(
         },
         "diagnostics": {
             "engine": "python_price_only",
+            "reference_output_dirs": payload.get("reference_output_dirs", []),
+            "using_expected_output": bool(payload.get("using_expected_output", False)),
         },
     }
 
@@ -1112,7 +1132,7 @@ def _has_active_simulation_analytic(ore_xml: Path) -> bool:
     root = ET.parse(ore_xml).getroot()
     analytic = root.find("./Analytics/Analytic[@type='simulation']")
     if analytic is None:
-        return False
+        return (ore_xml.parent / "simulation.xml").exists()
     params = {
         (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
         for node in analytic.findall("./Parameter")
@@ -1239,6 +1259,10 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
         or "FloatingLegData/Index not found" in message
         or "no LGM node found for ccy" in message
         or "no fitted market curve available for currency" in message
+        or "has no Configuration[@id='" in message
+        or "has no DiscountingCurves mapping for config" in message
+        or "has no DiscountingCurve[@currency='" in message
+        or "Could not resolve column name for curve handle" in message
     )
 
 
@@ -1736,10 +1760,18 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
     diagnostics = dict(case_summary.get("diagnostics") or {})
     input_validation = case_summary.get("input_validation") or {}
     pass_all = bool(case_summary.get("pass_all"))
+    reference_dirs = [Path(p) for p in diagnostics.get("reference_output_dirs", []) if p]
+    reference_kinds = {_classify_reference_dir(Path(case_summary.get("ore_xml", ".")), p) for p in reference_dirs if p.exists()}
     if diagnostics.get("error"):
         return "hard_error"
     if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
         return "price_only_reference_fallback"
+    if diagnostics.get("fallback_reason") == "missing_native_output" and pass_all and not reference_kinds:
+        return "no_reference_artifacts_pass"
+    if diagnostics.get("fallback_reason") == "missing_native_output" and pass_all and (
+        "expected_output" in reference_kinds
+    ):
+        return "expected_output_fallback_pass"
     if diagnostics.get("fallback_reason") == "missing_native_output":
         return "missing_native_output_fallback"
     if diagnostics.get("fallback_reason") == "unsupported_python_snapshot":

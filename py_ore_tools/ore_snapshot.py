@@ -464,6 +464,31 @@ _TODAYSMARKET_OBJECT_META: tuple[tuple[str, str, str], ...] = (
     ("CorrelationsId", "Correlations", "Correlation"),
 )
 
+
+def _legacy_todaysmarket_section_ids(tm_root: ET.Element) -> set[str]:
+    ids: set[str] = set()
+    for _, section_tag, _ in _TODAYSMARKET_OBJECT_META:
+        for section in tm_root.findall(f"./{section_tag}"):
+            section_id = (section.attrib.get("id", "") or "").strip()
+            if section_id:
+                ids.add(section_id)
+    return ids
+
+
+def _resolve_todaysmarket_section_id(
+    tm_root: ET.Element,
+    config_id: str,
+    config_child: str,
+    section_tag: str,
+) -> str:
+    cfg = tm_root.find(f"./Configuration[@id='{config_id}']")
+    if cfg is not None:
+        return (cfg.findtext(f"./{config_child}") or "").strip()
+    legacy_section = tm_root.find(f"./{section_tag}[@id='{config_id}']")
+    if legacy_section is not None:
+        return config_id
+    return ""
+
 _SPEC_PREFIX_TO_CURVECONFIG_TAGS: dict[str, tuple[str, ...]] = {
     "Yield": ("YieldCurves",),
     "FX": (),
@@ -518,6 +543,13 @@ def _resolve_optional_ore_path(raw_path: str | Path | None, base: Path) -> Optio
     return _resolve_ore_path(raw_text, base)
 
 
+def _resolve_output_ore_path(raw_path: str | Path, run_dir: Path) -> Path:
+    raw = Path(str(raw_path).strip())
+    if raw.is_absolute():
+        return raw.resolve()
+    return (run_dir / raw).resolve()
+
+
 def _resolve_case_dirs(ore_xml_path: str | Path) -> tuple[Path, Path, Path]:
     ore_xml = Path(ore_xml_path).resolve()
     base = ore_xml.parent
@@ -556,7 +588,7 @@ def _parse_ore_setup_context(ore_xml_path: str) -> dict[str, object]:
     return {
         "ore_xml": ore_path,
         "input_dir": input_dir,
-        "output_dir": _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir),
+        "output_dir": _resolve_output_ore_path(setup_params.get("outputPath", "Output"), run_dir),
         "simulation_xml": simulation_xml,
         "market_data": _resolve_ore_path(setup_params.get("marketDataFile", ""), input_dir),
         "curve_config": _resolve_ore_path(setup_params.get("curveConfigFile", ""), input_dir),
@@ -761,6 +793,8 @@ def validate_ore_input_snapshot(
             if cfg.attrib.get("id", "").strip()
         }
     )
+    if not available_market_configs:
+        available_market_configs = sorted(_legacy_todaysmarket_section_ids(tm_root))
     requested_market_configs = []
     for value in markets_params.values():
         value = value.strip()
@@ -803,11 +837,13 @@ def validate_ore_input_snapshot(
     active_section_ids: dict[str, set[str]] = defaultdict(set)
     missing_section_refs: list[dict[str, str]] = []
     for config_id in active_market_configs:
-        cfg = tm_root.find(f"./Configuration[@id='{config_id}']")
-        if cfg is None:
-            continue
         for config_child, section_tag, _ in _TODAYSMARKET_OBJECT_META:
-            section_id = (cfg.findtext(f"./{config_child}") or "").strip()
+            section_id = _resolve_todaysmarket_section_id(
+                tm_root,
+                config_id,
+                config_child,
+                section_tag,
+            )
             if not section_id:
                 continue
             active_section_ids[section_tag].add(section_id)
@@ -1478,7 +1514,7 @@ def extract_discount_factors_by_currency(
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
 
-    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
+    output_path = _resolve_output_ore_path(setup_params.get("outputPath", "Output"), run_dir)
     curves_csv = output_path / "curves.csv"
     if not curves_csv.exists():
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {curves_csv}")
@@ -2028,7 +2064,7 @@ def load_from_ore_xml(
     # inputPath tells us the sub-directory name of the Input folder.
     # ore.xml lives inside that folder, so the ORE run-directory is base.parent.
     # outputPath is relative to that run-directory.
-    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
+    output_path = _resolve_output_ore_path(setup_params.get("outputPath", "Output"), run_dir)
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     market_data_rel = setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt")
@@ -2469,16 +2505,18 @@ def _handle_to_curve_name(tm_root: ET.Element, handle: str) -> str:
                 if name:
                     return name
 
-    # Some benchmark curves.csv files collapse cross-currency discount handles
-    # like ``Yield/USD/USD-IN-EUR`` down to the bare currency column ``USD``
-    # instead of exposing a separate ``USD-IN-EUR`` column. When the explicit
-    # XML indirection is absent, fall back to that convention so the Python
-    # parity tools can still consume ORE output curves.
+    # Some ORE curves.csv files collapse discount handles like
+    # ``Yield/EUR/EUR1D`` or cross-currency discount handles like
+    # ``Yield/USD/USD-IN-EUR`` down to the bare currency column instead of
+    # exposing a dedicated alias in todaysmarket.xml. When the explicit XML
+    # indirection is absent, fall back to that convention so the Python parity
+    # tools can still consume ORE output curves.
     parts = [p.strip() for p in handle.split("/") if p.strip()]
-    if len(parts) == 3 and parts[0] == "Yield" and "-IN-" in parts[2]:
+    if len(parts) == 3 and parts[0] == "Yield":
         ccy = parts[1].upper()
         if parts[2].upper().startswith(f"{ccy}-IN-"):
             return ccy
+        return ccy
 
     raise ValueError(
         f"Could not resolve column name for curve handle '{handle}' in todaysmarket.xml. "
@@ -2504,17 +2542,16 @@ def _resolve_discount_column(
         /[element with text == handle]
         → @name  (e.g. "EUR-EURIBOR-6M")  ← this is the curves.csv column
     """
-    cfg = tm_root.find(f"./Configuration[@id='{sim_config_id}']")
-    if cfg is None:
-        raise ValueError(
-            f"todaysmarket.xml has no Configuration[@id='{sim_config_id}']. "
-            f"Check that Markets/simulation in ore.xml matches a Configuration id."
-        )
-
-    disc_curves_id = (cfg.findtext("./DiscountingCurvesId") or "").strip()
+    disc_curves_id = _resolve_todaysmarket_section_id(
+        tm_root,
+        sim_config_id,
+        "DiscountingCurvesId",
+        "DiscountingCurves",
+    )
     if not disc_curves_id:
         raise ValueError(
-            f"Configuration[@id='{sim_config_id}'] is missing DiscountingCurvesId"
+            f"todaysmarket.xml has no DiscountingCurves mapping for config '{sim_config_id}'. "
+            f"Check that Markets/simulation in ore.xml matches a Configuration id or a direct DiscountingCurves id."
         )
 
     disc_curves = tm_root.find(f"./DiscountingCurves[@id='{disc_curves_id}']")
@@ -2544,17 +2581,16 @@ def _resolve_discount_columns_by_currency(
     config_id: str,
 ) -> Dict[str, Dict[str, str]]:
     """Resolve discounting curve handles and curves.csv columns for all currencies."""
-    cfg = tm_root.find(f"./Configuration[@id='{config_id}']")
-    if cfg is None:
-        raise ValueError(
-            f"todaysmarket.xml has no Configuration[@id='{config_id}']. "
-            f"Check analytics configuration id."
-        )
-
-    disc_curves_id = (cfg.findtext("./DiscountingCurvesId") or "").strip()
+    disc_curves_id = _resolve_todaysmarket_section_id(
+        tm_root,
+        config_id,
+        "DiscountingCurvesId",
+        "DiscountingCurves",
+    )
     if not disc_curves_id:
         raise ValueError(
-            f"Configuration[@id='{config_id}'] is missing DiscountingCurvesId"
+            f"todaysmarket.xml has no DiscountingCurves mapping for config '{config_id}'. "
+            f"Check analytics configuration id."
         )
 
     disc_curves = tm_root.find(f"./DiscountingCurves[@id='{disc_curves_id}']")
@@ -2744,7 +2780,7 @@ def _resolve_ore_run_files(
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
     _, run_dir, input_dir = _resolve_case_dirs(ore_xml)
-    output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
+    output_path = _resolve_output_ore_path(setup_params.get("outputPath", "Output"), run_dir)
     todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml"), input_dir)
     market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt"), input_dir)
     portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), input_dir)

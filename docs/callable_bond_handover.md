@@ -90,6 +90,25 @@ Why:
 Effect:
 - deterministic callable parity improved materially versus the older generic per-currency fitted curve calibration input
 
+### 1b. GSR calibration was silently falling back
+
+Fixed in:
+- [lgm_calibration.py](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools/lgm_calibration.py)
+
+Root cause:
+- the QuantLib `Gsr` model had been built with a hardcoded numeraire time of `60.0`
+- the calibration discount curve only extended to about `50Y`
+- QuantLib then threw `time (60) is past max curve time`
+- `_try_calibrate_callable_lgm(...)` swallowed that exception and returned `None`
+- callable pricing then fell back to the uncalibrated XML defaults
+
+Current fix:
+- `numeraire_time = max(maturity_times) + 2.0`
+
+Why it matters:
+- this was a real calibration disable, not a harmless numeric detail
+- after the fix, the callable path actually uses the calibrated LGM instead of the flat fallback model
+
 ### 2. More literal rollback state handling
 
 Added:
@@ -231,4 +250,3 @@ The direction is correct, but the current prototype is not good enough.
 - Do not chase more random market-input tweaks first.
 - Debug `PutCallBondTrade` against [numericlgmcallablebondengine.cpp](/Users/gordonlee/Documents/Engine/QuantExt/qle/pricingengines/numericlgmcallablebondengine.cpp) section `9.2` to `9.4`.
 - If you need a clean internal benchmark, use `CallableBondNoCall` for stripped value and `CallableBondCertainCall` for call exercise on a simpler path.
-

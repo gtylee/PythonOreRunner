@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 
@@ -10,6 +11,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from py_ore_tools.ore_snapshot import (
+    _resolve_discount_column,
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
 )
@@ -188,6 +190,143 @@ class TestOreSnapshotInputValidation(unittest.TestCase):
                 "FX/RATE/EUR/USD",
             )
             self.assertFalse(report["input_links_valid"])
+
+    def test_legacy_todaysmarket_schema_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+
+            (input_dir / "ore.xml").write_text(
+                """<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2025-01-01</Parameter>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="fixingDataFile">fixings.txt</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="implyTodaysFixings">N</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="simulation">default</Parameter>
+    <Parameter name="pricing">default</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="curves">
+      <Parameter name="configuration">default</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "curveconfig.xml").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<CurveConfiguration>
+  <YieldCurves>
+    <YieldCurve>
+      <CurveId>EUR1D</CurveId>
+      <CurveDescription>EUR OIS</CurveDescription>
+      <Currency>EUR</Currency>
+      <DiscountCurve>EUR1D</DiscountCurve>
+      <Segments>
+        <Simple>
+          <Type>Deposit</Type>
+          <Quotes>
+            <Quote>MM/RATE/EUR/EUR-EONIA/1D</Quote>
+          </Quotes>
+          <Conventions>EUR-CONV</Conventions>
+        </Simple>
+      </Segments>
+    </YieldCurve>
+    <YieldCurve>
+      <CurveId>EUR6M</CurveId>
+      <CurveDescription>EUR 6M</CurveDescription>
+      <Currency>EUR</Currency>
+      <DiscountCurve>EUR1D</DiscountCurve>
+      <Segments>
+        <Simple>
+          <Type>Deposit</Type>
+          <Quotes>
+            <Quote>MM/RATE/EUR/EUR-EURIBOR-6M/6M</Quote>
+          </Quotes>
+          <Conventions>EUR-CONV</Conventions>
+        </Simple>
+      </Segments>
+    </YieldCurve>
+  </YieldCurves>
+</CurveConfiguration>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "conventions.xml").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<Conventions>
+  <Deposit>
+    <Id>EUR-CONV</Id>
+    <IndexBased>true</IndexBased>
+    <Index>EUR-EONIA</Index>
+  </Deposit>
+</Conventions>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "todaysmarket.xml").write_text(
+                """<?xml version="1.0"?>
+<TodaysMarket>
+  <YieldCurves id="default">
+    <YieldCurve name="EUR">Yield/EUR/EUR1D</YieldCurve>
+  </YieldCurves>
+  <DiscountingCurves id="default">
+    <DiscountingCurve currency="EUR">Yield/EUR/EUR1D</DiscountingCurve>
+  </DiscountingCurves>
+  <IndexForwardingCurves id="default">
+    <Index name="EUR-EURIBOR-6M">Yield/EUR/EUR6M</Index>
+  </IndexForwardingCurves>
+</TodaysMarket>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "market.txt").write_text(
+                "\n".join(
+                    [
+                        "2025-01-01 MM/RATE/EUR/EUR-EONIA/1D 0.01",
+                        "2025-01-01 MM/RATE/EUR/EUR-EURIBOR-6M/6M 0.015",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (input_dir / "fixings.txt").write_text("", encoding="utf-8")
+
+            report = validate_ore_input_snapshot(input_dir / "ore.xml")
+
+            self.assertTrue(report["market_configurations"]["valid"])
+            self.assertIn("default", report["market_configurations"]["available"])
+            self.assertTrue(report["todaysmarket_sections"]["valid"])
+            self.assertTrue(report["curve_specs"]["valid"])
+            self.assertEqual(report["summary"]["selected_market_configs"], ["default"])
+
+    def test_resolve_discount_column_supports_legacy_todaysmarket_schema(self):
+        tm_root = ET.fromstring(
+            """<?xml version="1.0"?>
+<TodaysMarket>
+  <YieldCurves id="default">
+    <YieldCurve name="EUR">Yield/EUR/EUR1D</YieldCurve>
+  </YieldCurves>
+  <DiscountingCurves id="default">
+    <DiscountingCurve currency="EUR">Yield/EUR/EUR1D</DiscountingCurve>
+  </DiscountingCurves>
+  <IndexForwardingCurves id="default">
+    <Index name="EUR-EURIBOR-6M">Yield/EUR/EUR6M</Index>
+  </IndexForwardingCurves>
+</TodaysMarket>
+"""
+        )
+
+        self.assertEqual(_resolve_discount_column(tm_root, "default", "EUR"), "EUR")
 
 
 if __name__ == "__main__":
