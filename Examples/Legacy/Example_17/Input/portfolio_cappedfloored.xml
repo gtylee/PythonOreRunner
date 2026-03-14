@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <Portfolio>
-  <Trade id="YoY_Swap">
+  <Trade id="YearOnYear_Swap">
     <TradeType>Swap</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>

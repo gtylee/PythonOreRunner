@@ -30,13 +30,18 @@ The implementation here is deliberately pragmatic:
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+try:
+    import torch
+except Exception:  # pragma: no cover - torch is optional in some environments
+    torch = None
 
 from py_ore_tools.irs_xva_utils import (
     _parse_yyyymmdd,
@@ -229,6 +234,356 @@ class BondTradeSpec:
     settlement_dirty: bool = True
     compensation_payment: float = 0.0
     compensation_payment_date: date | None = None
+
+
+@dataclass(frozen=True)
+class CompiledBondTrade:
+    """Trade-time representation for scenario pricing.
+
+    This is the vectorization boundary. XML parsing and schedule reconstruction
+    happen once into dense arrays; scenario evaluation then becomes pure array
+    algebra over `[n_scenarios, n_flows]` style tensors.
+    """
+
+    trade_id: str
+    trade_type: str
+    currency: str
+    security_id: str
+    credit_curve_id: str
+    reference_curve_id: str
+    income_curve_id: str
+    bond_notional: float
+
+    pay_times: np.ndarray
+    amounts: np.ndarray
+    is_coupon: np.ndarray
+    recovery_nominals: np.ndarray
+    recovery_start_times: np.ndarray
+    recovery_end_times: np.ndarray
+
+    maturity_time: float
+
+    forward_maturity_time: float | None = None
+    forward_settlement_time: float | None = None
+    forward_amount: float | None = None
+    settlement_dirty: bool = True
+    long_in_forward: bool = True
+    compensation_payment: float = 0.0
+    compensation_payment_time: float | None = None
+
+    engine_spec: BondEngineSpec = BondEngineSpec()
+
+
+@dataclass(frozen=True)
+class BondScenarioGrid:
+    """Scenario inputs already sampled on the compiled trade times.
+
+    The intended use is:
+    - build trade-specific times once
+    - sample scenario curves / hazard inputs onto those times outside the hot loop
+    - feed the sampled arrays into NumPy or Torch pricing kernels
+    """
+
+    discount_to_pay: np.ndarray
+    income_to_npv: np.ndarray
+    income_to_settlement: np.ndarray
+    survival_to_pay: np.ndarray
+
+    recovery_discount_mid: np.ndarray
+    recovery_default_prob: np.ndarray
+    recovery_rate: np.ndarray
+
+    forward_dirty_value: np.ndarray | None = None
+    accrued_at_bond_settlement: np.ndarray | None = None
+    payoff_discount: np.ndarray | None = None
+    premium_discount: np.ndarray | None = None
+
+    def n_scenarios(self) -> int:
+        return int(np.asarray(self.income_to_npv).shape[0])
+
+    def as_single(self) -> "BondScenarioGrid":
+        """Return a shape-safe single-scenario view.
+
+        This is the adapter for legacy scalar pricing. Single pricing is just
+        the vectorized pricing path with `n_scenarios = 1`.
+        """
+
+        return BondScenarioGrid(
+            discount_to_pay=np.asarray(self.discount_to_pay, dtype=float).reshape(1, -1),
+            income_to_npv=np.asarray(self.income_to_npv, dtype=float).reshape(1),
+            income_to_settlement=np.asarray(self.income_to_settlement, dtype=float).reshape(1),
+            survival_to_pay=np.asarray(self.survival_to_pay, dtype=float).reshape(1, -1),
+            recovery_discount_mid=np.asarray(self.recovery_discount_mid, dtype=float).reshape(1, -1),
+            recovery_default_prob=np.asarray(self.recovery_default_prob, dtype=float).reshape(1, -1),
+            recovery_rate=np.asarray(self.recovery_rate, dtype=float).reshape(1),
+            forward_dirty_value=None if self.forward_dirty_value is None else np.asarray(self.forward_dirty_value, dtype=float).reshape(1),
+            accrued_at_bond_settlement=None if self.accrued_at_bond_settlement is None else np.asarray(self.accrued_at_bond_settlement, dtype=float).reshape(1),
+            payoff_discount=None if self.payoff_discount is None else np.asarray(self.payoff_discount, dtype=float).reshape(1),
+            premium_discount=None if self.premium_discount is None else np.asarray(self.premium_discount, dtype=float).reshape(1),
+        )
+
+
+def compile_bond_trade(
+    spec: BondTradeSpec,
+    *,
+    asof_date: str | date,
+    day_counter: str,
+    engine_spec: BondEngineSpec | None = None,
+) -> CompiledBondTrade:
+    """Compile a parsed trade into dense arrays for scenario evaluation."""
+
+    asof = asof_date if isinstance(asof_date, date) else _parse_any_date(str(asof_date))
+    live_cashflows = [cf for cf in spec.cashflows if not _cashflow_has_occurred(cf.pay_date, asof, False)]
+    coupon_rows = [cf for cf in live_cashflows if cf.accrual_start is not None and cf.accrual_end is not None and cf.nominal is not None]
+    pay_times = np.asarray([_time_from_dates(asof, cf.pay_date, day_counter) for cf in live_cashflows], dtype=float)
+    amounts = np.asarray([float(cf.amount) for cf in live_cashflows], dtype=float)
+    is_coupon = np.asarray([cf.accrual_start is not None and cf.accrual_end is not None and cf.nominal is not None for cf in live_cashflows], dtype=bool)
+    recovery_nominals = np.asarray([float(cf.nominal) for cf in coupon_rows], dtype=float) if coupon_rows else np.zeros(0, dtype=float)
+    recovery_start_times = (
+        np.asarray([_time_from_dates(asof, cf.accrual_start, day_counter) for cf in coupon_rows], dtype=float)
+        if coupon_rows
+        else np.zeros(0, dtype=float)
+    )
+    recovery_end_times = (
+        np.asarray([_time_from_dates(asof, cf.accrual_end, day_counter) for cf in coupon_rows], dtype=float)
+        if coupon_rows
+        else np.zeros(0, dtype=float)
+    )
+    maturity_time = float(np.max(pay_times)) if pay_times.size else 0.0
+    return CompiledBondTrade(
+        trade_id=spec.trade_id,
+        trade_type=spec.trade_type,
+        currency=spec.currency,
+        security_id=spec.security_id,
+        credit_curve_id=spec.credit_curve_id,
+        reference_curve_id=spec.reference_curve_id,
+        income_curve_id=spec.income_curve_id,
+        bond_notional=float(spec.bond_notional),
+        pay_times=pay_times,
+        amounts=amounts,
+        is_coupon=is_coupon,
+        recovery_nominals=recovery_nominals,
+        recovery_start_times=recovery_start_times,
+        recovery_end_times=recovery_end_times,
+        maturity_time=maturity_time,
+        forward_maturity_time=None if spec.forward_maturity_date is None else _time_from_dates(asof, spec.forward_maturity_date, day_counter),
+        forward_settlement_time=None if spec.forward_settlement_date is None else _time_from_dates(asof, spec.forward_settlement_date, day_counter),
+        forward_amount=None if spec.forward_amount is None else float(spec.forward_amount),
+        settlement_dirty=bool(spec.settlement_dirty),
+        long_in_forward=bool(spec.long_in_forward),
+        compensation_payment=float(spec.compensation_payment),
+        compensation_payment_time=None if spec.compensation_payment_date is None else _time_from_dates(asof, spec.compensation_payment_date, day_counter),
+        engine_spec=engine_spec or BondEngineSpec(),
+    )
+
+
+def _ensure_2d_float(name: str, value: np.ndarray) -> np.ndarray:
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
+    return arr
+
+
+def _ensure_1d_float(name: str, value: np.ndarray) -> np.ndarray:
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be 1D, got shape {arr.shape}")
+    return arr
+
+
+def validate_bond_scenario_grid(compiled: CompiledBondTrade, grid: BondScenarioGrid) -> None:
+    discount_to_pay = _ensure_2d_float("discount_to_pay", grid.discount_to_pay)
+    survival_to_pay = _ensure_2d_float("survival_to_pay", grid.survival_to_pay)
+    income_to_npv = _ensure_1d_float("income_to_npv", grid.income_to_npv)
+    income_to_settlement = _ensure_1d_float("income_to_settlement", grid.income_to_settlement)
+    recovery_discount_mid = _ensure_2d_float("recovery_discount_mid", grid.recovery_discount_mid)
+    recovery_default_prob = _ensure_2d_float("recovery_default_prob", grid.recovery_default_prob)
+    recovery_rate = _ensure_1d_float("recovery_rate", grid.recovery_rate)
+    n_scen = income_to_npv.shape[0]
+    if discount_to_pay.shape != (n_scen, compiled.pay_times.size):
+        raise ValueError(f"discount_to_pay expected shape {(n_scen, compiled.pay_times.size)}, got {discount_to_pay.shape}")
+    if survival_to_pay.shape != (n_scen, compiled.pay_times.size):
+        raise ValueError(f"survival_to_pay expected shape {(n_scen, compiled.pay_times.size)}, got {survival_to_pay.shape}")
+    if income_to_settlement.shape[0] != n_scen or recovery_rate.shape[0] != n_scen:
+        raise ValueError("scenario scalars must share the same scenario count")
+    if recovery_discount_mid.shape != (n_scen, compiled.recovery_nominals.size):
+        raise ValueError(f"recovery_discount_mid expected shape {(n_scen, compiled.recovery_nominals.size)}, got {recovery_discount_mid.shape}")
+    if recovery_default_prob.shape != (n_scen, compiled.recovery_nominals.size):
+        raise ValueError(f"recovery_default_prob expected shape {(n_scen, compiled.recovery_nominals.size)}, got {recovery_default_prob.shape}")
+    if compiled.trade_type == "ForwardBond":
+        for name in ("forward_dirty_value", "accrued_at_bond_settlement", "payoff_discount"):
+            value = getattr(grid, name)
+            if value is None:
+                raise ValueError(f"{name} is required for ForwardBond scenario pricing")
+            arr = _ensure_1d_float(name, value)
+            if arr.shape[0] != n_scen:
+                raise ValueError(f"{name} must have length {n_scen}, got {arr.shape[0]}")
+        if (
+            compiled.compensation_payment
+            and compiled.compensation_payment_time is not None
+            and compiled.compensation_payment_time > 0.0
+            and grid.premium_discount is None
+        ):
+            raise ValueError("premium_discount is required when compensation_payment_time is set")
+
+
+def build_bond_scenario_grid_numpy(
+    compiled: CompiledBondTrade,
+    *,
+    discount_curve,
+    income_curve,
+    hazard_times: np.ndarray,
+    hazard_rates: np.ndarray,
+    recovery_rate: float,
+    security_spread: float = 0.0,
+    engine_spec: BondEngineSpec | None = None,
+    npv_time: float = 0.0,
+    settlement_time: float = 0.0,
+    conditional_on_survival: bool = False,
+    forward_dirty_value: float | None = None,
+    accrued_at_bond_settlement: float | None = None,
+    payoff_discount: float | None = None,
+    premium_discount: float | None = None,
+) -> BondScenarioGrid:
+    """Convenience builder for the legacy single-scenario case.
+
+    This samples scalar curve/hazard inputs onto a compiled trade and returns a
+    one-scenario grid that can be fed directly into the vectorized NumPy kernel.
+    """
+
+    engine_spec = engine_spec or compiled.engine_spec
+    extra_credit = (
+        security_spread / max(1.0 - float(recovery_rate), 1.0e-12)
+        if engine_spec.treat_security_spread_as_credit_spread
+        else 0.0
+    )
+    eff_discount = discount_curve if engine_spec.treat_security_spread_as_credit_spread else _apply_spread(discount_curve, security_spread)
+    eff_income = income_curve
+    if security_spread and not engine_spec.treat_security_spread_as_credit_spread and engine_spec.spread_on_income_curve:
+        eff_income = _apply_spread(income_curve, security_spread)
+    df_npv = float(eff_income(max(npv_time, 0.0)))
+    df_settlement = float(eff_income(max(settlement_time, 0.0)))
+    sp_npv = 1.0 if not conditional_on_survival else float(
+        _survival_from_piecewise(np.asarray([max(npv_time, 0.0)]), hazard_times, hazard_rates, extra_credit)[0]
+    )
+    sp_settlement = float(_survival_from_piecewise(np.asarray([max(settlement_time, 0.0)]), hazard_times, hazard_rates, extra_credit)[0]) / (
+        1.0 if not conditional_on_survival else max(sp_npv, 1.0e-18)
+    )
+    discount_to_pay = np.asarray([float(eff_discount(max(t, 0.0))) / max(df_npv, 1.0e-18) for t in compiled.pay_times], dtype=float)[None, :]
+    survival_to_pay = np.asarray(
+        [
+            float(_survival_from_piecewise(np.asarray([max(t, 0.0)]), hazard_times, hazard_rates, extra_credit)[0]) / max(sp_npv, 1.0e-18)
+            for t in compiled.pay_times
+        ],
+        dtype=float,
+    )[None, :]
+    recovery_discount_mid = np.zeros((1, compiled.recovery_nominals.size), dtype=float)
+    recovery_default_prob = np.zeros((1, compiled.recovery_nominals.size), dtype=float)
+    for i, (s, e) in enumerate(zip(compiled.recovery_start_times, compiled.recovery_end_times)):
+        s_eff = max(float(s), 0.0)
+        e_eff = max(float(e), 0.0)
+        if e_eff <= s_eff:
+            continue
+        default_prob = _default_probability(s_eff, e_eff, hazard_times, hazard_rates, extra_credit) / max(sp_npv, 1.0e-18)
+        mid_t = 0.5 * (s_eff + e_eff)
+        recovery_default_prob[0, i] = default_prob
+        recovery_discount_mid[0, i] = float(eff_discount(max(mid_t, 0.0))) / max(df_npv, 1.0e-18)
+    if payoff_discount is None:
+        payoff_discount = float(eff_discount(max(settlement_time, 0.0)))
+        # For the vectorized forward path we supply the already-discounted payoff
+        # factor used in the C++ `DiscountingForwardBondEngine`, not the bond
+        # engine's settlement compounding factor.
+    return BondScenarioGrid(
+        discount_to_pay=discount_to_pay,
+        income_to_npv=np.asarray([df_npv], dtype=float),
+        income_to_settlement=np.asarray([df_settlement], dtype=float),
+        survival_to_pay=survival_to_pay,
+        recovery_discount_mid=recovery_discount_mid,
+        recovery_default_prob=recovery_default_prob,
+        recovery_rate=np.asarray([float(recovery_rate)], dtype=float),
+        forward_dirty_value=None if forward_dirty_value is None else np.asarray([float(forward_dirty_value)], dtype=float),
+        accrued_at_bond_settlement=None if accrued_at_bond_settlement is None else np.asarray([float(accrued_at_bond_settlement)], dtype=float),
+        payoff_discount=None if payoff_discount is None else np.asarray([float(payoff_discount)], dtype=float),
+        premium_discount=None if premium_discount is None else np.asarray([float(premium_discount)], dtype=float),
+    )
+
+
+def price_bond_scenarios_numpy(compiled: CompiledBondTrade, grid: BondScenarioGrid) -> np.ndarray:
+    """Vectorized NumPy evaluator.
+
+    This is the canonical scenario pricing kernel. Single-scenario pricing
+    should use this same function with `n_scenarios=1`.
+    """
+
+    validate_bond_scenario_grid(compiled, grid)
+    cash_pv = (np.asarray(grid.discount_to_pay, dtype=float) * np.asarray(grid.survival_to_pay, dtype=float)) * compiled.amounts[None, :]
+    pv = np.sum(cash_pv, axis=1)
+    if compiled.recovery_nominals.size:
+        pv += np.sum(
+            np.asarray(grid.recovery_discount_mid, dtype=float)
+            * np.asarray(grid.recovery_default_prob, dtype=float)
+            * compiled.recovery_nominals[None, :]
+            * np.asarray(grid.recovery_rate, dtype=float)[:, None],
+            axis=1,
+        )
+    if compiled.trade_type == "ForwardBond":
+        forward_dirty_value = np.asarray(grid.forward_dirty_value, dtype=float)
+        accrued = np.asarray(grid.accrued_at_bond_settlement, dtype=float)
+        strike = float(compiled.forward_amount or 0.0) + np.where(compiled.settlement_dirty, 0.0, accrued)
+        raw = np.where(compiled.long_in_forward, forward_dirty_value - strike, strike - forward_dirty_value)
+        pv = raw * np.asarray(grid.payoff_discount, dtype=float)
+        if (
+            compiled.compensation_payment_time is not None
+            and compiled.compensation_payment_time > 0.0
+            and compiled.compensation_payment
+        ):
+            prem = float(compiled.compensation_payment) * np.asarray(grid.premium_discount, dtype=float)
+            pv = pv + np.where(compiled.long_in_forward, -prem, prem)
+    return np.asarray(pv, dtype=float)
+
+
+def price_bond_scenarios_torch(compiled: CompiledBondTrade, grid: BondScenarioGrid):
+    """Vectorized Torch evaluator mirroring the NumPy kernel."""
+
+    if torch is None:
+        raise ImportError("torch is required for price_bond_scenarios_torch()")
+    validate_bond_scenario_grid(compiled, grid)
+    device = torch.device("cpu")
+    amounts = torch.as_tensor(compiled.amounts, dtype=torch.float64, device=device)
+    recovery_nominals = torch.as_tensor(compiled.recovery_nominals, dtype=torch.float64, device=device)
+    discount_to_pay = torch.as_tensor(grid.discount_to_pay, dtype=torch.float64, device=device)
+    survival_to_pay = torch.as_tensor(grid.survival_to_pay, dtype=torch.float64, device=device)
+    pv = torch.sum(discount_to_pay * survival_to_pay * amounts.unsqueeze(0), dim=1)
+    if compiled.recovery_nominals.size:
+        recovery_discount_mid = torch.as_tensor(grid.recovery_discount_mid, dtype=torch.float64, device=device)
+        recovery_default_prob = torch.as_tensor(grid.recovery_default_prob, dtype=torch.float64, device=device)
+        recovery_rate = torch.as_tensor(grid.recovery_rate, dtype=torch.float64, device=device)
+        pv = pv + torch.sum(
+            recovery_discount_mid * recovery_default_prob * recovery_nominals.unsqueeze(0) * recovery_rate.unsqueeze(1),
+            dim=1,
+        )
+    if compiled.trade_type == "ForwardBond":
+        forward_dirty_value = torch.as_tensor(grid.forward_dirty_value, dtype=torch.float64, device=device)
+        accrued = torch.as_tensor(grid.accrued_at_bond_settlement, dtype=torch.float64, device=device)
+        strike = torch.full_like(forward_dirty_value, float(compiled.forward_amount or 0.0))
+        if not compiled.settlement_dirty:
+            strike = strike + accrued
+        raw = forward_dirty_value - strike if compiled.long_in_forward else strike - forward_dirty_value
+        pv = raw * torch.as_tensor(grid.payoff_discount, dtype=torch.float64, device=device)
+        if (
+            compiled.compensation_payment_time is not None
+            and compiled.compensation_payment_time > 0.0
+            and compiled.compensation_payment
+        ):
+            prem = float(compiled.compensation_payment) * torch.as_tensor(grid.premium_discount, dtype=torch.float64, device=device)
+            pv = pv + (-prem if compiled.long_in_forward else prem)
+    return pv
+
+
+def price_bond_single_numpy(compiled: CompiledBondTrade, grid: BondScenarioGrid) -> float:
+    """Single-scenario special case of the vectorized NumPy kernel."""
+
+    return float(price_bond_scenarios_numpy(compiled, grid.as_single())[0])
 
 
 def _resolve_trade(root: ET.Element, trade_id: str) -> ET.Element:
@@ -684,10 +1039,10 @@ def price_bond_trade(
     else:
         base_curve = _fit_curve_for_currency(ore_xml, spec.currency)
     income_curve = base_curve
-    value, settlement_value = _bond_npv(
-        spec,
-        asof_date=asof,
-        day_counter=model_day_counter,
+    compiled = compile_bond_trade(spec, asof_date=asof, day_counter=model_day_counter, engine_spec=engine_spec)
+    underlying_compiled = compiled if compiled.trade_type == "Bond" else replace(compiled, trade_type="Bond")
+    spot_grid = build_bond_scenario_grid_numpy(
+        underlying_compiled,
         discount_curve=base_curve,
         income_curve=income_curve,
         hazard_times=hazard_times,
@@ -695,7 +1050,11 @@ def price_bond_trade(
         recovery_rate=recovery_rate,
         security_spread=security_spread,
         engine_spec=engine_spec,
+        settlement_time=0.0,
+        conditional_on_survival=False,
     )
+    value = price_bond_single_numpy(underlying_compiled, spot_grid)
+    settlement_value = value
     if spec.trade_type == "ForwardBond":
         # Port of `DiscountingForwardBondEngine::calculate()`:
         # - first compute the underlying bond forward value at the forward
@@ -719,16 +1078,25 @@ def price_bond_trade(
         )
         bond_settlement_date = _adjust_date(spec.forward_maturity_date + timedelta(days=spec.settlement_days), "F", spec.calendar)
         accrued = _accrued_amount(spec, bond_settlement_date)
-        strike = float(spec.forward_amount or 0.0) + (0.0 if spec.settlement_dirty else accrued)
         eff_settlement_date = bond_settlement_date
-        discount = float(base_curve(max(_time_from_dates(asof, eff_settlement_date, model_day_counter), 0.0)))
-        if spec.long_in_forward:
-            value = (forward_value - strike) * discount
-        else:
-            value = (strike - forward_value) * discount
-        if spec.compensation_payment and spec.compensation_payment_date > asof:
-            cmp_df = float(base_curve(max(_time_from_dates(asof, spec.compensation_payment_date, model_day_counter), 0.0)))
-            value += (-spec.compensation_payment if spec.long_in_forward else spec.compensation_payment) * cmp_df
+        forward_grid = BondScenarioGrid(
+            discount_to_pay=spot_grid.discount_to_pay,
+            income_to_npv=spot_grid.income_to_npv,
+            income_to_settlement=spot_grid.income_to_settlement,
+            survival_to_pay=spot_grid.survival_to_pay,
+            recovery_discount_mid=spot_grid.recovery_discount_mid,
+            recovery_default_prob=spot_grid.recovery_default_prob,
+            recovery_rate=spot_grid.recovery_rate,
+            forward_dirty_value=np.asarray([float(forward_value)], dtype=float),
+            accrued_at_bond_settlement=np.asarray([float(accrued)], dtype=float),
+            payoff_discount=np.asarray([float(base_curve(max(_time_from_dates(asof, eff_settlement_date, model_day_counter), 0.0)))], dtype=float),
+            premium_discount=(
+                None
+                if not (spec.compensation_payment and spec.compensation_payment_date > asof)
+                else np.asarray([float(base_curve(max(_time_from_dates(asof, spec.compensation_payment_date, model_day_counter), 0.0)))], dtype=float)
+            ),
+        )
+        value = price_bond_single_numpy(compiled, forward_grid)
         settlement_value = value
     maturity_date = max(cf.pay_date for cf in spec.cashflows)
     maturity_time = _time_from_dates(asof, maturity_date, model_day_counter)

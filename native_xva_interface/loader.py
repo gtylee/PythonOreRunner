@@ -313,9 +313,10 @@ def _resolve_ref(ref: str, ore_file: Path, input_path: str) -> Path:
     if p.is_absolute() and p.exists():
         return p
 
+    run_dir = ore_file.parent.parent
     candidates = [
-        (ore_file.parent / p),
-        (ore_file.parent / input_path / p),
+        (ore_file.parent / p).resolve(),
+        (run_dir / input_path / p).resolve(),
     ]
 
     for c in candidates:

@@ -12,12 +12,20 @@ if str(TOOLS_DIR) not in sys.path:
 from py_ore_tools.bond_pricing import (
     BondCashflow,
     BondEngineSpec,
+    BondScenarioGrid,
     BondTradeSpec,
+    CompiledBondTrade,
+    build_bond_scenario_grid_numpy,
+    compile_bond_trade,
     _bond_npv,
     _curve_from_flow_discounts,
     _load_bond_cashflows_from_flows,
     load_bond_trade_spec,
+    price_bond_scenarios_numpy,
+    price_bond_scenarios_torch,
+    price_bond_single_numpy,
     price_bond_trade,
+    torch,
 )
 from py_ore_tools.ore_snapshot import _load_ore_npv_details
 
@@ -149,6 +157,89 @@ class TestBondPricing(unittest.TestCase):
                     self.assertEqual(spec.forward_amount, 6300000.0)
                     self.assertTrue(spec.settlement_dirty)
                     self.assertTrue(spec.long_in_forward)
+
+    def test_compiled_trade_matches_example18_fixed_shape(self):
+        spec, engine = load_bond_trade_spec(
+            portfolio_xml=EXAMPLE_18_PORTFOLIO,
+            trade_id="Bond_Fixed",
+            reference_data_path=EXAMPLE_18_REFERENCE,
+            pricingengine_path=EXAMPLE_SHARED_PE,
+            flows_csv=EXAMPLE_18_FLOWS,
+        )
+        compiled = compile_bond_trade(spec, asof_date="2016-02-05", day_counter="A365F", engine_spec=engine)
+        self.assertEqual(compiled.trade_type, "Bond")
+        self.assertEqual(compiled.pay_times.shape, (6,))
+        self.assertEqual(compiled.amounts.shape, (6,))
+        self.assertEqual(compiled.recovery_nominals.shape, (5,))
+        self.assertEqual(compiled.recovery_start_times.shape, (5,))
+        self.assertEqual(compiled.recovery_end_times.shape, (5,))
+
+    def test_single_numpy_pricing_is_scenario_pricing_with_n1(self):
+        spec = BondTradeSpec(
+            trade_id="B1",
+            trade_type="Bond",
+            currency="EUR",
+            payer=False,
+            security_id="SEC",
+            credit_curve_id="CPTY",
+            reference_curve_id="EUR-EURIBOR-6M",
+            income_curve_id="",
+            settlement_days=2,
+            calendar="TARGET",
+            issue_date=date(2024, 1, 1),
+            bond_notional=1.0,
+            cashflows=(
+                BondCashflow(pay_date=date(2025, 1, 1), amount=5.0, flow_type="Interest", accrual_start=date(2024, 1, 1), accrual_end=date(2025, 1, 1), nominal=100.0),
+                BondCashflow(pay_date=date(2025, 1, 1), amount=100.0, flow_type="Notional", nominal=None),
+            ),
+        )
+        compiled = compile_bond_trade(spec, asof_date="2024-01-01", day_counter="A365F", engine_spec=BondEngineSpec())
+        curve = _flat_curve(0.05)
+        grid = build_bond_scenario_grid_numpy(
+            compiled,
+            discount_curve=curve,
+            income_curve=curve,
+            hazard_times=np.asarray([10.0], dtype=float),
+            hazard_rates=np.asarray([0.0], dtype=float),
+            recovery_rate=0.0,
+        )
+        scalar = price_bond_single_numpy(compiled, grid)
+        vector = price_bond_scenarios_numpy(compiled, grid)[0]
+        self.assertAlmostEqual(scalar, vector, places=12)
+
+    def test_numpy_and_torch_scenario_pricing_match(self):
+        compiled = CompiledBondTrade(
+            trade_id="B1",
+            trade_type="Bond",
+            currency="EUR",
+            security_id="SEC",
+            credit_curve_id="CPTY",
+            reference_curve_id="EUR-EURIBOR-6M",
+            income_curve_id="",
+            bond_notional=1.0,
+            pay_times=np.asarray([1.0, 2.0], dtype=float),
+            amounts=np.asarray([5.0, 100.0], dtype=float),
+            is_coupon=np.asarray([True, False], dtype=bool),
+            recovery_nominals=np.asarray([100.0], dtype=float),
+            recovery_start_times=np.asarray([0.0], dtype=float),
+            recovery_end_times=np.asarray([1.0], dtype=float),
+            maturity_time=2.0,
+            engine_spec=BondEngineSpec(),
+        )
+        grid = BondScenarioGrid(
+            discount_to_pay=np.asarray([[0.97, 0.94], [0.96, 0.92]], dtype=float),
+            income_to_npv=np.asarray([1.0, 1.0], dtype=float),
+            income_to_settlement=np.asarray([1.0, 1.0], dtype=float),
+            survival_to_pay=np.asarray([[0.99, 0.97], [0.98, 0.95]], dtype=float),
+            recovery_discount_mid=np.asarray([[0.985], [0.975]], dtype=float),
+            recovery_default_prob=np.asarray([[0.01], [0.02]], dtype=float),
+            recovery_rate=np.asarray([0.4, 0.4], dtype=float),
+        )
+        np_out = price_bond_scenarios_numpy(compiled, grid)
+        if torch is None:
+            self.skipTest("torch is not available in this environment")
+        th_out = price_bond_scenarios_torch(compiled, grid).detach().cpu().numpy()
+        np.testing.assert_allclose(np_out, th_out, rtol=0.0, atol=1.0e-12)
 
     def test_positive_hazard_reduces_bond_value(self):
         spec = BondTradeSpec(

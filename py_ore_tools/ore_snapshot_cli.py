@@ -1088,6 +1088,7 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
         isinstance(exc, FileNotFoundError)
         or "FloatingLegData/Index not found" in message
         or "no LGM node found for ccy" in message
+        or "no fitted market curve available for currency" in message
     )
 
 
@@ -1146,9 +1147,13 @@ def _ore_reference_summary(
                 if not allow_partial_reference:
                     raise
                 case_summary["diagnostics"]["missing_reference_pricing"] = True
+                case_summary["maturity_date"] = ""
+                case_summary["maturity_time"] = 0.0
                 case_summary["pricing"] = None
         else:
             case_summary["diagnostics"]["missing_reference_pricing"] = True
+            case_summary["maturity_date"] = ""
+            case_summary["maturity_time"] = 0.0
             case_summary["pricing"] = None
     else:
         case_summary["maturity_date"] = ""
@@ -1599,7 +1604,7 @@ def _run_case(
             reference_summary = _ore_reference_summary(
                 ore_xml,
                 modes,
-                allow_partial_reference=not isinstance(exc, FileNotFoundError),
+                allow_partial_reference=True,
             )
             diagnostics = dict(reference_summary.get("diagnostics") or {})
             diagnostics["engine"] = "ore_reference_expected_output"
@@ -1642,7 +1647,11 @@ def _run_case(
             if not _is_reference_fallback_error(exc):
                 raise
             if isinstance(exc, FileNotFoundError):
-                price_summary = _price_reference_summary(ore_xml)
+                price_summary = _ore_reference_summary(
+                    ore_xml,
+                    ModeSelection(price=True, xva=False, sensi=False),
+                    allow_partial_reference=True,
+                )
             else:
                 price_summary = _ore_reference_summary(
                     ore_xml,
