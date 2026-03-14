@@ -364,6 +364,42 @@ T1,Swap,1,1,2016-09-01,InterestProjected,50.0,EUR,0.02,0.5000000000,2016-03-01,2
         self.assertAlmostEqual(float(legs["float_index_accrual"][0]), 0.5)
         self.assertEqual(legs["float_index_day_counter"], "flows_accrual")
 
+    def test_load_ore_legs_from_flows_ignores_placeholder_fixing_dates(self):
+        from py_ore_tools.irs_xva_utils import load_ore_legs_from_flows
+
+        flows_csv = """\
+#TradeId,Type,CashflowNo,LegNo,PayDate,FlowType,Amount,Currency,Coupon,Accrual,AccrualStartDate,AccrualEndDate,AccruedAmount,fixingDate,fixingValue,Notional,DiscountFactor,PresentValue,FXRate(Local-Base),PresentValue(Base),BaseCurrency
+T1,Swap,1,0,2016-09-01,Interest,100.0,EUR,0.02,0.5,2016-03-01,2016-09-01,0.0,#N/A,#N/A,10000.0,1.0,100.0,1.0,100.0,EUR
+T1,Swap,1,1,2016-06-01,InterestProjected,-10.0,EUR,0.004,0.25,2016-03-01,2016-06-01,0.0,#N/A,#N/A,10000.0,1.0,-10.0,1.0,-10.0,EUR
+T1,Swap,2,1,2016-09-01,InterestProjected,-11.0,EUR,0.0044,0.25,2016-06-01,2016-09-01,0.0,#N/A,#N/A,10000.0,1.0,-11.0,1.0,-11.0,EUR
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = f"{tmp}/flows.csv"
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(flows_csv)
+            legs = load_ore_legs_from_flows(fp, trade_id="T1", asof_date="2016-02-05", time_day_counter="A365F")
+
+        self.assertEqual(legs["float_fixing_source"], "accrual_start_fallback")
+
+    def test_load_ore_legs_from_flows_detects_reversed_leg_numbers_via_fixings(self):
+        from py_ore_tools.irs_xva_utils import load_ore_legs_from_flows
+
+        flows_csv = """\
+#TradeId,Type,CashflowNo,LegNo,PayDate,FlowType,Amount,Currency,Coupon,Accrual,AccrualStartDate,AccrualEndDate,AccruedAmount,fixingDate,fixingValue,Notional,DiscountFactor,PresentValue,FXRate(Local-Base),PresentValue(Base),BaseCurrency
+T1,Swap,1,0,2016-06-01,InterestProjected,-10.0,USD,0.004,0.25,2016-03-01,2016-06-01,0.0,2016-02-26,0.004,10000.0,1.0,-10.0,1.0,-10.0,USD
+T1,Swap,2,0,2016-09-01,InterestProjected,-11.0,USD,0.0044,0.25,2016-06-01,2016-09-01,0.0,2016-05-30,0.0044,10000.0,1.0,-11.0,1.0,-11.0,USD
+T1,Swap,1,1,2016-09-01,Interest,100.0,TRY,0.10,0.5,2016-03-01,2016-09-01,0.0,#N/A,#N/A,20000.0,1.0,100.0,1.0,100.0,USD
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = f"{tmp}/flows.csv"
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(flows_csv)
+            legs = load_ore_legs_from_flows(fp, trade_id="T1", asof_date="2016-02-05", time_day_counter="A365F")
+
+        self.assertAlmostEqual(float(legs["fixed_notional"][0]), 20000.0)
+        self.assertAlmostEqual(float(legs["float_notional"][0]), 10000.0)
+        self.assertEqual(legs["float_fixing_source"], "flows_fixing_date")
+
 
 if __name__ == "__main__":
     unittest.main()

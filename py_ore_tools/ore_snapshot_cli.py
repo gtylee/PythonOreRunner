@@ -408,10 +408,18 @@ def _build_minimal_pricing_payload(
     conventions_path = (input_dir / setup_params.get("conventionsFile", "")).resolve()
     todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
     portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
+    netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
+    forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
+
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
     sim_params: dict[str, str] = {}
+    simulation_xml: Path | None = None
     if sim_analytic is not None:
         sim_params = {
             n.attrib.get("name", ""): (n.text or "").strip()
@@ -419,26 +427,31 @@ def _build_minimal_pricing_payload(
         }
         simulation_xml = (input_dir / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
     else:
-        simulation_xml = (input_dir / "simulation.xml").resolve()
-        if not simulation_xml.exists():
-            raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
-    sim_root = ET.parse(simulation_xml).getroot()
-    domestic_ccy = (
-        sim_root.findtext("./DomesticCcy")
-        or sim_root.findtext("./CrossAssetModel/DomesticCcy")
-        or "EUR"
-    ).strip()
-    model_day_counter = ore_snapshot_mod._normalize_day_counter_name(
-        (sim_root.findtext("./DayCounter") or "A365F").strip()
-    )
-    node_tenors = load_simulation_yield_tenors(str(simulation_xml))
+        candidate = (input_dir / "simulation.xml").resolve()
+        if candidate.exists():
+            simulation_xml = candidate
 
-    portfolio_root = ET.parse(portfolio_xml).getroot()
-    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
-    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
-    counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
-    netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
-    forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
+    if simulation_xml is not None and simulation_xml.exists():
+        sim_root = ET.parse(simulation_xml).getroot()
+        domestic_ccy = (
+            sim_root.findtext("./DomesticCcy")
+            or sim_root.findtext("./CrossAssetModel/DomesticCcy")
+            or "EUR"
+        ).strip()
+        model_day_counter = ore_snapshot_mod._normalize_day_counter_name(
+            (sim_root.findtext("./DayCounter") or "A365F").strip()
+        )
+        node_tenors = load_simulation_yield_tenors(str(simulation_xml))
+    else:
+        if trade_type != "Swap":
+            raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
+        npv_analytic = ore_root.find("./Analytics/Analytic[@type='npv']")
+        domestic_ccy = (
+            (npv_analytic.findtext("./Parameter[@name='baseCurrency']") if npv_analytic is not None else "")
+            or "EUR"
+        ).strip()
+        model_day_counter = "A365F"
+        node_tenors = []
 
     tm_root = ET.parse(todaysmarket_xml).getroot()
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
@@ -464,29 +477,39 @@ def _build_minimal_pricing_payload(
         )[forward_column]
         p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
 
-    calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
-        ore_xml_path=str(ore_xml_path),
-        output_path=output_path,
-        market_data_path=market_data_path,
-        curve_config_path=curve_config_path,
-        conventions_path=conventions_path,
-        todaysmarket_xml_path=todaysmarket_xml,
-        simulation_xml_path=simulation_xml,
-        domestic_ccy=domestic_ccy,
-    )
-    if calibration_xml is not None and calibration_xml.exists():
-        try:
-            params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(
-                str(calibration_xml), ccy_key=domestic_ccy
-            )
-        except Exception:
+    if simulation_xml is not None and simulation_xml.exists():
+        calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
+            ore_xml_path=str(ore_xml_path),
+            output_path=output_path,
+            market_data_path=market_data_path,
+            curve_config_path=curve_config_path,
+            conventions_path=conventions_path,
+            todaysmarket_xml_path=todaysmarket_xml,
+            simulation_xml_path=simulation_xml,
+            domestic_ccy=domestic_ccy,
+        )
+        if calibration_xml is not None and calibration_xml.exists():
+            try:
+                params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(
+                    str(calibration_xml), ccy_key=domestic_ccy
+                )
+            except Exception:
+                params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(
+                    str(simulation_xml), ccy_key=domestic_ccy
+                )
+        else:
             params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(
                 str(simulation_xml), ccy_key=domestic_ccy
             )
     else:
-        params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(
-            str(simulation_xml), ccy_key=domestic_ccy
-        )
+        params_dict = {
+            "alpha_times": (1.0,),
+            "alpha_values": (0.01, 0.01),
+            "kappa_times": (1.0,),
+            "kappa_values": (0.03, 0.03),
+            "shift": 0.0,
+            "scaling": 1.0,
+        }
     lgm_params = ore_snapshot_mod.LGMParams(
         alpha_times=tuple(float(x) for x in params_dict["alpha_times"]),
         alpha_values=tuple(float(x) for x in params_dict["alpha_values"]),
@@ -1137,7 +1160,8 @@ def _has_active_simulation_analytic(ore_xml: Path) -> bool:
         (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
         for node in analytic.findall("./Parameter")
     }
-    return params.get("active", "Y").strip().upper() != "N"
+    sim_name = params.get("simulationConfigFile", "simulation.xml").strip() or "simulation.xml"
+    return (ore_xml.parent / sim_name).exists()
 
 
 def _infer_modes(args: argparse.Namespace, ore_xml: Path) -> ModeSelection:
@@ -2052,7 +2076,7 @@ def _run_case(
             )
     elif modes.price:
         try:
-            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond"}:
+            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond", "Swap"}:
                 price_summary = _compute_price_only_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,

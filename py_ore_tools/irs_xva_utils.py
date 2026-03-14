@@ -484,10 +484,34 @@ def load_ore_legs_from_flows(
         d = datetime.strptime(date_str, "%Y-%m-%d")
         return _time_from_dates(asof.date(), d.date(), time_day_counter)
 
-    fixed = [r for r in rows if r["LegNo"] == "0"]
-    floating = [r for r in rows if r["LegNo"] == "1"]
-    if not fixed or not floating:
+    def _has_real_value(value: str) -> bool:
+        txt = (value or "").strip()
+        return bool(txt) and txt.upper() not in {"#N/A", "N/A", "NA"}
+
+    leg_groups: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        leg_groups.setdefault(row["LegNo"], []).append(row)
+    if len(leg_groups) != 2:
         raise ValueError("could not split fixed/floating legs from flows.csv")
+
+    leg_items = sorted(leg_groups.items(), key=lambda item: item[0])
+
+    def _leg_has_fixings(leg_rows: list[dict[str, str]]) -> bool:
+        for candidate in ("FixingDate", "fixingDate"):
+            if candidate in leg_rows[0]:
+                return any(_has_real_value(r.get(candidate, "")) for r in leg_rows)
+        return False
+
+    fixing_flags = [(leg_no, _leg_has_fixings(leg_rows)) for leg_no, leg_rows in leg_items]
+    if sum(1 for _, has_fixings in fixing_flags if has_fixings) == 1:
+        floating_leg_no = next(leg_no for leg_no, has_fixings in fixing_flags if has_fixings)
+        fixed_leg_no = next(leg_no for leg_no, has_fixings in fixing_flags if not has_fixings)
+    else:
+        fixed_leg_no = leg_items[0][0]
+        floating_leg_no = leg_items[1][0]
+
+    fixed = list(leg_groups[fixed_leg_no])
+    floating = list(leg_groups[floating_leg_no])
 
     # sort by pay date
     fixed.sort(key=lambda r: r["PayDate"])
@@ -565,7 +589,7 @@ def load_ore_legs_from_flows(
         if candidate in floating[0]:
             fixing_key = candidate
             break
-    if fixing_key is not None and all((r.get(fixing_key, "") or "").strip() for r in floating):
+    if fixing_key is not None and all(_has_real_value(r.get(fixing_key, "")) for r in floating):
         out["float_fixing_time"] = np.asarray([to_time(r[fixing_key]) for r in floating], dtype=float)
         out["float_fixing_source"] = "flows_fixing_date"
     else:

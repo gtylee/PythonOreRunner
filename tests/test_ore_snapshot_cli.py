@@ -436,14 +436,15 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(summary["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
         self.assertIn("FloatingLegData/Index not found", summary["diagnostics"]["fallback_error"])
 
-    def test_price_case_falls_back_to_reference_on_unsupported_product_error(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            input_dir = root / "Input"
-            input_dir.mkdir()
-            ore_xml = input_dir / "ore.xml"
-            ore_xml.write_text(
-                """<ORE>
+        def test_price_case_falls_back_to_reference_on_unsupported_product_error(self):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                input_dir = root / "Input"
+                input_dir.mkdir()
+                ore_xml = input_dir / "ore.xml"
+                (input_dir / "simulation.xml").write_text("<Simulation />", encoding="utf-8")
+                ore_xml.write_text(
+                    """<ORE>
   <Setup>
     <Parameter name="asofDate">2020-12-28</Parameter>
     <Parameter name="inputPath">Input</Parameter>
@@ -455,6 +456,7 @@ class TestOreSnapshotCli(unittest.TestCase):
     </Analytic>
     <Analytic type="simulation">
       <Parameter name="active">Y</Parameter>
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
     </Analytic>
   </Analytics>
 </ORE>
@@ -644,7 +646,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("pricing", payload)
             self.assertIsNone(payload["xva"])
 
-    def test_price_only_run_falls_back_to_reference_without_simulation_analytic(self):
+    def test_price_only_run_uses_synthetic_swap_setup_without_simulation_analytic(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
             case_root = tmp_root / "price_only_case"
@@ -677,9 +679,8 @@ class TestOreSnapshotCli(unittest.TestCase):
             payload = json.loads(
                 (tmp_root / "artifacts" / "price_only_case" / "summary.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(payload["diagnostics"]["engine"], "ore_reference_price_only")
-            self.assertEqual(payload["diagnostics"]["pricing_fallback_reason"], "missing_simulation_analytic")
-            self.assertNotIn("py_t0_npv", payload["pricing"])
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
 
@@ -718,6 +719,27 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
+
+    def test_has_active_simulation_analytic_accepts_inactive_analytic_with_existing_simulation_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            input_dir = tmp_root / "Input"
+            input_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<ORE>
+  <Analytics>
+    <Analytic type="simulation">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "simulation.xml").write_text("<Simulation />", encoding="utf-8")
+            self.assertTrue(ore_snapshot_cli._has_active_simulation_analytic(ore_xml))
 
     def test_reference_fallback_classifier_accepts_todaysmarket_resolution_errors(self):
         self.assertTrue(

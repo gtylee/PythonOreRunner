@@ -1,5 +1,6 @@
 import sys
 import unittest
+from dataclasses import replace
 from datetime import date
 import numpy as np
 from pathlib import Path
@@ -17,6 +18,10 @@ from py_ore_tools.bond_pricing import (
     CallableExerciseSpec,
     CompiledBondTrade,
     _callable_price_amount,
+    _build_lgm_model_for_callable,
+    _fit_curve_for_currency,
+    _load_security_spread,
+    _price_callable_bond_lgm,
     build_bond_scenario_grid_numpy,
     compile_bond_trade,
     _bond_npv,
@@ -31,6 +36,7 @@ from py_ore_tools.bond_pricing import (
     torch,
 )
 from py_ore_tools.ore_snapshot import _load_ore_npv_details
+from py_ore_tools.irs_xva_utils import load_ore_default_curve_inputs
 
 
 EXAMPLE_18_ORE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "ore.xml"
@@ -62,6 +68,46 @@ def _flat_curve(rate: float):
 
 
 class TestBondPricing(unittest.TestCase):
+    def _price_callable_variant(self, trade_id: str, *, spec_override=None, engine_override=None) -> dict:
+        spec, engine = load_callable_bond_trade_spec(
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id=trade_id,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_LGM_GRID_PE,
+        )
+        if spec_override is not None:
+            spec = spec_override(spec)
+        if engine_override is not None:
+            engine = engine_override(engine)
+        credit = load_ore_default_curve_inputs(str(EXAMPLE_SHARED_TM), str(EXAMPLE_SHARED_MARKET_FULL), cpty_name=spec.credit_curve_id)
+        hazard_times = np.asarray(credit["hazard_times"], dtype=float)
+        hazard_rates = np.asarray(credit["hazard_rates"], dtype=float)
+        recovery_rate = float(credit["recovery"])
+        security_spread = _load_security_spread(EXAMPLE_SHARED_MARKET_FULL, spec.security_id)
+        base_curve = _fit_curve_for_currency(CALLABLE_LGM_GRID_ORE_XML, spec.currency)
+        model = _build_lgm_model_for_callable(
+            ore_xml=CALLABLE_LGM_GRID_ORE_XML,
+            pricingengine_path=CALLABLE_LGM_GRID_PE,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            currency=spec.currency,
+            maturity_date=max(cf.pay_date for cf in spec.bond.cashflows),
+            asof_date=date(2016, 2, 5),
+        )
+        return _price_callable_bond_lgm(
+            spec,
+            engine,
+            asof_date=date(2016, 2, 5),
+            day_counter="A365F",
+            reference_curve=base_curve,
+            income_curve=base_curve,
+            hazard_times=hazard_times,
+            hazard_rates=hazard_rates,
+            recovery_rate=recovery_rate,
+            security_spread=security_spread,
+            model=model,
+        )
+
     def _price_example18(self, trade_id: str) -> tuple[dict, float]:
         out = price_bond_trade(
             ore_xml=EXAMPLE_18_ORE_XML,
@@ -352,6 +398,73 @@ class TestBondPricing(unittest.TestCase):
         self.assertGreater(float(put_call["py_npv"]), float(call_only["py_npv"]))
         self.assertEqual(int(put_call["put_schedule_count"]), 3)
         self.assertEqual(int(put_call["call_schedule_count"]), 3)
+
+    def test_put_call_variant_put_only_is_more_valuable_than_call_only(self):
+        call_only = self._price_callable_variant(
+            "PutCallBondTrade",
+            spec_override=lambda s: replace(s, put_data=()),
+        )
+        put_only = self._price_callable_variant(
+            "PutCallBondTrade",
+            spec_override=lambda s: replace(s, call_data=()),
+        )
+        both = self._price_callable_variant("PutCallBondTrade")
+        self.assertGreater(float(put_only["py_npv"]), float(both["py_npv"]))
+        self.assertGreater(float(both["py_npv"]), float(call_only["py_npv"]))
+
+    def test_put_call_variant_american_and_bermudan_currently_coincide(self):
+        def _to_bermudan(spec):
+            calls = tuple(replace(x, exercise_type="OnThisDate") for x in spec.call_data)
+            puts = tuple(replace(x, exercise_type="OnThisDate") for x in spec.put_data)
+            return replace(spec, call_data=calls, put_data=puts)
+
+        american = self._price_callable_variant("PutCallBondTrade")
+        bermudan = self._price_callable_variant("PutCallBondTrade", spec_override=_to_bermudan)
+        # This is intentionally a diagnostic regression test rather than a
+        # finance-theory assertion. In the current Python callable engine, the
+        # additional American grid points in this mixed put/call case do not
+        # change the optimal exercise result versus Bermudan-only dates. If
+        # that changes in a future parity pass, this test should be updated
+        # deliberately rather than silently drifting.
+        self.assertAlmostEqual(float(american["py_npv"]), float(bermudan["py_npv"]), delta=1.0)
+
+    def test_put_call_variant_include_accrual_changes_value(self):
+        with_accrual = self._price_callable_variant("PutCallBondTrade")
+        without_accrual = self._price_callable_variant(
+            "PutCallBondTrade",
+            spec_override=lambda s: replace(
+                s,
+                call_data=tuple(replace(x, include_accrual=False) for x in s.call_data),
+                put_data=tuple(replace(x, include_accrual=False) for x in s.put_data),
+            ),
+        )
+        self.assertNotAlmostEqual(float(with_accrual["py_npv"]), float(without_accrual["py_npv"]), delta=1.0)
+
+    def test_put_call_variant_dirty_prices_change_value(self):
+        clean = self._price_callable_variant("PutCallBondTrade")
+        dirty = self._price_callable_variant(
+            "PutCallBondTrade",
+            spec_override=lambda s: replace(
+                s,
+                call_data=tuple(replace(x, price_type="Dirty") for x in s.call_data),
+                put_data=tuple(replace(x, price_type="Dirty") for x in s.put_data),
+            ),
+        )
+        self.assertNotAlmostEqual(float(clean["py_npv"]), float(dirty["py_npv"]), delta=1.0)
+
+    def test_put_call_variant_exercise_step_density_is_stable(self):
+        coarse = self._price_callable_variant(
+            "PutCallBondTrade",
+            engine_override=lambda e: replace(e, exercise_time_steps_per_year=12),
+        )
+        base = self._price_callable_variant("PutCallBondTrade")
+        dense = self._price_callable_variant(
+            "PutCallBondTrade",
+            engine_override=lambda e: replace(e, exercise_time_steps_per_year=48),
+        )
+        self.assertGreater(float(coarse["py_npv"]), float(base["py_npv"]))
+        self.assertGreater(float(base["py_npv"]), float(dense["py_npv"]))
+        self.assertLess(abs(float(coarse["py_npv"]) - float(dense["py_npv"])), 5.0e4)
 
     def test_callable_lgm_grid_parity_against_native_ore_npv(self):
         tolerances = {
