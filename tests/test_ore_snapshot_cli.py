@@ -323,6 +323,68 @@ class TestOreSnapshotCli(unittest.TestCase):
             result = ore_snapshot_cli.validate_ore_input_snapshot(input_dir / "ore.xml")
         self.assertIsInstance(result, dict)
 
+    def test_default_case_identity_allows_empty_portfolio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            (input_dir / "portfolio.xml").write_text("<Portfolio />", encoding="utf-8")
+            (input_dir / "ore.xml").write_text(
+                """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2020-12-28</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+  </Setup>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ore_snapshot_cli._default_case_identity(input_dir / "ore.xml"),
+                ("", "", ""),
+            )
+
+    def test_non_pricing_case_with_empty_portfolio_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            (input_dir / "portfolio.xml").write_text("<Portfolio />", encoding="utf-8")
+            (input_dir / "market.txt").write_text("", encoding="utf-8")
+            for name in ("curveconfig.xml", "conventions.xml", "todaysmarket.xml"):
+                (input_dir / name).write_text("<root />", encoding="utf-8")
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2020-12-28</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+  </Setup>
+  <Analytics>
+    <Analytic type="zeroToParShift">
+      <Parameter name="active">Y</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            summary = ore_snapshot_cli._run_case(
+                ore_xml,
+                ore_snapshot_cli.build_parser().parse_args([str(ore_xml), "--output-root", str(root / "artifacts")]),
+                artifact_root=root / "artifacts",
+            )
+        self.assertEqual(summary["trade_id"], "")
+        self.assertEqual(summary["diagnostics"]["mode"], "non_pricing")
+        self.assertTrue(summary["pass_all"])
+
     def test_case_run_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()

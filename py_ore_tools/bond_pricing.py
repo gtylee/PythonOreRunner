@@ -1,3 +1,32 @@
+"""Python bond pricing helpers for `ore_snapshot_cli`.
+
+This module is intentionally not a generic bond library. It is a narrow port of
+the ORE C++ price-only path used by the snapshot CLI when the first trade is a
+`Bond` or `ForwardBond`.
+
+Source mapping to ORE C++:
+- `ored/portfolio/bond.cpp`
+  Mirrors how ORE turns `BondData` into a vanilla `QuantLib::Bond` with
+  schedule-driven coupon cashflows and a redemption flow.
+- `qle/pricingengines/discountingriskybondengine.cpp`
+  Mirrors the risky-bond NPV logic: discounted expected cashflows plus expected
+  recovery, with optional treatment of security spread as either a discount
+  spread or an extra credit spread.
+- `ored/portfolio/forwardbond.cpp`
+  Mirrors how ORE reuses the underlying bond definition plus settlement /
+  premium fields from `ForwardBondData`.
+- `qle/pricingengines/discountingforwardbondengine.cpp`
+  Mirrors the forward-bond payoff shape: underlying forward bond value minus
+  strike, discounted to the effective settlement date, with optional premium.
+
+The implementation here is deliberately pragmatic:
+- it focuses on price-only parity for `Bond` / `ForwardBond`
+- it uses existing PythonOreRunner utilities where that is already faithful
+- when native ORE curve outputs are unavailable, it falls back to either
+  flow-implied discount factors or a fitted market curve rather than requiring
+  ORE-SWIG at runtime
+"""
+
 from __future__ import annotations
 
 import csv
@@ -210,6 +239,10 @@ def _resolve_trade(root: ET.Element, trade_id: str) -> ET.Element:
 
 
 def _merge_reference_data(bond_node: ET.Element, reference_data_path: Path | None) -> ET.Element:
+    # ORE's `Bond::build()` first populates the inline `BondData` from reference
+    # data when a security id is present. We mimic the minimal part needed for
+    # the snapshot CLI: fill missing top-level bond fields and `LegData` from
+    # `ReferenceDatum[id]/BondReferenceData`, but leave inline overrides intact.
     merged = ET.fromstring(ET.tostring(bond_node, encoding="unicode"))
     security_id = (merged.findtext("./SecurityId") or "").strip()
     if not security_id or reference_data_path is None or not reference_data_path.exists():
@@ -243,6 +276,10 @@ def _parse_fixed_leg_cashflows(leg_node: ET.Element, *, sign: float) -> tuple[st
     term_convention = (rules.findtext("./TermConvention") or convention).strip()
     rule = (rules.findtext("./Rule") or "Forward").strip()
     schedule = _build_schedule(start, end, tenor, calendar, convention, term_convention, rule)
+    # ORE ultimately prices bonds off the cashflow leg that comes out of
+    # `BondData` -> coupon schedule -> `QuantLib::Bond`. For the Python path we
+    # reconstruct those deterministic cashflows directly instead of constructing
+    # a live QuantLib bond object and then re-extracting the same dates/amounts.
     flows: list[BondCashflow] = []
     if len(schedule) < 2:
         raise ValueError("bond schedule produced fewer than two dates")
@@ -255,6 +292,10 @@ def _parse_fixed_leg_cashflows(leg_node: ET.Element, *, sign: float) -> tuple[st
 
 
 def _load_bond_cashflows_from_flows(flows_csv: Path, trade_id: str, *, forward_underlying_only: bool = False) -> tuple[BondCashflow, ...]:
+    # When ORE `flows.csv` is available, prefer it over a locally rebuilt
+    # schedule. This follows the same parity philosophy already used elsewhere
+    # in the repo for swaps: ORE's emitted cashflow schedule is the most
+    # authoritative source for pay dates, accrued amounts, and redemption timing.
     rows: list[BondCashflow] = []
     with open(flows_csv, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -287,6 +328,13 @@ def _load_bond_cashflows_from_flows(flows_csv: Path, trade_id: str, *, forward_u
 
 
 def _load_engine_spec(pricingengine_path: Path | None, trade_type: str) -> BondEngineSpec:
+    # Only port the engine fields that materially affect the price formulas we
+    # reproduce here. This is taken from the ORE product docs and the
+    # corresponding builders / pricing engines:
+    # - TimestepPeriod
+    # - SpreadOnIncomeCurve
+    # - TreatSecuritySpreadAsCreditSpread
+    # - IncludePastCashflows
     if pricingengine_path is None or not pricingengine_path.exists():
         return BondEngineSpec()
     root = ET.parse(pricingengine_path).getroot()
@@ -345,6 +393,9 @@ def load_bond_trade_spec(
             cashflows=_load_bond_cashflows_from_flows(flows_csv, trade_id) if flows_csv and flows_csv.exists() else cashflows,
         )
     else:
+        # This follows `ForwardBond::fromXML()` / `ForwardBond::build()` in ORE:
+        # the underlying bond is parsed first, then settlement / premium /
+        # long-short forward metadata are applied around it.
         fwd_node = trade.find("./ForwardBondData")
         if fwd_node is None:
             raise ValueError("ForwardBond missing ForwardBondData")
@@ -405,6 +456,11 @@ def _fit_curve_for_currency(ore_xml: Path, currency: str):
 
 
 def _curve_from_flow_discounts(flows_csv: Path, trade_id: str, asof_date: date, day_counter: str, *, forward_underlying_only: bool = False):
+    # Some legacy example cases ship `flows.csv` / `npv.csv` but not `curves.csv`.
+    # In the risk-free / zero-spread cases, ORE's own cashflow report already
+    # contains discount factors per flow, so we can use those as curve pillars.
+    # This is not a generic market reconstruction; it is a parity-oriented
+    # fallback for the snapshot CLI's price-only bond checks.
     pairs: list[tuple[float, float]] = []
     with open(flows_csv, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -464,12 +520,27 @@ def _bond_npv(
     settlement_date: date | None = None,
     conditional_on_survival: bool = False,
 ) -> tuple[float, float]:
+    # This is the core port of QuantExt's `DiscountingRiskyBondEngine`.
+    #
+    # Mapping to C++ concepts:
+    # - `npv_date` / `settlement_date` correspond to the engine's forward-NPV and
+    #   settlement evaluation points.
+    # - `discount_curve` corresponds to the benchmark / risky discounting curve
+    #   after any security-spread-on-curve adjustment.
+    # - `income_curve` corresponds to the compounding curve used for settlement
+    #   value (`compoundFactorSettlement` in the C++ engine).
+    # - `conditional_on_survival` is used by ORE when valuing forward bond
+    #   positions off the underlying bond's forward price.
     npv_date = npv_date or asof_date
     settlement_date = settlement_date or npv_date
     include_ref_date_flows = False
     npv_t = _time_from_dates(asof_date, npv_date, day_counter)
     sett_t = _time_from_dates(asof_date, settlement_date, day_counter)
     extra_credit = security_spread / max(1.0 - float(recovery_rate), 1.0e-12) if engine_spec.treat_security_spread_as_credit_spread else 0.0
+    # ORE has two spread treatments:
+    # 1. default: apply security spread as a zero spread on the benchmark curve
+    # 2. TreatSecuritySpreadAsCreditSpread=true: leave the benchmark curve
+    #    unchanged and add the spread / (1 - recovery) onto the hazard curve
     eff_discount = discount_curve if engine_spec.treat_security_spread_as_credit_spread else _apply_spread(discount_curve, security_spread)
     eff_income = income_curve
     if security_spread and not engine_spec.treat_security_spread_as_credit_spread and engine_spec.spread_on_income_curve:
@@ -494,6 +565,10 @@ def _bond_npv(
         else:
             npv += pv
         if cf.accrual_start is not None and cf.accrual_end is not None and cf.nominal is not None:
+            # Coupon recovery contribution. This follows the C++ engine's
+            # `recoveryContribution(...)` call for coupon cashflows: expected
+            # default probability over the coupon accrual period times recovery
+            # of the coupon nominal, discounted to the valuation point.
             start = max(npv_date, cf.accrual_start)
             end = cf.accrual_end
             if start < end and recovery_rate > 0.0:
@@ -504,6 +579,9 @@ def _bond_npv(
                 mid_t = _time_from_dates(asof_date, mid, day_counter)
                 npv += float(cf.nominal) * float(recovery_rate) * default_prob * float(eff_discount(max(mid_t, 0.0))) / max(df_npv, 1.0e-18)
     if len(spec.cashflows) == 1 and spec.cashflows[0].flow_type.endswith("Notional") and spec.cashflows[0].nominal is not None and recovery_rate > 0.0:
+        # Zero-coupon bond special case. QuantExt handles this separately by
+        # stepping through the life of the redemption with `timestepPeriod_`
+        # because there are no coupon accrual periods to attach recovery to.
         redemption = spec.cashflows[0]
         start = npv_date
         while start < redemption.pay_date:
@@ -519,6 +597,10 @@ def _bond_npv(
 
 
 def _accrued_amount(spec: BondTradeSpec, settlement_date: date) -> float:
+    # Forward bond settlement can be dirty or clean. ORE's
+    # `DiscountingForwardBondEngine` adds accrued amount to the strike only when
+    # settlement is clean. We compute the same accrued stub off the underlying
+    # bond cashflow period that contains the bond settlement date.
     for cf in spec.cashflows:
         if cf.accrual_start is None or cf.accrual_end is None or cf.nominal is None:
             continue
@@ -544,6 +626,16 @@ def price_bond_trade(
     pricingengine_path: Path | None,
     flows_csv: Path | None,
 ) -> dict[str, object]:
+    # Entry point used by `ore_snapshot_cli` price-only mode.
+    #
+    # High-level ORE mapping:
+    # 1. parse trade + reference data
+    # 2. load engine parameters that influence pricing
+    # 3. load credit inputs and security spread from ORE market data
+    # 4. build / infer a discount curve
+    # 5. price either:
+    #    - a risky bond directly, or
+    #    - a forward contract on that underlying risky bond
     asof = _parse_any_date(asof_date)
     spec, engine_spec = load_bond_trade_spec(
         portfolio_xml=portfolio_xml,
@@ -599,6 +691,11 @@ def price_bond_trade(
         engine_spec=engine_spec,
     )
     if spec.trade_type == "ForwardBond":
+        # Port of `DiscountingForwardBondEngine::calculate()`:
+        # - first compute the underlying bond forward value at the forward
+        #   maturity date
+        # - then form `(forwardPrice - strikeAmount) * discount`
+        # - then apply long/short sign and optional premium cashflow
         forward_value, _ = _bond_npv(
             spec,
             asof_date=asof,

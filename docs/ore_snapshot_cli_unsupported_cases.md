@@ -86,6 +86,16 @@ This is the current signal that the loader is still assuming a swap-style floati
   - `Examples/Legacy/Example_73/Input/ore.xml`
 
 ### Commodity / Equity / Inflation / FRA / CapFloor / Credit
+- `Flexi-Swap` (`9`)
+  - `Examples/Legacy/Example_65/Input/ore_0.xml`
+  - `Examples/Legacy/Example_65/Input/ore_0_100.xml`
+  - `Examples/Legacy/Example_65/Input/ore_0_20.xml`
+  - `Examples/Legacy/Example_65/Input/ore_0_50.xml`
+  - `Examples/Legacy/Example_65/Input/ore_10.xml`
+  - `Examples/Legacy/Example_65/Input/ore_15.xml`
+  - `Examples/Legacy/Example_65/Input/ore_20.xml`
+  - `Examples/Legacy/Example_65/Input/ore_5.xml`
+  - `Examples/Legacy/Example_65/Input/ore_50.xml`
 - `CommodityForward` (`2`)
   - `Examples/Exposure/Input/ore_commodity.xml`
   - `Examples/Legacy/Example_24/Input/ore_wti.xml`

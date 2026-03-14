@@ -1086,7 +1086,12 @@ def _default_case_identity(ore_xml: Path) -> tuple[str, str, str]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
         return "", "", ""
-    return _find_first_trade_context(portfolio_xml)
+    try:
+        return _find_first_trade_context(portfolio_xml)
+    except ValueError as exc:
+        if "no Trade node found" in str(exc):
+            return "", "", ""
+        raise
 
 
 def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any]:
