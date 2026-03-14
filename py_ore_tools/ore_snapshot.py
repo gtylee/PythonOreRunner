@@ -509,6 +509,26 @@ def _resolve_ore_path(raw_path: str | Path, base: Path) -> Path:
     return (base / raw).resolve()
 
 
+def _resolve_optional_ore_path(raw_path: str | Path | None, base: Path) -> Optional[Path]:
+    raw_text = "" if raw_path is None else str(raw_path).strip()
+    if not raw_text:
+        return None
+    return _resolve_ore_path(raw_text, base)
+
+
+def _resolve_case_dirs(ore_xml_path: str | Path) -> tuple[Path, Path, Path]:
+    ore_xml = Path(ore_xml_path).resolve()
+    base = ore_xml.parent
+    ore_root = ET.parse(ore_xml).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    run_dir = base.parent
+    input_dir = _resolve_ore_path(setup_params.get("inputPath", base.name or "Input"), run_dir)
+    return ore_xml, run_dir, input_dir
+
+
 def validate_ore_input_snapshot(
     ore_xml_path: str | Path,
     *,
@@ -525,7 +545,7 @@ def validate_ore_input_snapshot(
     - FX duplicate/dominance outcomes are surfaced explicitly
     - implyTodaysFixings and any asof-date fixings are surfaced together
     """
-    ore_xml = Path(ore_xml_path).resolve()
+    ore_xml, _, input_dir = _resolve_case_dirs(ore_xml_path)
     ore_root = ET.parse(ore_xml).getroot()
 
     setup_params = {
@@ -548,13 +568,12 @@ def validate_ore_input_snapshot(
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
 
-    base = ore_xml.parent
-    curveconfig_xml = _resolve_ore_path(setup_params.get("curveConfigFile", "curveconfig.xml"), base)
-    conventions_xml = _resolve_ore_path(setup_params.get("conventionsFile", "conventions.xml"), base)
-    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "todaysmarket.xml"), base)
-    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "market.txt"), base)
-    fixing_data_file = _resolve_ore_path(setup_params.get("fixingDataFile", "fixings.txt"), base)
-    portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), base)
+    curveconfig_xml = _resolve_ore_path(setup_params.get("curveConfigFile", "curveconfig.xml"), input_dir)
+    conventions_xml = _resolve_ore_path(setup_params.get("conventionsFile", "conventions.xml"), input_dir)
+    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "todaysmarket.xml"), input_dir)
+    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "market.txt"), input_dir)
+    fixing_data_file = _resolve_optional_ore_path(setup_params.get("fixingDataFile", "fixings.txt"), input_dir)
+    portfolio_xml = _resolve_optional_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), input_dir)
     imply_todays_fixings = str(setup_params.get("implyTodaysFixings", "N")).strip().upper() in {"Y", "YES", "TRUE"}
 
     missing_files = [
@@ -611,7 +630,7 @@ def validate_ore_input_snapshot(
     )
     available_convention_set = set(available_conventions)
     relevant_currencies, relevant_indices, relevant_counterparties = _collect_snapshot_relevance(
-        portfolio_xml if portfolio_xml.exists() else None,
+        portfolio_xml if portfolio_xml is not None and portfolio_xml.exists() else None,
         analytics_params,
     )
 
@@ -834,7 +853,7 @@ def validate_ore_input_snapshot(
             fx_seen.add(canonical)
 
     today_fixing_count = 0
-    if fixing_data_file.exists():
+    if fixing_data_file is not None and fixing_data_file.exists():
         fixing_keys_by_date = _load_ore_csv_keys_by_date(fixing_data_file)
         today_fixing_count = len(fixing_keys_by_date.get(asof_date, set()))
 
@@ -921,7 +940,12 @@ def validate_ore_input_snapshot(
                 "severity": "warning",
                 "what_failed": "The fixing file contains asof-date fixings, but ORE is configured not to use today's fixings.",
                 "what_to_fix": "Set Setup/implyTodaysFixings to Y in ore.xml if those asof-date fixings should be consumed, or remove them from the fixing file if they are not intentional.",
-                "where_to_fix": [str(ore_xml), str(fixing_data_file) if fixing_data_file.exists() else str(ore_xml)],
+                    "where_to_fix": [
+                        str(ore_xml),
+                        str(fixing_data_file)
+                        if (fixing_data_file is not None and fixing_data_file.exists())
+                        else str(ore_xml),
+                    ],
                 "details": {"asof_date": asof_date, "today_fixing_count": today_fixing_count},
             }
         )
@@ -958,8 +982,8 @@ def validate_ore_input_snapshot(
             "conventions_xml": str(conventions_xml),
             "todaysmarket_xml": str(todaysmarket_xml),
             "market_data_file": str(market_data_file),
-            "fixing_data_file": str(fixing_data_file) if fixing_data_file.exists() else None,
-            "portfolio_xml": str(portfolio_xml) if portfolio_xml.exists() else None,
+            "fixing_data_file": str(fixing_data_file) if (fixing_data_file is not None and fixing_data_file.exists()) else None,
+            "portfolio_xml": str(portfolio_xml) if (portfolio_xml is not None and portfolio_xml.exists()) else None,
         },
         "market_configurations": {
             "requested": requested_market_configs,
@@ -1277,7 +1301,7 @@ def extract_discount_factors_by_currency(
         ...
       }
     """
-    ore_xml = Path(ore_xml_path).resolve()
+    ore_xml, run_dir, input_dir = _resolve_case_dirs(ore_xml_path)
     ore_root = ET.parse(ore_xml).getroot()
     setup_params = {
         n.attrib.get("name", ""): (n.text or "").strip()
@@ -1288,8 +1312,6 @@ def extract_discount_factors_by_currency(
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
 
-    base = ore_xml.parent
-    run_dir = base.parent
     output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
     curves_csv = output_path / "curves.csv"
     if not curves_csv.exists():
@@ -1302,7 +1324,7 @@ def extract_discount_factors_by_currency(
         n.attrib.get("name", ""): (n.text or "").strip()
         for n in simulation_analytic.findall("./Parameter")
     }
-    simulation_xml = _resolve_ore_path(simulation_params.get("simulationConfigFile", "simulation.xml"), base)
+    simulation_xml = _resolve_ore_path(simulation_params.get("simulationConfigFile", "simulation.xml"), input_dir)
     if not simulation_xml.exists():
         raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
     simulation_root = ET.parse(simulation_xml).getroot()
@@ -1311,7 +1333,7 @@ def extract_discount_factors_by_currency(
     )
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
-    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, base)
+    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, input_dir)
     if not todaysmarket_xml.exists():
         raise FileNotFoundError(f"todaysmarket.xml not found: {todaysmarket_xml}")
     tm_root = ET.parse(todaysmarket_xml).getroot()
@@ -1813,7 +1835,7 @@ def load_from_ore_xml(
         If XML structure does not match expected schema or a required field
         is absent.
     """
-    ore_xml_path = Path(ore_xml_path).resolve()
+    ore_xml_path, run_dir, input_dir = _resolve_case_dirs(ore_xml_path)
     base = ore_xml_path.parent  # directory containing ore.xml (e.g. .../Exposure/Input)
 
     # In ORE the run directory is the *parent* of the inputPath directory.
@@ -1840,16 +1862,15 @@ def load_from_ore_xml(
     # inputPath tells us the sub-directory name of the Input folder.
     # ore.xml lives inside that folder, so the ORE run-directory is base.parent.
     # outputPath is relative to that run-directory.
-    run_dir = base.parent
     output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     market_data_rel = setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt")
     portfolio_rel = setup_params.get("portfolioFile", "portfolio_singleswap.xml")
 
-    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, base)
-    market_data_file = _resolve_ore_path(market_data_rel, base)
-    portfolio_xml = _resolve_ore_path(portfolio_rel, base)
+    todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, input_dir)
+    market_data_file = _resolve_ore_path(market_data_rel, input_dir)
+    portfolio_xml = _resolve_ore_path(portfolio_rel, input_dir)
 
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
@@ -1863,7 +1884,7 @@ def load_from_ore_xml(
         for n in sim_analytic.findall("./Parameter")
     }
     sim_cfg_rel = sim_params.get("simulationConfigFile", "simulation_lgm.xml")
-    simulation_xml = _resolve_ore_path(sim_cfg_rel, base)
+    simulation_xml = _resolve_ore_path(sim_cfg_rel, input_dir)
 
     # ------------------------------------------------------------------
     # 2. Parse simulation.xml
@@ -2525,12 +2546,11 @@ def _resolve_ore_run_files(
     asof_date = setup_params.get("asofDate", "")
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml}")
-    base = ore_xml.parent
-    run_dir = base.parent
+    _, run_dir, input_dir = _resolve_case_dirs(ore_xml)
     output_path = _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir)
-    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml"), base)
-    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt"), base)
-    portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), base)
+    todaysmarket_xml = _resolve_ore_path(setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml"), input_dir)
+    market_data_file = _resolve_ore_path(setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt"), input_dir)
+    portfolio_xml = _resolve_ore_path(setup_params.get("portfolioFile", "portfolio.xml"), input_dir)
     return ore_xml, asof_date, market_data_file, todaysmarket_xml, output_path
 
 

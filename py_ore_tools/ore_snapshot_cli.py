@@ -339,9 +339,10 @@ def _build_minimal_pricing_payload(
         raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
     base = ore_xml_path.parent
     run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
     output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
-    todaysmarket_xml = (base / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
-    portfolio_xml = (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+    portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
@@ -351,7 +352,7 @@ def _build_minimal_pricing_payload(
         n.attrib.get("name", ""): (n.text or "").strip()
         for n in sim_analytic.findall("./Parameter")
     }
-    simulation_xml = (base / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    simulation_xml = (input_dir / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
     sim_root = ET.parse(simulation_xml).getroot()
     domestic_ccy = (
         sim_root.findtext("./DomesticCcy")
@@ -467,14 +468,19 @@ def _resolve_case_output_dir(ore_xml: Path) -> Path:
     return (run_dir / setup_params.get("outputPath", "Output")).resolve()
 
 
-def _resolve_case_portfolio_path(ore_xml: Path) -> Path:
+def _resolve_case_portfolio_path(ore_xml: Path) -> Path | None:
     ore_root = ET.parse(ore_xml).getroot()
     setup_params = {
         n.attrib.get("name", ""): (n.text or "").strip()
         for n in ore_root.findall("./Setup/Parameter")
     }
     base = ore_xml.resolve().parent
-    return (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    portfolio_file = (setup_params.get("portfolioFile", "portfolio.xml") or "").strip()
+    if not portfolio_file:
+        return None
+    return (input_dir / portfolio_file).resolve()
 
 
 def _compute_price_only_case(
@@ -872,10 +878,17 @@ def _price_reference_summary(ore_xml: Path) -> dict[str, Any]:
     return reference
 
 
+def _default_case_identity(ore_xml: Path) -> tuple[str, str, str]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return "", "", ""
+    return _find_first_trade_context(portfolio_xml)
+
+
 def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any]:
     validation = validate_ore_input_snapshot(ore_xml)
     output_dir = _resolve_case_output_dir(ore_xml)
-    trade_id, counterparty, netting_set_id = _find_first_trade_context(_resolve_case_portfolio_path(ore_xml))
+    trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
@@ -1365,7 +1378,7 @@ def _run_case(
             }
         )
     else:
-        trade_id, counterparty, netting_set_id = _find_first_trade_context(_resolve_case_portfolio_path(ore_xml))
+        trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
         case_summary.update(
             {
                 "trade_id": trade_id,

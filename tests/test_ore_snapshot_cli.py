@@ -290,6 +290,38 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertFalse(modes.xva)
         self.assertTrue(modes.sensi)
 
+    def test_validate_snapshot_allows_blank_portfolio_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            (input_dir / "ore.xml").write_text(
+                """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2020-12-28</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output/SIMM</Parameter>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="portfolioFile"></Parameter>
+  </Setup>
+  <Markets />
+  <Analytics>
+    <Analytic type="simm">
+      <Parameter name="active">Y</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            for name in ("market.txt", "curveconfig.xml", "conventions.xml", "todaysmarket.xml"):
+                (input_dir / name).write_text("<root />" if name.endswith(".xml") else "", encoding="utf-8")
+            result = ore_snapshot_cli.validate_ore_input_snapshot(input_dir / "ore.xml")
+        self.assertIsInstance(result, dict)
+
     def test_case_run_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
@@ -467,6 +499,43 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertNotIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
+
+    def test_run_case_without_supported_analytics_and_without_portfolio_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2020-12-28</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output/SIMM</Parameter>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="portfolioFile"></Parameter>
+  </Setup>
+  <Markets />
+  <Analytics>
+    <Analytic type="simm">
+      <Parameter name="active">Y</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            for name in ("market.txt", "curveconfig.xml", "conventions.xml", "todaysmarket.xml"):
+                (input_dir / name).write_text("<root />" if name.endswith(".xml") else "", encoding="utf-8")
+            rc = ore_snapshot_cli.main([str(ore_xml), "--output-root", str(root / "artifacts")])
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / root.name / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["modes"], [])
+        self.assertEqual(payload["trade_id"], "")
+        self.assertTrue(payload["pass_all"])
 
     def test_sensi_flag_uses_comparator(self):
         fake_result = {
