@@ -1144,14 +1144,14 @@ def _sample_ql_curve(curve_handle, asof_date: date):
     if ql is None:  # pragma: no cover - exercised only without QuantLib
         raise ImportError("QuantLib Python bindings are required for this curve build")
     curve = curve_handle.currentLink() if hasattr(curve_handle, "currentLink") else curve_handle
-    curve.enableExtrapolation()
-    dates = list(curve.dates())
     pairs: list[tuple[float, float]] = [(0.0, 1.0)]
-    for d in dates[1:]:
-        t = float(curve.timeFromReference(d))
-        if t <= 1.0e-12:
-            continue
-        pairs.append((t, float(curve.discount(d))))
+    curve.enableExtrapolation()
+    if hasattr(curve, "dates"):
+        for d in list(curve.dates())[1:]:
+            t = float(curve.timeFromReference(d))
+            if t <= 1.0e-12:
+                continue
+            pairs.append((t, float(curve.discount(d))))
     if len(pairs) == 1:
         max_time = 61.0
         for i in range(1, int(math.ceil(max_time / 0.25)) + 1):
@@ -1217,6 +1217,14 @@ def _build_ql_eur_projection_curve(
         return ql.Period(str(text).upper())
 
     helpers: list[ql.RateHelper] = []
+    helper_pillars: set[int] = set()
+
+    def _append_helper(helper) -> None:
+        pillar = int(helper.latestDate().serialNumber())
+        if pillar in helper_pillars:
+            return
+        helper_pillars.add(pillar)
+        helpers.append(helper)
     for ins in sorted(mm, key=lambda x: float(x["maturity"])):
         key = str(ins.get("quote_key", "")).upper()
         parts = key.split("/")
@@ -1224,7 +1232,7 @@ def _build_ql_eur_projection_curve(
             continue
         dep_tenor = parts[-1]
         fixing_days = int(parts[3][:-1]) if parts[3].endswith("D") and parts[3][:-1].isdigit() else 2
-        helpers.append(
+        _append_helper(
             ql.DepositRateHelper(
                 _quote(ins),
                 _period(dep_tenor),
@@ -1233,7 +1241,6 @@ def _build_ql_eur_projection_curve(
                 ql.ModifiedFollowing,
                 False,
                 ql.Actual360(),
-                projection_curve,
             )
         )
     for ins in sorted(fra, key=lambda x: float(x["maturity"])):
@@ -1242,14 +1249,14 @@ def _build_ql_eur_projection_curve(
         if len(parts) < 5:
             continue
         start_period = _period(parts[3])
-        helpers.append(ql.FraRateHelper(_quote(ins), start_period, index))
+        _append_helper(ql.FraRateHelper(_quote(ins), start_period, index))
     for ins in sorted(irs, key=lambda x: float(x["maturity"])):
         key = str(ins.get("quote_key", "")).upper()
         parts = key.split("/")
         if len(parts) < 6:
             continue
         swap_tenor = parts[-1]
-        helpers.append(
+        _append_helper(
             ql.SwapRateHelper(
                 _quote(ins),
                 _period(swap_tenor),
@@ -1305,7 +1312,7 @@ def _fit_curve_for_id(ore_xml: Path, currency: str, curve_id: str | None, asof_d
         try:
             payload = extract_market_instruments_by_currency(
                 ore_xml,
-                instrument_types=("ZERO", "MM", "IR_SWAP", "OIS"),
+                instrument_types=("ZERO", "MM", "FRA", "IR_SWAP", "OIS"),
             )
             instruments = list(payload.get(currency, {}).get("instruments", []))
             if curve_name.endswith("1D") or curve_name.endswith("EONIA"):
@@ -2149,6 +2156,76 @@ def _callable_underlying_reduced_value(
     return value / num
 
 
+@dataclass(frozen=True)
+class _CallableCashflowState:
+    amount: float
+    pay_time: float
+    belongs_to_underlying_max_time: float
+    max_estimation_time: float
+    coupon_start_time: float | None
+    coupon_end_time: float | None
+
+
+def _build_callable_cashflow_states(
+    spec: CallableBondTradeSpec,
+    *,
+    asof_date: date,
+    day_counter: str,
+) -> list[_CallableCashflowState]:
+    out: list[_CallableCashflowState] = []
+    for cf in spec.bond.cashflows:
+        pay_t = _time_from_dates(asof_date, cf.pay_date, day_counter)
+        if pay_t <= 0.0:
+            continue
+        if cf.accrual_start is not None and cf.accrual_end is not None:
+            start_t = _time_from_dates(asof_date, cf.accrual_start, day_counter)
+            end_t = _time_from_dates(asof_date, cf.accrual_end, day_counter)
+            out.append(
+                _CallableCashflowState(
+                    amount=float(cf.amount),
+                    pay_time=float(pay_t),
+                    belongs_to_underlying_max_time=float(end_t),
+                    max_estimation_time=float(pay_t),
+                    coupon_start_time=float(start_t),
+                    coupon_end_time=float(end_t),
+                )
+            )
+        else:
+            out.append(
+                _CallableCashflowState(
+                    amount=float(cf.amount),
+                    pay_time=float(pay_t),
+                    belongs_to_underlying_max_time=float(pay_t),
+                    max_estimation_time=float(pay_t),
+                    coupon_start_time=None,
+                    coupon_end_time=None,
+                )
+            )
+    return out
+
+
+def _callable_coupon_ratio(cf: _CallableCashflowState, t: float) -> float:
+    if cf.coupon_start_time is None or cf.coupon_end_time is None:
+        return 1.0
+    denom = cf.coupon_end_time - cf.coupon_start_time
+    if denom <= 1.0e-18:
+        return 0.0
+    return max(0.0, min(1.0, (cf.coupon_end_time - float(t)) / denom))
+
+
+def _callable_cashflow_reduced_pv(
+    cf: _CallableCashflowState,
+    model: LGM1F,
+    eff_discount_curve,
+    *,
+    t: float,
+    x_grid: np.ndarray,
+) -> np.ndarray:
+    disc = np.asarray(model.discount_bond(float(t), float(cf.pay_time), x_grid, eff_discount_curve, eff_discount_curve), dtype=float)
+    num = np.asarray(model.numeraire_lgm(float(t), x_grid, eff_discount_curve), dtype=float)
+    return float(cf.amount) * disc / num
+
+
 def _rollback_callable_bond_lgm_value(
     spec: CallableBondTradeSpec,
     engine_spec: CallableBondEngineSpec,
@@ -2220,13 +2297,20 @@ def _rollback_callable_bond_lgm_value(
         day_counter=day_counter,
     )
     change_times, notionals = _callable_notional_schedule(spec, asof_date, day_counter)
+    cashflows = _build_callable_cashflow_states(spec, asof_date=asof_date, day_counter=day_counter)
+    cf_done = np.zeros(len(cashflows), dtype=bool)
 
-    # Mirror ORE's decomposition more explicitly:
-    # - the stripped risky bond is valued by the bond engine
-    # - the rollback carries only the embedded call/put option in reduced form
-    # - exercise compares the call/put amount to the full reduced underlying
-    #   bond value at the exercise time
+    # Mirror the ORE engine loop more directly:
+    # - `underlying_npv` is the reduced-form value of already-activated bond
+    #   cashflows that remain part of the underlying
+    # - `provisional_npv` captures flows that are part of the underlying but
+    #   cannot yet be fully estimated at the exercise time
+    # For the current callable bond examples all coupons are fixed, so the
+    # provisional bucket stays zero; we still keep the state split because the
+    # call/put formulas in ORE use it asymmetrically.
+    underlying_npv = np.zeros_like(x_grids[-1], dtype=float)
     option_values = np.zeros_like(x_grids[-1], dtype=float)
+    provisional_npv = np.zeros_like(x_grids[-1], dtype=float)
     for i in range(len(grid) - 1, 0, -1):
         t_from = float(grid[i])
         grid_i = x_grids[i]
@@ -2240,17 +2324,50 @@ def _rollback_callable_bond_lgm_value(
                 y_nodes=y_nodes,
                 y_weights=y_weights,
             )
+            underlying_npv = _convolution_rollback(
+                underlying_npv,
+                zeta_t1=float(zeta_grid[i + 1]),
+                zeta_t0=float(zeta_grid[i]),
+                mx=mx,
+                nx=int(engine_spec.grid_nx),
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+            if i == 1:
+                provisional_npv = _convolution_rollback(
+                    provisional_npv,
+                    zeta_t1=float(zeta_grid[i + 1]),
+                    zeta_t0=float(zeta_grid[i]),
+                    mx=mx,
+                    nx=int(engine_spec.grid_nx),
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+
+        provisional_npv = np.zeros_like(provisional_npv)
+        for j, cf in enumerate(cashflows):
+            if cf_done[j]:
+                continue
+            if t_from <= cf.belongs_to_underlying_max_time + 1.0e-12 and _callable_coupon_ratio(cf, t_from) > 0.0:
+                if t_from <= cf.max_estimation_time + 1.0e-12:
+                    underlying_npv = underlying_npv + _callable_cashflow_reduced_pv(
+                        cf,
+                        model,
+                        eff_discount_curve,
+                        t=t_from,
+                        x_grid=grid_i,
+                    )
+                    cf_done[j] = True
+                else:
+                    provisional_npv = provisional_npv + _callable_cashflow_reduced_pv(
+                        cf,
+                        model,
+                        eff_discount_curve,
+                        t=t_from,
+                        x_grid=grid_i,
+                    )
         if i in call_map or i in put_map:
             continuation = option_values.copy()
-            underlying = _callable_underlying_reduced_value(
-                spec,
-                model,
-                eff_discount_curve,
-                asof_date=asof_date,
-                day_counter=day_counter,
-                t=t_from,
-                x_grid=grid_i,
-            )
             if i in call_map:
                 ex = call_map[i]
                 amt = _callable_price_amount(
@@ -2259,7 +2376,7 @@ def _rollback_callable_bond_lgm_value(
                     _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
                 )
                 num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
-                continuation = np.minimum(continuation, float(amt) / num - underlying)
+                continuation = np.minimum(continuation, float(amt) / num - (underlying_npv + provisional_npv))
             if i in put_map:
                 ex = put_map[i]
                 amt = _callable_price_amount(
@@ -2268,7 +2385,7 @@ def _rollback_callable_bond_lgm_value(
                     _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
                 )
                 num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
-                continuation = np.maximum(continuation, float(amt) / num - underlying)
+                continuation = np.maximum(continuation, float(amt) / num - underlying_npv + provisional_npv)
             option_values = continuation
     if len(grid) > 1:
         option_values = _convolution_rollback(
@@ -2421,12 +2538,8 @@ def price_bond_trade(
             forward_underlying_only=spec.trade_type == "ForwardBond",
         )
     else:
-        base_curve = _fit_curve_for_id(ore_xml, spec.currency, spec.reference_curve_id, asof)
-    income_curve = (
-        _fit_curve_for_id(ore_xml, spec.currency, spec.income_curve_id, asof)
-        if (spec.income_curve_id or "").strip()
-        else base_curve
-    )
+        base_curve = _fit_curve_for_currency(ore_xml, spec.currency)
+    income_curve = base_curve
     if trade_type == "CallableBond":
         model = _build_lgm_model_for_callable(
             ore_xml=ore_xml,

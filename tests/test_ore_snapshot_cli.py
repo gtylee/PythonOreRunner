@@ -907,6 +907,141 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["call_schedule_count"], 3)
         self.assertEqual(payload["diagnostics"]["callable_model_family"], "LGM")
 
+    def test_unique_report_case_slug_avoids_collisions(self):
+        first = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
+        second = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
+        self.assertNotEqual(
+            ore_snapshot_cli._unique_report_case_slug(first),
+            ore_snapshot_cli._unique_report_case_slug(second),
+        )
+
+    def test_reference_source_used_detects_output_expected_and_mixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case_root = root / "Examples" / "Demo"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            expected_dir = case_root / "ExpectedOutput"
+            input_dir.mkdir(parents=True)
+            output_dir.mkdir()
+            expected_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<ORE><Setup>
+<Parameter name="outputPath">Output</Parameter>
+</Setup></ORE>""",
+                encoding="utf-8",
+            )
+            output_case = {"diagnostics": {"reference_output_dirs": [str(output_dir)]}}
+            expected_case = {"diagnostics": {"reference_output_dirs": [str(expected_dir)]}}
+            mixed_case = {"diagnostics": {"reference_output_dirs": [str(output_dir), str(expected_dir)]}}
+            self.assertEqual(ore_snapshot_cli._reference_source_used(ore_xml, output_case), "output")
+            self.assertEqual(ore_snapshot_cli._reference_source_used(ore_xml, expected_case), "expected_output")
+            self.assertEqual(ore_snapshot_cli._reference_source_used(ore_xml, mixed_case), "mixed")
+
+    def test_bucket_case_precedence_is_deterministic(self):
+        case_summary = {
+            "pass_all": False,
+            "diagnostics": {
+                "missing_reference_xva": True,
+                "fallback_reason": "missing_native_output",
+                "sample_count_mismatch": True,
+            },
+            "input_validation": {"input_links_valid": False},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "missing_reference_xva")
+
+    def test_write_live_report_artifacts_includes_next_fix_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [
+                {
+                    "ore_xml": "/tmp/a.xml",
+                    "case_slug": "case_a",
+                    "rc": 1,
+                    "pass_all": False,
+                    "trade_id": "T1",
+                    "modes": "price,xva",
+                    "engine": "ore_reference_expected_output",
+                    "reference_source_used": "expected_output",
+                    "fallback_reason": "missing_native_output",
+                    "pricing_fallback_reason": None,
+                    "sample_count_mismatch": False,
+                    "pricing_abs_diff": None,
+                    "cva_rel_diff": None,
+                    "dva_rel_diff": None,
+                    "fba_rel_diff": None,
+                    "fca_rel_diff": None,
+                    "parity_ready": None,
+                    "bucket": "missing_native_output_fallback",
+                    "next_fix_hint": ore_snapshot_cli.REPORT_BUCKET_HINTS["missing_native_output_fallback"],
+                    "summary_path": "/tmp/a/summary.json",
+                }
+            ]
+            ore_snapshot_cli._write_live_report_artifacts(root, rows, total_cases=2, top_buckets=5)
+            summary = json.loads((root / "live_summary.json").read_text(encoding="utf-8"))
+            report = (root / "live_report.md").read_text(encoding="utf-8")
+            self.assertEqual(summary["totals_by_bucket"]["missing_native_output_fallback"], 1)
+            self.assertIn("next_fix_hint", report)
+            self.assertTrue((root / "live_results.csv").exists())
+
+    def test_report_examples_mode_runs_and_writes_live_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            examples_root = root / "Examples"
+            case_dir = examples_root / "FamilyA" / "Input"
+            case_dir.mkdir(parents=True)
+            ore_a = case_dir / "ore.xml"
+            ore_b = case_dir / "ore_alt.xml"
+            ore_a.write_text("<ORE />", encoding="utf-8")
+            ore_b.write_text("<ORE />", encoding="utf-8")
+
+            def fake_run_case(ore_xml, args, *, artifact_root):
+                out_dir = artifact_root / ore_snapshot_cli._case_slug(ore_xml)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "ore_xml": str(ore_xml),
+                    "trade_id": ore_xml.stem,
+                    "counterparty": "CPTY",
+                    "netting_set_id": "NET",
+                    "modes": ["price"],
+                    "pricing": {"ore_t0_npv": 1.0, "py_t0_npv": 1.0, "t0_npv_abs_diff": 0.0},
+                    "xva": None,
+                    "parity": {"parity_ready": True, "summary": {"requested_xva_metrics": []}},
+                    "diagnostics": {"engine": "python"},
+                    "input_validation": {"input_links_valid": True, "issues": []},
+                    "pass_flags": {"pricing": True},
+                    "pass_all": True,
+                }
+                (out_dir / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+
+            with patch("py_ore_tools.ore_snapshot_cli._examples_root", return_value=examples_root):
+                with patch("py_ore_tools.ore_snapshot_cli._run_case", side_effect=fake_run_case):
+                    rc = ore_snapshot_cli.main(
+                        [
+                            "--report-examples",
+                            "--report-root",
+                            str(root / "report"),
+                            "--report-workers",
+                            "2",
+                            "--report-refresh-every",
+                            "1",
+                        ]
+                    )
+            self.assertEqual(rc, 0)
+            summary = json.loads((root / "report" / "live_summary.json").read_text(encoding="utf-8"))
+            rows = list(csv.DictReader((root / "report" / "live_results.csv").open(encoding="utf-8")))
+            self.assertEqual(summary["completed_cases"], 2)
+            self.assertEqual(len(rows), 2)
+            self.assertNotEqual(rows[0]["case_slug"], rows[1]["case_slug"])
+            self.assertTrue(all(row["summary_path"] for row in rows))
+
+    def test_report_examples_mode_does_not_change_normal_single_case_behavior(self):
+        args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--price"])
+        self.assertFalse(args.report_examples)
+        self.assertEqual(args.report_workers, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

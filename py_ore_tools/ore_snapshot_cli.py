@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
 import csv
+import io
 import json
 import re
 import shutil
@@ -9,6 +11,8 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
+from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -55,6 +59,18 @@ EXAMPLE_CHOICES = (
     "lgm_fx_portfolio_256",
 )
 TENSOR_BACKEND_CHOICES = ("auto", "numpy", "torch-cpu", "torch-mps")
+REPORT_BUCKET_HINTS = {
+    "clean_pass": "No action needed; case is clean on the current parity path.",
+    "parity_threshold_fail": "Inspect per-case summary and comparison metrics; use pricing vs XVA pass flags to choose the next subsystem.",
+    "sample_count_mismatch": "Align Python paths with ORE samples before treating the diff as structural.",
+    "missing_native_output_fallback": "Decide whether to vendor native outputs or accept expected-output-only parity.",
+    "unsupported_python_snapshot_fallback": "Inspect the product/model support gap or accept reference fallback for this family.",
+    "price_only_reference_fallback": "Enable or restore the simulation analytic if Python-side pricing parity is required.",
+    "input_validation_issue": "Fix file links, market config ids, or required quotes before parity work.",
+    "missing_reference_pricing": "Provide or regenerate pricing reference artifacts (`npv.csv`) before pricing parity work.",
+    "missing_reference_xva": "Provide or regenerate XVA reference artifacts (`xva.csv` / exposure files) before XVA parity work.",
+    "hard_error": "Inspect the recorded error/parse failure before any parity debugging.",
+}
 
 
 def _example_devices_for_backend(tensor_backend: str) -> list[str]:
@@ -526,6 +542,10 @@ def _resolve_case_output_dir(ore_xml: Path) -> Path:
     return (run_dir / setup_params.get("outputPath", "Output")).resolve()
 
 
+def _examples_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "Examples"
+
+
 def _expected_output_root(ore_xml: Path) -> Path | None:
     root = ore_xml.resolve().parents[1] / "ExpectedOutput"
     return root if root.exists() else None
@@ -585,6 +605,26 @@ def _reference_output_dirs(ore_xml: Path) -> list[Path]:
     if root is not None and root.exists() and root not in dirs:
         dirs.append(root)
     return dirs
+
+
+def _classify_reference_dir(ore_xml: Path, directory: Path) -> str:
+    actual = _resolve_case_output_dir(ore_xml)
+    if directory.resolve() == actual.resolve():
+        return "output"
+    return "expected_output"
+
+
+def _reference_source_used(ore_xml: Path, case_summary: dict[str, Any]) -> str:
+    diagnostics = dict(case_summary.get("diagnostics") or {})
+    recorded_dirs = [Path(p) for p in diagnostics.get("reference_output_dirs", []) if p]
+    if not recorded_dirs:
+        recorded_dirs = _reference_output_dirs(ore_xml)
+    sources = {_classify_reference_dir(ore_xml, p) for p in recorded_dirs if p.exists()}
+    if not sources:
+        return "none"
+    if len(sources) == 1:
+        return next(iter(sources))
+    return "mixed"
 
 
 def _reference_filename_candidates(ore_xml: Path, filename: str) -> list[str]:
@@ -1677,6 +1717,238 @@ def _render_case_markdown(case_summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _unique_report_case_slug(ore_xml: Path) -> str:
+    examples_root = _examples_root().resolve()
+    resolved = ore_xml.resolve()
+    try:
+        rel = resolved.relative_to(examples_root)
+    except ValueError:
+        rel = resolved
+    return "__".join(rel.parts[:-1] + (resolved.stem,))
+
+
+def _bucket_case(case_summary: dict[str, Any]) -> str:
+    diagnostics = dict(case_summary.get("diagnostics") or {})
+    input_validation = case_summary.get("input_validation") or {}
+    pass_all = bool(case_summary.get("pass_all"))
+    if diagnostics.get("error"):
+        return "hard_error"
+    if diagnostics.get("missing_reference_pricing"):
+        return "missing_reference_pricing"
+    if diagnostics.get("missing_reference_xva"):
+        return "missing_reference_xva"
+    if not pass_all and diagnostics.get("sample_count_mismatch"):
+        return "sample_count_mismatch"
+    if not pass_all and input_validation.get("input_links_valid") is False:
+        return "input_validation_issue"
+    if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
+        return "price_only_reference_fallback"
+    if diagnostics.get("fallback_reason") == "missing_native_output":
+        return "missing_native_output_fallback"
+    if diagnostics.get("fallback_reason") == "unsupported_python_snapshot":
+        return "unsupported_python_snapshot_fallback"
+    if not pass_all:
+        return "parity_threshold_fail"
+    return "clean_pass"
+
+
+def _report_row_from_case_summary(ore_xml: Path, case_summary: dict[str, Any], rc: int, *, summary_path: Path) -> dict[str, Any]:
+    pricing = case_summary.get("pricing") or {}
+    xva = case_summary.get("xva") or {}
+    diagnostics = case_summary.get("diagnostics") or {}
+    parity = case_summary.get("parity") or {}
+    bucket = _bucket_case(case_summary)
+    return {
+        "ore_xml": str(ore_xml),
+        "case_slug": _unique_report_case_slug(ore_xml),
+        "rc": int(rc),
+        "pass_all": bool(case_summary.get("pass_all")),
+        "trade_id": str(case_summary.get("trade_id", "")),
+        "modes": ",".join(case_summary.get("modes") or []),
+        "engine": diagnostics.get("engine"),
+        "reference_source_used": _reference_source_used(ore_xml, case_summary),
+        "fallback_reason": diagnostics.get("fallback_reason"),
+        "pricing_fallback_reason": diagnostics.get("pricing_fallback_reason"),
+        "sample_count_mismatch": diagnostics.get("sample_count_mismatch"),
+        "pricing_abs_diff": pricing.get("t0_npv_abs_diff"),
+        "cva_rel_diff": xva.get("cva_rel_diff"),
+        "dva_rel_diff": xva.get("dva_rel_diff"),
+        "fba_rel_diff": xva.get("fba_rel_diff"),
+        "fca_rel_diff": xva.get("fca_rel_diff"),
+        "parity_ready": parity.get("parity_ready"),
+        "bucket": bucket,
+        "next_fix_hint": REPORT_BUCKET_HINTS[bucket],
+        "summary_path": str(summary_path),
+    }
+
+
+def _render_live_report_markdown(rows: list[dict[str, Any]], *, total_cases: int, top_buckets: int) -> str:
+    bucket_counts = Counter(row["bucket"] for row in rows)
+    engine_counts = Counter(str(row["engine"]) for row in rows if row.get("engine"))
+    reference_counts = Counter(str(row["reference_source_used"]) for row in rows if row.get("reference_source_used"))
+    clean_count = sum(1 for row in rows if row["bucket"] == "clean_pass")
+    non_clean = [row for row in rows if row["bucket"] != "clean_pass"]
+    lines = [
+        "# ORE Snapshot CLI Live Parity Report",
+        "",
+        f"- completed: `{len(rows)}` / `{total_cases}`",
+        f"- clean_pass: `{clean_count}`",
+        f"- non_clean: `{len(non_clean)}`",
+        "",
+        "## Top Buckets",
+        "",
+    ]
+    for bucket, count in bucket_counts.most_common(top_buckets):
+        lines.append(f"- `{bucket}`: `{count}`")
+    lines.extend(["", "## Reference Sources", ""])
+    for key, count in sorted(reference_counts.items()):
+        lines.append(f"- `{key}`: `{count}`")
+    lines.extend(["", "## Engines", ""])
+    for key, count in sorted(engine_counts.items()):
+        lines.append(f"- `{key}`: `{count}`")
+    lines.extend(["", "## Actionable Cases", ""])
+    if not non_clean:
+        lines.append("- all completed cases are clean")
+    else:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in non_clean:
+            grouped.setdefault(str(row["bucket"]), []).append(row)
+        for bucket, count in bucket_counts.most_common(top_buckets):
+            if bucket == "clean_pass":
+                continue
+            rows_for_bucket = grouped.get(bucket, [])
+            if not rows_for_bucket:
+                continue
+            lines.append(f"### `{bucket}`")
+            lines.append("")
+            lines.append(f"- next_fix_hint: `{REPORT_BUCKET_HINTS[bucket]}`")
+            for row in rows_for_bucket[:3]:
+                lines.append(
+                    f"- `{row['ore_xml']}` | engine=`{row.get('engine')}` | summary=`{row['summary_path']}`"
+                )
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_live_report_artifacts(report_root: Path, rows: list[dict[str, Any]], *, total_cases: int, top_buckets: int) -> None:
+    bucket_counts = Counter(row["bucket"] for row in rows)
+    engine_counts = Counter(str(row["engine"]) for row in rows if row.get("engine"))
+    reference_counts = Counter(str(row["reference_source_used"]) for row in rows if row.get("reference_source_used"))
+    non_clean = [row for row in rows if row["bucket"] != "clean_pass"]
+    payload = {
+        "total_cases": total_cases,
+        "completed_cases": len(rows),
+        "totals_by_status": dict(sorted(Counter("completed_zero" if row["rc"] == 0 else "completed_nonzero" for row in rows).items())),
+        "totals_by_bucket": dict(sorted(bucket_counts.items())),
+        "counts_by_reference_source": dict(sorted(reference_counts.items())),
+        "counts_by_engine": dict(sorted(engine_counts.items())),
+        "top_actionable_buckets": [
+            {"bucket": bucket, "count": count, "next_fix_hint": REPORT_BUCKET_HINTS[bucket]}
+            for bucket, count in bucket_counts.most_common(top_buckets)
+            if bucket != "clean_pass"
+        ],
+        "non_clean_cases": non_clean,
+    }
+    _write_json(report_root / "live_summary.json", payload)
+    _write_csv(
+        report_root / "live_results.csv",
+        rows,
+    )
+    (report_root / "live_report.md").write_text(
+        _render_live_report_markdown(rows, total_cases=total_cases, top_buckets=top_buckets),
+        encoding="utf-8",
+    )
+
+
+def _emit_live_case_line(done: int, total: int, row: dict[str, Any]) -> None:
+    print(
+        f"[{done}/{total}] {'PASS' if row['pass_all'] else 'FAIL'} "
+        f"bucket={row['bucket']} "
+        f"reason={row.get('fallback_reason') or row.get('pricing_fallback_reason') or row['bucket']} "
+        f"{row['ore_xml']}"
+    )
+
+
+def _emit_live_refresh(done: int, total: int, rows: list[dict[str, Any]], report_root: Path, *, top_buckets: int) -> None:
+    bucket_counts = Counter(row["bucket"] for row in rows)
+    clean_count = sum(1 for row in rows if row["bucket"] == "clean_pass")
+    print(f"live_report completed={done}/{total} clean={clean_count} report={report_root / 'live_report.md'}")
+    for bucket, count in bucket_counts.most_common(top_buckets):
+        print(f"  bucket {bucket}={count}")
+    shown = 0
+    for row in rows:
+        if row["bucket"] == "clean_pass":
+            continue
+        print(f"  case {row['bucket']} {row['ore_xml']}")
+        shown += 1
+        if shown >= min(3, top_buckets):
+            break
+
+
+def _run_report_examples(args: argparse.Namespace, artifact_root: Path) -> int:
+    ore_xmls = sorted(_examples_root().glob("**/Input/ore*.xml"))
+    if not ore_xmls:
+        raise FileNotFoundError(f"no example ore.xml files found under {_examples_root()}")
+    report_root = (args.report_root or (artifact_root / "example_live_report")).resolve()
+    report_root.mkdir(parents=True, exist_ok=True)
+    cases_root = report_root / "cases"
+    cases_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+
+    def _run_one(ore_xml: Path) -> tuple[dict[str, Any], int, Path]:
+        case_root = cases_root / _unique_report_case_slug(ore_xml)
+        case_root.mkdir(parents=True, exist_ok=True)
+        capture = io.StringIO()
+        with redirect_stdout(capture):
+            case_summary = _run_case(ore_xml, args, artifact_root=case_root)
+        summary_path = case_root / _case_slug(ore_xml) / "summary.json"
+        rc = 0 if case_summary["pass_all"] else 1
+        return case_summary, rc, summary_path
+
+    with cf.ThreadPoolExecutor(max_workers=int(args.report_workers)) as executor:
+        futures = {executor.submit(_run_one, ore_xml): ore_xml for ore_xml in ore_xmls}
+        for done, future in enumerate(cf.as_completed(futures), start=1):
+            ore_xml = futures[future]
+            try:
+                case_summary, rc, summary_path = future.result()
+                row = _report_row_from_case_summary(ore_xml, case_summary, rc, summary_path=summary_path)
+            except Exception as exc:
+                row = {
+                    "ore_xml": str(ore_xml),
+                    "case_slug": _unique_report_case_slug(ore_xml),
+                    "rc": 1,
+                    "pass_all": False,
+                    "trade_id": "",
+                    "modes": "",
+                    "engine": None,
+                    "reference_source_used": "none",
+                    "fallback_reason": None,
+                    "pricing_fallback_reason": None,
+                    "sample_count_mismatch": None,
+                    "pricing_abs_diff": None,
+                    "cva_rel_diff": None,
+                    "dva_rel_diff": None,
+                    "fba_rel_diff": None,
+                    "fca_rel_diff": None,
+                    "parity_ready": None,
+                    "bucket": "hard_error",
+                    "next_fix_hint": REPORT_BUCKET_HINTS["hard_error"],
+                    "summary_path": "",
+                }
+            rows.append(row)
+            rows.sort(key=lambda item: item["ore_xml"])
+            _emit_live_case_line(done, len(ore_xmls), row)
+            if done % int(args.report_refresh_every) == 0 or done == len(ore_xmls):
+                _write_live_report_artifacts(
+                    report_root,
+                    rows,
+                    total_cases=len(ore_xmls),
+                    top_buckets=int(args.report_top_buckets),
+                )
+                _emit_live_refresh(done, len(ore_xmls), rows, report_root, top_buckets=int(args.report_top_buckets))
+    return 0 if all(bool(row["pass_all"]) for row in rows) else 1
+
+
 def _run_case(
     ore_xml: Path,
     args: argparse.Namespace,
@@ -2011,7 +2283,7 @@ def _run_cli_example(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ore_snapshot_cli",
-        usage="%(prog)s path/to/ore.xml [--price] [--xva] [--sensi] [--pack] [options]",
+        usage="%(prog)s path/to/ore.xml [--price] [--xva] [--sensi] [--pack|--report-examples] [options]",
         add_help=False,
     )
     parser.add_argument("ore_xml", nargs="?")
@@ -2029,8 +2301,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xva", action="store_true")
     parser.add_argument("--sensi", action="store_true")
     parser.add_argument("--pack", action="store_true")
+    parser.add_argument("--report-examples", action="store_true")
     parser.add_argument("--case", action="append", dest="cases", default=[])
     parser.add_argument("--output-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
+    parser.add_argument("--report-root", type=Path, default=None)
+    parser.add_argument("--report-workers", type=int, default=12)
+    parser.add_argument("--report-refresh-every", type=int, default=1)
+    parser.add_argument("--report-top-buckets", type=int, default=10)
     parser.add_argument("--ore-output-only", action="store_true")
     parser.add_argument("--paths", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -2059,6 +2336,7 @@ def _print_help(parser: argparse.ArgumentParser) -> None:
     print("  - -h/--hash matches ore.exe hash flag")
     print("  - use --help for help output")
     print("  - use --example <name> with --tensor-backend auto|numpy|torch-cpu|torch-mps for built-in backend-dispatch examples")
+    print("  - use --report-examples for a live parity sweep across Examples/**/Input/ore*.xml")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2075,7 +2353,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.example:
         return _run_cli_example(args)
-    if not args.ore_xml and not args.pack:
+    if not args.ore_xml and not args.pack and not args.report_examples:
         parser.error("the following arguments are required: ore_xml")
 
     ore_xmls: list[Path] = []
@@ -2084,7 +2362,9 @@ def main(argv: list[str] | None = None) -> int:
     ore_xmls.extend(Path(item).resolve() for item in args.cases)
     if args.pack and not ore_xmls:
         parser.error("--pack requires ore_xml or at least one --case")
-    if not args.pack and len(ore_xmls) != 1:
+    if args.report_examples and ore_xmls:
+        parser.error("--report-examples does not accept ore_xml or --case inputs")
+    if not args.pack and not args.report_examples and len(ore_xmls) != 1:
         parser.error("normal runs accept exactly one ore_xml input")
 
     artifact_root = args.output_root.resolve()
@@ -2092,6 +2372,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pack:
         return _run_pack(args, ore_xmls, artifact_root)
+    if args.report_examples:
+        return _run_report_examples(args, artifact_root)
 
     modes = _infer_modes(args, ore_xmls[0])
     start = time.perf_counter()
