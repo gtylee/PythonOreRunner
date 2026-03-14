@@ -6,7 +6,7 @@ from typing import Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
-from .lgm_fx_hybrid import MultiCcyLgmParams, _to_pair_key
+from .lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams, _to_pair_key
 from .lgm_torch import TorchLGM1F, _require_torch
 
 
@@ -23,7 +23,7 @@ def _as_sorted_unique_times_torch(values: Sequence[float], *, torch_mod, dtype, 
     return times_t
 
 
-class TorchLgmFxHybrid:
+class TorchLgmFxHybrid(LgmFxHybrid):
     """Torch-native correlated multi-ccy LGM + FX helper."""
 
     def __init__(
@@ -159,8 +159,6 @@ def simulate_hybrid_paths_torch(
     torch_mod = _require_torch()
     if n_paths <= 0:
         raise ValueError("n_paths must be positive")
-    if rng is None and normal_draws is None:
-        rng = np.random.default_rng()
 
     device_obj = torch_mod.device(device) if device is not None else torch_mod.device(model.device)
     if dtype is None:
@@ -175,15 +173,19 @@ def simulate_hybrid_paths_torch(
     rd_minus_rf = {k.upper().replace("-", "/"): float(v) for k, v in (rd_minus_rf or {}).items()}
 
     if normal_draws is None:
-        draws = rng.standard_normal(size=(times_t.numel() - 1, model.n_factors, n_paths))
+        if rng is None:
+            draws_t = torch_mod.randn((times_t.numel() - 1, model.n_factors, n_paths), dtype=dtype, device=device_obj)
+        else:
+            draws = rng.standard_normal(size=(times_t.numel() - 1, model.n_factors, n_paths))
+            draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
     else:
         draws = np.asarray(normal_draws, dtype=float)
         if draws.shape != (times_t.numel() - 1, model.n_factors, n_paths):
             raise ValueError("normal_draws must have shape (n_steps, n_factors, n_paths)")
+        draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
 
     with torch_mod.inference_mode():
         chol_t = torch_mod.as_tensor(model._chol, dtype=dtype, device=device_obj)
-        draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
         dt_t = torch_mod.diff(times_t)
         mid_t = 0.5 * (times_t[:-1] + times_t[1:])
 

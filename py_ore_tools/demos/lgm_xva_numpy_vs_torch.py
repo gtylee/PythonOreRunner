@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example: 3-ccy, 100-trade FX-forward portfolio XVA in NumPy vs torch."""
+"""Example: 10-ccy FX-forward portfolio XVA in NumPy vs torch."""
 
 from __future__ import annotations
 
@@ -27,10 +27,72 @@ except ImportError:  # pragma: no cover - demo exits cleanly without torch
     torch = None
 
 
+CCYS = ("USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD", "SEK", "NOK")
+USD_CROSSES = ("EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "USD/SEK", "USD/NOK")
+ZERO_RATES = {
+    "USD": 0.030,
+    "EUR": 0.020,
+    "GBP": 0.025,
+    "JPY": 0.010,
+    "CHF": 0.012,
+    "AUD": 0.032,
+    "CAD": 0.029,
+    "NZD": 0.034,
+    "SEK": 0.022,
+    "NOK": 0.028,
+}
+ALPHA_BY_CCY = {
+    "USD": 0.012,
+    "EUR": 0.010,
+    "GBP": 0.011,
+    "JPY": 0.009,
+    "CHF": 0.0095,
+    "AUD": 0.0125,
+    "CAD": 0.0115,
+    "NZD": 0.013,
+    "SEK": 0.0105,
+    "NOK": 0.011,
+}
+KAPPA_BY_CCY = {
+    "USD": 0.020,
+    "EUR": 0.030,
+    "GBP": 0.025,
+    "JPY": 0.018,
+    "CHF": 0.019,
+    "AUD": 0.024,
+    "CAD": 0.022,
+    "NZD": 0.023,
+    "SEK": 0.021,
+    "NOK": 0.0225,
+}
+SPOT_BY_PAIR = {
+    "EUR/USD": 1.10,
+    "GBP/USD": 1.27,
+    "USD/JPY": 148.0,
+    "USD/CHF": 0.88,
+    "AUD/USD": 0.66,
+    "USD/CAD": 1.35,
+    "NZD/USD": 0.61,
+    "USD/SEK": 10.4,
+    "USD/NOK": 10.7,
+}
+FX_VOL_BY_PAIR = {
+    "EUR/USD": 0.12,
+    "GBP/USD": 0.11,
+    "USD/JPY": 0.10,
+    "USD/CHF": 0.095,
+    "AUD/USD": 0.13,
+    "USD/CAD": 0.10,
+    "NZD/USD": 0.135,
+    "USD/SEK": 0.11,
+    "USD/NOK": 0.115,
+}
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--paths", type=int, default=10000)
-    p.add_argument("--trades", type=int, default=1000)
+    p.add_argument("--trades", type=int, default=100)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", choices=("cpu", "mps", "all"), default="all")
     p.add_argument("--repeats", type=int, default=1)
@@ -40,24 +102,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _build_hybrid() -> tuple[LgmFxHybrid, TorchLgmFxHybrid]:
-    eur = LGMParams.constant(alpha=0.010, kappa=0.030)
-    usd = LGMParams.constant(alpha=0.012, kappa=0.020)
-    gbp = LGMParams.constant(alpha=0.011, kappa=0.025)
-    corr = np.array(
-        [
-            [1.0, 0.20, 0.10, 0.15, 0.05],
-            [0.20, 1.0, 0.25, 0.10, 0.08],
-            [0.10, 0.25, 1.0, 0.06, 0.12],
-            [0.15, 0.10, 0.06, 1.0, 0.30],
-            [0.05, 0.08, 0.12, 0.30, 1.0],
-        ],
-        dtype=float,
-    )
-    params = MultiCcyLgmParams(
-        ir_params={"EUR": eur, "USD": usd, "GBP": gbp},
-        fx_vols={"EUR/USD": (tuple(), (0.12,)), "GBP/USD": (tuple(), (0.11,))},
-        corr=corr,
-    )
+    ir_params = {
+        ccy: LGMParams.constant(alpha=ALPHA_BY_CCY[ccy], kappa=KAPPA_BY_CCY[ccy])
+        for ccy in CCYS
+    }
+    fx_vols = {pair: (tuple(), (FX_VOL_BY_PAIR[pair],)) for pair in USD_CROSSES}
+    n_ir = len(CCYS)
+    n_fx = len(USD_CROSSES)
+    n_factors = n_ir + n_fx
+    corr = np.empty((n_factors, n_factors), dtype=float)
+    for i in range(n_factors):
+        for j in range(n_factors):
+            if i == j:
+                corr[i, j] = 1.0
+            elif i < n_ir and j < n_ir:
+                corr[i, j] = 0.35 * np.exp(-abs(i - j) / 4.0)
+            elif i >= n_ir and j >= n_ir:
+                corr[i, j] = 0.40 * np.exp(-abs(i - j) / 3.0)
+            else:
+                corr[i, j] = 0.15 * np.exp(-abs(i - j) / 5.0)
+    corr = 0.5 * (corr + corr.T)
+    params = MultiCcyLgmParams(ir_params=ir_params, fx_vols=fx_vols, corr=corr)
     return LgmFxHybrid(params), TorchLgmFxHybrid(params)
 
 
@@ -66,11 +131,7 @@ def _curve(rate: float):
 
 
 def _curves():
-    return {
-        "USD": _curve(0.030),
-        "EUR": _curve(0.020),
-        "GBP": _curve(0.025),
-    }
+    return {ccy: _curve(rate) for ccy, rate in ZERO_RATES.items()}
 
 
 def _times() -> np.ndarray:
@@ -80,48 +141,53 @@ def _times() -> np.ndarray:
 def _portfolio(n_trades: int) -> list[FxForwardDef]:
     trades: list[FxForwardDef] = []
     maturities = np.linspace(0.5, 2.5, n_trades, dtype=float)
+    pairs = list(USD_CROSSES)
     for i, maturity in enumerate(maturities):
-        if i % 2 == 0:
-            trades.append(
-                FxForwardDef(
-                    trade_id=f"FX_EURUSD_{i:03d}",
-                    pair="EUR/USD",
-                    notional_base=1_000_000.0 + 5_000.0 * i,
-                    strike=1.10 + 0.00005 * i,
-                    maturity=float(maturity),
-                )
+        pair = pairs[i % len(pairs)]
+        spot = SPOT_BY_PAIR[pair]
+        strike_bump = 0.0005 * ((i % len(pairs)) + 1) / len(pairs)
+        strike = spot * (1.0 + (-1.0 if i % 3 == 0 else 1.0) * strike_bump)
+        trades.append(
+            FxForwardDef(
+                trade_id=f"FX_{pair.replace('/', '')}_{i:03d}",
+                pair=pair,
+                notional_base=1_000_000.0 + 7_500.0 * i,
+                strike=float(strike),
+                maturity=float(maturity),
             )
-        else:
-            trades.append(
-                FxForwardDef(
-                    trade_id=f"FX_GBPUSD_{i:03d}",
-                    pair="GBP/USD",
-                    notional_base=1_200_000.0 + 5_000.0 * i,
-                    strike=1.28 + 0.00007 * i,
-                    maturity=float(maturity),
-                )
-            )
+        )
     return trades
 
 
+def _sim_inputs():
+    log_s0 = {pair: np.log(spot) for pair, spot in SPOT_BY_PAIR.items()}
+    rd_minus_rf = {}
+    for pair in USD_CROSSES:
+        base, quote = pair.split("/")
+        rd_minus_rf[pair] = ZERO_RATES[quote] - ZERO_RATES[base]
+    return log_s0, rd_minus_rf
+
+
 def _simulate_numpy(hybrid: LgmFxHybrid, times: np.ndarray, n_paths: int, seed: int):
+    log_s0, rd_minus_rf = _sim_inputs()
     return hybrid.simulate_paths(
         times,
         n_paths,
         rng=np.random.default_rng(seed),
-        log_s0={"EUR/USD": np.log(1.10), "GBP/USD": np.log(1.27)},
-        rd_minus_rf={"EUR/USD": 0.010, "GBP/USD": 0.005},
+        log_s0=log_s0,
+        rd_minus_rf=rd_minus_rf,
     )
 
 
 def _simulate_torch(hybrid: TorchLgmFxHybrid, times: np.ndarray, n_paths: int, seed: int, device: str):
+    log_s0, rd_minus_rf = _sim_inputs()
     return simulate_hybrid_paths_torch(
         hybrid,
         times,
         n_paths,
         rng=np.random.default_rng(seed),
-        log_s0={"EUR/USD": np.log(1.10), "GBP/USD": np.log(1.27)},
-        rd_minus_rf={"EUR/USD": 0.010, "GBP/USD": 0.005},
+        log_s0=log_s0,
+        rd_minus_rf=rd_minus_rf,
         device=device,
         return_numpy=False,
     )
@@ -270,8 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     result = {
-        "currencies": ["EUR", "USD", "GBP"],
-        "trade_pairs": ["EUR/USD", "GBP/USD"],
+        "currencies": list(CCYS),
+        "trade_pairs": list(USD_CROSSES),
         "paths": args.paths,
         "trades": args.trades,
         "seed": args.seed,
@@ -286,13 +352,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2))
         return 0
 
-    # Print settings header
     print("LGM FX portfolio XVA example")
     print("=" * 80)
     print(f"{'Settings':<22} {'Value'}")
     print("=" * 80)
-    print(f"{'currencies':<22} {'EUR, USD, GBP'}")
-    print(f"{'pairs':<22} {'EUR/USD, GBP/USD'}")
+    print(f"{'currencies':<22} {', '.join(CCYS)}")
+    print(f"{'pairs':<22} {', '.join(USD_CROSSES)}")
     print(f"{'trades':<22} {args.trades:,}")
     print(f"{'paths':<22} {args.paths:,}")
     print(f"{'seed':<22} {args.seed:,}")
@@ -300,7 +365,6 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 80)
     print()
 
-    # Table 1: Numbers (rounded to 3dp, thousands separators, lined up)
     numbers_headers = (
         f"{'Engine':<16}"
         f"{'CVA':>18} {'DVA':>18} {'FVA':>18} {'XVA':>18} "
@@ -308,8 +372,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(numbers_headers)
     print("-" * len(numbers_headers))
-
-    # NumPy row
     print(
         f"{'NumPy':<16}"
         f"{result['numpy']['cva']:18,.3f}"
@@ -318,8 +380,6 @@ def main(argv: list[str] | None = None) -> int:
         f"{result['numpy']['xva_total']:18,.3f}"
         f"{'':>18}{'':>18}{'':>18}"
     )
-
-    # Torch rows
     for device in torch_devices:
         torch_row = result["torch"][device]
         print(
@@ -332,24 +392,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{torch_row['parity']['npv_rmse']:18.3e}"
             f"{torch_row['parity']['xva_total_abs_diff']:18.3e}"
         )
-
     print("=" * 80)
     print()
 
-    # Table 2: Timing
-    timing_header = (
-        f"{'Engine':<16}"
-        f"{'Mean sec':>18} {'Speedup':>18}"
-    )
+    timing_header = f"{'Engine':<16}{'Mean sec':>18} {'Speedup':>18}"
     print(timing_header)
     print("-" * len(timing_header))
-
-    # NumPy row
-    print(
-        f"{'NumPy':<16}"
-        f"{result['timing']['numpy']['mean_sec']:18,.3f}"
-        f"{'':>18}"
-    )
+    print(f"{'NumPy':<16}{result['timing']['numpy']['mean_sec']:18,.3f}{'':>18}")
     for device in torch_devices:
         torch_row = result["torch"][device]
         print(

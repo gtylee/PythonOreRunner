@@ -314,8 +314,6 @@ def simulate_lgm_measure_torch(
         raise ValueError("draw_order must be 'time_major' or 'ore_path_major'")
     if rng is None and normal_draws is None and draw_order == "ore_path_major":
         raise ValueError("draw_order='ore_path_major' requires an explicit rng or normal_draws")
-    if rng is None and normal_draws is None:
-        rng = np.random.default_rng()
 
     device_obj = torch_mod.device(device) if device is not None else torch_mod.device("cpu")
     if dtype is None:
@@ -334,12 +332,16 @@ def simulate_lgm_measure_torch(
 
         if draw_order == "time_major":
             if normal_draws is None:
-                draws = rng.standard_normal((step_scales_t.numel(), n_paths))
+                if rng is None:
+                    draws_t = torch_mod.randn((step_scales_t.numel(), n_paths), dtype=dtype, device=device_obj)
+                else:
+                    draws = rng.standard_normal((step_scales_t.numel(), n_paths))
+                    draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
             else:
                 draws = np.asarray(normal_draws, dtype=float)
                 if draws.shape != (step_scales_t.numel(), n_paths):
                     raise ValueError("normal_draws must have shape (n_steps, n_paths) for time_major")
-            draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
+                draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
             increments = step_scales_t[:, None] * draws_t
             x[1:] = float(x0) + torch_mod.cumsum(increments, dim=0)
             return x.cpu().numpy() if return_numpy else x
