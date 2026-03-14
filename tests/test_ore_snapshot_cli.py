@@ -949,7 +949,19 @@ class TestOreSnapshotCli(unittest.TestCase):
             },
             "input_validation": {"input_links_valid": False},
         }
-        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "missing_reference_xva")
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "missing_native_output_fallback")
+
+    def test_bucket_case_prefers_fallback_reason_over_missing_reference_pricing(self):
+        case_summary = {
+            "pass_all": True,
+            "diagnostics": {
+                "fallback_reason": "missing_native_output",
+                "missing_reference_pricing": True,
+                "missing_reference_xva": True,
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "missing_native_output_fallback")
 
     def test_write_live_report_artifacts_includes_next_fix_hint(self):
         with tempfile.TemporaryDirectory() as tmp:

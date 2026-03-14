@@ -779,6 +779,7 @@ def _compute_price_only_case(
                 "embedded_option_value": pricing_result.get("embedded_option_value"),
             },
             "diagnostics": {
+                "engine": "python_price_only",
                 "trade_type": trade_type,
                 "bond_pricing_mode": "python_callable_lgm" if trade_type == "CallableBond" else "python_risky_bond",
                 "curve_ids": {
@@ -837,6 +838,9 @@ def _compute_price_only_case(
             "leg_source": payload["leg_source"],
             "discount_column": payload["discount_column"],
             "forward_column": payload["forward_column"],
+        },
+        "diagnostics": {
+            "engine": "python_price_only",
         },
     }
 
@@ -1020,6 +1024,7 @@ def _compute_snapshot_case(
     }
     parity = snap.parity_completeness_report()
     diagnostics = {
+        "engine": "compare",
         "epe_rel_median": float(np.median(_safe_rel_vector(epe, snap.ore_epe))),
         "ene_rel_median": float(np.median(_safe_rel_vector(ene, snap.ore_ene))),
         "exposure_points": int(len(times)),
@@ -1733,6 +1738,12 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
     pass_all = bool(case_summary.get("pass_all"))
     if diagnostics.get("error"):
         return "hard_error"
+    if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
+        return "price_only_reference_fallback"
+    if diagnostics.get("fallback_reason") == "missing_native_output":
+        return "missing_native_output_fallback"
+    if diagnostics.get("fallback_reason") == "unsupported_python_snapshot":
+        return "unsupported_python_snapshot_fallback"
     if diagnostics.get("missing_reference_pricing"):
         return "missing_reference_pricing"
     if diagnostics.get("missing_reference_xva"):
@@ -1741,12 +1752,6 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
         return "sample_count_mismatch"
     if not pass_all and input_validation.get("input_links_valid") is False:
         return "input_validation_issue"
-    if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
-        return "price_only_reference_fallback"
-    if diagnostics.get("fallback_reason") == "missing_native_output":
-        return "missing_native_output_fallback"
-    if diagnostics.get("fallback_reason") == "unsupported_python_snapshot":
-        return "unsupported_python_snapshot_fallback"
     if not pass_all:
         return "parity_threshold_fail"
     return "clean_pass"
@@ -2074,7 +2079,7 @@ def _run_case(
                 "pricing": None,
                 "xva": None,
                 "parity": None,
-                "diagnostics": {"mode": "non_pricing"},
+                "diagnostics": {"mode": "non_pricing", "engine": "non_pricing"},
             }
         )
     if modes.sensi:
