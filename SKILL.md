@@ -2725,3 +2725,81 @@ On the large-FX benchmark, three structural fixes mattered:
 - keep FX forward maturity payoffs alive when maturity falls inside the MPOR closeout window
 
 Without those, PV can look acceptable while CVA/DVA/FVA are overstated by an order of magnitude on short-dated offsetting books.
+
+### 10. A default `--paths` mismatch can look like a model/XVA bug when it is just a CLI bug
+
+One of the last shipped-example parity failures was not a curve, exposure, or
+model issue at all. The CLI defaulted `--paths` to `500`, while some ORE cases
+were configured with `Samples=1000`.
+
+That created a subtle trap:
+
+- explicit parity investigations at `1000 vs 1000` could pass
+- but a plain default CLI run of the same example could still fail parity
+- the summary would show:
+  - `python_paths = 500`
+  - `ore_samples = 1000`
+  - `sample_count_mismatch = true`
+
+Rule:
+
+- do not hardcode a CLI default path count for parity-mode runs
+- if the user does not pass `--paths`, inherit the sample count from the loaded
+  ORE case (`snap.n_samples`)
+- only treat a path mismatch as meaningful when it was explicitly requested
+
+This was the final fix needed to make the shipped example sweep go fully green.
+
+### 11. Non-LGM cases must not crash calibration matching
+
+`resolve_calibration_xml_path()` originally assumed every simulation file had an
+LGM node and tried to build an LGM signature unconditionally.
+
+That is wrong for cases like:
+
+- HW2F examples
+- any future non-LGM simulation config
+
+Failure mode:
+
+- the case crashes while trying to match calibration metadata
+- the crash is misleading because the real desired behavior is usually a clean
+  fallback to ORE reference mode
+
+Rule:
+
+- calibration matching must be tolerant of non-LGM simulation files
+- if a simulation file has no usable LGM signature, treat it as "no calibration
+  match available", not as a fatal error
+
+This is especially important when broad example sweeps include mixed model families.
+
+### 12. Cloned reruns can silently lose calibration fallback if matching uses absolute paths
+
+Another subtle parity trap appeared when native ORE cases were copied into `/tmp`
+for fresh reruns.
+
+The bad version of the calibration resolver compared absolute shared-input paths.
+That meant:
+
+- the repo example and the temp-cloned rerun were logically the same case
+- but they no longer matched for calibration fallback
+- Python then silently fell back to flat simulation params such as:
+  - `alpha = 1%`
+  - `kappa = 3%`
+
+Observed consequence:
+
+- PV could still look good
+- but raw cube variance, EEPE, and CVA would blow out again
+- it looked like a fresh state-dynamics bug even though the real issue was wrong
+  parameter provenance
+
+Rule:
+
+- calibration fallback matching must use stable example-relative resource ids or
+  another clone-stable identity
+- do not use absolute filesystem paths as the parity identity for shared inputs
+
+If a temp-rerun parity result suddenly regresses after looking healthy in-repo,
+check calibration provenance before touching the simulator or XVA formulas.

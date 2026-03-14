@@ -604,6 +604,13 @@ def _simulation_lgm_signature(simulation_xml: str, domestic_ccy: str) -> tuple[s
     )
 
 
+def _maybe_simulation_lgm_signature(simulation_xml: str, domestic_ccy: str) -> tuple[str, ...] | None:
+    try:
+        return _simulation_lgm_signature(simulation_xml, domestic_ccy)
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=32)
 def _candidate_ore_xmls_with_calibration(search_root: str) -> tuple[str, ...]:
     examples_root = Path(search_root).resolve() / "Examples"
@@ -663,7 +670,7 @@ def resolve_calibration_xml_path(
         _canonical_example_resource_id(conventions_path),
         _canonical_example_resource_id(todaysmarket_xml_path),
         str(domestic_ccy).strip() or "EUR",
-        _simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
+        _maybe_simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
     )
     for root in _candidate_search_roots(ore_xml_path):
         for candidate_ore_xml in _candidate_ore_xmls_with_calibration(str(root)):
@@ -677,7 +684,7 @@ def resolve_calibration_xml_path(
                     _canonical_example_resource_id(ctx["conventions"]),
                     _canonical_example_resource_id(ctx["todaysmarket"]),
                     str(ctx["domestic_ccy"]),
-                    _simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
+                    _maybe_simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
                 )
             except Exception:
                 continue

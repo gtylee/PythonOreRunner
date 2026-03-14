@@ -804,7 +804,7 @@ def _compute_price_only_case(
 def _compute_snapshot_case(
     ore_xml: Path,
     *,
-    paths: int,
+    paths: int | None,
     seed: int,
     rng_mode: str,
     anchor_t0_npv: bool,
@@ -813,6 +813,7 @@ def _compute_snapshot_case(
     xva_mode: str,
 ) -> SnapshotComputation:
     snap = load_from_ore_xml(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    effective_paths = int(paths) if paths is not None else int(getattr(snap, "n_samples", 500) or 500)
     model = snap.build_model()
     setattr(model, "_measure", str(getattr(snap, "measure", "LGM")).upper())
     if rng_mode == "ore_parity":
@@ -825,7 +826,7 @@ def _compute_snapshot_case(
         model=model,
         exposure_times=snap.exposure_model_times,
         fixing_times=np.asarray(snap.legs.get("float_fixing_time", []), dtype=float),
-        n_paths=paths,
+        n_paths=effective_paths,
         rng=rng,
         draw_order=draw_order,
     )
@@ -838,11 +839,13 @@ def _compute_snapshot_case(
         x_paths_on_sim_grid=x_all,
     )
 
-    npv = np.zeros((snap.exposure_model_times.size, paths), dtype=float)
+    npv = np.zeros((snap.exposure_model_times.size, effective_paths), dtype=float)
     ore_style_xva = str(xva_mode).strip().lower() == "ore"
     xva_cube_bar = None
     if ore_style_xva:
-        xva_cube_bar = _ConsoleProgressBar(f"XVA: Build Cube 1 x 121 x {paths}", message_width=48, bar_width=40)
+        xva_cube_bar = _ConsoleProgressBar(
+            f"XVA: Build Cube 1 x 121 x {effective_paths}", message_width=48, bar_width=40
+        )
         xva_cube_bar.update(0, max(snap.exposure_model_times.size, 1))
     for i, t in enumerate(snap.exposure_model_times):
         npv[i, :] = swap_npv_from_ore_legs_dual_curve(
@@ -982,13 +985,13 @@ def _compute_snapshot_case(
         "exposure_points": int(len(times)),
         "xva_mode": "ore" if ore_style_xva else "classic",
     }
-    diagnostics.update(_build_leg_diagnostics(snap, paths=paths))
+    diagnostics.update(_build_leg_diagnostics(snap, paths=effective_paths))
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=snap.trade_id,
         counterparty=snap.counterparty,
         netting_set_id=snap.netting_set_id,
-        paths=paths,
+        paths=effective_paths,
         seed=seed,
         rng_mode=rng_mode,
         pricing=pricing,
@@ -1362,7 +1365,7 @@ def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: P
         cases=[],
         output_root=output_root,
         ore_output_only=options.ore_output_only,
-        paths=int(options.paths),
+        paths=None if options.paths is None else int(options.paths),
         seed=int(options.seed),
         rng=options.rng,
         xva_mode=options.xva_mode,
@@ -2029,7 +2032,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--case", action="append", dest="cases", default=[])
     parser.add_argument("--output-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
     parser.add_argument("--ore-output-only", action="store_true")
-    parser.add_argument("--paths", type=int, default=500)
+    parser.add_argument("--paths", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rng", choices=("numpy", "ore_parity"), default="ore_parity")
     parser.add_argument("--xva-mode", choices=("classic", "ore"), default="ore")

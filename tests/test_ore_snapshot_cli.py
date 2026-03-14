@@ -597,6 +597,23 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("python_paths", diagnostics)
             self.assertTrue(diagnostics["sample_count_mismatch"])
 
+    def test_default_xva_run_uses_snapshot_sample_count_when_paths_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ore_snapshot_cli.main(
+                [
+                    str(REAL_CASE_XML),
+                    "--price",
+                    "--xva",
+                    "--output-root",
+                    tmp,
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((Path(tmp) / REAL_CASE_XML.parents[1].name / "summary.json").read_text(encoding="utf-8"))
+            diagnostics = payload["diagnostics"]
+            self.assertEqual(diagnostics["python_paths"], diagnostics["ore_samples"])
+            self.assertFalse(diagnostics["sample_count_mismatch"])
+
     def test_price_only_run_does_not_require_xva_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp)

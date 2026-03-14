@@ -75,8 +75,10 @@ from py_ore_tools.lgm_calibration import (
 )
 from py_ore_tools.lgm_ir_options import _convolution_nodes_and_weights, _convolution_rollback
 from py_ore_tools.ore_snapshot import (
+    _fit_quantlib_helper_eur_nodes,
     _resolve_ore_path,
     build_discount_curve_from_discount_pairs,
+    extract_market_instruments_by_currency,
     fit_discount_curves_from_ore_market,
 )
 
@@ -1138,6 +1140,193 @@ def _fit_curve_for_currency(ore_xml: Path, currency: str):
     return build_discount_curve_from_discount_pairs(list(zip(payload["times"], payload["dfs"])))
 
 
+def _sample_ql_curve(curve_handle, asof_date: date):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for this curve build")
+    curve = curve_handle.currentLink() if hasattr(curve_handle, "currentLink") else curve_handle
+    curve.enableExtrapolation()
+    dates = list(curve.dates())
+    pairs: list[tuple[float, float]] = [(0.0, 1.0)]
+    for d in dates[1:]:
+        t = float(curve.timeFromReference(d))
+        if t <= 1.0e-12:
+            continue
+        pairs.append((t, float(curve.discount(d))))
+    if len(pairs) == 1:
+        max_time = 61.0
+        for i in range(1, int(math.ceil(max_time / 0.25)) + 1):
+            t = 0.25 * i
+            pairs.append((t, float(curve.discount(t))))
+    return build_discount_curve_from_discount_pairs(pairs)
+
+
+def _build_ql_eur_projection_curve(
+    *,
+    asof_date: date,
+    instruments: list[dict[str, object]],
+    tenor: str,
+):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for this curve build")
+    ql.Settings.instance().evaluationDate = ql.Date(asof_date.day, asof_date.month, asof_date.year)
+
+    ois_instruments = _filter_instruments_for_discount_handle(instruments, discount_handle="Yield/EUR/EUR1D")
+    ois_times, ois_zeros = _fit_quantlib_helper_eur_nodes(asof_date.isoformat(), ois_instruments)
+    ois_pairs = [(float(t), float(math.exp(-float(z) * float(t)))) for t, z in zip(ois_times, ois_zeros)]
+    ois_base = build_discount_curve_from_discount_pairs(ois_pairs)
+    ois_dates = [ql.Date(asof_date.day, asof_date.month, asof_date.year)]
+    ois_dfs = [1.0]
+    for tt in sorted(set(round(float(t), 8) for t in ois_times if float(t) > 0.0)):
+        qd = ql.Date(asof_date.day, asof_date.month, asof_date.year) + int(round(tt * 365.0))
+        if qd <= ois_dates[-1]:
+            continue
+        ois_dates.append(qd)
+        ois_dfs.append(float(ois_base(tt)))
+    discount_curve = ql.RelinkableYieldTermStructureHandle()
+    discount_curve.linkTo(ql.DiscountCurve(ois_dates, ois_dfs, ql.Actual365Fixed()))
+
+    projection_curve = ql.RelinkableYieldTermStructureHandle()
+    cal = ql.TARGET()
+    zero_dc = ql.Actual365Fixed()
+    fixed_dc = ql.Thirty360(ql.Thirty360.BondBasis)
+    period = ql.Period(str(tenor))
+    if str(tenor).upper() == "3M":
+        index = ql.Euribor3M(projection_curve)
+    elif str(tenor).upper() == "6M":
+        index = ql.Euribor6M(projection_curve)
+    else:
+        raise ValueError(f"unsupported EUR projection tenor '{tenor}'")
+
+    mm: list[dict[str, object]] = []
+    fra: list[dict[str, object]] = []
+    irs: list[dict[str, object]] = []
+    for ins in instruments:
+        tpe = str(ins.get("instrument_type", "")).upper()
+        key = str(ins.get("quote_key", "")).upper()
+        if tpe == "MM":
+            mm.append(ins)
+        elif key.startswith(f"FRA/RATE/EUR/") and key.endswith(f"/{str(tenor).upper()}"):
+            fra.append(ins)
+        elif tpe == "IR_SWAP" and f"/{str(tenor).upper()}/" in key:
+            irs.append(ins)
+
+    def _quote(ins: dict[str, object]) -> ql.QuoteHandle:
+        return ql.QuoteHandle(ql.SimpleQuote(float(ins["quote_value"])))
+
+    def _period(text: str) -> ql.Period:
+        return ql.Period(str(text).upper())
+
+    helpers: list[ql.RateHelper] = []
+    for ins in sorted(mm, key=lambda x: float(x["maturity"])):
+        key = str(ins.get("quote_key", "")).upper()
+        parts = key.split("/")
+        if len(parts) < 5:
+            continue
+        dep_tenor = parts[-1]
+        fixing_days = int(parts[3][:-1]) if parts[3].endswith("D") and parts[3][:-1].isdigit() else 2
+        helpers.append(
+            ql.DepositRateHelper(
+                _quote(ins),
+                _period(dep_tenor),
+                fixing_days,
+                cal,
+                ql.ModifiedFollowing,
+                False,
+                ql.Actual360(),
+                projection_curve,
+            )
+        )
+    for ins in sorted(fra, key=lambda x: float(x["maturity"])):
+        key = str(ins.get("quote_key", "")).upper()
+        parts = key.split("/")
+        if len(parts) < 5:
+            continue
+        start_period = _period(parts[3])
+        helpers.append(ql.FraRateHelper(_quote(ins), start_period, index))
+    for ins in sorted(irs, key=lambda x: float(x["maturity"])):
+        key = str(ins.get("quote_key", "")).upper()
+        parts = key.split("/")
+        if len(parts) < 6:
+            continue
+        swap_tenor = parts[-1]
+        helpers.append(
+            ql.SwapRateHelper(
+                _quote(ins),
+                _period(swap_tenor),
+                cal,
+                ql.Annual,
+                ql.ModifiedFollowing,
+                fixed_dc,
+                index,
+                ql.QuoteHandle(),
+                ql.Period(0, ql.Days),
+                discount_curve,
+            )
+        )
+    curve = ql.PiecewiseLogLinearDiscount(
+        ql.Date(asof_date.day, asof_date.month, asof_date.year),
+        helpers,
+        zero_dc,
+    )
+    projection_curve.linkTo(curve)
+    curve.enableExtrapolation()
+    return ql.YieldTermStructureHandle(curve)
+
+
+def _curve_from_zero_quotes(
+    *,
+    asof_date: date,
+    instruments: list[dict[str, object]],
+    curve_tag: str,
+):
+    pairs: list[tuple[float, float]] = [(0.0, 1.0)]
+    for ins in instruments:
+        key = str(ins.get("quote_key", "")).upper()
+        if f"/{curve_tag.upper()}/" not in key:
+            continue
+        parts = key.split("/")
+        tenor = parts[-1]
+        try:
+            t = _parse_period_to_years(tenor)
+        except Exception:
+            continue
+        r = float(ins["quote_value"])
+        pairs.append((float(t), float(math.exp(-r * float(t)))))
+    if len(pairs) <= 1:
+        raise ValueError(f"no zero quotes found for curve tag '{curve_tag}'")
+    return build_discount_curve_from_discount_pairs(sorted(set((round(t, 12), df) for t, df in pairs)))
+
+
+def _fit_curve_for_id(ore_xml: Path, currency: str, curve_id: str | None, asof_date: date):
+    curve_name = (curve_id or "").strip().upper()
+    if not curve_name:
+        return _fit_curve_for_currency(ore_xml, currency)
+    if currency.upper() == "EUR":
+        try:
+            payload = extract_market_instruments_by_currency(
+                ore_xml,
+                instrument_types=("ZERO", "MM", "IR_SWAP", "OIS"),
+            )
+            instruments = list(payload.get(currency, {}).get("instruments", []))
+            if curve_name.endswith("1D") or curve_name.endswith("EONIA"):
+                ql_curve = _build_ql_discount_curve_for_callable_calibration(
+                    ore_xml=ore_xml,
+                    todaysmarket_xml=_resolve_todaysmarket_path(ore_xml) or Path(),
+                    currency=currency,
+                    asof_date=asof_date,
+                )
+                return _sample_ql_curve(ql_curve, asof_date)
+            if curve_name.endswith("3M"):
+                return _sample_ql_curve(_build_ql_eur_projection_curve(asof_date=asof_date, instruments=instruments, tenor="3M"), asof_date)
+            if curve_name.endswith("6M"):
+                return _sample_ql_curve(_build_ql_eur_projection_curve(asof_date=asof_date, instruments=instruments, tenor="6M"), asof_date)
+            if "BOND_YIELD_EUR" in curve_name:
+                return _curve_from_zero_quotes(asof_date=asof_date, instruments=instruments, curve_tag="BOND_YIELD_EUR")
+        except Exception:
+            pass
+    return _fit_curve_for_currency(ore_xml, currency)
+
+
 def _curve_from_flow_discounts(flows_csv: Path, trade_id: str, asof_date: date, day_counter: str, *, forward_underlying_only: bool = False):
     # Some legacy example cases ship `flows.csv` / `npv.csv` but not `curves.csv`.
     # In the risk-free / zero-spread cases, ORE's own cashflow report already
@@ -1320,6 +1509,21 @@ def _resolve_simulation_config_path(ore_xml: Path) -> Path | None:
     return None
 
 
+def _resolve_todaysmarket_path(ore_xml: Path) -> Path | None:
+    root = ET.parse(ore_xml).getroot()
+    base = ore_xml.resolve().parent
+    run_dir = base.parent
+    input_dir = base
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in root.findall("./Setup/Parameter")
+    }
+    if setup_params.get("inputPath"):
+        input_dir = (run_dir / setup_params["inputPath"]).resolve()
+    raw = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
+    return _resolve_ore_path(raw, input_dir)
+
+
 def _resolve_curveconfig_path(ore_xml: Path) -> Path | None:
     root = ET.parse(ore_xml).getroot()
     base = ore_xml.resolve().parent
@@ -1479,6 +1683,104 @@ def _build_ql_discount_curve(ore_xml: Path, currency: str, asof_date: date):
     return ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
 
 
+def _resolve_todaysmarket_discount_handle(
+    todaysmarket_xml: Path,
+    *,
+    currency: str,
+    configuration_id: str,
+) -> str | None:
+    root = ET.parse(todaysmarket_xml).getroot()
+    cfg = root.find(f"./Configuration[@id='{configuration_id}']")
+    if cfg is None:
+        return None
+    disc_curves_id = (cfg.findtext("./DiscountingCurvesId") or "").strip()
+    if not disc_curves_id:
+        return None
+    disc_curves = root.find(f"./DiscountingCurves[@id='{disc_curves_id}']")
+    if disc_curves is None:
+        return None
+    node = disc_curves.find(f"./DiscountingCurve[@currency='{currency}']")
+    if node is None:
+        return None
+    handle = (node.text or "").strip()
+    return handle or None
+
+
+def _filter_instruments_for_discount_handle(
+    instruments: list[dict[str, object]],
+    *,
+    discount_handle: str,
+) -> list[dict[str, object]]:
+    handle = str(discount_handle).strip().upper()
+    if not handle:
+        return []
+
+    # ORE's callable-bond LGM builder calibrates off the specific discount
+    # curve handle resolved from MarketContext::irCalibration. For the EUR
+    # callable example this is the 1D/OIS curve, so using the full generic EUR
+    # market fit mixes in 3M/6M swap instruments that are not part of the
+    # native calibration curve family.
+    if handle.endswith("1D"):
+        out: list[dict[str, object]] = []
+        for ins in instruments:
+            tpe = str(ins.get("instrument_type", "")).upper()
+            key = str(ins.get("quote_key", "")).upper()
+            if tpe == "MM" and key.startswith("MM/RATE/") and key.endswith("/1D"):
+                out.append(ins)
+            elif tpe == "IR_SWAP" and "/1D/" in key:
+                out.append(ins)
+        return out
+
+    return []
+
+
+def _build_ql_discount_curve_for_callable_calibration(
+    *,
+    ore_xml: Path,
+    todaysmarket_xml: Path,
+    currency: str,
+    asof_date: date,
+):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for callable bond calibration")
+
+    discount_handle = _resolve_todaysmarket_discount_handle(
+        todaysmarket_xml,
+        currency=currency,
+        configuration_id="collateral_inccy",
+    ) or _resolve_todaysmarket_discount_handle(
+        todaysmarket_xml,
+        currency=currency,
+        configuration_id="default",
+    )
+
+    if discount_handle and currency.upper() == "EUR":
+        try:
+            payload = extract_market_instruments_by_currency(
+                ore_xml,
+                instrument_types=("ZERO", "MM", "IR_SWAP", "OIS"),
+            )
+            instruments = list(payload.get(currency, {}).get("instruments", []))
+            filtered = _filter_instruments_for_discount_handle(instruments, discount_handle=discount_handle)
+            if filtered:
+                times, zeros = _fit_quantlib_helper_eur_nodes(asof_date.isoformat(), filtered)
+                pairs = [(float(t), float(math.exp(-float(z) * float(t)))) for t, z in zip(times, zeros)]
+                base_curve = build_discount_curve_from_discount_pairs(pairs)
+                dates = [ql.Date(asof_date.day, asof_date.month, asof_date.year)]
+                dfs = [1.0]
+                for tt in sorted(set(round(float(t), 8) for t in times if float(t) > 0.0)):
+                    qd = ql.Date(asof_date.day, asof_date.month, asof_date.year) + int(round(tt * 365.0))
+                    if qd <= dates[-1]:
+                        continue
+                    dates.append(qd)
+                    dfs.append(float(base_curve(tt)))
+                return ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
+        except Exception:
+            pass
+
+    return _build_ql_discount_curve(ore_xml, currency, asof_date)
+
+
 def _build_callable_lgm_market_inputs(
     *,
     ore_xml: Path,
@@ -1516,7 +1818,12 @@ def _build_callable_lgm_market_inputs(
     bdc = _ql_bdc(str(spec["business_day_convention"]))
     vol_type = ql.Normal if str(spec["volatility_type"]).strip().lower() == "normal" else ql.ShiftedLognormal
     vol_surface = ql.SwaptionVolatilityMatrix(cal, bdc, option_periods, swap_periods, vols, dc, False, vol_type)
-    discount_curve = _build_ql_discount_curve(ore_xml, currency, asof_date)
+    discount_curve = _build_ql_discount_curve_for_callable_calibration(
+        ore_xml=ore_xml,
+        todaysmarket_xml=todaysmarket_xml,
+        currency=currency,
+        asof_date=asof_date,
+    )
     short_tenor = str(spec["short_swap_index_base"]).strip().split("-")[-1] or "1Y"
     long_tenor = str(spec["swap_index_base"]).strip().split("-")[-1] or "30Y"
     short_index = ql.EuriborSwapIsdaFixA(ql.Period(short_tenor), discount_curve)
@@ -2114,8 +2421,12 @@ def price_bond_trade(
             forward_underlying_only=spec.trade_type == "ForwardBond",
         )
     else:
-        base_curve = _fit_curve_for_currency(ore_xml, spec.currency)
-    income_curve = base_curve
+        base_curve = _fit_curve_for_id(ore_xml, spec.currency, spec.reference_curve_id, asof)
+    income_curve = (
+        _fit_curve_for_id(ore_xml, spec.currency, spec.income_curve_id, asof)
+        if (spec.income_curve_id or "").strip()
+        else base_curve
+    )
     if trade_type == "CallableBond":
         model = _build_lgm_model_for_callable(
             ore_xml=ore_xml,

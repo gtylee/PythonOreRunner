@@ -6,10 +6,10 @@
 
 - `Bond`
 - `ForwardBond`
+- `CallableBond`
 
 It does **not** support:
 
-- `CallableBond`
 - bond XVA / exposure simulation
 
 The implementation is a Python port of the relevant ORE / QuantExt pricing flow. It does **not** call ORE-SWIG and it is not a thin native bridge.
@@ -242,17 +242,76 @@ Interpretation:
 
 ## Current limitations
 
-- `CallableBond` is not implemented
 - no bond exposure / XVA path
 - no portfolio-level batched multi-trade GPU kernel yet
 - scenario-grid builder is still mostly a scalar-to-grid convenience path
 - the benchmark uses synthetic scenario perturbations, not a full market scenario engine
 
+## Hard-fought integration notes
+
+These were easy to get wrong and worth preserving explicitly.
+
+### 1. Default CLI routing matters more than ore.xml analytics for bond-family trades
+
+Several bond-family examples ship active simulation / XVA analytics in `ore.xml`.
+If the CLI follows those blindly, it routes the case into the swap/XVA snapshot
+path and either falls back unnecessarily or fails for the wrong reason.
+
+Current rule in `ore_snapshot_cli.py`:
+
+- when the user does **not** explicitly pass `--price`, `--xva`, or `--sensi`
+- and the first trade type is `Bond`, `ForwardBond`, or `CallableBond`
+- default to Python `price` mode and do not force XVA mode
+
+This is why examples like:
+
+- `Examples/AmericanMonteCarlo/Input/ore_forwardbond.xml`
+- `Examples/Legacy/Example_73/Input/ore.xml`
+- `Examples/Exposure/Input/ore_callable_bond.xml`
+
+now run cleanly out of the box.
+
+### 2. Forward-bond reference ids may include `_FWDEXP_...` suffixes
+
+`ForwardBond` examples can reference security ids like:
+
+- `SECURITY_1_FWDEXP_20251220`
+
+while the reference data is keyed by the base id:
+
+- `SECURITY_1`
+
+If reference-data lookup requires an exact id match, forward-bond examples will
+look unsupported even though the data is present.
+
+Current rule:
+
+- if exact security-id lookup fails
+- and the id contains `_FWDEXP_`
+- retry with the base security id before that suffix
+
+### 3. Reconstructed bond cashflows must be scaled by `BondNotional`
+
+When bond cashflows come from `flows.csv`, notional is already embedded.
+When they are reconstructed from `LegData` / reference data, coupon amounts are
+often unit-notional unless explicitly scaled.
+
+Failure mode:
+
+- PVs collapse from sensible ORE-sized values to tiny numbers
+- forward-bond cases look catastrophically wrong even though discounting logic is fine
+
+Current rule:
+
+- for `Bond` and `ForwardBond`
+- if cashflows are locally reconstructed instead of read from `flows.csv`
+- scale them by `BondNotional`
+
 ## Recommended next steps
 
 If continuing bond work, the highest-value next steps are:
 
-1. Implement `CallableBond` separately on top of the repo’s model infrastructure.
+1. Add bond exposure / XVA support if needed, instead of widening price-only routing further.
 2. Add a true multi-scenario market-data builder that samples scenario curves directly into `BondScenarioGrid`.
 3. Batch multiple compiled trades together for portfolio-level Torch pricing.
 4. Only pursue bond GPU work further if the target is portfolio batching, not isolated single-trade kernels.
