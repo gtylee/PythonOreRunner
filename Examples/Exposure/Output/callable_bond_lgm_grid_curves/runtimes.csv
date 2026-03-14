@@ -1,0 +1,4 @@
+#Key,Total,Count,Max,Min,Average
+PRICING|Run PRICINGAnalytic,260000,1,260000,260000,260000.00
+PRICING|buildMarket(),0,1,0,0,0.00
+PRICING|buildPortfolio(),60000,1,60000,60000,60000.00

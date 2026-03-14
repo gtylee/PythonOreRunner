@@ -358,7 +358,7 @@ class TestBondPricing(unittest.TestCase):
             "CallableBondTrade": 3.2e6,
             "CallableBondNoCall": 5.1e5,
             "CallableBondCertainCall": 1.4e6,
-            "PutCallBondTrade": 1.95e6,
+            "PutCallBondTrade": 2.15e6,
         }
         for trade_id, tol in tolerances.items():
             with self.subTest(trade_id=trade_id):

@@ -678,13 +678,13 @@ def _compute_price_only_case(
         if not npv_csv.exists():
             ref_npv = _find_reference_output_file(ore_xml, "npv.csv")
             if ref_npv is None:
-                raise FileNotFoundError(f"ORE output file not found (run ORE first): {npv_csv}")
-            npv_csv = ref_npv
+                npv_csv = None
+            else:
+                npv_csv = ref_npv
         flows_csv = output_dir / "flows.csv"
         if not flows_csv.exists():
             ref_flows = _find_reference_output_file(ore_xml, "flows.csv")
             flows_csv = ref_flows if ref_flows is not None else flows_csv
-        npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
         model_day_counter = "A365F"
         pricing_result = price_bond_trade(
             ore_xml=ore_xml,
@@ -698,6 +698,15 @@ def _compute_price_only_case(
             pricingengine_path=pricingengine_path,
             flows_csv=flows_csv if flows_csv.exists() else None,
         )
+        npv_details = (
+            ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
+            if npv_csv is not None
+            else {
+                "npv": None,
+                "maturity_date": pricing_result.get("maturity_date", ""),
+                "maturity_time": pricing_result.get("maturity_time", 0.0),
+            }
+        )
         return {
             "trade_id": trade_id,
             "trade_type": trade_type,
@@ -706,9 +715,17 @@ def _compute_price_only_case(
             "maturity_date": str(npv_details["maturity_date"]),
             "maturity_time": float(npv_details["maturity_time"]),
             "pricing": {
-                "ore_t0_npv": float(npv_details["npv"]),
+                **(
+                    {"ore_t0_npv": float(npv_details["npv"])}
+                    if npv_details.get("npv") is not None
+                    else {}
+                ),
                 "py_t0_npv": float(pricing_result["py_npv"]),
-                "t0_npv_abs_diff": abs(float(pricing_result["py_npv"]) - float(npv_details["npv"])),
+                **(
+                    {"t0_npv_abs_diff": abs(float(pricing_result["py_npv"]) - float(npv_details["npv"]))}
+                    if npv_details.get("npv") is not None
+                    else {}
+                ),
                 "trade_type": trade_type,
                 "bond_pricing_mode": "python_callable_lgm" if trade_type == "CallableBond" else "python_risky_bond",
                 "discount_column": str(pricing_result["reference_curve_id"]),
@@ -743,6 +760,14 @@ def _compute_price_only_case(
                 "callable_engine_variant": pricing_result.get("callable_engine_variant"),
                 "stripped_bond_npv": pricing_result.get("stripped_bond_npv"),
                 "embedded_option_value": pricing_result.get("embedded_option_value"),
+                **(
+                    {}
+                    if npv_details.get("npv") is not None
+                    else {
+                        "engine": "python_bond_price_only",
+                        "missing_native_pricing_reference": True,
+                    }
+                ),
             },
         }
     payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
@@ -1051,6 +1076,13 @@ def _infer_modes(args: argparse.Namespace, ore_xml: Path) -> ModeSelection:
     if args.price or args.xva or args.sensi:
         return ModeSelection(price=args.price, xva=args.xva, sensi=args.sensi)
     active = _parse_analytics(ore_xml)
+    first_trade_type = _first_trade_type(ore_xml)
+    # Bond-family examples often request exposure/XVA in ore.xml, but the Python
+    # CLI integration currently supports them in price-only mode. When the user
+    # has not explicitly requested modes on the command line, prefer the Python
+    # bond pricer over routing the case into the unsupported snapshot/XVA path.
+    if first_trade_type in {"Bond", "ForwardBond", "CallableBond"} and active["xva"]:
+        return ModeSelection(price=True, xva=False, sensi=active["sensi"])
     return ModeSelection(
         price=active["price"],
         xva=active["xva"],
@@ -1110,9 +1142,12 @@ def _first_trade_type(ore_xml: Path) -> str:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
         return ""
-    root = ET.parse(portfolio_xml).getroot()
-    trade_id = ore_snapshot_mod._get_first_trade_id(root)
-    return ore_snapshot_mod._get_trade_type(root, trade_id)
+    try:
+        root = ET.parse(portfolio_xml).getroot()
+        trade_id = ore_snapshot_mod._get_first_trade_id(root)
+        return ore_snapshot_mod._get_trade_type(root, trade_id)
+    except Exception:
+        return ""
 
 
 def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
@@ -1645,7 +1680,9 @@ def _run_case(
     *,
     artifact_root: Path,
 ) -> dict[str, Any]:
+    explicit_mode_request = bool(args.price or args.xva or args.sensi)
     modes = _infer_modes(args, ore_xml)
+    first_trade_type = _first_trade_type(ore_xml)
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
@@ -1703,11 +1740,16 @@ def _run_case(
             )
     elif modes.price:
         try:
-            if _has_active_simulation_analytic(ore_xml) or _first_trade_type(ore_xml) in {"Bond", "ForwardBond", "CallableBond"}:
+            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond"}:
                 price_summary = _compute_price_only_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,
                 )
+                if not explicit_mode_request and first_trade_type in {"Bond", "ForwardBond", "CallableBond"}:
+                    price_summary = _python_only_summary(price_summary)
+                    diagnostics = dict(price_summary.get("diagnostics") or {})
+                    diagnostics.setdefault("engine", "python_bond_price_only")
+                    price_summary["diagnostics"] = diagnostics
             else:
                 price_summary = _price_reference_summary(ore_xml)
         except Exception as exc:

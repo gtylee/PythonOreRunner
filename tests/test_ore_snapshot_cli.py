@@ -820,6 +820,31 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertIn("py_t0_npv", payload["pricing"])
         self.assertIn("ore_t0_npv", payload["pricing"])
 
+    def test_forward_bond_default_mode_prefers_python_price_only_dispatch(self):
+        forward_case = TOOLS_DIR / "Examples" / "Legacy" / "Example_73" / "Input" / "ore.xml"
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ore_snapshot_cli.main([str(forward_case), "--output-root", tmp])
+            self.assertEqual(rc, 0)
+            payload = json.loads((Path(tmp) / forward_case.parents[1].name / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["trade_id"], "FwdBond")
+        self.assertEqual(payload["pricing"]["trade_type"], "ForwardBond")
+        self.assertEqual(payload["diagnostics"]["bond_pricing_mode"], "python_risky_bond")
+        self.assertEqual(payload["diagnostics"].get("engine"), "python")
+        self.assertNotIn("ore_t0_npv", payload["pricing"])
+        self.assertIsNone(payload.get("xva"))
+
+    def test_callable_bond_default_mode_prefers_python_price_only_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ore_snapshot_cli.main([str(CALLABLE_CASE_XML), "--output-root", tmp])
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((Path(tmp) / CALLABLE_CASE_XML.parents[1].name / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["trade_id"], "CallableBondTrade")
+        self.assertEqual(payload["pricing"]["trade_type"], "CallableBond")
+        self.assertEqual(payload["diagnostics"]["bond_pricing_mode"], "python_callable_lgm")
+        self.assertEqual(payload["diagnostics"].get("engine"), "python")
+        self.assertNotIn("ore_t0_npv", payload["pricing"])
+        self.assertIsNone(payload.get("xva"))
+
     def test_write_ore_reports_preserves_bond_trade_type(self):
         case_summary = {
             "trade_id": "Bond_Fixed",

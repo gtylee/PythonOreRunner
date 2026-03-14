@@ -694,6 +694,10 @@ def _merge_reference_data(bond_node: ET.Element, reference_data_path: Path | Non
         return merged
     rd_root = ET.parse(reference_data_path).getroot()
     ref_node = rd_root.find(f"./ReferenceDatum[@id='{security_id}']/BondReferenceData")
+    if ref_node is None and "_FWDEXP_" in security_id:
+        base_security_id = security_id.split("_FWDEXP_", 1)[0].strip()
+        if base_security_id:
+            ref_node = rd_root.find(f"./ReferenceDatum[@id='{base_security_id}']/BondReferenceData")
     if ref_node is None:
         return merged
     for child in ref_node:
@@ -997,6 +1001,7 @@ def load_bond_trade_spec(
         payer = _parse_bool(bond_node.findtext("./LegData/Payer"), False)
         sign = -1.0 if payer else 1.0
         currency, _, cashflows = _parse_fixed_leg_cashflows(bond_node.find("./LegData"), sign=sign)
+        scale = float((bond_node.findtext("./BondNotional") or "1").strip() or "1")
         spec = BondTradeSpec(
             trade_id=trade_id,
             trade_type=trade_type,
@@ -1009,8 +1014,8 @@ def load_bond_trade_spec(
             settlement_days=int((bond_node.findtext("./SettlementDays") or "0").strip() or "0"),
             calendar=(bond_node.findtext("./Calendar") or "TARGET").strip(),
             issue_date=_parse_any_date(bond_node.findtext("./IssueDate") or ""),
-            bond_notional=float((bond_node.findtext("./BondNotional") or "1").strip() or "1"),
-            cashflows=_load_bond_cashflows_from_flows(flows_csv, trade_id) if flows_csv and flows_csv.exists() else cashflows,
+            bond_notional=scale,
+            cashflows=_load_bond_cashflows_from_flows(flows_csv, trade_id) if flows_csv and flows_csv.exists() else _scale_cashflows(cashflows, scale),
         )
     else:
         # This follows `ForwardBond::fromXML()` / `ForwardBond::build()` in ORE:
@@ -1023,6 +1028,7 @@ def load_bond_trade_spec(
         payer = _parse_bool(bond_node.findtext("./LegData/Payer"), False)
         sign = -1.0 if payer else 1.0
         currency, dc, parsed_cashflows = _parse_fixed_leg_cashflows(bond_node.find("./LegData"), sign=sign)
+        scale = float((bond_node.findtext("./BondNotional") or "1").strip() or "1")
         settlement = fwd_node.find("./SettlementData")
         if settlement is None:
             raise ValueError("ForwardBond missing SettlementData")
@@ -1038,8 +1044,8 @@ def load_bond_trade_spec(
             settlement_days=int((bond_node.findtext("./SettlementDays") or "0").strip() or "0"),
             calendar=(bond_node.findtext("./Calendar") or "TARGET").strip(),
             issue_date=_parse_any_date(bond_node.findtext("./IssueDate") or ""),
-            bond_notional=float((bond_node.findtext("./BondNotional") or "1").strip() or "1"),
-            cashflows=_load_bond_cashflows_from_flows(flows_csv, trade_id, forward_underlying_only=True) if flows_csv and flows_csv.exists() else parsed_cashflows,
+            bond_notional=scale,
+            cashflows=_load_bond_cashflows_from_flows(flows_csv, trade_id, forward_underlying_only=True) if flows_csv and flows_csv.exists() else _scale_cashflows(parsed_cashflows, scale),
             forward_maturity_date=_parse_any_date(settlement.findtext("./ForwardMaturityDate") or ""),
             forward_settlement_date=_parse_any_date(settlement.findtext("./ForwardSettlementDate") or settlement.findtext("./ForwardMaturityDate") or ""),
             forward_amount=float((settlement.findtext("./Amount") or "nan").strip()),
@@ -1783,11 +1789,14 @@ def _build_callable_grid_times(
 
 
 def _find_time_index(grid: np.ndarray, t: float) -> int:
-    idx = int(np.searchsorted(grid, float(t), side="left"))
+    tt = float(t)
+    idx = int(np.searchsorted(grid, tt, side="left"))
+    if idx < grid.size and abs(grid[idx] - tt) <= 1.0e-10:
+        return idx
+    if idx > 0 and abs(grid[idx - 1] - tt) <= 1.0e-10:
+        return idx - 1
     if idx >= grid.size:
         return grid.size - 1
-    if idx > 0 and abs(grid[idx - 1] - float(t)) <= abs(grid[idx] - float(t)):
-        return idx - 1
     return idx
 
 
@@ -1903,22 +1912,20 @@ def _rollback_callable_bond_lgm_value(
         asof_date=asof_date,
         day_counter=day_counter,
     )
-    cashflow_map: dict[int, list[BondCashflow]] = {}
-    for cf in spec.bond.cashflows:
-        if _cashflow_has_occurred(cf.pay_date, asof_date, False):
-            continue
-        idx = _find_time_index(grid, _time_from_dates(asof_date, cf.pay_date, day_counter))
-        cashflow_map.setdefault(idx, []).append(cf)
     change_times, notionals = _callable_notional_schedule(spec, asof_date, day_counter)
 
-    values = np.zeros_like(x_grids[-1], dtype=float)
+    # Mirror ORE's decomposition more explicitly:
+    # - the stripped risky bond is valued by the bond engine
+    # - the rollback carries only the embedded call/put option in reduced form
+    # - exercise compares the call/put amount to the full reduced underlying
+    #   bond value at the exercise time
+    option_values = np.zeros_like(x_grids[-1], dtype=float)
     for i in range(len(grid) - 1, 0, -1):
         t_from = float(grid[i])
-        t_to = float(grid[i - 1])
         grid_i = x_grids[i]
         if i < len(grid) - 1:
-            values = _convolution_rollback(
-                values,
+            option_values = _convolution_rollback(
+                option_values,
                 zeta_t1=float(zeta_grid[i + 1]),
                 zeta_t0=float(zeta_grid[i]),
                 mx=mx,
@@ -1926,12 +1933,17 @@ def _rollback_callable_bond_lgm_value(
                 y_nodes=y_nodes,
                 y_weights=y_weights,
             )
-        if i in cashflow_map:
-            num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
-            for cf in cashflow_map[i]:
-                values = values + float(cf.amount) / num
         if i in call_map or i in put_map:
-            continuation = values.copy()
+            continuation = option_values.copy()
+            underlying = _callable_underlying_reduced_value(
+                spec,
+                model,
+                eff_discount_curve,
+                asof_date=asof_date,
+                day_counter=day_counter,
+                t=t_from,
+                x_grid=grid_i,
+            )
             if i in call_map:
                 ex = call_map[i]
                 amt = _callable_price_amount(
@@ -1940,7 +1952,7 @@ def _rollback_callable_bond_lgm_value(
                     _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
                 )
                 num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
-                continuation = np.minimum(continuation, float(amt) / num)
+                continuation = np.minimum(continuation, float(amt) / num - underlying)
             if i in put_map:
                 ex = put_map[i]
                 amt = _callable_price_amount(
@@ -1949,11 +1961,11 @@ def _rollback_callable_bond_lgm_value(
                     _callable_accrual_at_time(spec, asof_date, day_counter, t_from),
                 )
                 num = np.asarray(model.numeraire_lgm(t_from, grid_i, eff_discount_curve), dtype=float)
-                continuation = np.maximum(continuation, float(amt) / num)
-            values = continuation
+                continuation = np.maximum(continuation, float(amt) / num - underlying)
+            option_values = continuation
     if len(grid) > 1:
-        values = _convolution_rollback(
-            values,
+        option_values = _convolution_rollback(
+            option_values,
             zeta_t1=float(zeta_grid[1]),
             zeta_t0=float(zeta_grid[0]),
             mx=mx,
@@ -1961,7 +1973,7 @@ def _rollback_callable_bond_lgm_value(
             y_nodes=y_nodes,
             y_weights=y_weights,
         )
-    return float(values[mx]) / max(float(eff_income_curve(0.0)), 1.0e-18)
+    return float(option_values[mx]) / max(float(eff_income_curve(0.0)), 1.0e-18)
 
 
 def _price_callable_bond_lgm(
@@ -1978,7 +1990,7 @@ def _price_callable_bond_lgm(
     security_spread: float,
     model: LGM1F,
 ) -> dict[str, float | int | str]:
-    price = _rollback_callable_bond_lgm_value(
+    option_value = _rollback_callable_bond_lgm_value(
         spec,
         engine_spec,
         asof_date=asof_date,
@@ -1991,19 +2003,24 @@ def _price_callable_bond_lgm(
         security_spread=security_spread,
         model=model,
     )
-    stripped = _rollback_callable_bond_lgm_value(
-        replace(spec, call_data=(), put_data=()),
-        engine_spec,
+    stripped, _ = _bond_npv(
+        spec.bond,
         asof_date=asof_date,
         day_counter=day_counter,
-        reference_curve=reference_curve,
+        discount_curve=reference_curve,
         income_curve=income_curve,
         hazard_times=hazard_times,
         hazard_rates=hazard_rates,
         recovery_rate=recovery_rate,
         security_spread=security_spread,
-        model=model,
+        engine_spec=BondEngineSpec(
+            timestep_months=6,
+            spread_on_income_curve=engine_spec.spread_on_income_curve,
+            treat_security_spread_as_credit_spread=False,
+            include_past_cashflows=False,
+        ),
     )
+    price = float(stripped + option_value)
     maturity_date = max(cf.pay_date for cf in spec.bond.cashflows)
     return {
         "py_npv": float(price),
