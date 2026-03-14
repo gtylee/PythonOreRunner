@@ -484,6 +484,12 @@ def _curve_from_flow_discounts(flows_csv: Path, trade_id: str, asof_date: date, 
             pairs.append((t, float(df_text)))
     if not pairs:
         raise ValueError(f"no flow discount factors found for trade '{trade_id}' in {flows_csv}")
+    # Anchor the curve at the valuation date. ORE discount factors in the flow
+    # report are quoted from the asof date, so `P(0,0)` must be exactly 1.
+    # Without this anchor, the first flow DF can leak into `curve(0)` via the
+    # interpolator and the risky-bond engine will overstate PV because it divides
+    # future discounts by `df_npv = curve(0)`.
+    pairs.append((0.0, 1.0))
     pairs = sorted(set((round(t, 12), df) for t, df in pairs))
     return build_discount_curve_from_discount_pairs(pairs)
 
@@ -696,7 +702,7 @@ def price_bond_trade(
         #   maturity date
         # - then form `(forwardPrice - strikeAmount) * discount`
         # - then apply long/short sign and optional premium cashflow
-        forward_value, _ = _bond_npv(
+        _, forward_value = _bond_npv(
             spec,
             asof_date=asof,
             day_counter=model_day_counter,

@@ -1082,6 +1082,15 @@ def _price_reference_summary(ore_xml: Path) -> dict[str, Any]:
     return reference
 
 
+def _is_reference_fallback_error(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        isinstance(exc, FileNotFoundError)
+        or "FloatingLegData/Index not found" in message
+        or "no LGM node found for ccy" in message
+    )
+
+
 def _default_case_identity(ore_xml: Path) -> tuple[str, str, str]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
@@ -1094,7 +1103,12 @@ def _default_case_identity(ore_xml: Path) -> tuple[str, str, str]:
         raise
 
 
-def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any]:
+def _ore_reference_summary(
+    ore_xml: Path,
+    modes: ModeSelection,
+    *,
+    allow_partial_reference: bool = False,
+) -> dict[str, Any]:
     validation = validate_ore_input_snapshot(ore_xml)
     output_dir = _resolve_case_output_dir(ore_xml)
     trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
@@ -1120,27 +1134,47 @@ def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any
         "pass_all": True,
     }
     if modes.price:
-        if npv_csv is None:
+        if npv_csv is None and not allow_partial_reference:
             raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_dir / 'npv.csv'}")
-        npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
-        case_summary["maturity_date"] = str(npv_details["maturity_date"])
-        case_summary["maturity_time"] = float(npv_details["maturity_time"])
-        case_summary["pricing"] = {"ore_t0_npv": float(npv_details["npv"])}
+        if npv_csv is not None:
+            try:
+                npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
+                case_summary["maturity_date"] = str(npv_details["maturity_date"])
+                case_summary["maturity_time"] = float(npv_details["maturity_time"])
+                case_summary["pricing"] = {"ore_t0_npv": float(npv_details["npv"])}
+            except Exception:
+                if not allow_partial_reference:
+                    raise
+                case_summary["diagnostics"]["missing_reference_pricing"] = True
+                case_summary["pricing"] = None
+        else:
+            case_summary["diagnostics"]["missing_reference_pricing"] = True
+            case_summary["pricing"] = None
     else:
         case_summary["maturity_date"] = ""
         case_summary["maturity_time"] = 0.0
     if modes.xva:
-        if xva_csv is None:
+        if xva_csv is None and not allow_partial_reference:
             raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_dir / 'xva.csv'}")
-        xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id)
-        case_summary["xva"] = {
-            "ore_cva": float(xva_row["cva"]),
-            "ore_dva": float(xva_row["dva"]),
-            "ore_fba": float(xva_row["fba"]),
-            "ore_fca": float(xva_row["fca"]),
-            "ore_basel_epe": float(xva_row["basel_epe"]),
-            "ore_basel_eepe": float(xva_row["basel_eepe"]),
-        }
+        if xva_csv is not None:
+            try:
+                xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id)
+                case_summary["xva"] = {
+                    "ore_cva": float(xva_row["cva"]),
+                    "ore_dva": float(xva_row["dva"]),
+                    "ore_fba": float(xva_row["fba"]),
+                    "ore_fca": float(xva_row["fca"]),
+                    "ore_basel_epe": float(xva_row["basel_epe"]),
+                    "ore_basel_eepe": float(xva_row["basel_eepe"]),
+                }
+            except Exception:
+                if not allow_partial_reference:
+                    raise
+                case_summary["diagnostics"]["missing_reference_xva"] = True
+                case_summary["xva"] = None
+        else:
+            case_summary["diagnostics"]["missing_reference_xva"] = True
+            case_summary["xva"] = None
         exposure_path = _find_reference_output_file(ore_xml, f"exposure_trade_{trade_id}.csv")
         if exposure_path is not None:
             exposure = ore_snapshot_mod.load_ore_exposure_profile(str(exposure_path))
@@ -1559,11 +1593,20 @@ def _run_case(
                 own_recovery=args.own_recovery,
                 xva_mode=args.xva_mode,
             )
-        except FileNotFoundError:
-            reference_summary = _ore_reference_summary(ore_xml, modes)
+        except Exception as exc:
+            if not _is_reference_fallback_error(exc):
+                raise
+            reference_summary = _ore_reference_summary(
+                ore_xml,
+                modes,
+                allow_partial_reference=not isinstance(exc, FileNotFoundError),
+            )
             diagnostics = dict(reference_summary.get("diagnostics") or {})
             diagnostics["engine"] = "ore_reference_expected_output"
-            diagnostics["fallback_reason"] = "missing_native_output"
+            diagnostics["fallback_reason"] = (
+                "missing_native_output" if isinstance(exc, FileNotFoundError) else "unsupported_python_snapshot"
+            )
+            diagnostics["fallback_error"] = str(exc)
             reference_summary["diagnostics"] = diagnostics
             case_summary.update(reference_summary)
             base_summary = None
@@ -1595,11 +1638,23 @@ def _run_case(
                 )
             else:
                 price_summary = _price_reference_summary(ore_xml)
-        except FileNotFoundError:
-            price_summary = _price_reference_summary(ore_xml)
+        except Exception as exc:
+            if not _is_reference_fallback_error(exc):
+                raise
+            if isinstance(exc, FileNotFoundError):
+                price_summary = _price_reference_summary(ore_xml)
+            else:
+                price_summary = _ore_reference_summary(
+                    ore_xml,
+                    ModeSelection(price=True, xva=False, sensi=False),
+                    allow_partial_reference=True,
+                )
             diagnostics = dict(price_summary.get("diagnostics") or {})
             diagnostics["engine"] = "ore_reference_expected_output"
-            diagnostics["fallback_reason"] = "missing_native_output"
+            diagnostics["fallback_reason"] = (
+                "missing_native_output" if isinstance(exc, FileNotFoundError) else "unsupported_python_snapshot"
+            )
+            diagnostics["fallback_error"] = str(exc)
             price_summary["diagnostics"] = diagnostics
         case_summary.update(
             {

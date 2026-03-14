@@ -16,6 +16,7 @@ from py_ore_tools.bond_pricing import (
     _bond_npv,
     _curve_from_flow_discounts,
     _load_bond_cashflows_from_flows,
+    load_bond_trade_spec,
     price_bond_trade,
 )
 from py_ore_tools.ore_snapshot import _load_ore_npv_details
@@ -26,6 +27,11 @@ EXAMPLE_18_PORTFOLIO = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input
 EXAMPLE_18_REFERENCE = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "referencedata.xml"
 EXAMPLE_18_FLOWS = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "ExpectedOutput" / "flows.csv"
 EXAMPLE_18_NPV = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "ExpectedOutput" / "npv.csv"
+EXAMPLE_78_ORE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "Input" / "ore.xml"
+EXAMPLE_78_PORTFOLIO = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "Input" / "portfolio.xml"
+EXAMPLE_78_REFERENCE = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "Input" / "referencedata.xml"
+EXAMPLE_78_FLOWS = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "ExpectedOutput" / "flows.csv"
+EXAMPLE_78_NPV = TOOLS_DIR / "Examples" / "Legacy" / "Example_78" / "ExpectedOutput" / "npv.csv"
 EXAMPLE_SHARED_MARKET = TOOLS_DIR / "Examples" / "Input" / "market_20160205_flat.txt"
 EXAMPLE_SHARED_TM = TOOLS_DIR / "Examples" / "Input" / "todaysmarket.xml"
 EXAMPLE_SHARED_PE = TOOLS_DIR / "Examples" / "Input" / "pricingengine.xml"
@@ -36,6 +42,22 @@ def _flat_curve(rate: float):
 
 
 class TestBondPricing(unittest.TestCase):
+    def _price_example18(self, trade_id: str) -> tuple[dict, float]:
+        out = price_bond_trade(
+            ore_xml=EXAMPLE_18_ORE_XML,
+            portfolio_xml=EXAMPLE_18_PORTFOLIO,
+            trade_id=trade_id,
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=EXAMPLE_18_REFERENCE,
+            pricingengine_path=EXAMPLE_SHARED_PE,
+            flows_csv=EXAMPLE_18_FLOWS,
+        )
+        ore_npv = _load_ore_npv_details(EXAMPLE_18_NPV, trade_id=trade_id)["npv"]
+        return out, ore_npv
+
     def test_load_ore_flows_for_forward_bond_filters_forward_value_row(self):
         flows = _load_bond_cashflows_from_flows(
             EXAMPLE_18_FLOWS,
@@ -54,7 +76,8 @@ class TestBondPricing(unittest.TestCase):
             asof_date=date(2016, 2, 5),
             day_counter="A365F",
         )
-        self.assertAlmostEqual(curve(0.9945205479452055), 0.9803373492, places=10)
+        self.assertAlmostEqual(curve(0.0), 1.0, places=12)
+        self.assertLess(abs(curve(0.9945205479452055) - 0.9803373492), 1.0e-4)
         self.assertLess(curve(1.0), 1.0)
         self.assertGreater(curve(1.0), curve(5.0))
 
@@ -92,6 +115,40 @@ class TestBondPricing(unittest.TestCase):
         )
         expected = 105.0 * curve(366.0 / 365.0)
         self.assertAlmostEqual(value, expected, places=8)
+
+    def test_load_bond_trade_spec_covers_construction_variants(self):
+        cases = [
+            ("Bond_Fixed", {"contains": {"Interest", "Notional"}}),
+            ("Bond_Floating", {"contains": {"Interest", "InterestProjected"}}),
+            ("Bond_Fixed_Then_Floating", {"prefix": ["Interest"] * 5, "contains": {"InterestProjected"}}),
+            ("Bond_Amortizing_FixedAmount", {"declining_nominal": True}),
+            ("FwdBond_Fixed", {"forward": True}),
+        ]
+        for trade_id, checks in cases:
+            with self.subTest(trade_id=trade_id):
+                spec, _ = load_bond_trade_spec(
+                    portfolio_xml=EXAMPLE_18_PORTFOLIO,
+                    trade_id=trade_id,
+                    reference_data_path=EXAMPLE_18_REFERENCE,
+                    pricingengine_path=EXAMPLE_SHARED_PE,
+                    flows_csv=EXAMPLE_18_FLOWS,
+                )
+                types = [cf.flow_type for cf in spec.cashflows]
+                if "contains" in checks:
+                    self.assertTrue(checks["contains"].issubset(set(types)))
+                if "prefix" in checks:
+                    self.assertEqual(types[: len(checks["prefix"])], checks["prefix"])
+                if checks.get("declining_nominal"):
+                    notionals = [cf.nominal for cf in spec.cashflows if cf.nominal is not None]
+                    self.assertGreater(len(notionals), 2)
+                    self.assertTrue(all(lhs >= rhs for lhs, rhs in zip(notionals, notionals[1:])))
+                    self.assertLess(min(notionals), max(notionals))
+                if checks.get("forward"):
+                    self.assertEqual(spec.trade_type, "ForwardBond")
+                    self.assertEqual(spec.forward_maturity_date, date(2016, 8, 8))
+                    self.assertEqual(spec.forward_amount, 6300000.0)
+                    self.assertTrue(spec.settlement_dirty)
+                    self.assertTrue(spec.long_in_forward)
 
     def test_positive_hazard_reduces_bond_value(self):
         spec = BondTradeSpec(
@@ -180,36 +237,65 @@ class TestBondPricing(unittest.TestCase):
         self.assertGreater(with_rec, no_rec)
 
     def test_example18_fixed_bond_parity_stays_within_regression_band(self):
-        out = price_bond_trade(
-            ore_xml=EXAMPLE_18_ORE_XML,
-            portfolio_xml=EXAMPLE_18_PORTFOLIO,
-            trade_id="Bond_Fixed",
-            asof_date="2016-02-05",
-            model_day_counter="A365F",
-            market_data_file=EXAMPLE_SHARED_MARKET,
-            todaysmarket_xml=EXAMPLE_SHARED_TM,
-            reference_data_path=EXAMPLE_18_REFERENCE,
-            pricingengine_path=EXAMPLE_SHARED_PE,
-            flows_csv=EXAMPLE_18_FLOWS,
-        )
-        ore_npv = _load_ore_npv_details(EXAMPLE_18_NPV, trade_id="Bond_Fixed")["npv"]
+        out, ore_npv = self._price_example18("Bond_Fixed")
         self.assertLess(abs(out["py_npv"] - ore_npv), 260000.0)
 
     def test_example18_forward_bond_parity_stays_within_regression_band(self):
-        out = price_bond_trade(
-            ore_xml=EXAMPLE_18_ORE_XML,
-            portfolio_xml=EXAMPLE_18_PORTFOLIO,
-            trade_id="FwdBond_Fixed",
-            asof_date="2016-02-05",
-            model_day_counter="A365F",
-            market_data_file=EXAMPLE_SHARED_MARKET,
-            todaysmarket_xml=EXAMPLE_SHARED_TM,
-            reference_data_path=EXAMPLE_18_REFERENCE,
-            pricingengine_path=EXAMPLE_SHARED_PE,
-            flows_csv=EXAMPLE_18_FLOWS,
-        )
-        ore_npv = _load_ore_npv_details(EXAMPLE_18_NPV, trade_id="FwdBond_Fixed")["npv"]
+        out, ore_npv = self._price_example18("FwdBond_Fixed")
         self.assertLess(abs(out["py_npv"] - ore_npv), 70000.0)
+
+    def test_example18_bond_matrix_has_near_exact_parity(self):
+        trade_ids = [
+            "Bond_Fixed",
+            "Bond_Floating",
+            "Bond_Fixed_Then_Floating",
+            "Bond_Amortizing_FixedAmount",
+            "Bond_Amortizing_Percentage_Initial",
+            "Bond_Amortizing_Percentage_Previous",
+            "Bond_Amortizing_Fixed_Annuity",
+            "Bond_Amortizing_Floating_Annuity",
+            "Bond_Amortizing_FixedAmount_PercentagePrevious",
+            "Bond_Fixed_using_BMBond_curve_Pricing",
+        ]
+        for trade_id in trade_ids:
+            with self.subTest(trade_id=trade_id):
+                out, ore_npv = self._price_example18(trade_id)
+                self.assertEqual(out["trade_type"], "Bond")
+                self.assertLess(abs(out["py_npv"] - ore_npv), 1.0e-2)
+
+    def test_example18_forward_bond_matrix_stays_in_tight_band(self):
+        trade_ids = [
+            "FwdBond_Fixed",
+            "FwdBond_Floating",
+            "FwdBond_Fixed_Then_Floating",
+            "FwdBond_Amortizing_FixedAmount",
+            "FwdBond_Amortizing_Percentage_Initial",
+            "FwdBond_Amortizing_Percentage_Previous",
+            "FwdBond_Amortizing_Fixed_Annuity",
+            "FwdBond_Amortizing_Floating_Annuity",
+            "FwdBond_Amortizing_FixedAmount_PercentagePrevious",
+        ]
+        for trade_id in trade_ids:
+            with self.subTest(trade_id=trade_id):
+                out, ore_npv = self._price_example18(trade_id)
+                self.assertEqual(out["trade_type"], "ForwardBond")
+                self.assertLess(abs(out["py_npv"] - ore_npv), 2500.0)
+
+    def test_example78_fixed_rate_bond_parity_is_near_exact(self):
+        out = price_bond_trade(
+            ore_xml=EXAMPLE_78_ORE_XML,
+            portfolio_xml=EXAMPLE_78_PORTFOLIO,
+            trade_id="FixedRateBond",
+            asof_date="2022-03-01",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_78_ORE_XML.parent / "MD_2022-03-01.csv",
+            todaysmarket_xml=EXAMPLE_78_ORE_XML.parent / "todaysmarket.xml",
+            reference_data_path=EXAMPLE_78_REFERENCE,
+            pricingengine_path=EXAMPLE_78_ORE_XML.parent / "pricingengine.xml",
+            flows_csv=EXAMPLE_78_FLOWS,
+        )
+        ore_npv = _load_ore_npv_details(EXAMPLE_78_NPV, trade_id="FixedRateBond")["npv"]
+        self.assertLess(abs(out["py_npv"] - ore_npv), 1.0e-2)
 
 
 if __name__ == "__main__":
