@@ -429,6 +429,13 @@ class CompiledCallableBondTrade:
     call_active: np.ndarray
     put_active: np.ndarray
     cashflows: tuple[CompiledCallableCashflowState, ...]
+    cf_amounts: np.ndarray
+    cf_pay_indices: np.ndarray
+    cf_belongs_to_underlying_max_time: np.ndarray
+    cf_max_estimation_time: np.ndarray
+    cf_exact_estimation_time: np.ndarray
+    cf_coupon_start_time: np.ndarray
+    cf_coupon_end_time: np.ndarray
 
     center_index: int
     grid_nx: int
@@ -972,7 +979,8 @@ def compile_callable_bond_trade(
         put_amounts[idx] = _callable_price_amount(ex, notionals_on_grid[idx], accruals_on_grid[idx])
 
     cashflows = []
-    for cf in _build_callable_cashflow_states(spec, asof_date=asof, day_counter=day_counter):
+    raw_cashflows = _build_callable_cashflow_states(spec, asof_date=asof, day_counter=day_counter)
+    for cf in raw_cashflows:
         cashflows.append(
             CompiledCallableCashflowState(
                 amount=float(cf.amount),
@@ -985,6 +993,25 @@ def compile_callable_bond_trade(
                 coupon_end_time=None if cf.coupon_end_time is None else float(cf.coupon_end_time),
             )
         )
+    cf_amounts = np.asarray([float(cf.amount) for cf in raw_cashflows], dtype=float)
+    cf_pay_indices = np.asarray([_find_time_index(grid, float(cf.pay_time)) for cf in raw_cashflows], dtype=int)
+    cf_belongs_to_underlying_max_time = np.asarray([float(cf.belongs_to_underlying_max_time) for cf in raw_cashflows], dtype=float)
+    cf_max_estimation_time = np.asarray(
+        [np.nan if cf.max_estimation_time is None else float(cf.max_estimation_time) for cf in raw_cashflows],
+        dtype=float,
+    )
+    cf_exact_estimation_time = np.asarray(
+        [np.nan if cf.exact_estimation_time is None else float(cf.exact_estimation_time) for cf in raw_cashflows],
+        dtype=float,
+    )
+    cf_coupon_start_time = np.asarray(
+        [np.nan if cf.coupon_start_time is None else float(cf.coupon_start_time) for cf in raw_cashflows],
+        dtype=float,
+    )
+    cf_coupon_end_time = np.asarray(
+        [np.nan if cf.coupon_end_time is None else float(cf.coupon_end_time) for cf in raw_cashflows],
+        dtype=float,
+    )
 
     stripped_spec = replace(
         spec.bond,
@@ -1014,6 +1041,13 @@ def compile_callable_bond_trade(
         call_active=call_active,
         put_active=put_active,
         cashflows=tuple(cashflows),
+        cf_amounts=cf_amounts,
+        cf_pay_indices=cf_pay_indices,
+        cf_belongs_to_underlying_max_time=cf_belongs_to_underlying_max_time,
+        cf_max_estimation_time=cf_max_estimation_time,
+        cf_exact_estimation_time=cf_exact_estimation_time,
+        cf_coupon_start_time=cf_coupon_start_time,
+        cf_coupon_end_time=cf_coupon_end_time,
         center_index=mx,
         grid_nx=grid_nx,
         y_nodes=np.asarray(y_nodes, dtype=float),
@@ -1128,6 +1162,24 @@ def build_callable_bond_scenario_pack(
     )
 
 
+def build_callable_bond_scenario_pack_from_arrays(
+    compiled: CompiledCallableBondTrade,
+    *,
+    p0_grid: np.ndarray,
+    h_grid: np.ndarray,
+    zeta_grid: np.ndarray,
+    stripped_grid: BondScenarioGrid,
+) -> CallableBondScenarioPack:
+    pack = CallableBondScenarioPack(
+        p0_grid=np.asarray(p0_grid, dtype=float),
+        h_grid=np.asarray(h_grid, dtype=float),
+        zeta_grid=np.asarray(zeta_grid, dtype=float),
+        stripped_grid=stripped_grid,
+    )
+    validate_callable_bond_scenario_pack(compiled, pack)
+    return pack
+
+
 def validate_callable_bond_scenario_pack(compiled: CompiledCallableBondTrade, pack: CallableBondScenarioPack) -> None:
     p0_grid = _ensure_2d_float("p0_grid", pack.p0_grid)
     h_grid = _ensure_2d_float("h_grid", pack.h_grid)
@@ -1148,6 +1200,15 @@ def _callable_coupon_ratio_compiled(cf: CompiledCallableCashflowState, t: float)
     if denom <= 1.0e-18:
         return 0.0
     return max(0.0, min(1.0, (float(cf.coupon_end_time) - float(t)) / denom))
+
+
+def _callable_coupon_ratio_from_arrays(start_t: float, end_t: float, t: float) -> float:
+    if np.isnan(start_t) or np.isnan(end_t):
+        return 1.0
+    denom = float(end_t) - float(start_t)
+    if denom <= 1.0e-18:
+        return 0.0
+    return max(0.0, min(1.0, (float(end_t) - float(t)) / denom))
 
 
 def _convolution_rollback_batch_numpy(
@@ -1285,6 +1346,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
         p0_t = np.asarray(pack.p0_grid[:, i], dtype=float)
         dx = np.sqrt(np.maximum(z_t, 0.0)) / float(max(compiled.grid_nx, 1))
         x_grid = dx[:, None] * compiled.k_grid[None, :]
+        reduced_cache: dict[int, np.ndarray] = {}
         if i < compiled.grid_times.size - 1:
             option_values = _convolution_rollback_batch_numpy(
                 option_values,
@@ -1328,34 +1390,66 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
                 )
 
         provisional_npv = np.zeros_like(provisional_npv)
-        for j, cf in enumerate(compiled.cashflows):
+        for j in range(compiled.cf_amounts.size):
             if cf_status[j] == "Done":
                 continue
-            if _callable_is_part_of_underlying(cf, t_from) and _callable_coupon_ratio_compiled(cf, t_from) > 0.0:
+            belongs_to_underlying = (
+                t_from < float(compiled.cf_belongs_to_underlying_max_time[j])
+                or _callable_close_enough(t_from, float(compiled.cf_belongs_to_underlying_max_time[j]))
+            )
+            coupon_ratio = _callable_coupon_ratio_from_arrays(
+                float(compiled.cf_coupon_start_time[j]),
+                float(compiled.cf_coupon_end_time[j]),
+                t_from,
+            )
+            if belongs_to_underlying and coupon_ratio > 0.0:
                 if cf_status[j] == "Cached":
                     underlying_npv = underlying_npv + np.asarray(cf_cache[j], dtype=float)
                     cf_cache[j] = None
                     cf_status[j] = "Done"
-                elif _callable_can_be_estimated(cf, t_from):
-                    h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
-                    p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
-                    reduced = float(cf.amount) * p0_pay[:, None] * np.exp(
-                        -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
-                    )
+                elif (
+                    not np.isnan(compiled.cf_max_estimation_time[j])
+                    and (t_from < float(compiled.cf_max_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_max_estimation_time[j])))
+                ):
+                    pay_idx = int(compiled.cf_pay_indices[j])
+                    reduced = reduced_cache.get(pay_idx)
+                    if reduced is None:
+                        h_pay = np.asarray(pack.h_grid[:, pay_idx], dtype=float)
+                        p0_pay = np.asarray(pack.p0_grid[:, pay_idx], dtype=float)
+                        reduced = p0_pay[:, None] * np.exp(
+                            -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
+                        )
+                        reduced_cache[pay_idx] = reduced
+                    reduced = float(compiled.cf_amounts[j]) * reduced
                     underlying_npv = underlying_npv + reduced
                     cf_status[j] = "Done"
                 else:
-                    h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
-                    p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
-                    provisional_npv = provisional_npv + float(cf.amount) * p0_pay[:, None] * np.exp(
+                    pay_idx = int(compiled.cf_pay_indices[j])
+                    reduced = reduced_cache.get(pay_idx)
+                    if reduced is None:
+                        h_pay = np.asarray(pack.h_grid[:, pay_idx], dtype=float)
+                        p0_pay = np.asarray(pack.p0_grid[:, pay_idx], dtype=float)
+                        reduced = p0_pay[:, None] * np.exp(
+                            -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
+                        )
+                        reduced_cache[pay_idx] = reduced
+                    provisional_npv = provisional_npv + float(compiled.cf_amounts[j]) * reduced
+            elif (
+                np.isnan(compiled.cf_max_estimation_time[j])
+                and not np.isnan(compiled.cf_exact_estimation_time[j])
+                and (t_from < float(compiled.cf_exact_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_exact_estimation_time[j])))
+                and cf_status[j] == "Open"
+            ):
+                pay_idx = int(compiled.cf_pay_indices[j])
+                reduced = reduced_cache.get(pay_idx)
+                if reduced is None:
+                    h_pay = np.asarray(pack.h_grid[:, pay_idx], dtype=float)
+                    p0_pay = np.asarray(pack.p0_grid[:, pay_idx], dtype=float)
+                    reduced = p0_pay[:, None] * np.exp(
                         -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
                     )
-            elif _callable_must_be_estimated(cf, t_from) and cf_status[j] == "Open":
-                h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
-                p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
-                cf_cache[j] = float(cf.amount) * p0_pay[:, None] * np.exp(
-                    -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
-                )
+                    reduced_cache[pay_idx] = reduced
+                cf_cache[j] = float(compiled.cf_amounts[j]) * reduced
                 cf_status[j] = "Cached"
         if compiled.call_active[i] or compiled.put_active[i]:
             continuation = option_values.copy()
@@ -1430,6 +1524,7 @@ def _price_callable_bond_scenarios_torch_chunk(
         p0_t = p0_grid[:, i]
         dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(compiled.grid_nx, 1))
         x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+        reduced_cache: dict[int, object] = {}
         if i < compiled.grid_times.size - 1:
             option_values = _convolution_rollback_batch_torch(
                 option_values,
@@ -1472,34 +1567,66 @@ def _price_callable_bond_scenarios_torch_chunk(
                     y_weights=y_weights,
                 )
         provisional_npv = torch.zeros_like(provisional_npv)
-        for j, cf in enumerate(compiled.cashflows):
+        for j in range(compiled.cf_amounts.size):
             if cf_status[j] == "Done":
                 continue
-            if _callable_is_part_of_underlying(cf, t_from) and _callable_coupon_ratio_compiled(cf, t_from) > 0.0:
+            belongs_to_underlying = (
+                t_from < float(compiled.cf_belongs_to_underlying_max_time[j])
+                or _callable_close_enough(t_from, float(compiled.cf_belongs_to_underlying_max_time[j]))
+            )
+            coupon_ratio = _callable_coupon_ratio_from_arrays(
+                float(compiled.cf_coupon_start_time[j]),
+                float(compiled.cf_coupon_end_time[j]),
+                t_from,
+            )
+            if belongs_to_underlying and coupon_ratio > 0.0:
                 if cf_status[j] == "Cached":
                     underlying_npv = underlying_npv + cf_cache[j]
                     cf_cache[j] = None
                     cf_status[j] = "Done"
-                elif _callable_can_be_estimated(cf, t_from):
-                    h_pay = h_grid[:, cf.pay_index]
-                    p0_pay = p0_grid[:, cf.pay_index]
-                    reduced = float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
-                        -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
-                    )
+                elif (
+                    not np.isnan(compiled.cf_max_estimation_time[j])
+                    and (t_from < float(compiled.cf_max_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_max_estimation_time[j])))
+                ):
+                    pay_idx = int(compiled.cf_pay_indices[j])
+                    reduced = reduced_cache.get(pay_idx)
+                    if reduced is None:
+                        h_pay = h_grid[:, pay_idx]
+                        p0_pay = p0_grid[:, pay_idx]
+                        reduced = p0_pay.unsqueeze(1) * torch.exp(
+                            -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                        )
+                        reduced_cache[pay_idx] = reduced
+                    reduced = float(compiled.cf_amounts[j]) * reduced
                     underlying_npv = underlying_npv + reduced
                     cf_status[j] = "Done"
                 else:
-                    h_pay = h_grid[:, cf.pay_index]
-                    p0_pay = p0_grid[:, cf.pay_index]
-                    provisional_npv = provisional_npv + float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
+                    pay_idx = int(compiled.cf_pay_indices[j])
+                    reduced = reduced_cache.get(pay_idx)
+                    if reduced is None:
+                        h_pay = h_grid[:, pay_idx]
+                        p0_pay = p0_grid[:, pay_idx]
+                        reduced = p0_pay.unsqueeze(1) * torch.exp(
+                            -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                        )
+                        reduced_cache[pay_idx] = reduced
+                    provisional_npv = provisional_npv + float(compiled.cf_amounts[j]) * reduced
+            elif (
+                np.isnan(compiled.cf_max_estimation_time[j])
+                and not np.isnan(compiled.cf_exact_estimation_time[j])
+                and (t_from < float(compiled.cf_exact_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_exact_estimation_time[j])))
+                and cf_status[j] == "Open"
+            ):
+                pay_idx = int(compiled.cf_pay_indices[j])
+                reduced = reduced_cache.get(pay_idx)
+                if reduced is None:
+                    h_pay = h_grid[:, pay_idx]
+                    p0_pay = p0_grid[:, pay_idx]
+                    reduced = p0_pay.unsqueeze(1) * torch.exp(
                         -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
                     )
-            elif _callable_must_be_estimated(cf, t_from) and cf_status[j] == "Open":
-                h_pay = h_grid[:, cf.pay_index]
-                p0_pay = p0_grid[:, cf.pay_index]
-                cf_cache[j] = float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
-                    -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
-                )
+                    reduced_cache[pay_idx] = reduced
+                cf_cache[j] = float(compiled.cf_amounts[j]) * reduced
                 cf_status[j] = "Cached"
         if bool(compiled.call_active[i]) or bool(compiled.put_active[i]):
             continuation = option_values.clone()
