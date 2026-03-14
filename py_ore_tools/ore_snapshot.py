@@ -2234,6 +2234,16 @@ def _get_netting_set_from_portfolio(portfolio_root: ET.Element, trade_id: str) -
     return ""
 
 
+def _get_trade_type(portfolio_root: ET.Element, trade_id: str) -> str:
+    for trade in portfolio_root.findall("./Trade"):
+        if trade.attrib.get("id", "") == trade_id:
+            trade_type = (trade.findtext("./TradeType") or "").strip()
+            if trade_type:
+                return trade_type
+            break
+    raise ValueError(f"TradeType not found for trade '{trade_id}'")
+
+
 def _get_float_index(portfolio_root: ET.Element, trade_id: str) -> str:
     """Return the floating index name from the swap's FloatingLegData.
 

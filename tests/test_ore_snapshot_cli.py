@@ -27,6 +27,7 @@ REAL_CASE_XML = (
     / "Input"
     / "ore.xml"
 )
+BOND_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "ore.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -644,6 +645,33 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertTrue(result["pass_flags"]["xva_fba"])
         self.assertTrue(result["pass_flags"]["xva_fca"])
         self.assertTrue(result["pass_all"])
+
+    def test_bond_price_only_case_uses_python_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ore_snapshot_cli.main([str(BOND_CASE_XML), "--price", "--output-root", tmp])
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((Path(tmp) / BOND_CASE_XML.parents[1].name / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["trade_id"], "Bond_Fixed")
+        self.assertEqual(payload["pricing"]["trade_type"], "Bond")
+        self.assertEqual(payload["diagnostics"]["trade_type"], "Bond")
+        self.assertEqual(payload["diagnostics"]["bond_pricing_mode"], "python_risky_bond")
+        self.assertIn("py_t0_npv", payload["pricing"])
+        self.assertIn("ore_t0_npv", payload["pricing"])
+
+    def test_write_ore_reports_preserves_bond_trade_type(self):
+        case_summary = {
+            "trade_id": "Bond_Fixed",
+            "netting_set_id": "",
+            "counterparty": "CPTY_C",
+            "maturity_date": "2021-02-03",
+            "maturity_time": 5.0,
+            "pricing": {"trade_type": "Bond", "py_t0_npv": 12.0},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ore_snapshot_cli._write_ore_compatible_reports(Path(tmp), case_summary)
+            with open(Path(tmp) / "npv.csv", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(rows[0]["TradeType"], "Bond")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@
   <Markets>
     <Parameter name="lgmcalibration">collateral_inccy</Parameter>
     <Parameter name="fxcalibration">default</Parameter>
-    <Parameter name="pricing">defaut</Parameter>
+    <Parameter name="pricing">default</Parameter>
     <Parameter name="simulation">default</Parameter>
   </Markets>
   <Analytics>

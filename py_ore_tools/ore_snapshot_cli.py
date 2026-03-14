@@ -23,6 +23,7 @@ from py_ore_tools.benchmarks import (
     benchmark_lgm_torch,
     benchmark_lgm_torch_swap,
 )
+from py_ore_tools.bond_pricing import price_bond_trade
 from py_ore_tools.irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     calibrate_float_spreads_from_coupon,
@@ -366,9 +367,10 @@ def _build_minimal_pricing_payload(
 
     portfolio_root = ET.parse(portfolio_xml).getroot()
     trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
     counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
     netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
-    forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id)
+    forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
 
     tm_root = ET.parse(todaysmarket_xml).getroot()
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
@@ -441,6 +443,7 @@ def _build_minimal_pricing_payload(
         legs = apply_parallel_float_spread_shift_to_match_npv(legs, p0_disc, ore_t0_npv, t0=0.0)
     return {
         "trade_id": trade_id,
+        "trade_type": trade_type,
         "counterparty": counterparty,
         "netting_set_id": netting_set_id,
         "model": model,
@@ -468,6 +471,114 @@ def _resolve_case_output_dir(ore_xml: Path) -> Path:
     return (run_dir / setup_params.get("outputPath", "Output")).resolve()
 
 
+def _expected_output_root(ore_xml: Path) -> Path | None:
+    root = ore_xml.resolve().parents[1] / "ExpectedOutput"
+    return root if root.exists() else None
+
+
+def _expected_output_variant_dir(ore_xml: Path) -> Path | None:
+    root = _expected_output_root(ore_xml)
+    if root is None:
+        return None
+    case_dir = ore_xml.resolve().parents[1]
+    stem = ore_xml.stem
+    if case_dir.name == "Example_10":
+        mapping = {
+            "ore.xml": None,
+            "ore_iah_0.xml": "collateral_iah_0",
+            "ore_iah_1.xml": "collateral_iah_1",
+            "ore_mpor.xml": "collateral_mpor",
+            "ore_mta.xml": "collateral_mta",
+            "ore_threshold.xml": "collateral_threshold",
+            "ore_threshold_break.xml": "collateral_threshold_break",
+            "ore_threshold_dim.xml": "collateral_threshold_dim",
+        }
+        target = mapping.get(ore_xml.name)
+        return None if target is None else root / target
+    if case_dir.name == "Example_31":
+        mapping = {
+            "ore.xml": None,
+            "ore_mpor.xml": "collateral_mpor",
+            "ore_dim.xml": "collateral_dim",
+            "ore_ddv.xml": "collateral_ddv",
+        }
+        target = mapping.get(ore_xml.name)
+        return None if target is None else root / target
+    if case_dir.name == "Example_13":
+        if stem.startswith("ore_A"):
+            return root / "case_A_eur_swap"
+        if stem.startswith("ore_B"):
+            return root / "case_B_eur_swaption"
+        if stem.startswith("ore_C"):
+            return root / "case_C_usd_swap"
+        if stem.startswith("ore_D"):
+            return root / "case_D_eurusd_swap"
+        if stem.startswith("ore_E"):
+            return root / "case_E_fxopt"
+    return None
+
+
+def _reference_output_dirs(ore_xml: Path) -> list[Path]:
+    dirs: list[Path] = []
+    actual = _resolve_case_output_dir(ore_xml)
+    if actual.exists():
+        dirs.append(actual)
+    variant = _expected_output_variant_dir(ore_xml)
+    if variant is not None and variant.exists() and variant not in dirs:
+        dirs.append(variant)
+    root = _expected_output_root(ore_xml)
+    if root is not None and root.exists() and root not in dirs:
+        dirs.append(root)
+    return dirs
+
+
+def _reference_filename_candidates(ore_xml: Path, filename: str) -> list[str]:
+    candidates = [filename]
+    stem = ore_xml.stem
+    variant = stem[4:] if stem.startswith("ore_") else stem
+    if not variant:
+        return candidates
+    name = Path(filename).stem
+    suffix = Path(filename).suffix
+    variants = [variant]
+    if "_" in variant:
+        head = variant.split("_", 1)[0]
+        if head and head not in variants:
+            variants.append(head)
+    for item in variants:
+        candidate = f"{name}_{item}{suffix}"
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _find_reference_output_file(ore_xml: Path, filename: str) -> Path | None:
+    for directory in _reference_output_dirs(ore_xml):
+        for candidate in _reference_filename_candidates(ore_xml, filename):
+            path = directory / candidate
+            if path.exists() and path.is_file():
+                return path
+    return None
+
+
+def _find_reference_npv_file(ore_xml: Path, trade_id: str) -> Path | None:
+    primary = _find_reference_output_file(ore_xml, "npv.csv")
+    candidates: list[Path] = []
+    if primary is not None:
+        candidates.append(primary)
+    for directory in _reference_output_dirs(ore_xml):
+        for path in sorted(directory.glob("*npv*.csv")):
+            if path not in candidates:
+                candidates.append(path)
+    for path in candidates:
+        try:
+            ore_snapshot_mod._load_ore_npv_details(path, trade_id=trade_id)
+            return path
+        except Exception:
+            continue
+    return primary
+
+
 def _resolve_case_portfolio_path(ore_xml: Path) -> Path | None:
     ore_root = ET.parse(ore_xml).getroot()
     setup_params = {
@@ -488,6 +599,88 @@ def _compute_price_only_case(
     *,
     anchor_t0_npv: bool,
 ) -> dict[str, Any]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        raise FileNotFoundError(f"portfolio xml not found: {portfolio_xml}")
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    if trade_type in {"Bond", "ForwardBond"}:
+        ore_root = ET.parse(ore_xml).getroot()
+        setup_params = {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in ore_root.findall("./Setup/Parameter")
+        }
+        base = ore_xml.resolve().parent
+        run_dir = base.parent
+        input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+        output_dir = _resolve_case_output_dir(ore_xml)
+        market_data_file = (input_dir / setup_params.get("marketDataFile", "../../Input/market.txt")).resolve()
+        todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+        reference_data_path = (input_dir / (setup_params.get("referenceDataFile", "") or "")).resolve() if (setup_params.get("referenceDataFile", "") or "").strip() else None
+        pricingengine_path = (input_dir / (setup_params.get("pricingEnginesFile", "") or "")).resolve() if (setup_params.get("pricingEnginesFile", "") or "").strip() else None
+        npv_csv = output_dir / "npv.csv"
+        if not npv_csv.exists():
+            ref_npv = _find_reference_output_file(ore_xml, "npv.csv")
+            if ref_npv is None:
+                raise FileNotFoundError(f"ORE output file not found (run ORE first): {npv_csv}")
+            npv_csv = ref_npv
+        flows_csv = output_dir / "flows.csv"
+        if not flows_csv.exists():
+            ref_flows = _find_reference_output_file(ore_xml, "flows.csv")
+            flows_csv = ref_flows if ref_flows is not None else flows_csv
+        npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
+        model_day_counter = "A365F"
+        pricing_result = price_bond_trade(
+            ore_xml=ore_xml,
+            portfolio_xml=portfolio_xml,
+            trade_id=trade_id,
+            asof_date=setup_params.get("asofDate", ""),
+            model_day_counter=model_day_counter,
+            market_data_file=market_data_file,
+            todaysmarket_xml=todaysmarket_xml,
+            reference_data_path=reference_data_path,
+            pricingengine_path=pricingengine_path,
+            flows_csv=flows_csv if flows_csv.exists() else None,
+        )
+        return {
+            "trade_id": trade_id,
+            "trade_type": trade_type,
+            "counterparty": ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id),
+            "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id),
+            "maturity_date": str(npv_details["maturity_date"]),
+            "maturity_time": float(npv_details["maturity_time"]),
+            "pricing": {
+                "ore_t0_npv": float(npv_details["npv"]),
+                "py_t0_npv": float(pricing_result["py_npv"]),
+                "t0_npv_abs_diff": abs(float(pricing_result["py_npv"]) - float(npv_details["npv"])),
+                "trade_type": trade_type,
+                "bond_pricing_mode": "python_risky_bond",
+                "discount_column": str(pricing_result["reference_curve_id"]),
+                "forward_column": "",
+                "credit_curve_id": str(pricing_result["credit_curve_id"]),
+                "security_id": str(pricing_result["security_id"]),
+                "security_spread": float(pricing_result["security_spread"]),
+                "settlement_dirty": bool(pricing_result["settlement_dirty"]),
+                "treat_security_spread_as_credit_spread": bool(pricing_result["treat_security_spread_as_credit_spread"]),
+            },
+            "diagnostics": {
+                "trade_type": trade_type,
+                "bond_pricing_mode": "python_risky_bond",
+                "curve_ids": {
+                    "reference": str(pricing_result["reference_curve_id"]),
+                    "income": str(pricing_result["income_curve_id"]),
+                },
+                "credit_curve_id": str(pricing_result["credit_curve_id"]),
+                "security_id": str(pricing_result["security_id"]),
+                "security_spread_mode": (
+                    "credit_curve"
+                    if pricing_result["treat_security_spread_as_credit_spread"]
+                    else ("discount_and_income" if pricing_result["spread_on_income_curve"] else "discount_only")
+                ),
+                "settlement_dirty": bool(pricing_result["settlement_dirty"]),
+            },
+        }
     payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
     py_t0_npv = float(
         swap_npv_from_ore_legs_dual_curve(
@@ -502,6 +695,7 @@ def _compute_price_only_case(
     )
     return {
         "trade_id": payload["trade_id"],
+        "trade_type": payload.get("trade_type", "Swap"),
         "counterparty": payload["counterparty"],
         "netting_set_id": payload["netting_set_id"],
         "maturity_date": payload["maturity_date"],
@@ -510,6 +704,7 @@ def _compute_price_only_case(
             "ore_t0_npv": float(payload["ore_t0_npv"]),
             "py_t0_npv": py_t0_npv,
             "t0_npv_abs_diff": abs(py_t0_npv - float(payload["ore_t0_npv"])),
+            "trade_type": payload.get("trade_type", "Swap"),
             "leg_source": payload["leg_source"],
             "discount_column": payload["discount_column"],
             "forward_column": payload["forward_column"],
@@ -844,6 +1039,15 @@ def _find_first_trade_context(portfolio_xml: Path) -> tuple[str, str, str]:
     return trade_id, counterparty, netting_set_id
 
 
+def _first_trade_type(ore_xml: Path) -> str:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return ""
+    root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(root)
+    return ore_snapshot_mod._get_trade_type(root, trade_id)
+
+
 def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
     result = dict(case_summary)
     pricing = case_summary.get("pricing")
@@ -889,6 +1093,9 @@ def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any
     validation = validate_ore_input_snapshot(ore_xml)
     output_dir = _resolve_case_output_dir(ore_xml)
     trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
+    reference_dirs = _reference_output_dirs(ore_xml)
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id)
+    xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
@@ -898,13 +1105,19 @@ def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any
         "pricing": None,
         "xva": None,
         "parity": None,
-        "diagnostics": {"engine": "ore_reference"},
+        "diagnostics": {
+            "engine": "ore_reference",
+            "reference_output_dirs": [str(p) for p in reference_dirs],
+            "using_expected_output": output_dir not in reference_dirs or not output_dir.exists(),
+        },
         "input_validation": validation,
         "pass_flags": {},
         "pass_all": True,
     }
     if modes.price:
-        npv_details = ore_snapshot_mod._load_ore_npv_details(output_dir / "npv.csv", trade_id=trade_id)
+        if npv_csv is None:
+            raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_dir / 'npv.csv'}")
+        npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
         case_summary["maturity_date"] = str(npv_details["maturity_date"])
         case_summary["maturity_time"] = float(npv_details["maturity_time"])
         case_summary["pricing"] = {"ore_t0_npv": float(npv_details["npv"])}
@@ -912,7 +1125,9 @@ def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any
         case_summary["maturity_date"] = ""
         case_summary["maturity_time"] = 0.0
     if modes.xva:
-        xva_row = ore_snapshot_mod._load_ore_xva_aggregate(output_dir / "xva.csv", cpty_or_netting=netting_set_id)
+        if xva_csv is None:
+            raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_dir / 'xva.csv'}")
+        xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id)
         case_summary["xva"] = {
             "ore_cva": float(xva_row["cva"]),
             "ore_dva": float(xva_row["dva"]),
@@ -921,8 +1136,8 @@ def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any
             "ore_basel_epe": float(xva_row["basel_epe"]),
             "ore_basel_eepe": float(xva_row["basel_eepe"]),
         }
-        exposure_path = output_dir / f"exposure_trade_{trade_id}.csv"
-        if exposure_path.exists():
+        exposure_path = _find_reference_output_file(ore_xml, f"exposure_trade_{trade_id}.csv")
+        if exposure_path is not None:
             exposure = ore_snapshot_mod.load_ore_exposure_profile(str(exposure_path))
             case_summary["exposure_dates"] = [str(x) for x in exposure["date"]]
             case_summary["exposure_times"] = [float(x) for x in exposure["time"]]
@@ -1128,7 +1343,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
         ]
         npv_row = [
             trade_id,
-            "Swap",
+            str(pricing.get("trade_type", "Swap")),
             maturity_date,
             _fmt_float(maturity_time),
             _fmt_float(npv_value),
@@ -1255,16 +1470,16 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
 
 
 def _copy_native_ore_reports(ore_xml: Path, case_out_dir: Path) -> None:
-    source_dir = _resolve_case_output_dir(ore_xml)
-    if not source_dir.exists():
-        return
-    for src in source_dir.iterdir():
-        if not src.is_file():
+    for source_dir in _reference_output_dirs(ore_xml):
+        if not source_dir.exists():
             continue
-        dst = case_out_dir / src.name
-        if dst.exists():
-            continue
-        shutil.copy2(src, dst)
+        for src in source_dir.iterdir():
+            if not src.is_file():
+                continue
+            dst = case_out_dir / src.name
+            if dst.exists():
+                continue
+            shutil.copy2(src, dst)
 
 
 def _render_case_markdown(case_summary: dict[str, Any]) -> str:
@@ -1328,42 +1543,59 @@ def _run_case(
     case_summary["input_validation"] = validation
 
     if modes.xva:
-        base_summary = _compute_snapshot_case(
-            ore_xml,
-            paths=args.paths,
-            seed=args.seed,
-            rng_mode=args.rng,
-            anchor_t0_npv=args.anchor_t0_npv,
-            own_hazard=args.own_hazard,
-            own_recovery=args.own_recovery,
-            xva_mode=args.xva_mode,
-        )
-        case_summary.update(
-            {
-                "trade_id": base_summary.trade_id,
-                "counterparty": base_summary.counterparty,
-                "netting_set_id": base_summary.netting_set_id,
-                "maturity_date": base_summary.maturity_date,
-                "maturity_time": base_summary.maturity_time,
-                "pricing": base_summary.pricing if modes.price else None,
-                "xva": base_summary.xva if modes.xva else None,
-                "parity": base_summary.parity,
-                "diagnostics": base_summary.diagnostics,
-                "exposure_dates": base_summary.exposure_dates,
-                "exposure_times": base_summary.exposure_times,
-                "py_epe": base_summary.py_epe,
-                "py_ene": base_summary.py_ene,
-                "py_pfe": base_summary.py_pfe,
-            }
-        )
-    elif modes.price:
-        if _has_active_simulation_analytic(ore_xml):
-            price_summary = _compute_price_only_case(
+        try:
+            base_summary = _compute_snapshot_case(
                 ore_xml,
+                paths=args.paths,
+                seed=args.seed,
+                rng_mode=args.rng,
                 anchor_t0_npv=args.anchor_t0_npv,
+                own_hazard=args.own_hazard,
+                own_recovery=args.own_recovery,
+                xva_mode=args.xva_mode,
             )
-        else:
+        except FileNotFoundError:
+            reference_summary = _ore_reference_summary(ore_xml, modes)
+            diagnostics = dict(reference_summary.get("diagnostics") or {})
+            diagnostics["engine"] = "ore_reference_expected_output"
+            diagnostics["fallback_reason"] = "missing_native_output"
+            reference_summary["diagnostics"] = diagnostics
+            case_summary.update(reference_summary)
+            base_summary = None
+        if base_summary is not None:
+            case_summary.update(
+                {
+                    "trade_id": base_summary.trade_id,
+                    "counterparty": base_summary.counterparty,
+                    "netting_set_id": base_summary.netting_set_id,
+                    "maturity_date": base_summary.maturity_date,
+                    "maturity_time": base_summary.maturity_time,
+                    "pricing": base_summary.pricing if modes.price else None,
+                    "xva": base_summary.xva if modes.xva else None,
+                    "parity": base_summary.parity,
+                    "diagnostics": base_summary.diagnostics,
+                    "exposure_dates": base_summary.exposure_dates,
+                    "exposure_times": base_summary.exposure_times,
+                    "py_epe": base_summary.py_epe,
+                    "py_ene": base_summary.py_ene,
+                    "py_pfe": base_summary.py_pfe,
+                }
+            )
+    elif modes.price:
+        try:
+            if _has_active_simulation_analytic(ore_xml) or _first_trade_type(ore_xml) in {"Bond", "ForwardBond"}:
+                price_summary = _compute_price_only_case(
+                    ore_xml,
+                    anchor_t0_npv=args.anchor_t0_npv,
+                )
+            else:
+                price_summary = _price_reference_summary(ore_xml)
+        except FileNotFoundError:
             price_summary = _price_reference_summary(ore_xml)
+            diagnostics = dict(price_summary.get("diagnostics") or {})
+            diagnostics["engine"] = "ore_reference_expected_output"
+            diagnostics["fallback_reason"] = "missing_native_output"
+            price_summary["diagnostics"] = diagnostics
         case_summary.update(
             {
                 "trade_id": price_summary["trade_id"],
