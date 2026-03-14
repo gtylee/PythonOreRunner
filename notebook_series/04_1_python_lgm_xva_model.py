@@ -232,11 +232,73 @@ plt.close(fig)
 
 # %% cell 12
 """
+## Large multi-ccy portfolio example
+
+The small IRS walkthrough above is useful for understanding the mechanics, but it is not the workload where torch
+earns its keep. The bigger batched multi-currency FX forward portfolio is the better scaling example.
+"""
+
+# %% cell 13
+portfolio_commands = pd.DataFrame(
+    [
+        {
+            "backend": "numpy",
+            "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend numpy",
+            "representative_runtime_sec": 1.55,
+            "paths": 10000,
+            "trades": 256,
+            "parity_max_abs": 1.8e-7,
+        },
+        {
+            "backend": "torch-cpu",
+            "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend torch-cpu",
+            "representative_runtime_sec": 0.17,
+            "paths": 10000,
+            "trades": 256,
+            "parity_max_abs": 1.8e-7,
+        },
+    ]
+)
+display(portfolio_commands)
+
+fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
+nh.plot_bar_frame(
+    portfolio_commands,
+    "backend",
+    "representative_runtime_sec",
+    title="256-trade portfolio runtime",
+    color=nh.PALETTE["gold"],
+    ax=axes[0],
+)
+nh.plot_bar_frame(
+    portfolio_commands.assign(speedup_vs_numpy=portfolio_commands["representative_runtime_sec"].iloc[0] / portfolio_commands["representative_runtime_sec"]),
+    "backend",
+    "speedup_vs_numpy",
+    title="Speedup vs numpy",
+    color=nh.PALETTE["teal"],
+    ax=axes[1],
+)
+axes[0].set_ylabel("Seconds")
+axes[1].set_ylabel("Multiple")
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+# %% cell 14
+"""
+These commands come from the repo's unified-backend notes for the torch-capable CLI surface. The important point is
+not the exact hardware number, but the workload shape: large batched FX portfolios are where torch materially changes
+the runtime, while the earlier single-trade notebook examples are mostly about transparency and parity.
+"""
+
+# %% cell 15
+"""
 ## Key takeaways
 
 - The Python LGM path is transparent enough for notebook-level debugging and explanation.
 - The exposure profile is the real driver of the XVA stack; the final metrics are only a summary layer.
 - A small multi-scenario comparison helps show how the same runner behaves under different market regimes.
 - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
+- The large 256-trade multi-currency portfolio is the right place to compare numpy and torch backends.
 """
 

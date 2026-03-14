@@ -1,0 +1,2 @@
+#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
+BERMUDAN_SWAPTION,Swaption,2045-09-22,20.613699,-1963949.626380,EUR,-2026252.780598,USD,10000000.00,EUR,10317233.97,NS,CPTY

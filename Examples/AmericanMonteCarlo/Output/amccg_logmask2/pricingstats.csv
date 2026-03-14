@@ -1,0 +1,8 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+BermSwp,Swaption,1,0,0
+CC_SWAP_EUR_USD,Swap,1,0,0
+FXSwap_Far,FxForward,1,0,0
+FXSwap_Near,FxForward,1,0,0
+FX_CALL_OPTION,FxOption,1,0,0
+Swap_EUR,Swap,1,0,0
+Swap_USD,Swap,1,0,0

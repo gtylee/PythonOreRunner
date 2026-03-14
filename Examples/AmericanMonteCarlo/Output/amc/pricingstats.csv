@@ -1,0 +1,10 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+AverageOIS_USD,Swap,1,0,0
+BermSwp,Swaption,1,0,0
+CC_SWAP_EUR_USD,Swap,1,0,0
+Composite,CompositeTrade,1,0,0
+FXSwap,FxSwap,16802,60000,3
+FX_CALL_OPTION,FxOption,1,0,0
+OIS_EUR,Swap,1,0,0
+Swap_EUR,Swap,1,0,0
+Swap_USD,Swap,1,0,0

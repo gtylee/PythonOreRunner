@@ -1,0 +1,2 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+BERMUDAN_SWAPTION,Swaption,1,0,0

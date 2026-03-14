@@ -1,0 +1,5 @@
+#RiskFactorType,RiskFactorName
+DiscountCurve,EUR|USD
+IndexCurve,EUR-EURIBOR-3M
+SwaptionVolatility,EUR-EURIBOR-3M
+FXSpot,EURUSD

@@ -467,6 +467,16 @@ def _resolve_case_output_dir(ore_xml: Path) -> Path:
     return (run_dir / setup_params.get("outputPath", "Output")).resolve()
 
 
+def _resolve_case_portfolio_path(ore_xml: Path) -> Path:
+    ore_root = ET.parse(ore_xml).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    base = ore_xml.resolve().parent
+    return (base / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+
+
 def _compute_price_only_case(
     ore_xml: Path,
     *,
@@ -757,12 +767,24 @@ def _parse_analytics(ore_xml: Path) -> dict[str, bool]:
     return active
 
 
+def _has_active_simulation_analytic(ore_xml: Path) -> bool:
+    root = ET.parse(ore_xml).getroot()
+    analytic = root.find("./Analytics/Analytic[@type='simulation']")
+    if analytic is None:
+        return False
+    params = {
+        (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+        for node in analytic.findall("./Parameter")
+    }
+    return params.get("active", "Y").strip().upper() != "N"
+
+
 def _infer_modes(args: argparse.Namespace, ore_xml: Path) -> ModeSelection:
     if args.price or args.xva or args.sensi:
         return ModeSelection(price=args.price, xva=args.xva, sensi=args.sensi)
     active = _parse_analytics(ore_xml)
     return ModeSelection(
-        price=active["price"] or True,
+        price=active["price"],
         xva=active["xva"],
         sensi=active["sensi"],
     )
@@ -841,10 +863,19 @@ def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _price_reference_summary(ore_xml: Path) -> dict[str, Any]:
+    reference = _ore_reference_summary(ore_xml, ModeSelection(price=True, xva=False, sensi=False))
+    diagnostics = dict(reference.get("diagnostics") or {})
+    diagnostics["engine"] = "ore_reference_price_only"
+    diagnostics["pricing_fallback_reason"] = "missing_simulation_analytic"
+    reference["diagnostics"] = diagnostics
+    return reference
+
+
 def _ore_reference_summary(ore_xml: Path, modes: ModeSelection) -> dict[str, Any]:
     validation = validate_ore_input_snapshot(ore_xml)
     output_dir = _resolve_case_output_dir(ore_xml)
-    trade_id, counterparty, netting_set_id = _find_first_trade_context(ore_xml.resolve().parent / "portfolio.xml")
+    trade_id, counterparty, netting_set_id = _find_first_trade_context(_resolve_case_portfolio_path(ore_xml))
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
@@ -1076,6 +1107,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
     if pricing:
         maturity_date = str(case_summary.get("maturity_date") or "")
         maturity_time = float(case_summary.get("maturity_time") or 0.0)
+        npv_value = float(pricing.get("py_t0_npv", pricing.get("ore_t0_npv", 0.0)))
         npv_headers = [
             "#TradeId", "TradeType", "Maturity", "MaturityTime", "NPV", "NpvCurrency",
             "NPV(Base)", "BaseCurrency", "Notional", "NotionalCurrency", "Notional(Base)",
@@ -1086,9 +1118,9 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             "Swap",
             maturity_date,
             _fmt_float(maturity_time),
-            _fmt_float(pricing.get("py_t0_npv", 0.0)),
+            _fmt_float(npv_value),
             "EUR",
-            _fmt_float(pricing.get("py_t0_npv", 0.0)),
+            _fmt_float(npv_value),
             "EUR",
             "10000000.00",
             "EUR",
@@ -1282,7 +1314,7 @@ def _run_case(
     validation = validate_ore_input_snapshot(ore_xml)
     case_summary["input_validation"] = validation
 
-    if modes.xva or modes.sensi:
+    if modes.xva:
         base_summary = _compute_snapshot_case(
             ore_xml,
             paths=args.paths,
@@ -1311,11 +1343,14 @@ def _run_case(
                 "py_pfe": base_summary.py_pfe,
             }
         )
-    else:
-        price_summary = _compute_price_only_case(
-            ore_xml,
-            anchor_t0_npv=args.anchor_t0_npv,
-        )
+    elif modes.price:
+        if _has_active_simulation_analytic(ore_xml):
+            price_summary = _compute_price_only_case(
+                ore_xml,
+                anchor_t0_npv=args.anchor_t0_npv,
+            )
+        else:
+            price_summary = _price_reference_summary(ore_xml)
         case_summary.update(
             {
                 "trade_id": price_summary["trade_id"],
@@ -1326,7 +1361,22 @@ def _run_case(
                 "pricing": price_summary["pricing"],
                 "xva": None,
                 "parity": None,
-                "diagnostics": {"mode": "price_only"},
+                "diagnostics": price_summary.get("diagnostics", {"mode": "price_only"}),
+            }
+        )
+    else:
+        trade_id, counterparty, netting_set_id = _find_first_trade_context(_resolve_case_portfolio_path(ore_xml))
+        case_summary.update(
+            {
+                "trade_id": trade_id,
+                "counterparty": counterparty,
+                "netting_set_id": netting_set_id,
+                "maturity_date": "",
+                "maturity_time": 0.0,
+                "pricing": None,
+                "xva": None,
+                "parity": None,
+                "diagnostics": {"mode": "non_pricing"},
             }
         )
     if modes.sensi:
@@ -1341,27 +1391,29 @@ def _run_case(
         str(metric).upper()
         for metric in parity_summary.get("requested_xva_metrics", [])
     }
+    pricing_diff = (case_summary.get("pricing") or {}).get("t0_npv_abs_diff")
+    xva_summary = case_summary.get("xva") or {}
     case_summary["pass_flags"] = {
-        "pricing": True if not modes.price else case_summary["pricing"]["t0_npv_abs_diff"] <= args.max_npv_abs_diff,
+        "pricing": True if (not modes.price or pricing_diff is None) else pricing_diff <= args.max_npv_abs_diff,
         "xva_cva": (
             True
             if (not modes.xva or "CVA" not in requested_xva_metrics)
-            else case_summary["xva"]["cva_rel_diff"] <= args.max_cva_rel
+            else xva_summary["cva_rel_diff"] <= args.max_cva_rel
         ),
         "xva_dva": (
             True
             if (not modes.xva or "DVA" not in requested_xva_metrics)
-            else case_summary["xva"]["dva_rel_diff"] <= args.max_dva_rel
+            else xva_summary["dva_rel_diff"] <= args.max_dva_rel
         ),
         "xva_fba": (
             True
             if (not modes.xva or "FVA" not in requested_xva_metrics)
-            else case_summary["xva"]["fba_rel_diff"] <= args.max_fba_rel
+            else xva_summary["fba_rel_diff"] <= args.max_fba_rel
         ),
         "xva_fca": (
             True
             if (not modes.xva or "FVA" not in requested_xva_metrics)
-            else case_summary["xva"]["fca_rel_diff"] <= args.max_fca_rel
+            else xva_summary["fca_rel_diff"] <= args.max_fca_rel
         ),
     }
     case_summary["pass_all"] = bool(all(case_summary["pass_flags"].values()))
@@ -1389,12 +1441,15 @@ def _render_terminal_case_summary(case_summary: dict[str, Any]) -> str:
     ]
     pricing = case_summary.get("pricing")
     if pricing:
-        lines.append(
-            "pricing "
-            f"py_t0_npv={pricing['py_t0_npv']:.6f} "
-            f"ore_t0_npv={pricing['ore_t0_npv']:.6f} "
-            f"abs_diff={pricing['t0_npv_abs_diff']:.6f}"
-        )
+        if "py_t0_npv" in pricing and "t0_npv_abs_diff" in pricing:
+            lines.append(
+                "pricing "
+                f"py_t0_npv={pricing['py_t0_npv']:.6f} "
+                f"ore_t0_npv={pricing['ore_t0_npv']:.6f} "
+                f"abs_diff={pricing['t0_npv_abs_diff']:.6f}"
+            )
+        else:
+            lines.append(f"pricing ore_t0_npv={pricing['ore_t0_npv']:.6f} reference_only=true")
     xva = case_summary.get("xva")
     if xva:
         lines.append(
@@ -1430,7 +1485,9 @@ def _run_pack(args: argparse.Namespace, ore_xmls: list[Path], artifact_root: Pat
                     "trade_id": case_summary["trade_id"],
                     "modes": ",".join(case_summary["modes"]),
                     "pass_all": case_summary["pass_all"],
-                    "pricing_abs_diff": None if not case_summary.get("pricing") else case_summary["pricing"]["t0_npv_abs_diff"],
+                    "pricing_abs_diff": None
+                    if not case_summary.get("pricing")
+                    else case_summary["pricing"].get("t0_npv_abs_diff"),
                     "cva_rel_diff": None if not case_summary.get("xva") else case_summary["xva"]["cva_rel_diff"],
                     "dva_rel_diff": None if not case_summary.get("xva") else case_summary["xva"]["dva_rel_diff"],
                     "fba_rel_diff": None if not case_summary.get("xva") else case_summary["xva"]["fba_rel_diff"],

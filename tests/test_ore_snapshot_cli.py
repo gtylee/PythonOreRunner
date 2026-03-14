@@ -267,6 +267,29 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertTrue(modes.price)
         self.assertTrue(modes.xva)
 
+    def test_infer_modes_does_not_force_price_when_npv_analytic_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ore_xml = Path(tmp) / "ore.xml"
+            ore_xml.write_text(
+                """<ORE>
+  <Setup><Parameter name="asofDate">2016-02-05</Parameter></Setup>
+  <Analytics>
+    <Analytic type="sensitivity">
+      <Parameter name="active">Y</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            modes = ore_snapshot_cli._infer_modes(
+                ore_snapshot_cli.build_parser().parse_args([str(ore_xml)]),
+                ore_xml,
+            )
+        self.assertFalse(modes.price)
+        self.assertFalse(modes.xva)
+        self.assertTrue(modes.sensi)
+
     def test_case_run_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
@@ -408,6 +431,42 @@ class TestOreSnapshotCli(unittest.TestCase):
             )
             self.assertIn("pricing", payload)
             self.assertIsNone(payload["xva"])
+
+    def test_price_only_run_falls_back_to_reference_without_simulation_analytic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "price_only_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("curves.csv", "npv.csv", "flows.csv"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            ore_xml_path = input_dir / "ore.xml"
+            text = ore_xml_path.read_text(encoding="utf-8")
+            start = text.index('<Analytic type="simulation">')
+            end = text.index("</Analytic>", start) + len("</Analytic>")
+            ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
+            rc = ore_snapshot_cli.main(
+                [
+                    str(ore_xml_path),
+                    "--price",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads(
+                (tmp_root / "artifacts" / "price_only_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["engine"], "ore_reference_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_fallback_reason"], "missing_simulation_analytic")
+            self.assertNotIn("py_t0_npv", payload["pricing"])
+            self.assertIn("ore_t0_npv", payload["pricing"])
+            self.assertTrue(payload["pass_all"])
 
     def test_sensi_flag_uses_comparator(self):
         fake_result = {

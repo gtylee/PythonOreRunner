@@ -1,0 +1,6 @@
+#MarketObjectType,MarketObjectName
+DiscountCurve,EUR|USD
+IndexCurve,EUR-EONIA|EUR-ESTER|EUR-EURIBOR-3M|EUR-EURIBOR-6M|USD-SOFR
+SwapIndexCurve,EUR-CMS-1Y|EUR-CMS-30Y
+FXSpot,EURUSD|USDEUR
+SwaptionVol,EUR-EURIBOR-3M
