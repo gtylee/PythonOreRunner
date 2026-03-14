@@ -11,7 +11,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-from .lgm import LGM1F, _validate_time_grid
+from .lgm import LGM1F
 
 try:
     import torch
@@ -30,6 +30,41 @@ def _require_torch():
     if torch is None:
         raise ImportError("torch-backed LGM simulation requires the torch package")
     return torch
+
+
+def _validate_time_grid_torch(times: Iterable[float], *, torch_mod, dtype, device):
+    times_t = torch_mod.as_tensor(times, dtype=dtype, device=device)
+    if times_t.ndim != 1:
+        raise ValueError("times must be one-dimensional")
+    if times_t.numel() == 0:
+        raise ValueError("times must be non-empty")
+    if torch_mod.any(~torch_mod.isfinite(times_t)).item():
+        raise ValueError("times contains non-finite values")
+    if torch_mod.any(times_t < 0.0).item():
+        raise ValueError("times must be non-negative")
+    if times_t.numel() > 1 and torch_mod.any(torch_mod.diff(times_t) <= 0.0).item():
+        raise ValueError("times must be strictly increasing")
+    return times_t
+
+
+def _zeta_grid_torch(model: LGM1F, times_t, *, torch_mod):
+    alpha_times_t = torch_mod.as_tensor(model.alpha_times, dtype=times_t.dtype, device=times_t.device)
+    alpha_values_t = torch_mod.as_tensor(model.alpha_values, dtype=times_t.dtype, device=times_t.device)
+    alpha_prefix_t = torch_mod.as_tensor(model._alpha_prefix_int, dtype=times_t.dtype, device=times_t.device)
+
+    flat = times_t.reshape(-1)
+    idx = torch_mod.searchsorted(alpha_times_t, flat, right=True)
+    out = torch_mod.zeros_like(flat)
+    mask = idx > 0
+    if mask.any().item():
+        out[mask] = alpha_prefix_t[idx[mask] - 1]
+    t0 = torch_mod.zeros_like(flat)
+    if mask.any().item():
+        t0[mask] = alpha_times_t[idx[mask] - 1]
+    a = alpha_values_t[idx]
+    out = out + a.square() * (flat - t0)
+    out = out / (model.scaling * model.scaling)
+    return out.reshape_as(times_t)
 
 
 def simulate_lgm_measure_torch(
@@ -53,7 +88,6 @@ def simulate_lgm_measure_torch(
     """
 
     torch_mod = _require_torch()
-    times_arr = _validate_time_grid(times)
     if n_paths <= 0:
         raise ValueError("n_paths must be positive")
     if draw_order not in ("time_major", "ore_path_major"):
@@ -68,22 +102,22 @@ def simulate_lgm_measure_torch(
         dtype = torch_mod.float32 if device_obj.type == "mps" else torch_mod.float64
 
     with torch_mod.inference_mode():
-        zeta_grid = np.asarray(model.zeta(times_arr), dtype=float)
-        var_increments = np.diff(zeta_grid)
-        if np.any(var_increments < -1.0e-14):
+        times_t = _validate_time_grid_torch(times, torch_mod=torch_mod, dtype=dtype, device=device_obj)
+        zeta_grid_t = _zeta_grid_torch(model, times_t, torch_mod=torch_mod)
+        var_increments_t = torch_mod.diff(zeta_grid_t)
+        if torch_mod.any(var_increments_t < -1.0e-14).item():
             raise ValueError("encountered negative variance increment")
-        step_scales = np.sqrt(np.maximum(var_increments, 0.0))
-        step_scales_t = torch_mod.as_tensor(step_scales, dtype=dtype, device=device_obj)
+        step_scales_t = torch_mod.sqrt(torch_mod.clamp_min(var_increments_t, 0.0))
 
-        x = torch_mod.empty((times_arr.size, n_paths), dtype=dtype, device=device_obj)
+        x = torch_mod.empty((times_t.numel(), n_paths), dtype=dtype, device=device_obj)
         x[0].fill_(float(x0))
 
         if draw_order == "time_major":
             if normal_draws is None:
-                draws = rng.standard_normal((step_scales.size, n_paths))
+                draws = rng.standard_normal((step_scales_t.numel(), n_paths))
             else:
                 draws = np.asarray(normal_draws, dtype=float)
-                if draws.shape != (step_scales.size, n_paths):
+                if draws.shape != (step_scales_t.numel(), n_paths):
                     raise ValueError("normal_draws must have shape (n_steps, n_paths) for time_major")
             draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
             increments = step_scales_t[:, None] * draws_t
@@ -93,10 +127,10 @@ def simulate_lgm_measure_torch(
         if normal_draws is None:
             if not hasattr(rng, "next_sequence"):
                 raise TypeError("draw_order='ore_path_major' requires an rng with a next_sequence(size) method")
-            draws = np.vstack([np.asarray(rng.next_sequence(step_scales.size), dtype=float) for _ in range(n_paths)])
+            draws = np.vstack([np.asarray(rng.next_sequence(step_scales_t.numel()), dtype=float) for _ in range(n_paths)])
         else:
             draws = np.asarray(normal_draws, dtype=float)
-            if draws.shape != (n_paths, step_scales.size):
+            if draws.shape != (n_paths, step_scales_t.numel()):
                 raise ValueError("normal_draws must have shape (n_paths, n_steps) for ore_path_major")
         draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
         increments = draws_t * step_scales_t[None, :]

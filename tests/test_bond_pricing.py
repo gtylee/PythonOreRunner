@@ -49,6 +49,7 @@ from py_ore_tools.bond_pricing import (
     price_bond_scenarios_torch,
     price_callable_bond_scenarios_numpy,
     price_callable_bond_scenarios_torch,
+    price_callable_bond_scenarios_torch_grouped,
     price_bond_single_numpy,
     price_bond_trade,
     torch,
@@ -745,6 +746,59 @@ class TestBondPricing(unittest.TestCase):
         npv_numpy = price_callable_bond_scenarios_numpy(compiled, pack, chunk_size=2)
         npv_torch = price_callable_bond_scenarios_torch(compiled, pack, chunk_size=2, device="cpu").detach().cpu().numpy()
         np.testing.assert_allclose(npv_torch, npv_numpy, rtol=0.0, atol=2.0e-8)
+
+    @unittest.skipIf(torch is None, "torch not available")
+    def test_callable_batch_scenario_torch_grouped_matches_reference_torch(self):
+        spec, engine = load_callable_bond_trade_spec(
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+        )
+        compiled = compile_callable_bond_trade(
+            spec,
+            engine,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        model = _build_lgm_model_for_callable(
+            ore_xml=CALLABLE_ORE_XML,
+            pricingengine_path=CALLABLE_PE,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            currency=spec.currency,
+            maturity_date=max(cf.pay_date for cf in spec.bond.cashflows),
+            asof_date=date(2016, 2, 5),
+        )
+        native_curve = _load_callable_option_curve_from_reference_output(
+            CALLABLE_ORE_XML,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            curve_id=spec.reference_curve_id,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        rollback_curve = native_curve[0] if native_curve is not None else _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        stripped_curve = _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        credit = load_ore_default_curve_inputs(
+            str(EXAMPLE_SHARED_TM),
+            str(EXAMPLE_SHARED_MARKET_FULL),
+            cpty_name=spec.credit_curve_id,
+        )
+        security_spread = _load_security_spread(EXAMPLE_SHARED_MARKET_FULL, spec.security_id)
+        pack = build_callable_bond_scenario_pack(
+            compiled,
+            reference_curves=[rollback_curve, rollback_curve],
+            models=[model, model],
+            hazard_times=np.asarray(credit["hazard_times"], dtype=float),
+            hazard_rates=np.repeat(np.asarray(credit["hazard_rates"], dtype=float).reshape(1, -1), 2, axis=0),
+            recovery_rate=np.asarray([float(credit["recovery"]), float(credit["recovery"])], dtype=float),
+            security_spread=np.asarray([security_spread, security_spread], dtype=float),
+            stripped_discount_curves=[stripped_curve, stripped_curve],
+            stripped_income_curves=[stripped_curve, stripped_curve],
+        )
+        npv_ref = price_callable_bond_scenarios_torch(compiled, pack, chunk_size=2, device="cpu").detach().cpu().numpy()
+        npv_grouped = price_callable_bond_scenarios_torch_grouped(compiled, pack, chunk_size=2, device="cpu").detach().cpu().numpy()
+        np.testing.assert_allclose(npv_grouped, npv_ref, rtol=0.0, atol=2.0e-8)
 
     def test_callable_batch_scenario_pack_from_arrays_matches_builder(self):
         spec, engine = load_callable_bond_trade_spec(

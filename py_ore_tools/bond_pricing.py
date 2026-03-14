@@ -1389,7 +1389,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
                     y_weights=compiled.y_weights,
                 )
 
-        provisional_npv = np.zeros_like(provisional_npv)
+        provisional_npv.fill(0.0)
         for j in range(compiled.cf_amounts.size):
             if cf_status[j] == "Done":
                 continue
@@ -1404,7 +1404,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
             )
             if belongs_to_underlying and coupon_ratio > 0.0:
                 if cf_status[j] == "Cached":
-                    underlying_npv = underlying_npv + np.asarray(cf_cache[j], dtype=float)
+                    underlying_npv += np.asarray(cf_cache[j], dtype=float)
                     cf_cache[j] = None
                     cf_status[j] = "Done"
                 elif (
@@ -1421,7 +1421,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
                         )
                         reduced_cache[pay_idx] = reduced
                     reduced = float(compiled.cf_amounts[j]) * reduced
-                    underlying_npv = underlying_npv + reduced
+                    underlying_npv += reduced
                     cf_status[j] = "Done"
                 else:
                     pay_idx = int(compiled.cf_pay_indices[j])
@@ -1433,7 +1433,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
                             -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
                         )
                         reduced_cache[pay_idx] = reduced
-                    provisional_npv = provisional_npv + float(compiled.cf_amounts[j]) * reduced
+                    provisional_npv += float(compiled.cf_amounts[j]) * reduced
             elif (
                 np.isnan(compiled.cf_max_estimation_time[j])
                 and not np.isnan(compiled.cf_exact_estimation_time[j])
@@ -1452,7 +1452,7 @@ def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTra
                 cf_cache[j] = float(compiled.cf_amounts[j]) * reduced
                 cf_status[j] = "Cached"
         if compiled.call_active[i] or compiled.put_active[i]:
-            continuation = option_values.copy()
+            continuation = option_values
             amount_over_num = p0_t[:, None] * np.exp(-h_t[:, None] * x_grid - 0.5 * (h_t * h_t * z_t)[:, None])
             if compiled.call_active[i]:
                 continuation = np.minimum(continuation, float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv))
@@ -1502,51 +1502,49 @@ def _price_callable_bond_scenarios_torch_chunk(
         raise ImportError("torch is required for price_callable_bond_scenarios_torch()")
     target = torch.device(device)
     dtype = torch.float32 if target.type == "mps" else torch.float64
-    n_scenarios = pack.n_scenarios()
-    n_states = 2 * compiled.center_index + 1
-    option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
-    underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
-    provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
-    cf_cache: list[object | None] = [None] * len(compiled.cashflows)
-    cf_status = ["Open"] * len(compiled.cashflows)
-    p0_grid = torch.as_tensor(pack.p0_grid, dtype=dtype, device=target)
-    h_grid = torch.as_tensor(pack.h_grid, dtype=dtype, device=target)
-    zeta_grid = torch.as_tensor(pack.zeta_grid, dtype=dtype, device=target)
-    k_grid = torch.as_tensor(compiled.k_grid, dtype=dtype, device=target)
-    y_nodes = torch.as_tensor(compiled.y_nodes, dtype=dtype, device=target)
-    y_weights = torch.as_tensor(compiled.y_weights, dtype=dtype, device=target)
-    stripped = price_bond_scenarios_torch(compiled.stripped_bond, pack.stripped_grid, device=device)
+    with torch.inference_mode():
+        n_scenarios = pack.n_scenarios()
+        n_states = 2 * compiled.center_index + 1
+        option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        cf_cache: list[object | None] = [None] * len(compiled.cashflows)
+        cf_status = ["Open"] * len(compiled.cashflows)
+        p0_grid = torch.as_tensor(pack.p0_grid, dtype=dtype, device=target)
+        h_grid = torch.as_tensor(pack.h_grid, dtype=dtype, device=target)
+        zeta_grid = torch.as_tensor(pack.zeta_grid, dtype=dtype, device=target)
+        k_grid = torch.as_tensor(compiled.k_grid, dtype=dtype, device=target)
+        y_nodes = torch.as_tensor(compiled.y_nodes, dtype=dtype, device=target)
+        y_weights = torch.as_tensor(compiled.y_weights, dtype=dtype, device=target)
 
-    for i in range(compiled.grid_times.size - 1, 0, -1):
-        t_from = float(compiled.grid_times[i])
-        z_t = zeta_grid[:, i]
-        h_t = h_grid[:, i]
-        p0_t = p0_grid[:, i]
-        dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(compiled.grid_nx, 1))
-        x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
-        reduced_cache: dict[int, object] = {}
-        if i < compiled.grid_times.size - 1:
-            option_values = _convolution_rollback_batch_torch(
-                option_values,
-                zeta_t1=zeta_grid[:, i + 1],
-                zeta_t0=zeta_grid[:, i],
-                mx=compiled.center_index,
-                nx=compiled.grid_nx,
-                y_nodes=y_nodes,
-                y_weights=y_weights,
+        stripped_discount_to_pay = torch.as_tensor(pack.stripped_grid.discount_to_pay, dtype=dtype, device=target)
+        stripped_survival_to_pay = torch.as_tensor(pack.stripped_grid.survival_to_pay, dtype=dtype, device=target)
+        stripped_amounts = torch.as_tensor(compiled.stripped_bond.amounts, dtype=dtype, device=target)
+        stripped = torch.sum(stripped_discount_to_pay * stripped_survival_to_pay * stripped_amounts.unsqueeze(0), dim=1)
+        if compiled.stripped_bond.recovery_nominals.size:
+            stripped_recovery_discount_mid = torch.as_tensor(pack.stripped_grid.recovery_discount_mid, dtype=dtype, device=target)
+            stripped_recovery_default_prob = torch.as_tensor(pack.stripped_grid.recovery_default_prob, dtype=dtype, device=target)
+            stripped_recovery_nominals = torch.as_tensor(compiled.stripped_bond.recovery_nominals, dtype=dtype, device=target)
+            stripped_recovery_rate = torch.as_tensor(pack.stripped_grid.recovery_rate, dtype=dtype, device=target)
+            stripped = stripped + torch.sum(
+                stripped_recovery_discount_mid
+                * stripped_recovery_default_prob
+                * stripped_recovery_nominals.unsqueeze(0)
+                * stripped_recovery_rate.unsqueeze(1),
+                dim=1,
             )
-            underlying_npv = _convolution_rollback_batch_torch(
-                underlying_npv,
-                zeta_t1=zeta_grid[:, i + 1],
-                zeta_t0=zeta_grid[:, i],
-                mx=compiled.center_index,
-                nx=compiled.grid_nx,
-                y_nodes=y_nodes,
-                y_weights=y_weights,
-            )
-            if i == 1:
-                provisional_npv = _convolution_rollback_batch_torch(
-                    provisional_npv,
+
+        for i in range(compiled.grid_times.size - 1, 0, -1):
+            t_from = float(compiled.grid_times[i])
+            z_t = zeta_grid[:, i]
+            h_t = h_grid[:, i]
+            p0_t = p0_grid[:, i]
+            dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(compiled.grid_nx, 1))
+            x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+            reduced_cache: dict[int, object] = {}
+            if i < compiled.grid_times.size - 1:
+                option_values = _convolution_rollback_batch_torch(
+                    option_values,
                     zeta_t1=zeta_grid[:, i + 1],
                     zeta_t0=zeta_grid[:, i],
                     mx=compiled.center_index,
@@ -1554,39 +1552,86 @@ def _price_callable_bond_scenarios_torch_chunk(
                     y_nodes=y_nodes,
                     y_weights=y_weights,
                 )
-            for j, cached in enumerate(cf_cache):
-                if cached is None:
+                underlying_npv = _convolution_rollback_batch_torch(
+                    underlying_npv,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                if i == 1:
+                    provisional_npv = _convolution_rollback_batch_torch(
+                        provisional_npv,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=compiled.center_index,
+                        nx=compiled.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                for j, cached in enumerate(cf_cache):
+                    if cached is None:
+                        continue
+                    cf_cache[j] = _convolution_rollback_batch_torch(
+                        cached,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=compiled.center_index,
+                        nx=compiled.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+            provisional_npv.zero_()
+            for j in range(compiled.cf_amounts.size):
+                if cf_status[j] == "Done":
                     continue
-                cf_cache[j] = _convolution_rollback_batch_torch(
-                    cached,
-                    zeta_t1=zeta_grid[:, i + 1],
-                    zeta_t0=zeta_grid[:, i],
-                    mx=compiled.center_index,
-                    nx=compiled.grid_nx,
-                    y_nodes=y_nodes,
-                    y_weights=y_weights,
+                belongs_to_underlying = (
+                    t_from < float(compiled.cf_belongs_to_underlying_max_time[j])
+                    or _callable_close_enough(t_from, float(compiled.cf_belongs_to_underlying_max_time[j]))
                 )
-        provisional_npv = torch.zeros_like(provisional_npv)
-        for j in range(compiled.cf_amounts.size):
-            if cf_status[j] == "Done":
-                continue
-            belongs_to_underlying = (
-                t_from < float(compiled.cf_belongs_to_underlying_max_time[j])
-                or _callable_close_enough(t_from, float(compiled.cf_belongs_to_underlying_max_time[j]))
-            )
-            coupon_ratio = _callable_coupon_ratio_from_arrays(
-                float(compiled.cf_coupon_start_time[j]),
-                float(compiled.cf_coupon_end_time[j]),
-                t_from,
-            )
-            if belongs_to_underlying and coupon_ratio > 0.0:
-                if cf_status[j] == "Cached":
-                    underlying_npv = underlying_npv + cf_cache[j]
-                    cf_cache[j] = None
-                    cf_status[j] = "Done"
+                coupon_ratio = _callable_coupon_ratio_from_arrays(
+                    float(compiled.cf_coupon_start_time[j]),
+                    float(compiled.cf_coupon_end_time[j]),
+                    t_from,
+                )
+                if belongs_to_underlying and coupon_ratio > 0.0:
+                    if cf_status[j] == "Cached":
+                        underlying_npv.add_(cf_cache[j])
+                        cf_cache[j] = None
+                        cf_status[j] = "Done"
+                    elif (
+                        not np.isnan(compiled.cf_max_estimation_time[j])
+                        and (t_from < float(compiled.cf_max_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_max_estimation_time[j])))
+                    ):
+                        pay_idx = int(compiled.cf_pay_indices[j])
+                        reduced = reduced_cache.get(pay_idx)
+                        if reduced is None:
+                            h_pay = h_grid[:, pay_idx]
+                            p0_pay = p0_grid[:, pay_idx]
+                            reduced = p0_pay.unsqueeze(1) * torch.exp(
+                                -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                            )
+                            reduced_cache[pay_idx] = reduced
+                        underlying_npv.add_(float(compiled.cf_amounts[j]) * reduced)
+                        cf_status[j] = "Done"
+                    else:
+                        pay_idx = int(compiled.cf_pay_indices[j])
+                        reduced = reduced_cache.get(pay_idx)
+                        if reduced is None:
+                            h_pay = h_grid[:, pay_idx]
+                            p0_pay = p0_grid[:, pay_idx]
+                            reduced = p0_pay.unsqueeze(1) * torch.exp(
+                                -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                            )
+                            reduced_cache[pay_idx] = reduced
+                        provisional_npv.add_(float(compiled.cf_amounts[j]) * reduced)
                 elif (
-                    not np.isnan(compiled.cf_max_estimation_time[j])
-                    and (t_from < float(compiled.cf_max_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_max_estimation_time[j])))
+                    np.isnan(compiled.cf_max_estimation_time[j])
+                    and not np.isnan(compiled.cf_exact_estimation_time[j])
+                    and (t_from < float(compiled.cf_exact_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_exact_estimation_time[j])))
+                    and cf_status[j] == "Open"
                 ):
                     pay_idx = int(compiled.cf_pay_indices[j])
                     reduced = reduced_cache.get(pay_idx)
@@ -1597,57 +1642,28 @@ def _price_callable_bond_scenarios_torch_chunk(
                             -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
                         )
                         reduced_cache[pay_idx] = reduced
-                    reduced = float(compiled.cf_amounts[j]) * reduced
-                    underlying_npv = underlying_npv + reduced
-                    cf_status[j] = "Done"
-                else:
-                    pay_idx = int(compiled.cf_pay_indices[j])
-                    reduced = reduced_cache.get(pay_idx)
-                    if reduced is None:
-                        h_pay = h_grid[:, pay_idx]
-                        p0_pay = p0_grid[:, pay_idx]
-                        reduced = p0_pay.unsqueeze(1) * torch.exp(
-                            -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
-                        )
-                        reduced_cache[pay_idx] = reduced
-                    provisional_npv = provisional_npv + float(compiled.cf_amounts[j]) * reduced
-            elif (
-                np.isnan(compiled.cf_max_estimation_time[j])
-                and not np.isnan(compiled.cf_exact_estimation_time[j])
-                and (t_from < float(compiled.cf_exact_estimation_time[j]) or _callable_close_enough(t_from, float(compiled.cf_exact_estimation_time[j])))
-                and cf_status[j] == "Open"
-            ):
-                pay_idx = int(compiled.cf_pay_indices[j])
-                reduced = reduced_cache.get(pay_idx)
-                if reduced is None:
-                    h_pay = h_grid[:, pay_idx]
-                    p0_pay = p0_grid[:, pay_idx]
-                    reduced = p0_pay.unsqueeze(1) * torch.exp(
-                        -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
-                    )
-                    reduced_cache[pay_idx] = reduced
-                cf_cache[j] = float(compiled.cf_amounts[j]) * reduced
-                cf_status[j] = "Cached"
-        if bool(compiled.call_active[i]) or bool(compiled.put_active[i]):
-            continuation = option_values.clone()
-            amount_over_num = p0_t.unsqueeze(1) * torch.exp(-h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1))
-            if bool(compiled.call_active[i]):
-                continuation = torch.minimum(continuation, float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv))
-            if bool(compiled.put_active[i]):
-                continuation = torch.maximum(continuation, float(compiled.put_amounts[i]) * amount_over_num - underlying_npv + provisional_npv)
-            option_values = continuation
-    if compiled.grid_times.size > 1:
-        option_values = _convolution_rollback_batch_torch(
-            option_values,
-            zeta_t1=zeta_grid[:, 1],
-            zeta_t0=zeta_grid[:, 0],
-            mx=compiled.center_index,
-            nx=compiled.grid_nx,
-            y_nodes=y_nodes,
-            y_weights=y_weights,
-        )
-    option_value = option_values[:, compiled.center_index]
-    return stripped + option_value
+                    cf_cache[j] = float(compiled.cf_amounts[j]) * reduced
+                    cf_status[j] = "Cached"
+            if bool(compiled.call_active[i]) or bool(compiled.put_active[i]):
+                continuation = option_values
+                amount_over_num = p0_t.unsqueeze(1) * torch.exp(-h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1))
+                if bool(compiled.call_active[i]):
+                    continuation = torch.minimum(continuation, float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv))
+                if bool(compiled.put_active[i]):
+                    continuation = torch.maximum(continuation, float(compiled.put_amounts[i]) * amount_over_num - underlying_npv + provisional_npv)
+                option_values = continuation
+        if compiled.grid_times.size > 1:
+            option_values = _convolution_rollback_batch_torch(
+                option_values,
+                zeta_t1=zeta_grid[:, 1],
+                zeta_t0=zeta_grid[:, 0],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+        option_value = option_values[:, compiled.center_index]
+        return stripped + option_value
 
 
 def price_callable_bond_scenarios_torch(
@@ -1669,6 +1685,253 @@ def price_callable_bond_scenarios_torch(
     for start in range(0, n_scenarios, chunk_size):
         end = min(start + chunk_size, n_scenarios)
         chunks.append(_price_callable_bond_scenarios_torch_chunk(compiled, pack.slice(start, end), device=device))
+    return torch.cat(chunks, dim=0)
+
+
+def _build_callable_step_action_tables(compiled: CompiledCallableBondTrade) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n_steps = compiled.grid_times.size
+    n_cf = compiled.cf_amounts.size
+    immediate_mask = np.zeros((n_steps, n_cf), dtype=bool)
+    provisional_mask = np.zeros((n_steps, n_cf), dtype=bool)
+    release_mask = np.zeros((n_steps, n_cf), dtype=bool)
+    cache_mask = np.zeros((n_steps, n_cf), dtype=bool)
+    max_nan = np.isnan(compiled.cf_max_estimation_time)
+    exact_valid = ~np.isnan(compiled.cf_exact_estimation_time)
+    cache_capable = max_nan & exact_valid
+
+    for i, t_from in enumerate(compiled.grid_times):
+        belongs = (t_from < compiled.cf_belongs_to_underlying_max_time) | np.isclose(
+            t_from,
+            compiled.cf_belongs_to_underlying_max_time,
+            atol=1.0e-12,
+            rtol=0.0,
+        )
+        coupon_ratio = np.asarray(
+            [
+                _callable_coupon_ratio_from_arrays(
+                    float(compiled.cf_coupon_start_time[j]),
+                    float(compiled.cf_coupon_end_time[j]),
+                    float(t_from),
+                )
+                for j in range(n_cf)
+            ],
+            dtype=float,
+        )
+        belongs_coupon = belongs & (coupon_ratio > 0.0)
+        immediate = belongs_coupon & (~max_nan) & (
+            (t_from < compiled.cf_max_estimation_time)
+            | np.isclose(t_from, compiled.cf_max_estimation_time, atol=1.0e-12, rtol=0.0)
+        )
+        release = belongs_coupon & cache_capable
+        provisional = belongs_coupon & (~immediate) & (~release)
+        cache = (~belongs_coupon) & cache_capable & (
+            (t_from < compiled.cf_exact_estimation_time)
+            | np.isclose(t_from, compiled.cf_exact_estimation_time, atol=1.0e-12, rtol=0.0)
+        )
+        immediate_mask[i] = immediate
+        provisional_mask[i] = provisional
+        release_mask[i] = release
+        cache_mask[i] = cache
+    return immediate_mask, provisional_mask, release_mask, cache_mask
+
+
+def _price_callable_bond_scenarios_torch_grouped_chunk(
+    compiled: CompiledCallableBondTrade,
+    pack: CallableBondScenarioPack,
+    *,
+    device: str,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_grouped()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    with torch.inference_mode():
+        n_scenarios = pack.n_scenarios()
+        n_states = 2 * compiled.center_index + 1
+        n_cf = compiled.cf_amounts.size
+        option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        cached_values = torch.zeros((n_scenarios, n_cf, n_states), dtype=dtype, device=target)
+        cache_active = torch.zeros((n_cf,), dtype=torch.bool, device=target)
+        cf_done = torch.zeros((n_cf,), dtype=torch.bool, device=target)
+
+        p0_grid = torch.as_tensor(pack.p0_grid, dtype=dtype, device=target)
+        h_grid = torch.as_tensor(pack.h_grid, dtype=dtype, device=target)
+        zeta_grid = torch.as_tensor(pack.zeta_grid, dtype=dtype, device=target)
+        k_grid = torch.as_tensor(compiled.k_grid, dtype=dtype, device=target)
+        y_nodes = torch.as_tensor(compiled.y_nodes, dtype=dtype, device=target)
+        y_weights = torch.as_tensor(compiled.y_weights, dtype=dtype, device=target)
+        cf_amounts = torch.as_tensor(compiled.cf_amounts, dtype=dtype, device=target)
+
+        unique_pay_idx, cf_group_idx = np.unique(compiled.cf_pay_indices, return_inverse=True)
+        unique_pay_idx_t = torch.as_tensor(unique_pay_idx, dtype=torch.long, device=target)
+        cf_group_idx_t = torch.as_tensor(cf_group_idx, dtype=torch.long, device=target)
+
+        immediate_mask_np, provisional_mask_np, release_mask_np, cache_mask_np = _build_callable_step_action_tables(compiled)
+        immediate_mask_t = torch.as_tensor(immediate_mask_np, dtype=torch.bool, device=target)
+        provisional_mask_t = torch.as_tensor(provisional_mask_np, dtype=torch.bool, device=target)
+        release_mask_t = torch.as_tensor(release_mask_np, dtype=torch.bool, device=target)
+        cache_mask_t = torch.as_tensor(cache_mask_np, dtype=torch.bool, device=target)
+
+        stripped_discount_to_pay = torch.as_tensor(pack.stripped_grid.discount_to_pay, dtype=dtype, device=target)
+        stripped_survival_to_pay = torch.as_tensor(pack.stripped_grid.survival_to_pay, dtype=dtype, device=target)
+        stripped_amounts = torch.as_tensor(compiled.stripped_bond.amounts, dtype=dtype, device=target)
+        stripped = torch.sum(stripped_discount_to_pay * stripped_survival_to_pay * stripped_amounts.unsqueeze(0), dim=1)
+        if compiled.stripped_bond.recovery_nominals.size:
+            stripped_recovery_discount_mid = torch.as_tensor(pack.stripped_grid.recovery_discount_mid, dtype=dtype, device=target)
+            stripped_recovery_default_prob = torch.as_tensor(pack.stripped_grid.recovery_default_prob, dtype=dtype, device=target)
+            stripped_recovery_nominals = torch.as_tensor(compiled.stripped_bond.recovery_nominals, dtype=dtype, device=target)
+            stripped_recovery_rate = torch.as_tensor(pack.stripped_grid.recovery_rate, dtype=dtype, device=target)
+            stripped = stripped + torch.sum(
+                stripped_recovery_discount_mid
+                * stripped_recovery_default_prob
+                * stripped_recovery_nominals.unsqueeze(0)
+                * stripped_recovery_rate.unsqueeze(1),
+                dim=1,
+            )
+
+        for i in range(compiled.grid_times.size - 1, 0, -1):
+            z_t = zeta_grid[:, i]
+            h_t = h_grid[:, i]
+            p0_t = p0_grid[:, i]
+            dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(compiled.grid_nx, 1))
+            x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+
+            if i < compiled.grid_times.size - 1:
+                option_values = _convolution_rollback_batch_torch(
+                    option_values,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                underlying_npv = _convolution_rollback_batch_torch(
+                    underlying_npv,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                if i == 1:
+                    provisional_npv = _convolution_rollback_batch_torch(
+                        provisional_npv,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=compiled.center_index,
+                        nx=compiled.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                if bool(torch.any(cache_active)):
+                    active_idx = torch.nonzero(cache_active, as_tuple=False).squeeze(1)
+                    active_count = int(active_idx.numel())
+                    flat_cached = cached_values.index_select(1, active_idx).reshape(n_scenarios * active_count, n_states)
+                    zeta_t1_rep = zeta_grid[:, i + 1].repeat_interleave(active_count)
+                    zeta_t0_rep = zeta_grid[:, i].repeat_interleave(active_count)
+                    flat_cached = _convolution_rollback_batch_torch(
+                        flat_cached,
+                        zeta_t1=zeta_t1_rep,
+                        zeta_t0=zeta_t0_rep,
+                        mx=compiled.center_index,
+                        nx=compiled.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                    cached_values[:, active_idx, :] = flat_cached.reshape(n_scenarios, active_count, n_states)
+
+            provisional_npv.zero_()
+
+            h_pay = h_grid.index_select(1, unique_pay_idx_t)
+            p0_pay = p0_grid.index_select(1, unique_pay_idx_t)
+            pay_reduced = p0_pay.unsqueeze(2) * torch.exp(
+                -h_pay.unsqueeze(2) * x_grid.unsqueeze(1)
+                - 0.5 * (h_pay * h_pay * z_t.unsqueeze(1)).unsqueeze(2)
+            )
+            cf_values = pay_reduced.index_select(1, cf_group_idx_t) * cf_amounts.view(1, -1, 1)
+
+            active_open = ~cf_done
+
+            immediate = immediate_mask_t[i] & active_open
+            if bool(torch.any(immediate)):
+                underlying_npv.add_(cf_values[:, immediate, :].sum(dim=1))
+                cf_done[immediate] = True
+
+            provisional = provisional_mask_t[i] & active_open
+            if bool(torch.any(provisional)):
+                provisional_npv.add_(cf_values[:, provisional, :].sum(dim=1))
+
+            release = release_mask_t[i] & active_open
+            release_cached = release & cache_active
+            if bool(torch.any(release_cached)):
+                underlying_npv.add_(cached_values[:, release_cached, :].sum(dim=1))
+                cached_values[:, release_cached, :] = 0.0
+                cache_active[release_cached] = False
+                cf_done[release_cached] = True
+
+            release_open = release & (~cache_active)
+            if bool(torch.any(release_open)):
+                provisional_npv.add_(cf_values[:, release_open, :].sum(dim=1))
+
+            create_cache = cache_mask_t[i] & (~cache_active) & active_open
+            if bool(torch.any(create_cache)):
+                cached_values[:, create_cache, :] = cf_values[:, create_cache, :]
+                cache_active[create_cache] = True
+
+            if bool(compiled.call_active[i]) or bool(compiled.put_active[i]):
+                continuation = option_values
+                amount_over_num = p0_t.unsqueeze(1) * torch.exp(
+                    -h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1)
+                )
+                if bool(compiled.call_active[i]):
+                    continuation = torch.minimum(
+                        continuation,
+                        float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv),
+                    )
+                if bool(compiled.put_active[i]):
+                    continuation = torch.maximum(
+                        continuation,
+                        float(compiled.put_amounts[i]) * amount_over_num - underlying_npv + provisional_npv,
+                    )
+                option_values = continuation
+
+        if compiled.grid_times.size > 1:
+            option_values = _convolution_rollback_batch_torch(
+                option_values,
+                zeta_t1=zeta_grid[:, 1],
+                zeta_t0=zeta_grid[:, 0],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+        option_value = option_values[:, compiled.center_index]
+        return stripped + option_value
+
+
+def price_callable_bond_scenarios_torch_grouped(
+    compiled: CompiledCallableBondTrade,
+    pack: CallableBondScenarioPack,
+    *,
+    device: str = "cpu",
+    chunk_size: int = 512,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_grouped()")
+    validate_callable_bond_scenario_pack(compiled, pack)
+    n_scenarios = pack.n_scenarios()
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n_scenarios <= chunk_size:
+        return _price_callable_bond_scenarios_torch_grouped_chunk(compiled, pack, device=device)
+    chunks = []
+    for start in range(0, n_scenarios, chunk_size):
+        end = min(start + chunk_size, n_scenarios)
+        chunks.append(_price_callable_bond_scenarios_torch_grouped_chunk(compiled, pack.slice(start, end), device=device))
     return torch.cat(chunks, dim=0)
 
 
