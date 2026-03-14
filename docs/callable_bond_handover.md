@@ -158,19 +158,41 @@ Use `additional_results.csv` for:
 
 ## Current Deterministic Parity
 
-Current stable numbers after the latest rollback pass:
+Current stable numbers after the callable option/native-curve split plus the
+more literal cached rollback state handling:
 
 | Trade | ORE NPV | Python NPV | Abs Diff |
 |---|---:|---:|---:|
-| `CallableBondTrade` | 107838072.031120 | 106265571.031745 | 1572501.00 |
+| `CallableBondTrade` | 107838072.031120 | 108223321.679891 | 385249.65 |
 | `CallableBondNoCall` | 111858499.784284 | 112146381.339940 | 287881.56 |
-| `CallableBondCertainCall` | 61960289.618040 | 61982593.977652 | 22304.36 |
-| `PutCallBondTrade` | 128191889.607085 | 126072478.908943 | 2119410.70 |
+| `CallableBondCertainCall` | 61960289.618040 | 62210523.118371 | 250233.50 |
+| `PutCallBondTrade` | 128191889.607085 | 128450669.412103 | 258779.81 |
 
 Interpretation:
 - `CallableBondNoCall` is the cleanest stripped-underlying check
-- `CallableBondCertainCall` is already quite close
-- `PutCallBondTrade` is the clearest remaining engine-logic miss
+- `CallableBondCertainCall` is now also in the same sub-`300k` band
+- `PutCallBondTrade` is no longer the outlier it used to be
+
+## Native ORE Proof About `CallableBondNoCall`
+
+One important conceptual point is now settled: native ORE itself does **not**
+price `CallableBondNoCall` as the same object as the equivalent standalone
+plain bond.
+
+Using a temporary native ORE case with the commented plain bond trade enabled:
+
+| Trade | ORE TradeType | Native ORE NPV |
+|---|---|---:|
+| `CallableBondNoCall` | `CallableBond` | 111858499.784284 |
+| `UnderlyingBondTrade` | `Bond` | 114184634.212881 |
+
+Difference:
+- the standalone bond is higher by `2326134.428597`
+
+Conclusion:
+- the remaining Python `CallableBondNoCall` miss is **not** a plain-bond parity miss
+- it is a callable-engine-underlying parity miss
+- so comparing `CallableBondNoCall` against the standalone bond is the wrong target
 
 ## Known Good Tests
 
@@ -183,7 +205,7 @@ python3 -m pytest /Users/gordonlee/Documents/PythonOreRunner/tests/test_bond_pri
 ```
 
 Current expected result:
-- `6 passed, 14 deselected, 4 subtests passed`
+- `10 passed, 70 deselected, 7 subtests passed` when running the callable slices across bond and CLI tests
 
 CLI smoke coverage:
 - [test_ore_snapshot_cli.py](/Users/gordonlee/Documents/PythonOreRunner/tests/test_ore_snapshot_cli.py)
@@ -214,23 +236,18 @@ Conclusion:
 
 ## What Still Looks Missing
 
-The remaining misses are now mostly engine-state issues, not XML parsing issues.
+The remaining misses are now much smaller and concentrated in the callable
+engine's internal underlying semantics, not in XML parsing and not in basic
+call/put wiring.
 
-Highest-signal next targets:
+Highest-signal next targets if this ever needs to be pushed further:
 
-1. Match `NumericLgmCallableBondEngine` state handling even more literally.
-Current Python still simplifies:
-- no cached `mustBeEstimated()` path
-- no explicit future cashflow cache vector
-- no exact `provisionalNpv` rollback gating except the trivial final-step case
+1. Reproduce native callable-engine underlying valuation directly.
+Current Python still mixes:
+- callable rollback for the option layer
+- standalone risky-bond logic for the stripped layer
 
-2. Focus on `PutCallBondTrade`.
-This is still the biggest miss and is the best case to debug:
-- put-overrides-call precedence
-- call then put update ordering on the same event index
-- event-date interaction with underlying cashflows
-
-3. Use native event-table additional results more aggressively.
+2. Use native event-table additional results more aggressively.
 The native engine emits an event table in `additional_results.csv`.
 That should be compared line by line against:
 - notional
@@ -240,13 +257,14 @@ That should be compared line by line against:
 - put
 - effective discount logic
 
-4. Only revisit named pricing curves after building a better multi-curve bootstrap.
+3. Only revisit named pricing curves after building a better multi-curve bootstrap.
 The direction is correct, but the current prototype is not good enough.
 
 ## Practical Advice For The Next Agent
 
 - Keep the current callable calibration discount-curve improvement. That was a real gain.
+- Keep the current callable option/native-reference-curve split. That was the biggest parity gain in the whole callable path.
 - Keep the more literal cashflow-state rollback. It improved source faithfulness and did not break tests.
 - Do not chase more random market-input tweaks first.
-- Debug `PutCallBondTrade` against [numericlgmcallablebondengine.cpp](/Users/gordonlee/Documents/Engine/QuantExt/qle/pricingengines/numericlgmcallablebondengine.cpp) section `9.2` to `9.4`.
-- If you need a clean internal benchmark, use `CallableBondNoCall` for stripped value and `CallableBondCertainCall` for call exercise on a simpler path.
+- If you need a clean internal benchmark, use `CallableBondNoCall` for callable-engine underlying behavior and `CallableBondCertainCall` for call exercise on a simpler path.
+- Do not assume `CallableBondNoCall` should equal the standalone `Bond`; native ORE proves that it does not.

@@ -76,6 +76,26 @@ class TestOreSnapshotCli(unittest.TestCase):
             )
         )
 
+    def test_supports_native_price_only_excludes_unsupported_non_swap_products(self):
+        self.assertFalse(
+            ore_snapshot_cli._supports_native_price_only(
+                "CommodityForward",
+                TOOLS_DIR / "Examples" / "Legacy" / "Example_24" / "Input" / "ore.xml",
+            )
+        )
+        self.assertFalse(
+            ore_snapshot_cli._supports_native_price_only(
+                "EquityOption",
+                TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml",
+            )
+        )
+        self.assertTrue(
+            ore_snapshot_cli._supports_native_price_only(
+                "FxOption",
+                FX_OPTION_CASE_XML,
+            )
+        )
+
     def test_price_only_fx_forward_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -132,7 +152,8 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_option_hybrid")
             self.assertEqual(payload["pricing"]["trade_type"], "FxOption")
             self.assertIn("py_cva", payload["xva"])
-            self.assertIn("ore_cva", payload["xva"])
+            self.assertTrue(payload["diagnostics"]["missing_reference_xva"])
+            self.assertNotIn("ore_cva", payload["xva"])
             self.assertGreater(len(payload["py_epe"]), 1)
 
     def test_run_case_from_buffers_python_engine_returns_python_only_summary(self):

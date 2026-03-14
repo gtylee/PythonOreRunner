@@ -1,0 +1,212 @@
+NOTICE   [2026-Mar-14 20:57:03.794466]    (OREAnalytics/orea/app/parameters.cpp:133) : Parameters:
+NOTICE   [2026-Mar-14 20:57:03.794632]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : active = N
+NOTICE   [2026-Mar-14 20:57:03.794736]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : outputFileName = flows.csv
+NOTICE   [2026-Mar-14 20:57:03.794836]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : active = N
+NOTICE   [2026-Mar-14 20:57:03.794932]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : configuration = default
+NOTICE   [2026-Mar-14 20:57:03.795027]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : grid = 240,1M
+NOTICE   [2026-Mar-14 20:57:03.795121]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : outputFileName = curves.csv
+NOTICE   [2026-Mar-14 20:57:03.795216]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : fxcalibration = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.795312]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : lgmcalibration = collateral_inccy
+NOTICE   [2026-Mar-14 20:57:03.795410]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : pricing = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.795507]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : sensitivity = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.795599]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : simulation = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.795689]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : active = Y
+NOTICE   [2026-Mar-14 20:57:03.795785]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : additionalResults = N
+NOTICE   [2026-Mar-14 20:57:03.795884]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : baseCurrency = EUR
+NOTICE   [2026-Mar-14 20:57:03.795973]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : outputFileName = npv.csv
+NOTICE   [2026-Mar-14 20:57:03.796064]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : asofDate = 2016-02-05
+NOTICE   [2026-Mar-14 20:57:03.796154]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : conventionsFile = ../../Input/conventions.xml
+NOTICE   [2026-Mar-14 20:57:03.796244]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : curveConfigFile = ../../Input/curveconfig.xml
+NOTICE   [2026-Mar-14 20:57:03.796334]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : fixingDataFile = ../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-14 20:57:03.796423]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : implyTodaysFixings = N
+NOTICE   [2026-Mar-14 20:57:03.796513]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : inputPath = Input
+NOTICE   [2026-Mar-14 20:57:03.796603]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logFile = log.txt
+NOTICE   [2026-Mar-14 20:57:03.796692]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logMask = 31
+NOTICE   [2026-Mar-14 20:57:03.796782]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketConfigFile = ../../Input/todaysmarket.xml
+NOTICE   [2026-Mar-14 20:57:03.796873]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketDataFile = ../../Input/market_20160205.txt
+NOTICE   [2026-Mar-14 20:57:03.796968]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : nThreads = 1
+NOTICE   [2026-Mar-14 20:57:03.797062]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : observationModel = None
+NOTICE   [2026-Mar-14 20:57:03.797153]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : outputPath = Output/callable_bond_compare
+NOTICE   [2026-Mar-14 20:57:03.797243]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : portfolioFile = portfolio_callablebond.xml
+NOTICE   [2026-Mar-14 20:57:03.797333]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : pricingEnginesFile = pricingengine_callablebond_lgm_grid.xml
+NOTICE   [2026-Mar-14 20:57:03.797424]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : referenceDataFile = reference_data_callablebond.xml
+NOTICE   [2026-Mar-14 20:57:03.797521]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : active = N
+NOTICE   [2026-Mar-14 20:57:03.797611]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : active = N
+NOTICE   [2026-Mar-14 20:57:03.797747]        (OREAnalytics/orea/app/oreapp.cpp:660) : load OREAppInputParameters called
+WARNING  [2026-Mar-14 20:57:03.797861]        (OREAnalytics/orea/app/oreapp.cpp:681) : Calendar adjustments not found, using defaults
+WARNING  [2026-Mar-14 20:57:03.797969]        (OREAnalytics/orea/app/oreapp.cpp:691) : Currency configurations not found, using defaults
+NOTICE   [2026-Mar-14 20:57:03.798073]        (OREAnalytics/orea/app/oreapp.cpp:759) : Observation Mode is None
+NOTICE   [2026-Mar-14 20:57:03.798179]        (OREAnalytics/orea/app/oreapp.cpp:801) : Loading reference data from file: "Input/reference_data_callablebond.xml"
+WARNING  [2026-Mar-14 20:57:03.798418]        (OREAnalytics/orea/app/oreapp.cpp:813) : Script library not loaded
+NOTICE   [2026-Mar-14 20:57:03.798533]        (OREAnalytics/orea/app/oreapp.cpp:818) : Loading conventions from file: "Input/../../Input/conventions.xml"
+WARNING  [2026-Mar-14 20:57:03.799220]        (OREAnalytics/orea/app/oreapp.cpp:829) : Using default Ibor fallback config
+WARNING  [2026-Mar-14 20:57:03.799400]        (OREAnalytics/orea/app/oreapp.cpp:837) : Using default Basel Traffic Light config
+NOTICE   [2026-Mar-14 20:57:03.799507]        (OREAnalytics/orea/app/oreapp.cpp:842) : Load curve configurations from file: 
+NOTICE   [2026-Mar-14 20:57:03.800211]        (OREAnalytics/orea/app/oreapp.cpp:851) : Load pricing engine data from file: "Input/pricingengine_callablebond_lgm_grid.xml"
+NOTICE   [2026-Mar-14 20:57:03.800364]        (OREAnalytics/orea/app/oreapp.cpp:860) : Loading today's market parameters from file"Input/../../Input/todaysmarket.xml"
+WARNING  [2026-Mar-14 20:57:03.800601]  (...rketdata/todaysmarketparameters.cpp:205) : TodaysMarketParameters: the attribute 'currency' is deprecated for 'SwaptionVolatilities', use 'key' instead.
+WARNING  [2026-Mar-14 20:57:03.800711]  (...rketdata/todaysmarketparameters.cpp:205) : TodaysMarketParameters: the attribute 'currency' is deprecated for 'CapFloorVolatilities', use 'key' instead.
+NOTICE   [2026-Mar-14 20:57:03.800837]  (...lytics/orea/app/inputparameters.cpp:279) : Loading portfolio from file: Input/portfolio_callablebond.xml
+NOTICE   [2026-Mar-14 20:57:03.801008]    (OREData/ored/portfolio/portfolio.cpp:100) : Finished Parsing XML doc
+WARNING  [2026-Mar-14 20:57:03.801110]        (OREAnalytics/orea/app/oreapp.cpp:881) : CounterpartyManager not found
+NOTICE   [2026-Mar-14 20:57:03.801210]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::fxcalibration = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.801304]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::lgmcalibration = collateral_inccy
+NOTICE   [2026-Mar-14 20:57:03.801399]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::pricing = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.801491]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::sensitivity = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.801584]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::simulation = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.801690]       (OREAnalytics/orea/app/oreapp.cpp:1580) : SIMM
+NOTICE   [2026-Mar-14 20:57:03.801785]       (OREAnalytics/orea/app/oreapp.cpp:1683) : IM SCHEDULE
+WARNING  [2026-Mar-14 20:57:03.801894]       (OREAnalytics/orea/app/oreapp.cpp:2602) : ScenarioSimMarket parameters for sensitivity not loaded
+WARNING  [2026-Mar-14 20:57:03.801985]       (OREAnalytics/orea/app/oreapp.cpp:2610) : Sensitivity scenario data not loaded
+NOTICE   [2026-Mar-14 20:57:03.802094]       (OREAnalytics/orea/app/oreapp.cpp:3343) : analytics: 1
+NOTICE   [2026-Mar-14 20:57:03.802186]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: NPV
+NOTICE   [2026-Mar-14 20:57:03.802278]       (OREAnalytics/orea/app/oreapp.cpp:3349) : buildInputParameters done
+NOTICE   [2026-Mar-14 20:57:03.802377]  (...lytics/orea/app/inputparameters.cpp:983) : OutputFileNameMap called
+NOTICE   [2026-Mar-14 20:57:03.802478]  (...ytics/orea/app/inputparameters.cpp:1080) : OutputFileNameMap complete
+NOTICE   [2026-Mar-14 20:57:03.802576]        (OREAnalytics/orea/app/oreapp.cpp:410) : initFromParameters done, requested analytics:NPV
+NOTICE   [2026-Mar-14 20:57:03.802685]        (OREAnalytics/orea/app/oreapp.cpp:469) : Global IncludeTodaysCashFlows is set false, value: na
+NOTICE   [2026-Mar-14 20:57:03.802781]        (OREAnalytics/orea/app/oreapp.cpp:238) : ORE analytics starting
+WARNING  [2026-Mar-14 20:57:03.802872]        (OREAnalytics/orea/app/oreapp.cpp:239) : Starting OREApp::analytics(): 21741568|21741568 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+WARNING  [2026-Mar-14 20:57:03.802976]        (OREAnalytics/orea/app/oreapp.cpp:219) : dividend data file not found
+WARNING  [2026-Mar-14 20:57:03.803068]        (OREAnalytics/orea/app/oreapp.cpp:227) : fixing cutoff date not set
+NOTICE   [2026-Mar-14 20:57:03.803162]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from Input/../../Input/market_20160205.txt
+WARNING  [2026-Mar-14 20:57:03.827943]  (...ed/marketdata/marketdatumparser.cpp:753) : Deprecated MarketDatum::InstrumentType::CDS_INDEX, please use INDEX_CDS_TRANCHE/BASE_CORRELATION/IndexName/Term/DetachPoint or INDEX_CDS_TRANCHE/PRICE/IndexName/Term/AttachPoint/DetachPoint instead
+WARNING  [2026-Mar-14 20:57:03.828155]  (...ed/marketdata/marketdatumparser.cpp:753) : Deprecated MarketDatum::InstrumentType::CDS_INDEX, please use INDEX_CDS_TRANCHE/BASE_CORRELATION/IndexName/Term/DetachPoint or INDEX_CDS_TRANCHE/PRICE/IndexName/Term/AttachPoint/DetachPoint instead
+WARNING  [2026-Mar-14 20:57:03.828261]  (...ed/marketdata/marketdatumparser.cpp:753) : Deprecated MarketDatum::InstrumentType::CDS_INDEX, please use INDEX_CDS_TRANCHE/BASE_CORRELATION/IndexName/Term/DetachPoint or INDEX_CDS_TRANCHE/PRICE/IndexName/Term/AttachPoint/DetachPoint instead
+WARNING  [2026-Mar-14 20:57:03.828363]  (...ed/marketdata/marketdatumparser.cpp:753) : Deprecated MarketDatum::InstrumentType::CDS_INDEX, please use INDEX_CDS_TRANCHE/BASE_CORRELATION/IndexName/Term/DetachPoint or INDEX_CDS_TRANCHE/PRICE/IndexName/Term/AttachPoint/DetachPoint instead
+WARNING  [2026-Mar-14 20:57:03.828463]  (...ed/marketdata/marketdatumparser.cpp:753) : Deprecated MarketDatum::InstrumentType::CDS_INDEX, please use INDEX_CDS_TRANCHE/BASE_CORRELATION/IndexName/Term/DetachPoint or INDEX_CDS_TRANCHE/PRICE/IndexName/Term/AttachPoint/DetachPoint instead
+NOTICE   [2026-Mar-14 20:57:03.828870]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing Input/../../Input/market_20160205.txt
+NOTICE   [2026-Mar-14 20:57:03.829643]    (OREData/ored/marketdata/csvloader.cpp:80) : CSVLoader loaded 7970 market data points for February 5th, 2016
+NOTICE   [2026-Mar-14 20:57:03.829932]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from Input/../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-14 20:57:03.837665]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing Input/../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-14 20:57:03.837814]    (OREData/ored/marketdata/csvloader.cpp:85) : CSVLoader loaded 5454 fixings
+NOTICE   [2026-Mar-14 20:57:03.837915]    (OREData/ored/marketdata/csvloader.cpp:90) : CSVLoader loaded 0 dividends
+NOTICE   [2026-Mar-14 20:57:03.838010]    (OREData/ored/marketdata/csvloader.cpp:92) : CSVLoader complete.
+NOTICE   [2026-Mar-14 20:57:03.838133]  (...lytics/orea/app/analyticsmanager.cpp:51) : register analytic with label 'PRICING' and sub-analytics CASHFLOW,CASHFLOWNPV,NPV,SENSITIVITY
+NOTICE   [2026-Mar-14 20:57:03.838235]        (OREAnalytics/orea/app/oreapp.cpp:263) : Available analytics: CASHFLOW,CASHFLOWNPV,NPV,SENSITIVITY
+NOTICE   [2026-Mar-14 20:57:03.838334]        (OREAnalytics/orea/app/oreapp.cpp:266) : Requested analytics: NPV
+NOTICE   [2026-Mar-14 20:57:03.838454]  (...ytics/orea/app/analyticsmanager.cpp:123) : AnalyticsManager::runAnalytics: populate loader for dates: February 5th, 2016
+NOTICE   [2026-Mar-14 20:57:03.838567]  (...ytics/orea/app/marketdataloader.cpp:185) : Asking portfolio for its required fixings
+NOTICE   [2026-Mar-14 20:57:03.838667]  (...ytics/orea/app/marketdataloader.cpp:192) : The portfolio depends on fixings from 0 indices
+NOTICE   [2026-Mar-14 20:57:03.838759]  (...ytics/orea/app/marketdataloader.cpp:197) : Add fixings possibly required for bootstrapping TodaysMarket
+NOTICE   [2026-Mar-14 20:57:03.838905]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-14 20:57:03.840339]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-14 20:57:03.840482]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-14 20:57:03.841285]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-14 20:57:03.841387]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-14 20:57:03.842157]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-14 20:57:03.842257]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-14 20:57:03.843044]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-14 20:57:03.843142]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-14 20:57:03.844011]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-14 20:57:03.844149]  (...ytics/orea/app/marketdataloader.cpp:201) : Add fixing possibly required for equity index delta risk decomposition
+NOTICE   [2026-Mar-14 20:57:03.844305]  (...ics/orea/app/marketdatacsvloader.cpp:70) : MarketDataCsvLoader::retrieveFixings called: all fixings ? Y
+NOTICE   [2026-Mar-14 20:57:03.852080]      (OREData/ored/marketdata/fixings.cpp:68) : Added 5454 of 5454 fixings in 0.010000 seconds
+NOTICE   [2026-Mar-14 20:57:03.852269]  (...ytics/orea/app/marketdataloader.cpp:279) : Adding the loaded fixings to the IndexManager
+NOTICE   [2026-Mar-14 20:57:03.852365]  (...ytics/orea/app/marketdataloader.cpp:280) : Fixings size = 25
+NOTICE   [2026-Mar-14 20:57:03.852457]  (...ytics/orea/app/marketdataloader.cpp:283) : Generating market datum set
+WARNING  [2026-Mar-14 20:57:03.852923]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (EUR_CF_N): The IborIndex node is deprecated, use Index instead.
+WARNING  [2026-Mar-14 20:57:03.853087]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (GBP_CF_N): The IborIndex node is deprecated, use Index instead.
+WARNING  [2026-Mar-14 20:57:03.853246]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (USD_CF_N): The IborIndex node is deprecated, use Index instead.
+WARNING  [2026-Mar-14 20:57:03.853558]  (.../configuration/cdsvolcurveconfig.cpp:93) : Using an Expiries node only in CDSVolatilityCurveConfig is deprecated. A volatility configuration node should be used instead.
+WARNING  [2026-Mar-14 20:57:03.853663]  (.../configuration/cdsvolcurveconfig.cpp:93) : Using an Expiries node only in CDSVolatilityCurveConfig is deprecated. A volatility configuration node should be used instead.
+NOTICE   [2026-Mar-14 20:57:03.855142]  (...ytics/orea/app/marketdataloader.cpp:301) : CurveConfigs require 2505 quotes
+NOTICE   [2026-Mar-14 20:57:03.858007]  (...ytics/orea/app/marketdataloader.cpp:309) : Got market data
+NOTICE   [2026-Mar-14 20:57:03.858349]  (...nalytics/orea/app/reportwriter.cpp:1176) : Writing MarketData report
+NOTICE   [2026-Mar-14 20:57:03.860090]  (...nalytics/orea/app/reportwriter.cpp:1215) : MarketData report written
+NOTICE   [2026-Mar-14 20:57:03.860455]  (...nalytics/orea/app/reportwriter.cpp:1220) : Writing Fixings report
+NOTICE   [2026-Mar-14 20:57:03.861060]  (...nalytics/orea/app/reportwriter.cpp:1229) : Fixings report written
+NOTICE   [2026-Mar-14 20:57:03.861159]  (...nalytics/orea/app/reportwriter.cpp:1234) : Writing Dividends report
+NOTICE   [2026-Mar-14 20:57:03.861255]  (...nalytics/orea/app/reportwriter.cpp:1246) : Dividends report written
+NOTICE   [2026-Mar-14 20:57:03.861350]  (...ytics/orea/app/analyticsmanager.cpp:149) : run analytic with label 'PRICING'
+WARNING  [2026-Mar-14 20:57:03.861447]       (OREAnalytics/orea/app/analytic.cpp:97) : Starting PRICING Analytic::runAnalytic(): 34619392|34619392 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-14 20:57:03.861551]      (OREAnalytics/orea/app/analytic.cpp:241) : Analytic::buildMarket called
+NOTICE   [2026-Mar-14 20:57:03.861653]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration default
+NOTICE   [2026-Mar-14 20:57:03.861828]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration collateral_inccy
+NOTICE   [2026-Mar-14 20:57:03.861938]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_eur
+NOTICE   [2026-Mar-14 20:57:03.862042]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_usd
+NOTICE   [2026-Mar-14 20:57:03.862147]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration libor
+NOTICE   [2026-Mar-14 20:57:03.862253]  (...ored/marketdata/bondspreadimply.cpp:108) : got 0 securities
+NOTICE   [2026-Mar-14 20:57:03.862654]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Mar-14 20:57:03.862754]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 8 quotes, 7 currencies.
+NOTICE   [2026-Mar-14 20:57:03.863583]  (...ta/ored/marketdata/todaysmarket.cpp:230) : Build objects in TodaysMarket lazily, i.e. when requested.
+NOTICE   [2026-Mar-14 20:57:03.863717]      (OREAnalytics/orea/app/analytic.cpp:279) : Market Build time 0.000000 sec
+NOTICE   [2026-Mar-14 20:57:03.863815]     (OREData/ored/portfolio/portfolio.cpp:48) : Reset portfolio of size 5
+NOTICE   [2026-Mar-14 20:57:03.863920]      (OREAnalytics/orea/app/analytic.cpp:296) : Build the portfolio
+NOTICE   [2026-Mar-14 20:57:03.864021]      (OREAnalytics/orea/app/analytic.cpp:197) : Analytic::engineFactory() called
+NOTICE   [2026-Mar-14 20:57:03.864118]      (OREAnalytics/orea/app/analytic.cpp:207) : MarketContext::pricing = xois_eur
+NOTICE   [2026-Mar-14 20:57:03.864215]    (OREData/ored/portfolio/portfolio.cpp:134) : Building Portfolio of size 5 for context = 'analytic/PRICING'
+NOTICE   [2026-Mar-14 20:57:03.875386]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-14 20:57:03.875509]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-14 20:57:03.875617]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve CPTY_A_SR_USD using 11 default quotes of 11 requested quotes.
+NOTICE   [2026-Mar-14 20:57:03.875710]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Mar-14 20:57:03.875822]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve CPTY_A_SR_USD
+WARNING  [2026-Mar-14 20:57:03.875935]  (...ata/ored/portfolio/builders/bond.hpp:93) : security specific recovery rate not found for security ID SECURITY_CERTAINCALL, falling back on the recovery rate for credit curve Id CPTY_A
+WARNING  [2026-Mar-14 20:57:03.876149]  (...portfolio/builders/callablebond.cpp:361) : security specific recovery rate not found for security ID SECURITY_CERTAINCALL, falling back on the recovery rate for credit curve Id CPTY_A
+NOTICE   [2026-Mar-14 20:57:03.876371]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-14 20:57:03.876479]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier EUR (ccy=EUR), configuration is collateral_inccy
+WARNING  [2026-Mar-14 20:57:03.890342]  (...ata/ored/portfolio/builders/bond.hpp:93) : security specific recovery rate not found for security ID SECURITY_NOCALL, falling back on the recovery rate for credit curve Id CPTY_A
+WARNING  [2026-Mar-14 20:57:03.890539]  (...portfolio/builders/callablebond.cpp:361) : security specific recovery rate not found for security ID SECURITY_NOCALL, falling back on the recovery rate for credit curve Id CPTY_A
+NOTICE   [2026-Mar-14 20:57:03.890726]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-14 20:57:03.890831]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier EUR (ccy=EUR), configuration is collateral_inccy
+WARNING  [2026-Mar-14 20:57:03.899636]  (...ata/ored/portfolio/builders/bond.hpp:93) : security specific recovery rate not found for security ID SECURITY_CALL, falling back on the recovery rate for credit curve Id CPTY_A
+WARNING  [2026-Mar-14 20:57:03.899926]  (...portfolio/builders/callablebond.cpp:361) : security specific recovery rate not found for security ID SECURITY_CALL, falling back on the recovery rate for credit curve Id CPTY_A
+NOTICE   [2026-Mar-14 20:57:03.900141]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-14 20:57:03.900256]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier EUR (ccy=EUR), configuration is collateral_inccy
+WARNING  [2026-Mar-14 20:57:03.909044]  (...ata/ored/portfolio/builders/bond.hpp:93) : security specific recovery rate not found for security ID SECURITY_PUTCALL, falling back on the recovery rate for credit curve Id CPTY_A
+WARNING  [2026-Mar-14 20:57:03.909339]  (...portfolio/builders/callablebond.cpp:361) : security specific recovery rate not found for security ID SECURITY_PUTCALL, falling back on the recovery rate for credit curve Id CPTY_A
+NOTICE   [2026-Mar-14 20:57:03.909568]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-14 20:57:03.909676]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier EUR (ccy=EUR), configuration is collateral_inccy
+WARNING  [2026-Mar-14 20:57:03.918268]  (...ata/ored/portfolio/builders/bond.hpp:93) : security specific recovery rate not found for security ID SECURITY_1_STRIPPED, falling back on the recovery rate for credit curve Id CPTY_A
+NOTICE   [2026-Mar-14 20:57:03.918398]    (OREData/ored/portfolio/portfolio.cpp:162) : Built Portfolio. Initial size = 5, size now 5, built 0 failed trades, context is analytic/PRICING
+NOTICE   [2026-Mar-14 20:57:03.918496]    (OREData/ored/portfolio/portfolio.cpp:163) : Build stats:
+NOTICE   [2026-Mar-14 20:57:03.918592]    (OREData/ored/portfolio/portfolio.cpp:167) : Bond                              1              0 ms (avg = 0)
+NOTICE   [2026-Mar-14 20:57:03.918687]    (OREData/ored/portfolio/portfolio.cpp:167) : CallableBond                      4             50 ms (avg = 12.5)
+NOTICE   [2026-Mar-14 20:57:03.918785]      (OREAnalytics/orea/app/analytic.cpp:305) : Filter trades that expire before February 5th, 2016
+NOTICE   [2026-Mar-14 20:57:03.920037]   (OREAnalytics/orea/app/reportwriter.cpp:69) : portfolio valuation
+NOTICE   [2026-Mar-14 20:57:03.928131]  (OREAnalytics/orea/app/reportwriter.cpp:132) : NPV file written
+WARNING  [2026-Mar-14 20:57:03.928311]      (OREAnalytics/orea/app/analytic.cpp:102) : Finishing PRICING Analytic::runAnalytic(): 44318720|44318720 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-14 20:57:03.928430]  (...ytics/orea/app/analyticsmanager.cpp:158) : run analytic with label 'PRICING' finished.
+NOTICE   [2026-Mar-14 20:57:03.940668]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR1D for label  as it has already been added
+WARNING  [2026-Mar-14 20:57:03.970852]  (.../ored/configuration/conventions.cpp:649) : receiveFrequency_ empty set to index tenor.
+WARNING  [2026-Mar-14 20:57:03.971095]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+WARNING  [2026-Mar-14 20:57:04.002137]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+NOTICE   [2026-Mar-14 20:57:04.066559]  (...nalytics/orea/app/reportwriter.cpp:1251) : Writing Pricing stats report
+NOTICE   [2026-Mar-14 20:57:04.066718]  (...nalytics/orea/app/reportwriter.cpp:1267) : Pricing stats report written
+NOTICE   [2026-Mar-14 20:57:04.066824]  (...nalytics/orea/app/reportwriter.cpp:1272) : Writing runtimes report
+NOTICE   [2026-Mar-14 20:57:04.066931]  (...nalytics/orea/app/reportwriter.cpp:1296) : Finished writing runtimes report
+NOTICE   [2026-Mar-14 20:57:04.067042]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name dividends occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067149]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name fixings occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067255]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name marketdata occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067349]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name npv occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067446]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name pricingstats occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067538]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name runtimes occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067628]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067718]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration_cashflows occurs 1 times
+NOTICE   [2026-Mar-14 20:57:04.067815]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/dividends.csv'
+NOTICE   [2026-Mar-14 20:57:04.068088]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/dividends.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.068184]  (...ytics/orea/app/analyticsmanager.cpp:299) : report dividends written to Output/callable_bond_compare/dividends.csv
+NOTICE   [2026-Mar-14 20:57:04.068276]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/fixings.csv'
+NOTICE   [2026-Mar-14 20:57:04.071107]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/fixings.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.071247]  (...ytics/orea/app/analyticsmanager.cpp:299) : report fixings written to Output/callable_bond_compare/fixings.csv
+NOTICE   [2026-Mar-14 20:57:04.071343]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/todaysmarketcalibration.csv'
+NOTICE   [2026-Mar-14 20:57:04.072156]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/todaysmarketcalibration.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.072255]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration written to Output/callable_bond_compare/todaysmarketcalibration.csv
+NOTICE   [2026-Mar-14 20:57:04.072351]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/todaysmarketcalibration_cashflows.csv'
+NOTICE   [2026-Mar-14 20:57:04.087335]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/todaysmarketcalibration_cashflows.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.087479]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration_cashflows written to Output/callable_bond_compare/todaysmarketcalibration_cashflows.csv
+NOTICE   [2026-Mar-14 20:57:04.087590]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/marketdata.csv'
+NOTICE   [2026-Mar-14 20:57:04.089188]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/marketdata.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.089289]  (...ytics/orea/app/analyticsmanager.cpp:299) : report marketdata written to Output/callable_bond_compare/marketdata.csv
+NOTICE   [2026-Mar-14 20:57:04.089387]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/npv.csv'
+NOTICE   [2026-Mar-14 20:57:04.089573]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/npv.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.089743]  (...ytics/orea/app/analyticsmanager.cpp:299) : report npv written to Output/callable_bond_compare/npv.csv
+NOTICE   [2026-Mar-14 20:57:04.089933]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/pricingstats.csv'
+NOTICE   [2026-Mar-14 20:57:04.090213]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/pricingstats.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.090318]  (...ytics/orea/app/analyticsmanager.cpp:299) : report pricingstats written to Output/callable_bond_compare/pricingstats.csv
+NOTICE   [2026-Mar-14 20:57:04.090418]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/callable_bond_compare/runtimes.csv'
+NOTICE   [2026-Mar-14 20:57:04.090617]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/callable_bond_compare/runtimes.csv' closed.
+NOTICE   [2026-Mar-14 20:57:04.090724]  (...ytics/orea/app/analyticsmanager.cpp:299) : report runtimes written to Output/callable_bond_compare/runtimes.csv
+WARNING  [2026-Mar-14 20:57:04.090836]        (OREAnalytics/orea/app/oreapp.cpp:344) : Finishing OREApp::analytics(): 54738944|54738944 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-14 20:57:04.090942]        (OREAnalytics/orea/app/oreapp.cpp:345) : ORE analytics done
+NOTICE   [2026-Mar-14 20:57:04.091050]        (OREAnalytics/orea/app/oreapp.cpp:489) : ORE done.

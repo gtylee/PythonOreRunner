@@ -1,7 +1,7 @@
 import sys
 import unittest
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 import csv
 import numpy as np
 from pathlib import Path
@@ -23,13 +23,17 @@ from py_ore_tools.bond_pricing import (
     _fit_curve_for_currency,
     _load_callable_option_curve_from_reference_output,
     _load_curve_from_reference_output,
+    _accrued_amount,
     _load_security_spread,
     _parse_reference_grid_dates,
     _price_callable_bond_lgm,
+    _time_from_dates,
     build_bond_scenario_grid_numpy,
+    build_bond_scenario_grid_from_scenarios,
     compile_bond_trade,
     _bond_npv,
     _curve_from_flow_discounts,
+    _adjust_date,
     _load_bond_cashflows_from_flows,
     load_bond_trade_spec,
     load_callable_bond_trade_spec,
@@ -67,13 +71,58 @@ CALLABLE_LGM_GRID_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricinge
 CALLABLE_LGM_GRID_NPV = TOOLS_DIR / "Examples" / "Exposure" / "Output" / "callable_bond_lgm_grid_npv_only" / "npv.csv"
 CALLABLE_LGM_GRID_ADDITIONAL = TOOLS_DIR / "Examples" / "Exposure" / "Output" / "callable_bond_lgm_grid_npv_additional" / "additional_results.csv"
 EXAMPLE_SHARED_MARKET_FULL = TOOLS_DIR / "Examples" / "Input" / "market_20160205.txt"
+AMC_FORWARDBOND_ORE_XML = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "ore_forwardbond.xml"
+AMC_FORWARDBOND_PORTFOLIO = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "portfolio_forwardbond.xml"
+AMC_FORWARDBOND_REFERENCE = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "referencedata.xml"
+AMC_FORWARDBOND_PE = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "pricingengine.xml"
+AMC_FORWARDBOND_TM = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "todaysmarket.xml"
+AMC_FORWARDBOND_MARKET = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "market.txt"
 
 
 def _flat_curve(rate: float):
     return lambda t: 1.0 if float(t) <= 0.0 else float(pow(2.718281828459045, -rate * float(t)))
 
 
+def _shift_curve(curve, shift: float):
+    return lambda t, curve=curve, shift=shift: float(curve(float(t))) * float(np.exp(-float(shift) * max(float(t), 0.0)))
+
+
 class TestBondPricing(unittest.TestCase):
+    def _american_forwardbond_fixture(self, trade_id: str):
+        spec, engine = load_bond_trade_spec(
+            portfolio_xml=AMC_FORWARDBOND_PORTFOLIO,
+            trade_id=trade_id,
+            reference_data_path=AMC_FORWARDBOND_REFERENCE,
+            pricingengine_path=AMC_FORWARDBOND_PE,
+            flows_csv=None,
+        )
+        asof = date(2022, 1, 31)
+        curve = _fit_curve_for_currency(AMC_FORWARDBOND_ORE_XML, spec.currency)
+        if spec.credit_curve_id:
+            credit = load_ore_default_curve_inputs(
+                str(AMC_FORWARDBOND_TM),
+                str(AMC_FORWARDBOND_MARKET),
+                cpty_name=spec.credit_curve_id,
+            )
+            hazard_times = np.asarray(credit["hazard_times"], dtype=float)
+            hazard_rates = np.asarray(credit["hazard_rates"], dtype=float)
+            recovery_rate = float(credit["recovery"])
+        else:
+            hazard_times = np.asarray([50.0], dtype=float)
+            hazard_rates = np.asarray([0.0], dtype=float)
+            recovery_rate = 0.0
+        return {
+            "spec": spec,
+            "engine": engine,
+            "compiled": compile_bond_trade(spec, asof_date=asof, day_counter="A365F", engine_spec=engine),
+            "curve": curve,
+            "hazard_times": hazard_times,
+            "hazard_rates": hazard_rates,
+            "recovery_rate": recovery_rate,
+            "security_spread": _load_security_spread(AMC_FORWARDBOND_MARKET, spec.security_id),
+            "asof": asof,
+        }
+
     def _load_native_callable_event_rows(self, trade_id: str):
         rows = []
         with open(CALLABLE_LGM_GRID_ADDITIONAL, newline="", encoding="utf-8") as handle:
@@ -332,6 +381,123 @@ class TestBondPricing(unittest.TestCase):
             self.skipTest("torch is not available in this environment")
         th_out = price_bond_scenarios_torch(compiled, grid).detach().cpu().numpy()
         np.testing.assert_allclose(np_out, th_out, rtol=0.0, atol=1.0e-12)
+
+    def test_multi_scenario_grid_matches_scalar_for_american_bond_example(self):
+        fx = self._american_forwardbond_fixture("NoFwdContract")
+        shifts = np.asarray([-0.0040, -0.0015, 0.0, 0.0020, 0.0050], dtype=float)
+        hazard_bumps = np.asarray([0.0000, 0.0010, 0.0025, 0.0040, 0.0060], dtype=float)
+        recovery_rates = np.clip(fx["recovery_rate"] + np.asarray([0.0, -0.02, 0.01, -0.01, 0.015], dtype=float), 0.0, 0.95)
+        security_spreads = fx["security_spread"] + np.asarray([0.0, 0.0005, 0.0010, -0.0003, 0.0015], dtype=float)
+        discount_curves = [_shift_curve(fx["curve"], s) for s in shifts]
+        hazard_rates = np.clip(fx["hazard_rates"][None, :] + hazard_bumps[:, None], 0.0, None)
+
+        vector_grid = build_bond_scenario_grid_from_scenarios(
+            fx["compiled"],
+            discount_curves=discount_curves,
+            income_curves=discount_curves,
+            hazard_times=fx["hazard_times"],
+            hazard_rates=hazard_rates,
+            recovery_rate=recovery_rates,
+            security_spread=security_spreads,
+            engine_spec=fx["engine"],
+        )
+        vector_out = price_bond_scenarios_numpy(fx["compiled"], vector_grid)
+
+        scalar_out = []
+        for i in range(len(discount_curves)):
+            scalar_grid = build_bond_scenario_grid_numpy(
+                fx["compiled"],
+                discount_curve=discount_curves[i],
+                income_curve=discount_curves[i],
+                hazard_times=fx["hazard_times"],
+                hazard_rates=hazard_rates[i],
+                recovery_rate=float(recovery_rates[i]),
+                security_spread=float(security_spreads[i]),
+                engine_spec=fx["engine"],
+            )
+            scalar_out.append(price_bond_single_numpy(fx["compiled"], scalar_grid))
+        np.testing.assert_allclose(vector_out, np.asarray(scalar_out, dtype=float), rtol=0.0, atol=1.0e-10)
+
+    def test_multi_scenario_grid_matches_scalar_for_american_forwardbond_example(self):
+        fx = self._american_forwardbond_fixture("FwdBond")
+        shifts = np.asarray([-0.0035, -0.0010, 0.0, 0.0015, 0.0045], dtype=float)
+        hazard_bumps = np.asarray([0.0000, 0.0010, 0.0020, 0.0035, 0.0050], dtype=float)
+        recovery_rates = np.clip(fx["recovery_rate"] + np.asarray([0.0, -0.015, 0.01, -0.005, 0.02], dtype=float), 0.0, 0.95)
+        security_spreads = fx["security_spread"] + np.asarray([0.0, 0.0004, 0.0008, -0.0002, 0.0012], dtype=float)
+        discount_curves = [_shift_curve(fx["curve"], s) for s in shifts]
+        hazard_rates = np.clip(fx["hazard_rates"][None, :] + hazard_bumps[:, None], 0.0, None)
+
+        bond_settlement_date = _adjust_date(
+            fx["spec"].forward_maturity_date + timedelta(days=fx["spec"].settlement_days),
+            "F",
+            fx["spec"].calendar,
+        )
+        accrued_at_bond_settlement = np.full(
+            len(discount_curves),
+            float(_accrued_amount(fx["spec"], bond_settlement_date)),
+            dtype=float,
+        )
+        payoff_time = max(_time_from_dates(fx["asof"], bond_settlement_date, "A365F"), 0.0)
+        payoff_discount = np.asarray([float(curve(payoff_time)) for curve in discount_curves], dtype=float)
+        premium_discount = None
+        if fx["spec"].compensation_payment and fx["spec"].compensation_payment_date and fx["spec"].compensation_payment_date > fx["asof"]:
+            premium_time = max(_time_from_dates(fx["asof"], fx["spec"].compensation_payment_date, "A365F"), 0.0)
+            premium_discount = np.asarray([float(curve(premium_time)) for curve in discount_curves], dtype=float)
+
+        forward_dirty_value = []
+        scalar_out = []
+        for i in range(len(discount_curves)):
+            _, forward_value = _bond_npv(
+                fx["spec"],
+                asof_date=fx["asof"],
+                day_counter="A365F",
+                discount_curve=discount_curves[i],
+                income_curve=discount_curves[i],
+                hazard_times=fx["hazard_times"],
+                hazard_rates=hazard_rates[i],
+                recovery_rate=float(recovery_rates[i]),
+                security_spread=float(security_spreads[i]),
+                engine_spec=fx["engine"],
+                npv_date=fx["spec"].forward_maturity_date,
+                settlement_date=fx["spec"].forward_maturity_date,
+                conditional_on_survival=True,
+            )
+            forward_dirty_value.append(forward_value)
+            scalar_grid = build_bond_scenario_grid_numpy(
+                fx["compiled"],
+                discount_curve=discount_curves[i],
+                income_curve=discount_curves[i],
+                hazard_times=fx["hazard_times"],
+                hazard_rates=hazard_rates[i],
+                recovery_rate=float(recovery_rates[i]),
+                security_spread=float(security_spreads[i]),
+                engine_spec=fx["engine"],
+                forward_dirty_value=float(forward_value),
+                accrued_at_bond_settlement=float(accrued_at_bond_settlement[i]),
+                payoff_discount=float(payoff_discount[i]),
+                premium_discount=None if premium_discount is None else float(premium_discount[i]),
+            )
+            scalar_out.append(price_bond_single_numpy(fx["compiled"], scalar_grid))
+
+        vector_grid = build_bond_scenario_grid_from_scenarios(
+            fx["compiled"],
+            discount_curves=discount_curves,
+            income_curves=discount_curves,
+            hazard_times=fx["hazard_times"],
+            hazard_rates=hazard_rates,
+            recovery_rate=recovery_rates,
+            security_spread=security_spreads,
+            engine_spec=fx["engine"],
+            forward_dirty_value=np.asarray(forward_dirty_value, dtype=float),
+            accrued_at_bond_settlement=accrued_at_bond_settlement,
+            payoff_discount=payoff_discount,
+            premium_discount=premium_discount,
+        )
+        vector_out = price_bond_scenarios_numpy(fx["compiled"], vector_grid)
+        np.testing.assert_allclose(vector_out, np.asarray(scalar_out, dtype=float), rtol=0.0, atol=1.0e-10)
+        if torch is not None:
+            torch_out = price_bond_scenarios_torch(fx["compiled"], vector_grid).detach().cpu().numpy()
+            np.testing.assert_allclose(vector_out, torch_out, rtol=0.0, atol=1.0e-10)
 
     def test_load_callable_bond_trade_spec_merges_reference_and_expands_american(self):
         spec, engine = load_callable_bond_trade_spec(

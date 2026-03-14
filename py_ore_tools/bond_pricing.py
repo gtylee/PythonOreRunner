@@ -581,6 +581,175 @@ def build_bond_scenario_grid_numpy(
     )
 
 
+def _scenario_curve_list(curves, n_scenarios: int | None, name: str) -> tuple[list[object], int]:
+    if callable(curves):
+        if n_scenarios is None:
+            n_scenarios = 1
+        return [curves] * int(n_scenarios), int(n_scenarios)
+    seq = list(curves)
+    if not seq:
+        raise ValueError(f"{name} is empty")
+    if n_scenarios is None:
+        n_scenarios = len(seq)
+    elif len(seq) == 1 and n_scenarios > 1:
+        seq = seq * int(n_scenarios)
+    elif len(seq) != int(n_scenarios):
+        raise ValueError(f"{name} must contain 1 or {n_scenarios} curves, got {len(seq)}")
+    return seq, int(n_scenarios)
+
+
+def _scenario_values(value, n_scenarios: int, name: str, *, allow_none: bool = False) -> np.ndarray | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{name} is required")
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return np.full(int(n_scenarios), float(arr), dtype=float)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be scalar or 1d, got shape {arr.shape}")
+    if arr.size == 1 and int(n_scenarios) > 1:
+        return np.full(int(n_scenarios), float(arr[0]), dtype=float)
+    if arr.size != int(n_scenarios):
+        raise ValueError(f"{name} must have length {n_scenarios}, got {arr.size}")
+    return np.asarray(arr, dtype=float)
+
+
+def build_bond_scenario_grid_from_scenarios(
+    compiled: CompiledBondTrade,
+    *,
+    discount_curves,
+    income_curves=None,
+    hazard_times: np.ndarray,
+    hazard_rates: np.ndarray,
+    recovery_rate: float | np.ndarray,
+    security_spread: float | np.ndarray = 0.0,
+    engine_spec: BondEngineSpec | None = None,
+    npv_time: float = 0.0,
+    settlement_time: float = 0.0,
+    conditional_on_survival: bool = False,
+    forward_dirty_value: float | np.ndarray | None = None,
+    accrued_at_bond_settlement: float | np.ndarray | None = None,
+    payoff_discount: float | np.ndarray | None = None,
+    premium_discount: float | np.ndarray | None = None,
+) -> BondScenarioGrid:
+    """Sample many scenario curves / hazards onto a compiled trade in one call.
+
+    This is the multi-scenario counterpart to `build_bond_scenario_grid_numpy`.
+    It keeps the hot pricing path in NumPy / Torch while allowing scenario
+    market data to arrive as Python callables plus hazard vectors.
+    """
+
+    engine_spec = engine_spec or compiled.engine_spec
+    discount_curve_list, n_scenarios = _scenario_curve_list(discount_curves, None, "discount_curves")
+    if income_curves is None:
+        income_curve_list = discount_curve_list
+    else:
+        income_curve_list, _ = _scenario_curve_list(income_curves, n_scenarios, "income_curves")
+
+    hazard_times = np.asarray(hazard_times, dtype=float)
+    hazard_rates_arr = np.asarray(hazard_rates, dtype=float)
+    if hazard_rates_arr.ndim == 1:
+        hazard_rates_arr = np.repeat(hazard_rates_arr.reshape(1, -1), n_scenarios, axis=0)
+    elif hazard_rates_arr.ndim == 2:
+        if hazard_rates_arr.shape[0] == 1 and n_scenarios > 1:
+            hazard_rates_arr = np.repeat(hazard_rates_arr, n_scenarios, axis=0)
+        elif hazard_rates_arr.shape[0] != n_scenarios:
+            raise ValueError(
+                f"hazard_rates must have shape ({n_scenarios}, m) or (m,), got {hazard_rates_arr.shape}"
+            )
+    else:
+        raise ValueError(f"hazard_rates must be 1d or 2d, got shape {hazard_rates_arr.shape}")
+    if hazard_rates_arr.shape[1] != hazard_times.size:
+        raise ValueError(
+            f"hazard_rates tenor axis must match hazard_times, got {hazard_rates_arr.shape[1]} vs {hazard_times.size}"
+        )
+
+    recovery_rates = _scenario_values(recovery_rate, n_scenarios, "recovery_rate")
+    security_spreads = _scenario_values(security_spread, n_scenarios, "security_spread")
+
+    discount_to_pay = np.zeros((n_scenarios, compiled.pay_times.size), dtype=float)
+    survival_to_pay = np.zeros((n_scenarios, compiled.pay_times.size), dtype=float)
+    recovery_discount_mid = np.zeros((n_scenarios, compiled.recovery_nominals.size), dtype=float)
+    recovery_default_prob = np.zeros((n_scenarios, compiled.recovery_nominals.size), dtype=float)
+    income_to_npv = np.zeros(n_scenarios, dtype=float)
+    income_to_settlement = np.zeros(n_scenarios, dtype=float)
+
+    for i in range(n_scenarios):
+        extra_credit = (
+            float(security_spreads[i]) / max(1.0 - float(recovery_rates[i]), 1.0e-12)
+            if engine_spec.treat_security_spread_as_credit_spread
+            else 0.0
+        )
+        eff_discount = (
+            discount_curve_list[i]
+            if engine_spec.treat_security_spread_as_credit_spread
+            else _apply_spread(discount_curve_list[i], float(security_spreads[i]))
+        )
+        eff_income = income_curve_list[i]
+        if (
+            abs(float(security_spreads[i])) > 1.0e-16
+            and not engine_spec.treat_security_spread_as_credit_spread
+            and engine_spec.spread_on_income_curve
+        ):
+            eff_income = _apply_spread(income_curve_list[i], float(security_spreads[i]))
+        df_npv = float(eff_income(max(npv_time, 0.0)))
+        df_settlement = float(eff_income(max(settlement_time, 0.0)))
+        income_to_npv[i] = df_npv
+        income_to_settlement[i] = df_settlement
+        sp_npv = 1.0 if not conditional_on_survival else float(
+            _survival_from_piecewise(
+                np.asarray([max(npv_time, 0.0)], dtype=float),
+                hazard_times,
+                hazard_rates_arr[i],
+                extra_credit,
+            )[0]
+        )
+        for j, pay_t in enumerate(compiled.pay_times):
+            pay_t_eff = max(float(pay_t), 0.0)
+            discount_to_pay[i, j] = float(eff_discount(pay_t_eff)) / max(df_npv, 1.0e-18)
+            survival_to_pay[i, j] = float(
+                _survival_from_piecewise(
+                    np.asarray([pay_t_eff], dtype=float),
+                    hazard_times,
+                    hazard_rates_arr[i],
+                    extra_credit,
+                )[0]
+            ) / max(sp_npv, 1.0e-18)
+        for j, (start_t, end_t) in enumerate(zip(compiled.recovery_start_times, compiled.recovery_end_times)):
+            s_eff = max(float(start_t), 0.0)
+            e_eff = max(float(end_t), 0.0)
+            if e_eff <= s_eff:
+                continue
+            recovery_default_prob[i, j] = _default_probability(
+                s_eff,
+                e_eff,
+                hazard_times,
+                hazard_rates_arr[i],
+                extra_credit,
+            ) / max(sp_npv, 1.0e-18)
+            recovery_discount_mid[i, j] = float(eff_discount(0.5 * (s_eff + e_eff))) / max(df_npv, 1.0e-18)
+
+    return BondScenarioGrid(
+        discount_to_pay=discount_to_pay,
+        income_to_npv=income_to_npv,
+        income_to_settlement=income_to_settlement,
+        survival_to_pay=survival_to_pay,
+        recovery_discount_mid=recovery_discount_mid,
+        recovery_default_prob=recovery_default_prob,
+        recovery_rate=np.asarray(recovery_rates, dtype=float),
+        forward_dirty_value=_scenario_values(forward_dirty_value, n_scenarios, "forward_dirty_value", allow_none=True),
+        accrued_at_bond_settlement=_scenario_values(
+            accrued_at_bond_settlement,
+            n_scenarios,
+            "accrued_at_bond_settlement",
+            allow_none=True,
+        ),
+        payoff_discount=_scenario_values(payoff_discount, n_scenarios, "payoff_discount", allow_none=True),
+        premium_discount=_scenario_values(premium_discount, n_scenarios, "premium_discount", allow_none=True),
+    )
+
+
 def price_bond_scenarios_numpy(compiled: CompiledBondTrade, grid: BondScenarioGrid) -> np.ndarray:
     """Vectorized NumPy evaluator.
 

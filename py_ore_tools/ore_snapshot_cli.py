@@ -815,6 +815,16 @@ def _requested_xva_metrics_from_ore_xml(ore_xml: Path) -> list[str]:
     return requested
 
 
+def _xva_csv_has_trade_row(xva_csv: Path, trade_id: str) -> bool:
+    with open(xva_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        for row in reader:
+            if (row.get(tid_key, "") or "").strip() == trade_id:
+                return True
+    return False
+
+
 def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: str) -> tuple[float, float]:
     root = ET.parse(simulation_xml).getroot()
     corr_nodes = root.findall("./CrossAssetModel/InstantaneousCorrelations/Correlation")
@@ -1620,6 +1630,7 @@ def _compute_fx_option_snapshot_case(
         recovery_own=recovery_own_eff,
         exposure_discounting="discount_curve",
     )
+    has_trade_xva_reference = _xva_csv_has_trade_row(xva_csv, str(payload["trade_id"]))
     xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(payload["netting_set_id"]))
     basel_ee = epe.copy()
     basel_eee = np.maximum.accumulate(basel_ee)
@@ -1655,25 +1666,30 @@ def _compute_fx_option_snapshot_case(
         pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
         pricing["t0_npv_abs_diff"] = abs(float(pricing["py_t0_npv"]) - float(payload["ore_t0_npv"]))
     xva_summary = {
-        "ore_cva": float(xva_row["cva"]),
         "py_cva": float(xva_pack["cva"]),
-        "cva_rel_diff": _safe_rel_diff(float(xva_pack["cva"]), float(xva_row["cva"])),
-        "ore_dva": float(xva_row["dva"]),
         "py_dva": float(xva_pack["dva"]),
-        "dva_rel_diff": _safe_rel_diff(float(xva_pack["dva"]), float(xva_row["dva"])),
-        "ore_fba": float(xva_row["fba"]),
         "py_fba": float(xva_pack.get("fba", 0.0)),
-        "fba_rel_diff": _safe_rel_diff(float(xva_pack.get("fba", 0.0)), float(xva_row["fba"])),
-        "ore_fca": float(xva_row["fca"]),
         "py_fca": float(xva_pack.get("fca", 0.0)),
-        "fca_rel_diff": _safe_rel_diff(float(xva_pack.get("fca", 0.0)), float(xva_row["fca"])),
         "py_fva": float(xva_pack.get("fva", 0.0)),
         "own_credit_source": own_credit_source,
-        "ore_basel_epe": float(xva_row["basel_epe"]),
-        "ore_basel_eepe": float(xva_row["basel_eepe"]),
         "py_basel_epe": py_basel_epe,
         "py_basel_eepe": py_basel_eepe,
     }
+    if has_trade_xva_reference:
+        xva_summary.update(
+            {
+                "ore_cva": float(xva_row["cva"]),
+                "cva_rel_diff": _safe_rel_diff(float(xva_pack["cva"]), float(xva_row["cva"])),
+                "ore_dva": float(xva_row["dva"]),
+                "dva_rel_diff": _safe_rel_diff(float(xva_pack["dva"]), float(xva_row["dva"])),
+                "ore_fba": float(xva_row["fba"]),
+                "fba_rel_diff": _safe_rel_diff(float(xva_pack.get("fba", 0.0)), float(xva_row["fba"])),
+                "ore_fca": float(xva_row["fca"]),
+                "fca_rel_diff": _safe_rel_diff(float(xva_pack.get("fca", 0.0)), float(xva_row["fca"])),
+                "ore_basel_epe": float(xva_row["basel_epe"]),
+                "ore_basel_eepe": float(xva_row["basel_eepe"]),
+            }
+        )
     requested_metrics = _requested_xva_metrics_from_ore_xml(ore_xml)
     diagnostics = {
         "engine": "compare",
@@ -1684,6 +1700,7 @@ def _compute_fx_option_snapshot_case(
         "ene_rel_median": float(np.median(_safe_rel_vector(ene, np.asarray(exposure_profile["ene"], dtype=float)))),
         "exposure_points": int(exposure_times.size),
         "own_credit_source": own_credit_source,
+        **({} if has_trade_xva_reference else {"missing_reference_xva": True}),
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
     }
     return SnapshotComputation(
@@ -1705,8 +1722,8 @@ def _compute_fx_option_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
-        ore_basel_epe=float(xva_row["basel_epe"]),
-        ore_basel_eepe=float(xva_row["basel_eepe"]),
+        ore_basel_epe=float(xva_row["basel_epe"]) if has_trade_xva_reference else 0.0,
+        ore_basel_eepe=float(xva_row["basel_eepe"]) if has_trade_xva_reference else 0.0,
     )
 
 
@@ -1990,6 +2007,8 @@ def _infer_modes(args: argparse.Namespace, ore_xml: Path) -> ModeSelection:
     if args.price or args.xva or args.sensi:
         return ModeSelection(price=args.price, xva=args.xva, sensi=args.sensi)
     active = _parse_analytics(ore_xml)
+    if active["sensi"] and not active["price"] and not active["xva"]:
+        return ModeSelection(price=False, xva=False, sensi=True)
     first_trade_type = _first_trade_type(ore_xml)
     # Bond-family examples often request exposure/XVA in ore.xml, but the Python
     # CLI integration currently supports them in price-only mode. When the user
@@ -2097,6 +2116,15 @@ def _is_plain_vanilla_swap_trade(ore_xml: Path) -> bool:
         return False
 
 
+def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
+    trade_type = str(first_trade_type or "").strip()
+    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption"}:
+        return True
+    if trade_type == "Swap":
+        return _is_plain_vanilla_swap_trade(ore_xml)
+    return False
+
+
 def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
     result = dict(case_summary)
     pricing = case_summary.get("pricing")
@@ -2142,6 +2170,7 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
         or "has no DiscountingCurves mapping for config" in message
         or "has no DiscountingCurve[@currency='" in message
         or "Could not resolve column name for curve handle" in message
+        or "discount_columns must contain at least one column name" in message
     )
 
 
@@ -2943,8 +2972,10 @@ def _run_case(
             )
     elif modes.price:
         try:
-            if _has_active_simulation_analytic(ore_xml) or first_trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption"} or (
-                first_trade_type == "Swap" and _is_plain_vanilla_swap_trade(ore_xml)
+            if _supports_native_price_only(first_trade_type, ore_xml) or (
+                _has_active_simulation_analytic(ore_xml)
+                and first_trade_type == "Swap"
+                and _is_plain_vanilla_swap_trade(ore_xml)
             ):
                 price_summary = _compute_price_only_case(
                     ore_xml,
@@ -3021,27 +3052,31 @@ def _run_case(
     }
     pricing_diff = (case_summary.get("pricing") or {}).get("t0_npv_abs_diff")
     xva_summary = case_summary.get("xva") or {}
+    cva_diff = xva_summary.get("cva_rel_diff")
+    dva_diff = xva_summary.get("dva_rel_diff")
+    fba_diff = xva_summary.get("fba_rel_diff")
+    fca_diff = xva_summary.get("fca_rel_diff")
     case_summary["pass_flags"] = {
         "pricing": True if (not modes.price or pricing_diff is None) else pricing_diff <= args.max_npv_abs_diff,
         "xva_cva": (
             True
-            if (not modes.xva or "CVA" not in requested_xva_metrics)
-            else xva_summary["cva_rel_diff"] <= args.max_cva_rel
+            if (not modes.xva or "CVA" not in requested_xva_metrics or cva_diff is None)
+            else cva_diff <= args.max_cva_rel
         ),
         "xva_dva": (
             True
-            if (not modes.xva or "DVA" not in requested_xva_metrics)
-            else xva_summary["dva_rel_diff"] <= args.max_dva_rel
+            if (not modes.xva or "DVA" not in requested_xva_metrics or dva_diff is None)
+            else dva_diff <= args.max_dva_rel
         ),
         "xva_fba": (
             True
-            if (not modes.xva or "FVA" not in requested_xva_metrics)
-            else xva_summary["fba_rel_diff"] <= args.max_fba_rel
+            if (not modes.xva or "FVA" not in requested_xva_metrics or fba_diff is None)
+            else fba_diff <= args.max_fba_rel
         ),
         "xva_fca": (
             True
-            if (not modes.xva or "FVA" not in requested_xva_metrics)
-            else xva_summary["fca_rel_diff"] <= args.max_fca_rel
+            if (not modes.xva or "FVA" not in requested_xva_metrics or fca_diff is None)
+            else fca_diff <= args.max_fca_rel
         ),
     }
     case_summary["pass_all"] = bool(all(case_summary["pass_flags"].values()))
