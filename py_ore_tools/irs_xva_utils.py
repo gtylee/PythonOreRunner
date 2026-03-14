@@ -125,14 +125,19 @@ def build_discount_curve_from_discount_pairs(
         raise ValueError("discount curve times must be strictly increasing")
     if np.any(dfs <= 0.0):
         raise ValueError("discount factors must be strictly positive")
+    log_dfs = np.log(dfs)
+    left_slope = (log_dfs[1] - log_dfs[0]) / max(times[1] - times[0], 1.0e-12)
+    right_slope = (log_dfs[-1] - log_dfs[-2]) / max(times[-1] - times[-2], 1.0e-12)
 
     def p0(t: float) -> float:
         t = float(t)
         if t <= times[0]:
-            return float(dfs[0])
+            if t <= 1.0e-14:
+                return 1.0
+            return float(np.exp(log_dfs[0] + (t - times[0]) * left_slope))
         if t >= times[-1]:
-            return float(dfs[-1])
-        return float(np.interp(t, times, dfs))
+            return float(np.exp(log_dfs[-1] + (t - times[-1]) * right_slope))
+        return float(np.exp(np.interp(t, times, log_dfs)))
 
     return p0
 
@@ -526,18 +531,25 @@ def load_ore_legs_from_flows(
     out["float_start_time"] = np.asarray([to_time(r["AccrualStartDate"]) for r in floating], dtype=float)
     out["float_end_time"] = np.asarray([to_time(r["AccrualEndDate"]) for r in floating], dtype=float)
     out["float_accrual"] = np.asarray([float(r["Accrual"]) for r in floating], dtype=float)
-    idx_dc = index_day_counter or time_day_counter
-    out["float_index_accrual"] = np.asarray(
-        [
-            _time_from_dates(
-                datetime.strptime(r["AccrualStartDate"], "%Y-%m-%d").date(),
-                datetime.strptime(r["AccrualEndDate"], "%Y-%m-%d").date(),
-                idx_dc,
-            )
-            for r in floating
-        ],
-        dtype=float,
-    )
+    idx_dc = index_day_counter or "flows_accrual"
+    if index_day_counter is None:
+        # flows.csv already carries the coupon accrual used by ORE to compute the
+        # exported floating coupon. Reusing it avoids introducing a synthetic
+        # coupon-vs-index basis mismatch when the true floating index convention is
+        # not available in the flow report.
+        out["float_index_accrual"] = np.asarray([float(r["Accrual"]) for r in floating], dtype=float)
+    else:
+        out["float_index_accrual"] = np.asarray(
+            [
+                _time_from_dates(
+                    datetime.strptime(r["AccrualStartDate"], "%Y-%m-%d").date(),
+                    datetime.strptime(r["AccrualEndDate"], "%Y-%m-%d").date(),
+                    idx_dc,
+                )
+                for r in floating
+            ],
+            dtype=float,
+        )
     out["float_notional"] = np.asarray([float(r["Notional"]) for r in floating], dtype=float)
     out["float_sign"] = np.full(len(floating), float_leg_sign, dtype=float)
     out["float_coupon"] = np.asarray([float(r["Coupon"]) for r in floating], dtype=float)

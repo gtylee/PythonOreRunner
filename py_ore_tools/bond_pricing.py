@@ -542,40 +542,41 @@ def price_bond_scenarios_numpy(compiled: CompiledBondTrade, grid: BondScenarioGr
     return np.asarray(pv, dtype=float)
 
 
-def price_bond_scenarios_torch(compiled: CompiledBondTrade, grid: BondScenarioGrid):
+def price_bond_scenarios_torch(compiled: CompiledBondTrade, grid: BondScenarioGrid, *, device: str = "cpu"):
     """Vectorized Torch evaluator mirroring the NumPy kernel."""
 
     if torch is None:
         raise ImportError("torch is required for price_bond_scenarios_torch()")
     validate_bond_scenario_grid(compiled, grid)
-    device = torch.device("cpu")
-    amounts = torch.as_tensor(compiled.amounts, dtype=torch.float64, device=device)
-    recovery_nominals = torch.as_tensor(compiled.recovery_nominals, dtype=torch.float64, device=device)
-    discount_to_pay = torch.as_tensor(grid.discount_to_pay, dtype=torch.float64, device=device)
-    survival_to_pay = torch.as_tensor(grid.survival_to_pay, dtype=torch.float64, device=device)
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    amounts = torch.as_tensor(compiled.amounts, dtype=dtype, device=target)
+    recovery_nominals = torch.as_tensor(compiled.recovery_nominals, dtype=dtype, device=target)
+    discount_to_pay = torch.as_tensor(grid.discount_to_pay, dtype=dtype, device=target)
+    survival_to_pay = torch.as_tensor(grid.survival_to_pay, dtype=dtype, device=target)
     pv = torch.sum(discount_to_pay * survival_to_pay * amounts.unsqueeze(0), dim=1)
     if compiled.recovery_nominals.size:
-        recovery_discount_mid = torch.as_tensor(grid.recovery_discount_mid, dtype=torch.float64, device=device)
-        recovery_default_prob = torch.as_tensor(grid.recovery_default_prob, dtype=torch.float64, device=device)
-        recovery_rate = torch.as_tensor(grid.recovery_rate, dtype=torch.float64, device=device)
+        recovery_discount_mid = torch.as_tensor(grid.recovery_discount_mid, dtype=dtype, device=target)
+        recovery_default_prob = torch.as_tensor(grid.recovery_default_prob, dtype=dtype, device=target)
+        recovery_rate = torch.as_tensor(grid.recovery_rate, dtype=dtype, device=target)
         pv = pv + torch.sum(
             recovery_discount_mid * recovery_default_prob * recovery_nominals.unsqueeze(0) * recovery_rate.unsqueeze(1),
             dim=1,
         )
     if compiled.trade_type == "ForwardBond":
-        forward_dirty_value = torch.as_tensor(grid.forward_dirty_value, dtype=torch.float64, device=device)
-        accrued = torch.as_tensor(grid.accrued_at_bond_settlement, dtype=torch.float64, device=device)
+        forward_dirty_value = torch.as_tensor(grid.forward_dirty_value, dtype=dtype, device=target)
+        accrued = torch.as_tensor(grid.accrued_at_bond_settlement, dtype=dtype, device=target)
         strike = torch.full_like(forward_dirty_value, float(compiled.forward_amount or 0.0))
         if not compiled.settlement_dirty:
             strike = strike + accrued
         raw = forward_dirty_value - strike if compiled.long_in_forward else strike - forward_dirty_value
-        pv = raw * torch.as_tensor(grid.payoff_discount, dtype=torch.float64, device=device)
+        pv = raw * torch.as_tensor(grid.payoff_discount, dtype=dtype, device=target)
         if (
             compiled.compensation_payment_time is not None
             and compiled.compensation_payment_time > 0.0
             and compiled.compensation_payment
         ):
-            prem = float(compiled.compensation_payment) * torch.as_tensor(grid.premium_discount, dtype=torch.float64, device=device)
+            prem = float(compiled.compensation_payment) * torch.as_tensor(grid.premium_discount, dtype=dtype, device=target)
             pv = pv + (-prem if compiled.long_in_forward else prem)
     return pv
 

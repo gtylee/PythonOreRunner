@@ -118,6 +118,24 @@ python py_ore_tools/benchmarks/benchmark_lgm_fx_hybrid_ore.py --max-cases 2
 python py_ore_tools/benchmarks/benchmark_lgm_fx_hybrid_ore.py --execute --max-cases 2
 ```
 
+### `benchmark_bond_pricing_numpy_torch.py`
+
+Purpose:
+Benchmark the new compiled-trade bond scenario pricers with a scalar-loop
+baseline plus NumPy and torch side by side.
+
+Inputs:
+- Local `Example_18` bond fixtures already vendored in this repo
+
+Outputs:
+- Prints timing and parity JSON only
+
+Example:
+
+```bash
+python py_ore_tools/benchmarks/benchmark_bond_pricing_numpy_torch.py --scenarios 1000 10000 --devices cpu gpu
+```
+
 ### `benchmark_ore_ir_options.py`
 
 Purpose:

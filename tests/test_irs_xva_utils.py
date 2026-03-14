@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 
 from py_ore_tools.irs_xva_utils import (
+    build_discount_curve_from_discount_pairs,
     load_ore_default_curve_inputs,
     payer_swap_npv_at_time,
     swap_npv_from_ore_legs,
@@ -121,11 +122,6 @@ def _swap_npv_from_ore_legs_dual_curve_reference(
         w = (T - t1) / max(t2 - t1, 1.0e-12)
         return np.exp((1.0 - w) * logp[j - 1] + w * logp[j])
 
-    def map_forward_bond_from_disc(T: float, p_t_T_disc: np.ndarray) -> np.ndarray:
-        bt = p0_fwd(t) / p0_disc(t)
-        bT = p0_fwd(T) / p0_disc(T)
-        return p_t_T_disc * (bT / bt)
-
     mask_f = legs["fixed_pay_time"] > t + 1.0e-12
     if np.any(mask_f):
         pay = legs["fixed_pay_time"][mask_f]
@@ -163,10 +159,9 @@ def _swap_npv_from_ore_legs_dual_curve_reference(
             n2 = n[~fixed]
             sign2 = sign[~fixed]
             spread2 = spread[~fixed]
-            p_ts_d2 = np.array([interp_from_nodes(T) for T in s2])
-            p_te_d2 = np.array([interp_from_nodes(T) for T in e2])
-            p_ts_f2 = np.array([map_forward_bond_from_disc(T, p_ts_d2[i]) for i, T in enumerate(s2)])
-            p_te_f2 = np.array([map_forward_bond_from_disc(T, p_te_d2[i]) for i, T in enumerate(e2)])
+            p_t_f = p0_fwd(t)
+            p_ts_f2 = np.array([model.discount_bond(t, T, x_t, p_t_f, p0_fwd(T)) for T in s2])
+            p_te_f2 = np.array([model.discount_bond(t, T, x_t, p_t_f, p0_fwd(T)) for T in e2])
             fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / tau2[:, None]
             amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
@@ -197,6 +192,12 @@ class TestIrsXvaUtils(unittest.TestCase):
         scalar = np.array([self.model.discount_bond(t, float(T), self.x_t, self.p0(t), self.p0(float(T))) for T in maturities])
         vectorized = self.model.discount_bond_paths(t, maturities, self.x_t, self.p0(t), self.p0)
         self.assertTrue(np.allclose(vectorized, scalar, rtol=1.0e-12, atol=1.0e-13))
+
+    def test_build_discount_curve_from_discount_pairs_extrapolates_in_log_discount_space(self):
+        p0 = build_discount_curve_from_discount_pairs([(0.0, 1.0), (1.0, np.exp(-0.02)), (2.0, np.exp(-0.04))])
+
+        self.assertAlmostEqual(p0(0.5), float(np.exp(-0.01)), places=12)
+        self.assertAlmostEqual(p0(2.5), float(np.exp(-0.05)), places=12)
 
     def test_payer_swap_npv_matches_reference_implementation(self):
         trade_def = {
@@ -344,6 +345,24 @@ T1,Swap,2,1,2016-09-01,InterestProjected,5.0,EUR,-0.002,0.25,2016-06-01,2016-09-
             legs = load_ore_legs_from_flows(fp, trade_id="T1", asof_date="2016-02-05", time_day_counter="A365F")
 
         self.assertTrue(np.allclose(legs["float_sign"], np.array([-1.0, -1.0])))
+
+    def test_load_ore_legs_from_flows_uses_exported_accrual_for_index_basis_by_default(self):
+        from py_ore_tools.irs_xva_utils import load_ore_legs_from_flows
+
+        flows_csv = """\
+#TradeId,Type,CashflowNo,LegNo,PayDate,FlowType,Amount,Currency,Coupon,Accrual,AccrualStartDate,AccrualEndDate,AccruedAmount,fixingDate,fixingValue,Notional,DiscountFactor,PresentValue,FXRate(Local-Base),PresentValue(Base),BaseCurrency
+T1,Swap,1,0,2016-09-01,Interest,100.0,EUR,0.02,0.5,2016-03-01,2016-09-01,0.0,#N/A,#N/A,10000.0,1.0,100.0,1.0,100.0,EUR
+T1,Swap,1,1,2016-09-01,InterestProjected,50.0,EUR,0.02,0.5000000000,2016-03-01,2016-09-01,0.0,2016-02-26,0.02,10000.0,1.0,50.0,1.0,50.0,EUR
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = f"{tmp}/flows.csv"
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(flows_csv)
+            legs = load_ore_legs_from_flows(fp, trade_id="T1", asof_date="2016-02-05", time_day_counter="A365F")
+
+        self.assertAlmostEqual(float(legs["float_accrual"][0]), 0.5)
+        self.assertAlmostEqual(float(legs["float_index_accrual"][0]), 0.5)
+        self.assertEqual(legs["float_index_day_counter"], "flows_accrual")
 
 
 if __name__ == "__main__":
