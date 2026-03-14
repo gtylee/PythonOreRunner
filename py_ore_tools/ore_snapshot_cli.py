@@ -385,6 +385,9 @@ def _build_minimal_pricing_payload(
     run_dir = base.parent
     input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
     output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    market_data_path = (input_dir / setup_params.get("marketDataFile", "")).resolve()
+    curve_config_path = (input_dir / setup_params.get("curveConfigFile", "")).resolve()
+    conventions_path = (input_dir / setup_params.get("conventionsFile", "")).resolve()
     todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
     portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
     sim_config_id = markets_params.get("simulation", "libor")
@@ -439,8 +442,17 @@ def _build_minimal_pricing_payload(
         )[forward_column]
         p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
 
-    calibration_xml = output_path / "calibration.xml"
-    if calibration_xml.exists():
+    calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
+        ore_xml_path=str(ore_xml_path),
+        output_path=output_path,
+        market_data_path=market_data_path,
+        curve_config_path=curve_config_path,
+        conventions_path=conventions_path,
+        todaysmarket_xml_path=todaysmarket_xml,
+        simulation_xml_path=simulation_xml,
+        domestic_ccy=domestic_ccy,
+    )
+    if calibration_xml is not None and calibration_xml.exists():
         try:
             params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(
                 str(calibration_xml), ccy_key=domestic_ccy

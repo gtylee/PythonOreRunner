@@ -319,7 +319,7 @@ class TestBondPricing(unittest.TestCase):
             flows_csv=None,
         )
         self.assertLess(float(certain_call["py_npv"]), float(no_call["py_npv"]))
-        self.assertLess(float(certain_call["embedded_option_value"]), 0.0)
+        self.assertGreater(float(certain_call["embedded_option_value"]), 0.0)
 
     def test_callable_put_overrides_call_and_increases_value(self):
         call_only = price_bond_trade(

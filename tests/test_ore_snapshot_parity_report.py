@@ -83,6 +83,24 @@ class TestOreSnapshotParityReport(unittest.TestCase):
         self.assertEqual(snap.seed, 42)
         self.assertEqual(snap.n_samples, 1000)
 
+    def test_load_from_ore_xml_falls_back_to_matching_example_calibration(self):
+        engine_root = require_engine_repo_root()
+        ore_xml = engine_root / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
+        snap = load_from_ore_xml(ore_xml)
+
+        self.assertEqual(snap.alpha_source, "calibration")
+        self.assertIsNotNone(snap.calibration_xml_path)
+        self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
+    def test_load_from_ore_xml_falls_back_to_matching_cross_example_calibration(self):
+        engine_root = require_engine_repo_root()
+        ore_xml = engine_root / "Examples" / "Legacy" / "Example_1" / "Input" / "ore.xml"
+        snap = load_from_ore_xml(ore_xml)
+
+        self.assertEqual(snap.alpha_source, "calibration")
+        self.assertIsNotNone(snap.calibration_xml_path)
+        self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
 
 if __name__ == "__main__":
     unittest.main()

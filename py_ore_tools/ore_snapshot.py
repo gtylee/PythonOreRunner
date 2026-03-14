@@ -60,6 +60,7 @@ import dataclasses
 import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -93,6 +94,7 @@ from .irs_xva_utils import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +529,139 @@ def _resolve_case_dirs(ore_xml_path: str | Path) -> tuple[Path, Path, Path]:
     run_dir = base.parent
     input_dir = _resolve_ore_path(setup_params.get("inputPath", base.name or "Input"), run_dir)
     return ore_xml, run_dir, input_dir
+
+
+@lru_cache(maxsize=512)
+def _parse_ore_setup_context(ore_xml_path: str) -> dict[str, object]:
+    ore_path, run_dir, input_dir = _resolve_case_dirs(ore_xml_path)
+    ore_root = ET.parse(ore_path).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    sim_param = ""
+    sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
+    if sim_analytic is not None:
+        for node in sim_analytic.findall("./Parameter"):
+            if node.attrib.get("name", "") == "simulationConfigFile":
+                sim_param = (node.text or "").strip()
+                break
+    simulation_xml = _resolve_ore_path(sim_param or "simulation.xml", input_dir)
+    sim_root = ET.parse(simulation_xml).getroot()
+    domestic_ccy = (
+        sim_root.findtext("./DomesticCcy")
+        or sim_root.findtext("./CrossAssetModel/DomesticCcy")
+        or "EUR"
+    ).strip()
+    return {
+        "ore_xml": ore_path,
+        "input_dir": input_dir,
+        "output_dir": _resolve_ore_path(setup_params.get("outputPath", "Output"), run_dir),
+        "simulation_xml": simulation_xml,
+        "market_data": _resolve_ore_path(setup_params.get("marketDataFile", ""), input_dir),
+        "curve_config": _resolve_ore_path(setup_params.get("curveConfigFile", ""), input_dir),
+        "conventions": _resolve_ore_path(setup_params.get("conventionsFile", ""), input_dir),
+        "todaysmarket": _resolve_ore_path(
+            setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml"),
+            input_dir,
+        ),
+        "domestic_ccy": domestic_ccy,
+    }
+
+
+@lru_cache(maxsize=512)
+def _simulation_lgm_signature(simulation_xml: str, domestic_ccy: str) -> tuple[str, ...]:
+    root = ET.parse(simulation_xml).getroot()
+    models = root.find("./CrossAssetModel/InterestRateModels")
+    if models is None:
+        raise ValueError(f"simulation xml missing InterestRateModels: {simulation_xml}")
+    node = models.find(f"./LGM[@ccy='{domestic_ccy}']")
+    if node is None:
+        node = models.find("./LGM[@ccy='default']")
+    if node is None:
+        raise ValueError(f"simulation xml missing LGM node for {domestic_ccy}: {simulation_xml}")
+
+    def _txt(path: str) -> str:
+        return (node.findtext(path) or "").strip()
+
+    return (
+        _txt("./CalibrationType"),
+        _txt("./Volatility/Calibrate").upper(),
+        _txt("./Volatility/VolatilityType"),
+        _txt("./Volatility/ParamType"),
+        _txt("./Volatility/TimeGrid"),
+        _txt("./Volatility/InitialValue"),
+        _txt("./Reversion/Calibrate").upper(),
+        _txt("./Reversion/ReversionType"),
+        _txt("./Reversion/ParamType"),
+        _txt("./Reversion/TimeGrid"),
+        _txt("./Reversion/InitialValue"),
+        _txt("./CalibrationSwaptions/Expiries"),
+        _txt("./CalibrationSwaptions/Terms"),
+        _txt("./CalibrationSwaptions/Strikes"),
+        _txt("./ParameterTransformation/ShiftHorizon"),
+        _txt("./ParameterTransformation/Scaling"),
+    )
+
+
+@lru_cache(maxsize=32)
+def _candidate_ore_xmls_with_calibration() -> tuple[str, ...]:
+    examples_root = PROJECT_ROOT / "Examples"
+    if not examples_root.exists():
+        return ()
+    candidates: list[str] = []
+    for ore_xml in sorted(examples_root.rglob("ore*.xml")):
+        try:
+            ctx = _parse_ore_setup_context(str(ore_xml))
+        except Exception:
+            continue
+        if (Path(ctx["output_dir"]) / "calibration.xml").exists():
+            candidates.append(str(Path(ctx["ore_xml"]).resolve()))
+    return tuple(candidates)
+
+
+def resolve_calibration_xml_path(
+    *,
+    ore_xml_path: str,
+    output_path: str | Path,
+    market_data_path: str | Path,
+    curve_config_path: str | Path,
+    conventions_path: str | Path,
+    todaysmarket_xml_path: str | Path,
+    simulation_xml_path: str | Path,
+    domestic_ccy: str,
+) -> Optional[Path]:
+    direct = Path(output_path).resolve() / "calibration.xml"
+    if direct.exists():
+        return direct
+    current_key = (
+        Path(market_data_path).resolve(),
+        Path(curve_config_path).resolve(),
+        Path(conventions_path).resolve(),
+        Path(todaysmarket_xml_path).resolve(),
+        str(domestic_ccy).strip() or "EUR",
+        _simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
+    )
+    for candidate_ore_xml in _candidate_ore_xmls_with_calibration():
+        if Path(candidate_ore_xml).resolve() == Path(ore_xml_path).resolve():
+            continue
+        try:
+            ctx = _parse_ore_setup_context(candidate_ore_xml)
+            candidate_key = (
+                Path(ctx["market_data"]).resolve(),
+                Path(ctx["curve_config"]).resolve(),
+                Path(ctx["conventions"]).resolve(),
+                Path(ctx["todaysmarket"]).resolve(),
+                str(ctx["domestic_ccy"]),
+                _simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
+            )
+        except Exception:
+            continue
+        if candidate_key == current_key:
+            calibration_xml = Path(ctx["output_dir"]) / "calibration.xml"
+            if calibration_xml.exists():
+                return calibration_xml.resolve()
+    return None
 
 
 def validate_ore_input_snapshot(
@@ -1962,8 +2097,17 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     # 5. Determine LGM parameters (calibration.xml preferred)
     # ------------------------------------------------------------------
-    calibration_xml = output_path / "calibration.xml"
-    if calibration_xml.exists():
+    calibration_xml = resolve_calibration_xml_path(
+        ore_xml_path=str(ore_xml),
+        output_path=output_path,
+        market_data_path=market_data_path,
+        curve_config_path=curve_config_path,
+        conventions_path=conventions_path,
+        todaysmarket_xml_path=todaysmarket_xml,
+        simulation_xml_path=simulation_xml,
+        domestic_ccy=domestic_ccy,
+    )
+    if calibration_xml is not None and calibration_xml.exists():
         try:
             params_dict = parse_lgm_params_from_calibration_xml(
                 str(calibration_xml), ccy_key=domestic_ccy
@@ -2203,7 +2347,7 @@ def load_from_ore_xml(
         todaysmarket_xml_path=str(todaysmarket_xml),
         market_data_path=str(market_data_file),
         simulation_xml_path=str(simulation_xml),
-        calibration_xml_path=str(calibration_xml) if calibration_xml.exists() else None,
+        calibration_xml_path=str(calibration_xml) if calibration_xml is not None and calibration_xml.exists() else None,
         curves_csv_path=str(curves_csv),
         exposure_csv_path=str(exposure_csv),
         xva_csv_path=str(xva_csv),

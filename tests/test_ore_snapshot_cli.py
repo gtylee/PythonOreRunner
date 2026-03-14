@@ -852,7 +852,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             "callable_model_family": "LGM",
             "callable_engine_variant": "Grid",
             "stripped_bond_npv": 103.0,
-            "embedded_option_value": -1.75,
+            "embedded_option_value": 1.75,
         }
         fake_npv = {"npv": 100.0, "maturity_date": "2024-02-26", "maturity_time": 8.0}
         with patch("py_ore_tools.ore_snapshot_cli.price_bond_trade", return_value=fake_result):
