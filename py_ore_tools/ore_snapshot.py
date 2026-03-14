@@ -803,7 +803,7 @@ def validate_ore_input_snapshot(
     curves_cfg = analytics_params.get("curves", {}).get("configuration", "").strip()
     if curves_cfg and curves_cfg not in requested_market_configs:
         requested_market_configs.append(curves_cfg)
-    if "default" not in requested_market_configs:
+    if not requested_market_configs:
         requested_market_configs.append("default")
 
     missing_requested_market_configs = [
@@ -829,10 +829,12 @@ def validate_ore_input_snapshot(
         }
     )
     available_convention_set = set(available_conventions)
+    portfolio_path = portfolio_xml if portfolio_xml is not None and portfolio_xml.exists() else None
     relevant_currencies, relevant_indices, relevant_counterparties = _collect_snapshot_relevance(
-        portfolio_xml if portfolio_xml is not None and portfolio_xml.exists() else None,
+        portfolio_path,
         analytics_params,
     )
+    has_portfolio = portfolio_path is not None
 
     active_section_ids: dict[str, set[str]] = defaultdict(set)
     missing_section_refs: list[dict[str, str]] = []
@@ -933,8 +935,10 @@ def validate_ore_input_snapshot(
             continue
         selected = [
             node for node in section.findall("./Index")
-            if not relevant_indices or (node.attrib.get("name", "").strip() in relevant_indices)
+            if node.attrib.get("name", "").strip() in relevant_indices
         ]
+        if not selected and has_portfolio and not relevant_indices:
+            continue
         for node in selected or section.findall("./Index"):
             spec = (node.text or "").strip()
             parent_tags, curve_id = _curve_spec_target(spec)
@@ -949,8 +953,10 @@ def validate_ore_input_snapshot(
             continue
         selected = [
             node for node in section.findall("./DefaultCurve")
-            if not relevant_counterparties or (node.attrib.get("name", "").strip() in relevant_counterparties)
+            if node.attrib.get("name", "").strip() in relevant_counterparties
         ]
+        if not selected and has_portfolio and not relevant_counterparties:
+            continue
         for node in selected:
             spec = (node.text or "").strip()
             parent_tags, curve_id = _curve_spec_target(spec)

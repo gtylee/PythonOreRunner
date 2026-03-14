@@ -67,6 +67,7 @@ REPORT_BUCKET_HINTS = {
     "clean_pass": "No action needed; case is clean on the current parity path.",
     "expected_output_fallback_pass": "Case is passing against vendored ExpectedOutput; only generate native Output if you want native-artifact parity as well.",
     "no_reference_artifacts_pass": "Case has no native Output or vendored ExpectedOutput; generate native artifacts only if you want parity-grade references.",
+    "python_only_no_reference": "Case looks natively runnable in Python, but no Output or ExpectedOutput baseline exists; generate reference artifacts only if you want parity-grade comparison.",
     "parity_threshold_fail": "Inspect per-case summary and comparison metrics; use pricing vs XVA pass flags to choose the next subsystem.",
     "sample_count_mismatch": "Align Python paths with ORE samples before treating the diff as structural.",
     "missing_native_output_fallback": "Decide whether to vendor native outputs or accept expected-output-only parity.",
@@ -719,6 +720,10 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         raise ValueError(f"Incomplete FxForwardData for trade '{trade_id}' in {portfolio_xml}")
     pair = f"{bought_ccy}/{sold_ccy}"
     strike = sold_amount / bought_amount
+    value_date = (fx_data.findtext("./ValueDate") or "").strip()
+    settlement_type = (fx_data.findtext("./Settlement") or "").strip().upper()
+    settlement_currency = (fx_data.findtext("./SettlementData/Currency") or sold_ccy).strip().upper()
+    settlement_date = (fx_data.findtext("./SettlementData/Date") or value_date).strip()
 
     tm_root = ET.parse(todaysmarket_xml).getroot()
     mappings = ore_snapshot_mod._resolve_discount_columns_by_currency(tm_root, pricing_config_id)
@@ -728,6 +733,7 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         )
     curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
     if curves_csv is None:
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
     if npv_csv is None:
@@ -777,9 +783,15 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id),
         "maturity_date": str(npv_details["maturity_date"]),
         "maturity_time": maturity_time,
+        "value_date": value_date,
+        "settlement_date": settlement_date or str(npv_details["maturity_date"]),
+        "settlement_type": settlement_type,
+        "settlement_currency": settlement_currency,
         "ore_t0_npv": float(npv_details["npv"]),
         "discount_column": mappings[sold_ccy]["source_column"],
         "forward_column": mappings[bought_ccy]["source_column"],
+        "bought_currency": bought_ccy,
+        "sold_currency": sold_ccy,
         "fx_def": fx_def,
         "spot0": spot0,
         "p0_dom": p0_dom,
@@ -788,10 +800,21 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "curve_dfs_dom": [float(x) for x in dfs_dom],
         "curve_dates_for": list(dates_for),
         "curve_dfs_for": [float(x) for x in dfs_for],
+        "reference_fixing_value": (
+            _load_fx_forward_fixing_value_from_flows(flows_csv, trade_id, bought_amount)
+            if flows_csv is not None and flows_csv.exists()
+            else None
+        ),
+        "reference_discount_factor": (
+            _load_fx_forward_discount_factor_from_flows(flows_csv, trade_id)
+            if flows_csv is not None and flows_csv.exists()
+            else None
+        ),
         "reference_output_dirs": sorted({str(curves_csv.parent), str(npv_csv.parent)}),
         "using_expected_output": any(
             _classify_reference_dir(ore_xml, path.parent) == "expected_output"
-            for path in (curves_csv, npv_csv)
+            for path in (curves_csv, npv_csv, flows_csv)
+            if path is not None
         ),
     }
 
@@ -1152,6 +1175,58 @@ def _find_reference_npv_file(ore_xml: Path, trade_id: str) -> Path | None:
     return primary
 
 
+def _load_fx_forward_fixing_value_from_flows(flows_csv: Path, trade_id: str, bought_amount: float) -> float | None:
+    if bought_amount == 0.0:
+        return None
+    with open(flows_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        trade_key = "#TradeId" if reader.fieldnames and "#TradeId" in reader.fieldnames else "TradeId"
+        fixing_key = "fixingValue" if reader.fieldnames and "fixingValue" in reader.fieldnames else "FixingValue"
+        amount_key = "Amount" if reader.fieldnames and "Amount" in reader.fieldnames else "amount"
+        for row in reader:
+            if (row.get(trade_key, "") or "").strip() != trade_id:
+                continue
+            fixing_text = (row.get(fixing_key, "") or "").strip()
+            if fixing_text:
+                try:
+                    return float(fixing_text)
+                except ValueError:
+                    pass
+            amount_text = (row.get(amount_key, "") or "").strip()
+            if not amount_text:
+                continue
+            try:
+                amount = float(amount_text)
+            except ValueError:
+                continue
+            if amount > 0.0:
+                return amount / bought_amount
+    return None
+
+
+def _load_fx_forward_discount_factor_from_flows(flows_csv: Path, trade_id: str) -> float | None:
+    with open(flows_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        trade_key = "#TradeId" if reader.fieldnames and "#TradeId" in reader.fieldnames else "TradeId"
+        amount_key = "Amount" if reader.fieldnames and "Amount" in reader.fieldnames else "amount"
+        discount_key = "DiscountFactor" if reader.fieldnames and "DiscountFactor" in reader.fieldnames else "discountFactor"
+        for row in reader:
+            if (row.get(trade_key, "") or "").strip() != trade_id:
+                continue
+            amount_text = (row.get(amount_key, "") or "").strip()
+            discount_text = (row.get(discount_key, "") or "").strip()
+            if not amount_text or not discount_text:
+                continue
+            try:
+                amount = float(amount_text)
+                discount = float(discount_text)
+            except ValueError:
+                continue
+            if amount > 0.0:
+                return discount
+    return None
+
+
 def _resolve_case_portfolio_path(ore_xml: Path) -> Path | None:
     ore_root = ET.parse(ore_xml).getroot()
     setup_params = {
@@ -1293,6 +1368,8 @@ def _compute_price_only_case(
     if payload.get("trade_type") == "FxForward":
         fx_def = payload["fx_def"]
         maturity_date = str(payload["maturity_date"])
+        fixing_date = str(payload.get("value_date") or maturity_date)
+        settlement_date = str(payload.get("settlement_date") or maturity_date)
         dom_by_date = {
             str(d): float(df)
             for d, df in zip(payload.get("curve_dates_dom", []), payload.get("curve_dfs_dom", []))
@@ -1301,15 +1378,33 @@ def _compute_price_only_case(
             str(d): float(df)
             for d, df in zip(payload.get("curve_dates_for", []), payload.get("curve_dfs_for", []))
         }
-        df_dom = dom_by_date.get(maturity_date, float(payload["p0_dom"](float(fx_def.maturity))))
-        df_for = for_by_date.get(maturity_date, float(payload["p0_for"](float(fx_def.maturity))))
-        py_t0_npv = float(
-            fx_def.notional_base
-            * (
-                float(payload["spot0"]) * df_for
-                - float(fx_def.strike) * df_dom
+        df_dom_fix = dom_by_date.get(fixing_date, float(payload["p0_dom"](float(fx_def.maturity))))
+        df_for_fix = for_by_date.get(fixing_date, float(payload["p0_for"](float(fx_def.maturity))))
+        df_dom_settle = dom_by_date.get(settlement_date, dom_by_date.get(maturity_date, float(payload["p0_dom"](float(fx_def.maturity)))))
+        if payload.get("reference_discount_factor") is not None:
+            df_dom_settle = float(payload["reference_discount_factor"])
+        if (
+            str(payload.get("settlement_type", "")).upper() == "CASH"
+            and str(payload.get("settlement_currency", "")).upper() == str(payload.get("sold_currency", "")).upper()
+        ):
+            forward_fix = payload.get("reference_fixing_value")
+            if forward_fix is None:
+                forward_fix = float(payload["spot0"]) * df_for_fix / max(df_dom_fix, 1.0e-12)
+            py_t0_npv = float(
+                fx_def.notional_base
+                * df_dom_settle
+                * (float(forward_fix) - float(fx_def.strike))
             )
-        )
+        else:
+            df_dom = dom_by_date.get(maturity_date, float(payload["p0_dom"](float(fx_def.maturity))))
+            df_for = for_by_date.get(maturity_date, float(payload["p0_for"](float(fx_def.maturity))))
+            py_t0_npv = float(
+                fx_def.notional_base
+                * (
+                    float(payload["spot0"]) * df_for
+                    - float(fx_def.strike) * df_dom
+                )
+            )
         return {
             "trade_id": payload["trade_id"],
             "trade_type": payload["trade_type"],
@@ -1327,6 +1422,10 @@ def _compute_price_only_case(
                 "spot0": float(payload["spot0"]),
                 "fx_pair": payload["fx_def"].pair,
                 "fx_strike": float(payload["fx_def"].strike),
+                "fx_settlement_type": payload.get("settlement_type"),
+                "fx_settlement_currency": payload.get("settlement_currency"),
+                "fx_reference_fixing_value": payload.get("reference_fixing_value"),
+                "fx_reference_discount_factor": payload.get("reference_discount_factor"),
             },
             "diagnostics": {
                 "engine": "python_price_only",
@@ -2125,6 +2224,15 @@ def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
     return False
 
 
+def _supports_native_python_no_reference(first_trade_type: str, ore_xml: Path) -> bool:
+    trade_type = str(first_trade_type or "").strip()
+    if _supports_native_price_only(trade_type, ore_xml):
+        return True
+    if trade_type == "Swap" and _has_active_simulation_analytic(ore_xml):
+        return True
+    return False
+
+
 def _python_only_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
     result = dict(case_summary)
     pricing = case_summary.get("pricing")
@@ -2673,12 +2781,20 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
     reference_kinds = {_classify_reference_dir(ore_xml_path, p) for p in reference_dirs if p.exists()}
     if diagnostics.get("error"):
         return "hard_error"
+    first_trade_type = _first_trade_type(ore_xml_path) if ore_xml_path.is_file() else ""
+    if (
+        pass_all
+        and diagnostics.get("fallback_reason") == "missing_native_output"
+        and first_trade_type in {"FlexiSwap", "ScriptedTrade"}
+    ):
+        return "unsupported_python_snapshot_fallback"
     if diagnostics.get("pricing_fallback_reason") == "missing_simulation_analytic":
-        first_trade_type = _first_trade_type(ore_xml_path)
         if not _supports_native_price_only(first_trade_type, ore_xml_path):
             return "unsupported_python_snapshot_fallback"
         return "price_only_reference_fallback"
     if diagnostics.get("fallback_reason") == "missing_native_output" and pass_all and not reference_kinds:
+        if _supports_native_python_no_reference(first_trade_type, ore_xml_path):
+            return "python_only_no_reference"
         return "no_reference_artifacts_pass"
     if diagnostics.get("fallback_reason") == "missing_native_output" and pass_all and (
         "expected_output" in reference_kinds

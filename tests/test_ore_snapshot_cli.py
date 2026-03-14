@@ -31,6 +31,7 @@ BOND_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_18" / "Input" / "or
 CALLABLE_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond.xml"
 FX_FORWARD_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_28" / "Input" / "ore_eur_base.xml"
 FX_OPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_E0.xml"
+FX_NDF_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_71" / "Input" / "ore.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -113,6 +114,26 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
             self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
             self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_fx_ndf_uses_cash_settlement_formula(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(FX_NDF_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / "Example_71" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
+            self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
+            self.assertEqual(payload["pricing"]["fx_settlement_type"], "CASH")
+            self.assertEqual(payload["pricing"]["fx_settlement_currency"], "USD")
+            self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 1.0)
 
     def test_price_only_fx_option_runs_python_path_without_native_npv_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1158,6 +1179,29 @@ class TestOreSnapshotCli(unittest.TestCase):
         }
         self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "unsupported_python_snapshot_fallback")
 
+    def test_bucket_case_reclassifies_unsupported_missing_output_passes(self):
+        case_summary = {
+            "pass_all": True,
+            "ore_xml": str(TOOLS_DIR / "Examples" / "Legacy" / "Example_65" / "Input" / "ore_0.xml"),
+            "diagnostics": {
+                "fallback_reason": "missing_native_output",
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "unsupported_python_snapshot_fallback")
+
+    def test_bucket_case_marks_native_swap_without_references_as_python_only_no_reference(self):
+        case_summary = {
+            "pass_all": True,
+            "ore_xml": str(TOOLS_DIR / "Examples" / "Legacy" / "Example_35" / "Input" / "ore_Normal.xml"),
+            "diagnostics": {
+                "fallback_reason": "missing_native_output",
+                "reference_output_dirs": [],
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "python_only_no_reference")
+
     def test_bucket_case_splits_no_reference_artifacts_passes(self):
         case_summary = {
             "pass_all": True,
@@ -1168,7 +1212,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             },
             "input_validation": {"input_links_valid": True},
         }
-        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "no_reference_artifacts_pass")
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "python_only_no_reference")
 
     def test_write_live_report_artifacts_includes_next_fix_hint(self):
         with tempfile.TemporaryDirectory() as tmp:

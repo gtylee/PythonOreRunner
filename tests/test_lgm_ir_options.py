@@ -7,6 +7,9 @@ from py_ore_tools.lgm import LGM1F, LGMParams, simulate_lgm_measure
 from py_ore_tools.lgm_ir_options import (
     BermudanSwaptionDef,
     CapFloorDef,
+    _convolution_nodes_and_weights,
+    _convolution_rollback,
+    _convolution_rollback_python,
     bermudan_backward_price,
     bermudan_npv_paths,
     bermudan_price,
@@ -131,6 +134,41 @@ class TestLgmIrOptions(unittest.TestCase):
         self.assertGreater(backward.price, 0.0)
         self.assertAlmostEqual(backward.price, lsmc_price, delta=0.08 * lsmc_price)
         self.assertEqual(len(backward.diagnostics), 2)
+
+    def test_convolution_rollback_vectorized_matches_python_reference(self):
+        rng = np.random.default_rng(17)
+        mx = 17
+        nx = 4
+        y_nodes, y_weights = _convolution_nodes_and_weights(3.0, 8)
+        values = rng.normal(size=2 * mx + 1)
+
+        test_cases = [
+            (0.0, 0.0),
+            (0.05, 0.0),
+            (0.12, 0.03),
+            (0.50, 0.10),
+        ]
+        for zeta_t1, zeta_t0 in test_cases:
+            with self.subTest(zeta_t1=zeta_t1, zeta_t0=zeta_t0):
+                got = _convolution_rollback(
+                    values,
+                    zeta_t1=zeta_t1,
+                    zeta_t0=zeta_t0,
+                    mx=mx,
+                    nx=nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                ref = _convolution_rollback_python(
+                    values,
+                    zeta_t1=zeta_t1,
+                    zeta_t0=zeta_t0,
+                    mx=mx,
+                    nx=nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                np.testing.assert_allclose(got, ref, rtol=0.0, atol=1.0e-12)
 
 
 if __name__ == "__main__":

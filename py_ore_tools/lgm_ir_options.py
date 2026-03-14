@@ -900,7 +900,7 @@ def _convolution_state_grid(zeta_t: float, mx: int, nx: int) -> np.ndarray:
     return dx * (np.arange(2 * mx + 1, dtype=float) - mx)
 
 
-def _convolution_rollback(
+def _convolution_rollback_python(
     values: np.ndarray,
     *,
     zeta_t1: float,
@@ -922,7 +922,7 @@ def _convolution_rollback(
             kp = y_i * sigma / dx + mx
             kk = int(np.floor(kp))
             alpha = kp - kk
-            beta = 1.0 + kk - kp
+            beta = 1.0 - alpha
             interp = v[0] if kk < 0 else (v[-1] if kk + 1 > 2 * mx else alpha * v[kk + 1] + beta * v[kk])
             acc += w_i * interp
         out.fill(acc)
@@ -935,11 +935,76 @@ def _convolution_rollback(
             kp = (dx2 * (k - mx) + y_i * std) / dx + mx
             kk = int(np.floor(kp))
             alpha = kp - kk
-            beta = 1.0 + kk - kp
+            beta = 1.0 - alpha
             interp = v[0] if kk < 0 else (v[-1] if kk + 1 > 2 * mx else alpha * v[kk + 1] + beta * v[kk])
             acc += w_i * interp
         out[k] = acc
     return out
+
+
+def _convolution_rollback_vectorized(
+    values: np.ndarray,
+    *,
+    zeta_t1: float,
+    zeta_t0: float,
+    mx: int,
+    nx: int,
+    y_nodes: np.ndarray,
+    y_weights: np.ndarray,
+) -> np.ndarray:
+    v = np.ascontiguousarray(np.asarray(values, dtype=float))
+    if abs(zeta_t1 - zeta_t0) <= 1.0e-18:
+        return v.copy()
+
+    sigma = np.sqrt(max(float(zeta_t1), 0.0))
+    dx = sigma / float(nx)
+    last = 2 * mx
+
+    if abs(zeta_t0) <= 1.0e-18:
+        kp = y_nodes * sigma / dx + mx
+        kk = np.floor(kp).astype(np.int64, copy=False)
+        alpha = kp - kk
+        beta = 1.0 - alpha
+        left = np.clip(kk, 0, last)
+        right = np.clip(kk + 1, 0, last)
+        interp = alpha * v[right] + beta * v[left]
+        acc = float(np.dot(y_weights, interp))
+        out = np.empty(last + 1, dtype=float)
+        out.fill(acc)
+        return out
+
+    std = np.sqrt(max(float(zeta_t1 - zeta_t0), 0.0))
+    dx2 = np.sqrt(max(float(zeta_t0), 0.0)) / float(nx)
+    k_grid = np.arange(last + 1, dtype=float) - mx
+    kp = ((dx2 * k_grid)[:, None] + (y_nodes * std)[None, :]) / dx + mx
+    kk = np.floor(kp).astype(np.int64, copy=False)
+    alpha = kp - kk
+    beta = 1.0 - alpha
+    left = np.clip(kk, 0, last)
+    right = np.clip(kk + 1, 0, last)
+    interp = alpha * v[right] + beta * v[left]
+    return interp @ y_weights
+
+
+def _convolution_rollback(
+    values: np.ndarray,
+    *,
+    zeta_t1: float,
+    zeta_t0: float,
+    mx: int,
+    nx: int,
+    y_nodes: np.ndarray,
+    y_weights: np.ndarray,
+) -> np.ndarray:
+    return _convolution_rollback_vectorized(
+        values,
+        zeta_t1=zeta_t1,
+        zeta_t0=zeta_t0,
+        mx=mx,
+        nx=nx,
+        y_nodes=np.asarray(y_nodes, dtype=float),
+        y_weights=np.asarray(y_weights, dtype=float),
+    )
 
 
 def _state_grid_probabilities(model: LGM1F, t: float, x_grid: np.ndarray) -> np.ndarray:

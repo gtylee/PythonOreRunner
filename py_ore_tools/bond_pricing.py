@@ -396,6 +396,77 @@ class BondScenarioGrid:
         )
 
 
+@dataclass(frozen=True)
+class CompiledCallableCashflowState:
+    amount: float
+    pay_time: float
+    pay_index: int
+    belongs_to_underlying_max_time: float
+    max_estimation_time: float | None
+    exact_estimation_time: float | None
+    coupon_start_time: float | None
+    coupon_end_time: float | None
+
+
+@dataclass(frozen=True)
+class CompiledCallableBondTrade:
+    trade_id: str
+    currency: str
+    security_id: str
+    credit_curve_id: str
+    reference_curve_id: str
+    income_curve_id: str
+    bond_notional: float
+    day_counter: str
+
+    stripped_bond: CompiledBondTrade
+    engine_spec: CallableBondEngineSpec
+
+    grid_times: np.ndarray
+    k_grid: np.ndarray
+    call_amounts: np.ndarray
+    put_amounts: np.ndarray
+    call_active: np.ndarray
+    put_active: np.ndarray
+    cashflows: tuple[CompiledCallableCashflowState, ...]
+
+    center_index: int
+    grid_nx: int
+    y_nodes: np.ndarray
+    y_weights: np.ndarray
+
+
+@dataclass(frozen=True)
+class CallableBondScenarioPack:
+    p0_grid: np.ndarray
+    h_grid: np.ndarray
+    zeta_grid: np.ndarray
+    stripped_grid: BondScenarioGrid
+
+    def n_scenarios(self) -> int:
+        return int(np.asarray(self.p0_grid, dtype=float).shape[0])
+
+    def slice(self, start: int, end: int) -> "CallableBondScenarioPack":
+        return CallableBondScenarioPack(
+            p0_grid=np.asarray(self.p0_grid, dtype=float)[start:end],
+            h_grid=np.asarray(self.h_grid, dtype=float)[start:end],
+            zeta_grid=np.asarray(self.zeta_grid, dtype=float)[start:end],
+            stripped_grid=BondScenarioGrid(
+                discount_to_pay=np.asarray(self.stripped_grid.discount_to_pay, dtype=float)[start:end],
+                income_to_npv=np.asarray(self.stripped_grid.income_to_npv, dtype=float)[start:end],
+                income_to_settlement=np.asarray(self.stripped_grid.income_to_settlement, dtype=float)[start:end],
+                survival_to_pay=np.asarray(self.stripped_grid.survival_to_pay, dtype=float)[start:end],
+                recovery_discount_mid=np.asarray(self.stripped_grid.recovery_discount_mid, dtype=float)[start:end],
+                recovery_default_prob=np.asarray(self.stripped_grid.recovery_default_prob, dtype=float)[start:end],
+                recovery_rate=np.asarray(self.stripped_grid.recovery_rate, dtype=float)[start:end],
+                forward_dirty_value=None if self.stripped_grid.forward_dirty_value is None else np.asarray(self.stripped_grid.forward_dirty_value, dtype=float)[start:end],
+                accrued_at_bond_settlement=None if self.stripped_grid.accrued_at_bond_settlement is None else np.asarray(self.stripped_grid.accrued_at_bond_settlement, dtype=float)[start:end],
+                payoff_discount=None if self.stripped_grid.payoff_discount is None else np.asarray(self.stripped_grid.payoff_discount, dtype=float)[start:end],
+                premium_discount=None if self.stripped_grid.premium_discount is None else np.asarray(self.stripped_grid.premium_discount, dtype=float)[start:end],
+            ),
+        )
+
+
 def compile_bond_trade(
     spec: BondTradeSpec,
     *,
@@ -827,6 +898,651 @@ def price_bond_single_numpy(compiled: CompiledBondTrade, grid: BondScenarioGrid)
     """Single-scenario special case of the vectorized NumPy kernel."""
 
     return float(price_bond_scenarios_numpy(compiled, grid.as_single())[0])
+
+
+def compile_callable_bond_trade(
+    spec: CallableBondTradeSpec,
+    engine_spec: CallableBondEngineSpec,
+    *,
+    asof_date: str | date,
+    day_counter: str,
+) -> CompiledCallableBondTrade:
+    asof = asof_date if isinstance(asof_date, date) else _parse_any_date(str(asof_date))
+    pay_times = np.asarray(
+        [
+            _time_from_dates(asof, cf.pay_date, day_counter)
+            for cf in spec.bond.cashflows
+            if not _cashflow_has_occurred(cf.pay_date, asof, False)
+        ],
+        dtype=float,
+    )
+    exercise_times = np.asarray(
+        [
+            _time_from_dates(asof, ex.exercise_date, day_counter)
+            for ex in spec.call_data + spec.put_data
+            if ex.exercise_date > asof
+        ],
+        dtype=float,
+    )
+    mandatory_times = np.asarray(sorted(set([float(x) for x in np.concatenate((pay_times, exercise_times)) if float(x) > 0.0])), dtype=float)
+    max_time = float(np.max(mandatory_times)) if mandatory_times.size else 0.0
+    if engine_spec.engine_variant == "Grid":
+        mx = max(int(round(float(engine_spec.grid_sx) * float(engine_spec.grid_nx))), 1)
+        grid_nx = int(engine_spec.grid_nx)
+        y_nodes, y_weights = _convolution_nodes_and_weights(float(engine_spec.grid_sy), int(engine_spec.grid_ny))
+        effective_steps = max(int(engine_spec.exercise_time_steps_per_year), 0)
+        grid_max_time = max_time
+    else:
+        mx = max((int(engine_spec.fd_state_grid_points) - 1) // 2, 1)
+        grid_nx = max(int(round(mx / max(6.0, 1.0e-12))), 1)
+        y_nodes, y_weights = _convolution_nodes_and_weights(3.0, 10)
+        effective_steps = max(int(engine_spec.exercise_time_steps_per_year), int(engine_spec.fd_time_steps_per_year))
+        grid_max_time = max(max_time, float(engine_spec.fd_max_time))
+    grid = _build_callable_grid_times(mandatory_times, max_time=grid_max_time, time_steps_per_year=effective_steps)
+    if grid[-1] > max_time and max_time > 0.0:
+        grid = grid[grid <= max_time + 1.0e-12]
+        if grid.size == 0 or grid[-1] < max_time:
+            grid = np.append(grid, max_time)
+
+    call_active = np.zeros(grid.size, dtype=bool)
+    put_active = np.zeros(grid.size, dtype=bool)
+    call_amounts = np.zeros(grid.size, dtype=float)
+    put_amounts = np.zeros(grid.size, dtype=float)
+    change_times, notionals = _callable_notional_schedule(spec, asof, day_counter)
+    notionals_on_grid = np.asarray([_callable_notional_at_time(change_times, notionals, float(t)) for t in grid], dtype=float)
+    accruals_on_grid = np.asarray([_callable_accrual_at_time(spec, asof, day_counter, float(t)) for t in grid], dtype=float)
+
+    call_map = _register_callable_exercises(
+        grid,
+        tuple(ex for ex in spec.call_data if ex.exercise_date > asof),
+        asof_date=asof,
+        day_counter=day_counter,
+    )
+    put_map = _register_callable_exercises(
+        grid,
+        tuple(ex for ex in spec.put_data if ex.exercise_date > asof),
+        asof_date=asof,
+        day_counter=day_counter,
+    )
+    for idx, ex in call_map.items():
+        call_active[idx] = True
+        call_amounts[idx] = _callable_price_amount(ex, notionals_on_grid[idx], accruals_on_grid[idx])
+    for idx, ex in put_map.items():
+        put_active[idx] = True
+        put_amounts[idx] = _callable_price_amount(ex, notionals_on_grid[idx], accruals_on_grid[idx])
+
+    cashflows = []
+    for cf in _build_callable_cashflow_states(spec, asof_date=asof, day_counter=day_counter):
+        cashflows.append(
+            CompiledCallableCashflowState(
+                amount=float(cf.amount),
+                pay_time=float(cf.pay_time),
+                pay_index=_find_time_index(grid, float(cf.pay_time)),
+                belongs_to_underlying_max_time=float(cf.belongs_to_underlying_max_time),
+                max_estimation_time=None if cf.max_estimation_time is None else float(cf.max_estimation_time),
+                exact_estimation_time=None if cf.exact_estimation_time is None else float(cf.exact_estimation_time),
+                coupon_start_time=None if cf.coupon_start_time is None else float(cf.coupon_start_time),
+                coupon_end_time=None if cf.coupon_end_time is None else float(cf.coupon_end_time),
+            )
+        )
+
+    stripped_spec = replace(
+        spec.bond,
+        trade_type="Bond",
+    )
+    stripped_engine = BondEngineSpec(
+        timestep_months=6,
+        spread_on_income_curve=engine_spec.spread_on_income_curve,
+        treat_security_spread_as_credit_spread=False,
+        include_past_cashflows=False,
+    )
+    return CompiledCallableBondTrade(
+        trade_id=spec.trade_id,
+        currency=spec.currency,
+        security_id=spec.security_id,
+        credit_curve_id=spec.credit_curve_id,
+        reference_curve_id=spec.reference_curve_id,
+        income_curve_id=spec.income_curve_id,
+        bond_notional=float(spec.bond_notional),
+        day_counter=str(day_counter),
+        stripped_bond=compile_bond_trade(stripped_spec, asof_date=asof, day_counter=day_counter, engine_spec=stripped_engine),
+        engine_spec=engine_spec,
+        grid_times=np.asarray(grid, dtype=float),
+        k_grid=(np.arange(2 * mx + 1, dtype=float) - mx),
+        call_amounts=call_amounts,
+        put_amounts=put_amounts,
+        call_active=call_active,
+        put_active=put_active,
+        cashflows=tuple(cashflows),
+        center_index=mx,
+        grid_nx=grid_nx,
+        y_nodes=np.asarray(y_nodes, dtype=float),
+        y_weights=np.asarray(y_weights, dtype=float),
+    )
+
+
+def _scenario_model_list(models, n_scenarios: int | None) -> tuple[list[LGM1F], int]:
+    if isinstance(models, (LGM1F, LGMParams, dict)):
+        if n_scenarios is None:
+            n_scenarios = 1
+        models = [models] * int(n_scenarios)
+    seq = list(models)
+    if not seq:
+        raise ValueError("models is empty")
+    if n_scenarios is None:
+        n_scenarios = len(seq)
+    elif len(seq) == 1 and int(n_scenarios) > 1:
+        seq = seq * int(n_scenarios)
+    elif len(seq) != int(n_scenarios):
+        raise ValueError(f"models must contain 1 or {n_scenarios} entries, got {len(seq)}")
+
+    out: list[LGM1F] = []
+    for item in seq:
+        if isinstance(item, LGM1F):
+            out.append(item)
+            continue
+        if isinstance(item, LGMParams):
+            out.append(LGM1F(item))
+            continue
+        if isinstance(item, dict):
+            out.append(
+                LGM1F(
+                    LGMParams(
+                        alpha_times=tuple(float(x) for x in np.asarray(item.get("alpha_times", []), dtype=float)),
+                        alpha_values=tuple(float(x) for x in np.asarray(item.get("alpha_values", [0.01]), dtype=float)),
+                        kappa_times=tuple(float(x) for x in np.asarray(item.get("kappa_times", []), dtype=float)),
+                        kappa_values=tuple(float(x) for x in np.asarray(item.get("kappa_values", [0.03]), dtype=float)),
+                        shift=float(item.get("shift", 0.0)),
+                        scaling=float(item.get("scaling", 1.0)),
+                    )
+                )
+            )
+            continue
+        raise TypeError(f"unsupported LGM model payload type '{type(item).__name__}'")
+    return out, int(n_scenarios)
+
+
+def build_callable_bond_scenario_pack(
+    compiled: CompiledCallableBondTrade,
+    *,
+    reference_curves,
+    models,
+    hazard_times: np.ndarray,
+    hazard_rates: np.ndarray,
+    recovery_rate: float | np.ndarray,
+    security_spread: float | np.ndarray = 0.0,
+    stripped_discount_curves=None,
+    stripped_income_curves=None,
+) -> CallableBondScenarioPack:
+    reference_curve_list, n_scenarios = _scenario_curve_list(reference_curves, None, "reference_curves")
+    model_list, n_scenarios = _scenario_model_list(models, n_scenarios)
+    hazard_times = np.asarray(hazard_times, dtype=float)
+    hazard_rates_arr = np.asarray(hazard_rates, dtype=float)
+    if hazard_rates_arr.ndim == 1:
+        hazard_rates_arr = np.repeat(hazard_rates_arr.reshape(1, -1), n_scenarios, axis=0)
+    elif hazard_rates_arr.ndim == 2:
+        if hazard_rates_arr.shape[0] == 1 and n_scenarios > 1:
+            hazard_rates_arr = np.repeat(hazard_rates_arr, n_scenarios, axis=0)
+        elif hazard_rates_arr.shape[0] != n_scenarios:
+            raise ValueError(f"hazard_rates must have shape ({n_scenarios}, m) or (m,), got {hazard_rates_arr.shape}")
+    else:
+        raise ValueError(f"hazard_rates must be 1d or 2d, got shape {hazard_rates_arr.shape}")
+    if hazard_rates_arr.shape[1] != hazard_times.size:
+        raise ValueError(f"hazard_rates tenor axis must match hazard_times, got {hazard_rates_arr.shape[1]} vs {hazard_times.size}")
+
+    recovery_rates = _scenario_values(recovery_rate, n_scenarios, "recovery_rate")
+    security_spreads = _scenario_values(security_spread, n_scenarios, "security_spread")
+    p0_grid = np.zeros((n_scenarios, compiled.grid_times.size), dtype=float)
+    h_grid = np.zeros((n_scenarios, compiled.grid_times.size), dtype=float)
+    zeta_grid = np.zeros((n_scenarios, compiled.grid_times.size), dtype=float)
+
+    for i, (curve, model) in enumerate(zip(reference_curve_list, model_list)):
+        eff_discount_curve = _effective_bond_discount_curve(
+            curve,
+            hazard_times,
+            hazard_rates_arr[i],
+            float(recovery_rates[i]),
+            float(security_spreads[i]),
+        )
+        p0_grid[i, :] = np.asarray([float(eff_discount_curve(float(t))) for t in compiled.grid_times], dtype=float)
+        h_grid[i, :] = np.asarray(model.H(compiled.grid_times), dtype=float)
+        zeta_grid[i, :] = np.asarray(model.zeta(compiled.grid_times), dtype=float)
+
+    stripped_discount_curves = reference_curves if stripped_discount_curves is None else stripped_discount_curves
+    stripped_income_curves = stripped_discount_curves if stripped_income_curves is None else stripped_income_curves
+    stripped_grid = build_bond_scenario_grid_from_scenarios(
+        compiled.stripped_bond,
+        discount_curves=stripped_discount_curves,
+        income_curves=stripped_income_curves,
+        hazard_times=hazard_times,
+        hazard_rates=hazard_rates_arr,
+        recovery_rate=recovery_rates,
+        security_spread=security_spreads,
+        engine_spec=compiled.stripped_bond.engine_spec,
+    )
+    return CallableBondScenarioPack(
+        p0_grid=p0_grid,
+        h_grid=h_grid,
+        zeta_grid=zeta_grid,
+        stripped_grid=stripped_grid,
+    )
+
+
+def validate_callable_bond_scenario_pack(compiled: CompiledCallableBondTrade, pack: CallableBondScenarioPack) -> None:
+    p0_grid = _ensure_2d_float("p0_grid", pack.p0_grid)
+    h_grid = _ensure_2d_float("h_grid", pack.h_grid)
+    zeta_grid = _ensure_2d_float("zeta_grid", pack.zeta_grid)
+    expected = (pack.n_scenarios(), compiled.grid_times.size)
+    for name, arr in (("p0_grid", p0_grid), ("h_grid", h_grid), ("zeta_grid", zeta_grid)):
+        if arr.shape != expected:
+            raise ValueError(f"{name} expected shape {expected}, got {arr.shape}")
+    validate_bond_scenario_grid(compiled.stripped_bond, pack.stripped_grid)
+    if pack.stripped_grid.n_scenarios() != pack.n_scenarios():
+        raise ValueError("stripped_grid scenario count must match callable scenario count")
+
+
+def _callable_coupon_ratio_compiled(cf: CompiledCallableCashflowState, t: float) -> float:
+    if cf.coupon_start_time is None or cf.coupon_end_time is None:
+        return 1.0
+    denom = float(cf.coupon_end_time) - float(cf.coupon_start_time)
+    if denom <= 1.0e-18:
+        return 0.0
+    return max(0.0, min(1.0, (float(cf.coupon_end_time) - float(t)) / denom))
+
+
+def _convolution_rollback_batch_numpy(
+    values: np.ndarray,
+    *,
+    zeta_t1: np.ndarray,
+    zeta_t0: np.ndarray,
+    mx: int,
+    nx: int,
+    y_nodes: np.ndarray,
+    y_weights: np.ndarray,
+) -> np.ndarray:
+    v = np.asarray(values, dtype=float)
+    out = v.copy()
+    z1 = np.asarray(zeta_t1, dtype=float).reshape(-1)
+    z0 = np.asarray(zeta_t0, dtype=float).reshape(-1)
+    if v.ndim != 2 or v.shape[0] != z1.size or z0.size != z1.size:
+        raise ValueError("batch rollback shape mismatch")
+
+    last = 2 * mx
+    changed = np.abs(z1 - z0) > 1.0e-18
+    if not np.any(changed):
+        return out
+
+    idx = np.nonzero(changed)[0]
+    vv = v[idx]
+    zz1 = np.maximum(z1[idx], 0.0)
+    zz0 = np.maximum(z0[idx], 0.0)
+    sigma = np.sqrt(zz1)
+    dx = sigma / float(nx)
+
+    zero_mask = zz0 <= 1.0e-18
+    if np.any(zero_mask):
+        zi = idx[zero_mask]
+        kp = y_nodes[None, :] * (sigma[zero_mask] / dx[zero_mask])[:, None] + mx
+        kk = np.floor(kp).astype(np.int64, copy=False)
+        alpha = kp - kk
+        beta = 1.0 - alpha
+        left = np.clip(kk, 0, last)
+        right = np.clip(kk + 1, 0, last)
+        interp = alpha * np.take_along_axis(v[zi], right, axis=1) + beta * np.take_along_axis(v[zi], left, axis=1)
+        acc = interp @ y_weights
+        out[zi, :] = acc[:, None]
+
+    pos_mask = ~zero_mask
+    if np.any(pos_mask):
+        zi = idx[pos_mask]
+        std = np.sqrt(np.maximum(zz1[pos_mask] - zz0[pos_mask], 0.0))
+        dx2 = np.sqrt(zz0[pos_mask]) / float(nx)
+        k_grid = (np.arange(last + 1, dtype=float) - mx)[None, :, None]
+        kp = ((dx2[:, None, None] * k_grid) + (std[:, None, None] * y_nodes[None, None, :])) / dx[pos_mask][:, None, None] + mx
+        kk = np.floor(kp).astype(np.int64, copy=False)
+        alpha = kp - kk
+        beta = 1.0 - alpha
+        left = np.clip(kk, 0, last)
+        right = np.clip(kk + 1, 0, last)
+        base = v[zi][:, :, None]
+        interp = alpha * np.take_along_axis(base, right, axis=1) + beta * np.take_along_axis(base, left, axis=1)
+        out[zi, :] = np.tensordot(interp, y_weights, axes=([2], [0]))
+    return out
+
+
+def _convolution_rollback_batch_torch(
+    values,
+    *,
+    zeta_t1,
+    zeta_t0,
+    mx: int,
+    nx: int,
+    y_nodes,
+    y_weights,
+):
+    if torch is None:
+        raise ImportError("torch is required for _convolution_rollback_batch_torch()")
+    v = values
+    out = v.clone()
+    changed = torch.abs(zeta_t1 - zeta_t0) > 1.0e-18
+    if not torch.any(changed):
+        return out
+
+    last = 2 * mx
+    idx = torch.nonzero(changed, as_tuple=False).squeeze(1)
+    vv = v.index_select(0, idx)
+    zz1 = torch.clamp(zeta_t1.index_select(0, idx), min=0.0)
+    zz0 = torch.clamp(zeta_t0.index_select(0, idx), min=0.0)
+    sigma = torch.sqrt(zz1)
+    dx = sigma / float(nx)
+
+    zero_mask = zz0 <= 1.0e-18
+    if torch.any(zero_mask):
+        zi = idx[zero_mask]
+        kp = y_nodes.unsqueeze(0) * (sigma[zero_mask] / dx[zero_mask]).unsqueeze(1) + float(mx)
+        kk = torch.floor(kp).to(torch.long)
+        alpha = kp - kk.to(kp.dtype)
+        beta = 1.0 - alpha
+        left = torch.clamp(kk, 0, last)
+        right = torch.clamp(kk + 1, 0, last)
+        base = v.index_select(0, zi)
+        interp = alpha * torch.gather(base, 1, right) + beta * torch.gather(base, 1, left)
+        acc = interp @ y_weights
+        out[zi, :] = acc.unsqueeze(1).expand(-1, last + 1)
+
+    pos_mask = ~zero_mask
+    if torch.any(pos_mask):
+        zi = idx[pos_mask]
+        std = torch.sqrt(torch.clamp(zz1[pos_mask] - zz0[pos_mask], min=0.0))
+        dx2 = torch.sqrt(zz0[pos_mask]) / float(nx)
+        k_grid = (torch.arange(last + 1, dtype=v.dtype, device=v.device) - float(mx)).view(1, last + 1, 1)
+        kp = ((dx2.view(-1, 1, 1) * k_grid) + (std.view(-1, 1, 1) * y_nodes.view(1, 1, -1))) / dx[pos_mask].view(-1, 1, 1) + float(mx)
+        kk = torch.floor(kp).to(torch.long)
+        alpha = kp - kk.to(kp.dtype)
+        beta = 1.0 - alpha
+        left = torch.clamp(kk, 0, last)
+        right = torch.clamp(kk + 1, 0, last)
+        base = v.index_select(0, zi).unsqueeze(2).expand(-1, -1, y_nodes.numel())
+        interp = alpha * torch.gather(base, 1, right) + beta * torch.gather(base, 1, left)
+        out[zi, :] = torch.matmul(interp, y_weights)
+    return out
+
+
+def _price_callable_bond_scenarios_numpy_chunk(compiled: CompiledCallableBondTrade, pack: CallableBondScenarioPack) -> np.ndarray:
+    n_scenarios = pack.n_scenarios()
+    n_states = 2 * compiled.center_index + 1
+    option_values = np.zeros((n_scenarios, n_states), dtype=float)
+    underlying_npv = np.zeros((n_scenarios, n_states), dtype=float)
+    provisional_npv = np.zeros((n_scenarios, n_states), dtype=float)
+    cf_cache: list[np.ndarray | None] = [None] * len(compiled.cashflows)
+    cf_status = ["Open"] * len(compiled.cashflows)
+    stripped = price_bond_scenarios_numpy(compiled.stripped_bond, pack.stripped_grid)
+
+    for i in range(compiled.grid_times.size - 1, 0, -1):
+        t_from = float(compiled.grid_times[i])
+        z_t = np.asarray(pack.zeta_grid[:, i], dtype=float)
+        h_t = np.asarray(pack.h_grid[:, i], dtype=float)
+        p0_t = np.asarray(pack.p0_grid[:, i], dtype=float)
+        dx = np.sqrt(np.maximum(z_t, 0.0)) / float(max(compiled.grid_nx, 1))
+        x_grid = dx[:, None] * compiled.k_grid[None, :]
+        if i < compiled.grid_times.size - 1:
+            option_values = _convolution_rollback_batch_numpy(
+                option_values,
+                zeta_t1=pack.zeta_grid[:, i + 1],
+                zeta_t0=pack.zeta_grid[:, i],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=compiled.y_nodes,
+                y_weights=compiled.y_weights,
+            )
+            underlying_npv = _convolution_rollback_batch_numpy(
+                underlying_npv,
+                zeta_t1=pack.zeta_grid[:, i + 1],
+                zeta_t0=pack.zeta_grid[:, i],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=compiled.y_nodes,
+                y_weights=compiled.y_weights,
+            )
+            if i == 1:
+                provisional_npv = _convolution_rollback_batch_numpy(
+                    provisional_npv,
+                    zeta_t1=pack.zeta_grid[:, i + 1],
+                    zeta_t0=pack.zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=compiled.y_nodes,
+                    y_weights=compiled.y_weights,
+                )
+            for j, cached in enumerate(cf_cache):
+                if cached is None:
+                    continue
+                cf_cache[j] = _convolution_rollback_batch_numpy(
+                    cached,
+                    zeta_t1=pack.zeta_grid[:, i + 1],
+                    zeta_t0=pack.zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=compiled.y_nodes,
+                    y_weights=compiled.y_weights,
+                )
+
+        provisional_npv = np.zeros_like(provisional_npv)
+        for j, cf in enumerate(compiled.cashflows):
+            if cf_status[j] == "Done":
+                continue
+            if _callable_is_part_of_underlying(cf, t_from) and _callable_coupon_ratio_compiled(cf, t_from) > 0.0:
+                if cf_status[j] == "Cached":
+                    underlying_npv = underlying_npv + np.asarray(cf_cache[j], dtype=float)
+                    cf_cache[j] = None
+                    cf_status[j] = "Done"
+                elif _callable_can_be_estimated(cf, t_from):
+                    h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
+                    p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
+                    reduced = float(cf.amount) * p0_pay[:, None] * np.exp(
+                        -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
+                    )
+                    underlying_npv = underlying_npv + reduced
+                    cf_status[j] = "Done"
+                else:
+                    h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
+                    p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
+                    provisional_npv = provisional_npv + float(cf.amount) * p0_pay[:, None] * np.exp(
+                        -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
+                    )
+            elif _callable_must_be_estimated(cf, t_from) and cf_status[j] == "Open":
+                h_pay = np.asarray(pack.h_grid[:, cf.pay_index], dtype=float)
+                p0_pay = np.asarray(pack.p0_grid[:, cf.pay_index], dtype=float)
+                cf_cache[j] = float(cf.amount) * p0_pay[:, None] * np.exp(
+                    -h_pay[:, None] * x_grid - 0.5 * (h_pay * h_pay * z_t)[:, None]
+                )
+                cf_status[j] = "Cached"
+        if compiled.call_active[i] or compiled.put_active[i]:
+            continuation = option_values.copy()
+            amount_over_num = p0_t[:, None] * np.exp(-h_t[:, None] * x_grid - 0.5 * (h_t * h_t * z_t)[:, None])
+            if compiled.call_active[i]:
+                continuation = np.minimum(continuation, float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv))
+            if compiled.put_active[i]:
+                continuation = np.maximum(continuation, float(compiled.put_amounts[i]) * amount_over_num - underlying_npv + provisional_npv)
+            option_values = continuation
+    if compiled.grid_times.size > 1:
+        option_values = _convolution_rollback_batch_numpy(
+            option_values,
+            zeta_t1=pack.zeta_grid[:, 1],
+            zeta_t0=pack.zeta_grid[:, 0],
+            mx=compiled.center_index,
+            nx=compiled.grid_nx,
+            y_nodes=compiled.y_nodes,
+            y_weights=compiled.y_weights,
+        )
+    option_value = option_values[:, compiled.center_index]
+    return np.asarray(stripped + option_value, dtype=float)
+
+
+def price_callable_bond_scenarios_numpy(
+    compiled: CompiledCallableBondTrade,
+    pack: CallableBondScenarioPack,
+    *,
+    chunk_size: int = 512,
+) -> np.ndarray:
+    validate_callable_bond_scenario_pack(compiled, pack)
+    n_scenarios = pack.n_scenarios()
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n_scenarios <= chunk_size:
+        return _price_callable_bond_scenarios_numpy_chunk(compiled, pack)
+    out = []
+    for start in range(0, n_scenarios, chunk_size):
+        end = min(start + chunk_size, n_scenarios)
+        out.append(_price_callable_bond_scenarios_numpy_chunk(compiled, pack.slice(start, end)))
+    return np.concatenate(out, axis=0)
+
+
+def _price_callable_bond_scenarios_torch_chunk(
+    compiled: CompiledCallableBondTrade,
+    pack: CallableBondScenarioPack,
+    *,
+    device: str,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    n_scenarios = pack.n_scenarios()
+    n_states = 2 * compiled.center_index + 1
+    option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+    underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+    provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+    cf_cache: list[object | None] = [None] * len(compiled.cashflows)
+    cf_status = ["Open"] * len(compiled.cashflows)
+    p0_grid = torch.as_tensor(pack.p0_grid, dtype=dtype, device=target)
+    h_grid = torch.as_tensor(pack.h_grid, dtype=dtype, device=target)
+    zeta_grid = torch.as_tensor(pack.zeta_grid, dtype=dtype, device=target)
+    k_grid = torch.as_tensor(compiled.k_grid, dtype=dtype, device=target)
+    y_nodes = torch.as_tensor(compiled.y_nodes, dtype=dtype, device=target)
+    y_weights = torch.as_tensor(compiled.y_weights, dtype=dtype, device=target)
+    stripped = price_bond_scenarios_torch(compiled.stripped_bond, pack.stripped_grid, device=device)
+
+    for i in range(compiled.grid_times.size - 1, 0, -1):
+        t_from = float(compiled.grid_times[i])
+        z_t = zeta_grid[:, i]
+        h_t = h_grid[:, i]
+        p0_t = p0_grid[:, i]
+        dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(compiled.grid_nx, 1))
+        x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+        if i < compiled.grid_times.size - 1:
+            option_values = _convolution_rollback_batch_torch(
+                option_values,
+                zeta_t1=zeta_grid[:, i + 1],
+                zeta_t0=zeta_grid[:, i],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+            underlying_npv = _convolution_rollback_batch_torch(
+                underlying_npv,
+                zeta_t1=zeta_grid[:, i + 1],
+                zeta_t0=zeta_grid[:, i],
+                mx=compiled.center_index,
+                nx=compiled.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+            if i == 1:
+                provisional_npv = _convolution_rollback_batch_torch(
+                    provisional_npv,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+            for j, cached in enumerate(cf_cache):
+                if cached is None:
+                    continue
+                cf_cache[j] = _convolution_rollback_batch_torch(
+                    cached,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=compiled.center_index,
+                    nx=compiled.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+        provisional_npv = torch.zeros_like(provisional_npv)
+        for j, cf in enumerate(compiled.cashflows):
+            if cf_status[j] == "Done":
+                continue
+            if _callable_is_part_of_underlying(cf, t_from) and _callable_coupon_ratio_compiled(cf, t_from) > 0.0:
+                if cf_status[j] == "Cached":
+                    underlying_npv = underlying_npv + cf_cache[j]
+                    cf_cache[j] = None
+                    cf_status[j] = "Done"
+                elif _callable_can_be_estimated(cf, t_from):
+                    h_pay = h_grid[:, cf.pay_index]
+                    p0_pay = p0_grid[:, cf.pay_index]
+                    reduced = float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
+                        -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                    )
+                    underlying_npv = underlying_npv + reduced
+                    cf_status[j] = "Done"
+                else:
+                    h_pay = h_grid[:, cf.pay_index]
+                    p0_pay = p0_grid[:, cf.pay_index]
+                    provisional_npv = provisional_npv + float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
+                        -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                    )
+            elif _callable_must_be_estimated(cf, t_from) and cf_status[j] == "Open":
+                h_pay = h_grid[:, cf.pay_index]
+                p0_pay = p0_grid[:, cf.pay_index]
+                cf_cache[j] = float(cf.amount) * p0_pay.unsqueeze(1) * torch.exp(
+                    -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                )
+                cf_status[j] = "Cached"
+        if bool(compiled.call_active[i]) or bool(compiled.put_active[i]):
+            continuation = option_values.clone()
+            amount_over_num = p0_t.unsqueeze(1) * torch.exp(-h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1))
+            if bool(compiled.call_active[i]):
+                continuation = torch.minimum(continuation, float(compiled.call_amounts[i]) * amount_over_num - (underlying_npv + provisional_npv))
+            if bool(compiled.put_active[i]):
+                continuation = torch.maximum(continuation, float(compiled.put_amounts[i]) * amount_over_num - underlying_npv + provisional_npv)
+            option_values = continuation
+    if compiled.grid_times.size > 1:
+        option_values = _convolution_rollback_batch_torch(
+            option_values,
+            zeta_t1=zeta_grid[:, 1],
+            zeta_t0=zeta_grid[:, 0],
+            mx=compiled.center_index,
+            nx=compiled.grid_nx,
+            y_nodes=y_nodes,
+            y_weights=y_weights,
+        )
+    option_value = option_values[:, compiled.center_index]
+    return stripped + option_value
+
+
+def price_callable_bond_scenarios_torch(
+    compiled: CompiledCallableBondTrade,
+    pack: CallableBondScenarioPack,
+    *,
+    device: str = "cpu",
+    chunk_size: int = 512,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch()")
+    validate_callable_bond_scenario_pack(compiled, pack)
+    n_scenarios = pack.n_scenarios()
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n_scenarios <= chunk_size:
+        return _price_callable_bond_scenarios_torch_chunk(compiled, pack, device=device)
+    chunks = []
+    for start in range(0, n_scenarios, chunk_size):
+        end = min(start + chunk_size, n_scenarios)
+        chunks.append(_price_callable_bond_scenarios_torch_chunk(compiled, pack.slice(start, end), device=device))
+    return torch.cat(chunks, dim=0)
 
 
 def _resolve_trade(root: ET.Element, trade_id: str) -> ET.Element:

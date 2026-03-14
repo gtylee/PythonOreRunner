@@ -1,5 +1,8 @@
 import sys
 import unittest
+import tempfile
+import shutil
+import subprocess
 from dataclasses import replace
 from datetime import date, timedelta
 import csv
@@ -16,8 +19,10 @@ from py_ore_tools.bond_pricing import (
     BondEngineSpec,
     BondScenarioGrid,
     BondTradeSpec,
+    CallableBondScenarioPack,
     CallableExerciseSpec,
     CompiledBondTrade,
+    CompiledCallableBondTrade,
     _callable_price_amount,
     _build_lgm_model_for_callable,
     _fit_curve_for_currency,
@@ -30,7 +35,9 @@ from py_ore_tools.bond_pricing import (
     _time_from_dates,
     build_bond_scenario_grid_numpy,
     build_bond_scenario_grid_from_scenarios,
+    build_callable_bond_scenario_pack,
     compile_bond_trade,
+    compile_callable_bond_trade,
     _bond_npv,
     _curve_from_flow_discounts,
     _adjust_date,
@@ -39,6 +46,8 @@ from py_ore_tools.bond_pricing import (
     load_callable_bond_trade_spec,
     price_bond_scenarios_numpy,
     price_bond_scenarios_torch,
+    price_callable_bond_scenarios_numpy,
+    price_callable_bond_scenarios_torch,
     price_bond_single_numpy,
     price_bond_trade,
     torch,
@@ -77,6 +86,7 @@ AMC_FORWARDBOND_REFERENCE = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Inp
 AMC_FORWARDBOND_PE = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "pricingengine.xml"
 AMC_FORWARDBOND_TM = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "todaysmarket.xml"
 AMC_FORWARDBOND_MARKET = TOOLS_DIR / "Examples" / "AmericanMonteCarlo" / "Input" / "market.txt"
+LOCAL_ORE_BINARY = Path("/Users/gordonlee/Documents/Engine/build/App/ore")
 
 
 def _flat_curve(rate: float):
@@ -88,6 +98,26 @@ def _shift_curve(curve, shift: float):
 
 
 class TestBondPricing(unittest.TestCase):
+    def _callable_portfolio_with_underlying_bond(self, tmp_root: Path) -> tuple[Path, Path]:
+        input_dir = tmp_root / "Input"
+        shutil.copytree(CALLABLE_PORTFOLIO.parent, input_dir)
+        shared_input = tmp_root.parent / "Input"
+        if shared_input.exists():
+            shutil.rmtree(shared_input)
+        shutil.copytree(TOOLS_DIR / "Examples" / "Input", shared_input)
+
+        portfolio = input_dir / "portfolio_callablebond.xml"
+        text = portfolio.read_text(encoding="utf-8")
+        text = text.replace('  <!--Trade id="UnderlyingBondTrade">', '  <Trade id="UnderlyingBondTrade">')
+        text = text.replace("  </Trade-->", "  </Trade>")
+        portfolio.write_text(text, encoding="utf-8")
+
+        ore_xml = input_dir / "ore_callable_bond_lgm_grid_npv_only.xml"
+        text = ore_xml.read_text(encoding="utf-8")
+        text = text.replace("Output/callable_bond_lgm_grid_npv_only", "Output/callable_bond_compare")
+        ore_xml.write_text(text, encoding="utf-8")
+        return ore_xml, portfolio
+
     def _american_forwardbond_fixture(self, trade_id: str):
         spec, engine = load_bond_trade_spec(
             portfolio_xml=AMC_FORWARDBOND_PORTFOLIO,
@@ -599,6 +629,122 @@ class TestBondPricing(unittest.TestCase):
         self.assertEqual(int(put_call["put_schedule_count"]), 3)
         self.assertEqual(int(put_call["call_schedule_count"]), 3)
 
+    def test_callable_batch_scenario_numpy_matches_scalar_price(self):
+        spec, engine = load_callable_bond_trade_spec(
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+        )
+        compiled = compile_callable_bond_trade(
+            spec,
+            engine,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        model = _build_lgm_model_for_callable(
+            ore_xml=CALLABLE_ORE_XML,
+            pricingengine_path=CALLABLE_PE,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            currency=spec.currency,
+            maturity_date=max(cf.pay_date for cf in spec.bond.cashflows),
+            asof_date=date(2016, 2, 5),
+        )
+        native_curve = _load_callable_option_curve_from_reference_output(
+            CALLABLE_ORE_XML,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            curve_id=spec.reference_curve_id,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        rollback_curve = native_curve[0] if native_curve is not None else _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        stripped_curve = _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        credit = load_ore_default_curve_inputs(
+            str(EXAMPLE_SHARED_TM),
+            str(EXAMPLE_SHARED_MARKET_FULL),
+            cpty_name=spec.credit_curve_id,
+        )
+        security_spread = _load_security_spread(EXAMPLE_SHARED_MARKET_FULL, spec.security_id)
+        pack = build_callable_bond_scenario_pack(
+            compiled,
+            reference_curves=[rollback_curve, rollback_curve],
+            models=[model, model],
+            hazard_times=np.asarray(credit["hazard_times"], dtype=float),
+            hazard_rates=np.repeat(np.asarray(credit["hazard_rates"], dtype=float).reshape(1, -1), 2, axis=0),
+            recovery_rate=np.asarray([float(credit["recovery"]), float(credit["recovery"])], dtype=float),
+            security_spread=np.asarray([security_spread, security_spread], dtype=float),
+            stripped_discount_curves=[stripped_curve, stripped_curve],
+            stripped_income_curves=[stripped_curve, stripped_curve],
+        )
+        batch = price_callable_bond_scenarios_numpy(compiled, pack, chunk_size=1)
+        scalar = price_bond_trade(
+            ore_xml=CALLABLE_ORE_XML,
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            asof_date="2016-02-05",
+            model_day_counter="A365F",
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+            flows_csv=None,
+        )
+        np.testing.assert_allclose(batch, np.asarray([scalar["py_npv"], scalar["py_npv"]], dtype=float), rtol=0.0, atol=2.0e-8)
+
+    @unittest.skipIf(torch is None, "torch not available")
+    def test_callable_batch_scenario_torch_matches_numpy(self):
+        spec, engine = load_callable_bond_trade_spec(
+            portfolio_xml=CALLABLE_PORTFOLIO,
+            trade_id="CallableBondTrade",
+            reference_data_path=CALLABLE_REFERENCE,
+            pricingengine_path=CALLABLE_PE,
+        )
+        compiled = compile_callable_bond_trade(
+            spec,
+            engine,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        model = _build_lgm_model_for_callable(
+            ore_xml=CALLABLE_ORE_XML,
+            pricingengine_path=CALLABLE_PE,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+            currency=spec.currency,
+            maturity_date=max(cf.pay_date for cf in spec.bond.cashflows),
+            asof_date=date(2016, 2, 5),
+        )
+        native_curve = _load_callable_option_curve_from_reference_output(
+            CALLABLE_ORE_XML,
+            todaysmarket_xml=EXAMPLE_SHARED_TM,
+            curve_id=spec.reference_curve_id,
+            asof_date="2016-02-05",
+            day_counter="A365F",
+        )
+        rollback_curve = native_curve[0] if native_curve is not None else _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        stripped_curve = _fit_curve_for_currency(CALLABLE_ORE_XML, spec.currency)
+        credit = load_ore_default_curve_inputs(
+            str(EXAMPLE_SHARED_TM),
+            str(EXAMPLE_SHARED_MARKET_FULL),
+            cpty_name=spec.credit_curve_id,
+        )
+        security_spread = _load_security_spread(EXAMPLE_SHARED_MARKET_FULL, spec.security_id)
+        pack = build_callable_bond_scenario_pack(
+            compiled,
+            reference_curves=[rollback_curve, rollback_curve],
+            models=[model, model],
+            hazard_times=np.asarray(credit["hazard_times"], dtype=float),
+            hazard_rates=np.repeat(np.asarray(credit["hazard_rates"], dtype=float).reshape(1, -1), 2, axis=0),
+            recovery_rate=np.asarray([float(credit["recovery"]), float(credit["recovery"])], dtype=float),
+            security_spread=np.asarray([security_spread, security_spread], dtype=float),
+            stripped_discount_curves=[stripped_curve, stripped_curve],
+            stripped_income_curves=[stripped_curve, stripped_curve],
+        )
+        npv_numpy = price_callable_bond_scenarios_numpy(compiled, pack, chunk_size=2)
+        npv_torch = price_callable_bond_scenarios_torch(compiled, pack, chunk_size=2, device="cpu").detach().cpu().numpy()
+        np.testing.assert_allclose(npv_torch, npv_numpy, rtol=0.0, atol=2.0e-8)
+
     def test_put_call_variant_put_only_is_more_valuable_than_call_only(self):
         call_only = self._price_callable_variant(
             "PutCallBondTrade",
@@ -759,6 +905,67 @@ class TestBondPricing(unittest.TestCase):
                 self.assertEqual(out.get("callable_option_reference_curve_column"), "EUR-EURIBOR-3M")
                 ore_npv = _load_ore_npv_details(CALLABLE_LGM_GRID_NPV, trade_id=trade_id)["npv"]
                 self.assertLess(abs(float(out["py_npv"]) - float(ore_npv)), tol)
+
+    @unittest.skipUnless(LOCAL_ORE_BINARY.exists(), "local ORE binary not available")
+    def test_native_ore_callable_no_call_differs_from_equivalent_plain_bond(self):
+        with tempfile.TemporaryDirectory(dir=TOOLS_DIR / "tmp") as tmpdir:
+            tmp_root = Path(tmpdir)
+            ore_xml, _ = self._callable_portfolio_with_underlying_bond(tmp_root)
+            proc = subprocess.run(
+                [str(LOCAL_ORE_BINARY), "Input/ore_callable_bond_lgm_grid_npv_only.xml"],
+                cwd=tmp_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            npv_csv = tmp_root / "Output" / "callable_bond_compare" / "npv.csv"
+            self.assertTrue(npv_csv.exists())
+            rows: dict[str, float] = {}
+            with npv_csv.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    rows[row["#TradeId"]] = float(row["NPV"])
+            self.assertIn("CallableBondNoCall", rows)
+            self.assertIn("UnderlyingBondTrade", rows)
+            self.assertGreater(rows["UnderlyingBondTrade"], rows["CallableBondNoCall"])
+            self.assertGreater(rows["UnderlyingBondTrade"] - rows["CallableBondNoCall"], 2.0e6)
+
+    @unittest.expectedFailure
+    def test_python_callable_no_call_differs_from_equivalent_plain_bond(self):
+        with tempfile.TemporaryDirectory(dir=TOOLS_DIR / "tmp") as tmpdir:
+            tmp_root = Path(tmpdir)
+            ore_xml, portfolio = self._callable_portfolio_with_underlying_bond(tmp_root)
+            callable_out = price_bond_trade(
+                ore_xml=ore_xml,
+                portfolio_xml=portfolio,
+                trade_id="CallableBondNoCall",
+                asof_date="2016-02-05",
+                model_day_counter="A365F",
+                market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+                todaysmarket_xml=EXAMPLE_SHARED_TM,
+                reference_data_path=tmp_root / "Input" / "reference_data_callablebond.xml",
+                pricingengine_path=tmp_root / "Input" / "pricingengine_callablebond_lgm_grid.xml",
+                flows_csv=None,
+            )
+            bond_out = price_bond_trade(
+                ore_xml=ore_xml,
+                portfolio_xml=portfolio,
+                trade_id="UnderlyingBondTrade",
+                asof_date="2016-02-05",
+                model_day_counter="A365F",
+                market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+                todaysmarket_xml=EXAMPLE_SHARED_TM,
+                reference_data_path=tmp_root / "Input" / "reference_data_callablebond.xml",
+                pricingengine_path=tmp_root / "Input" / "pricingengine_callablebond_lgm_grid.xml",
+                flows_csv=None,
+            )
+            # Native ORE prices these two trades differently; Python currently
+            # still reuses the standalone risky-bond layer for the no-call
+            # callable, so this is an explicit gap marker rather than a hidden
+            # documentation caveat.
+            self.assertGreater(float(bond_out["py_npv"]), float(callable_out["py_npv"]))
+            self.assertGreater(float(bond_out["py_npv"]) - float(callable_out["py_npv"]), 1.0e6)
 
     def test_positive_hazard_reduces_bond_value(self):
         spec = BondTradeSpec(

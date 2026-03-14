@@ -16,11 +16,11 @@
     <Parameter name="observationModel">None</Parameter>
   </Setup>
   <Markets>
-    <Parameter name="lgmcalibration">default</Parameter>
-    <Parameter name="fxcalibration">default</Parameter>
-    <Parameter name="eqcalibration">default</Parameter>
+    <Parameter name="lgmcalibration">xois</Parameter>
+    <Parameter name="fxcalibration">xois</Parameter>
+    <Parameter name="eqcalibration">xois</Parameter>
     <Parameter name="pricing">xois</Parameter>
-    <Parameter name="simulation">default</Parameter>
+    <Parameter name="simulation">xois</Parameter>
   </Markets>
   <Analytics>
     <Analytic type="npv">
@@ -34,7 +34,7 @@
     </Analytic>
     <Analytic type="curves">
       <Parameter name="active">Y</Parameter>
-      <Parameter name="configuration">default</Parameter>
+      <Parameter name="configuration">xois</Parameter>
       <Parameter name="grid">240,1M</Parameter>
       <Parameter name="outputFileName">curves.csv</Parameter>
     </Analytic>

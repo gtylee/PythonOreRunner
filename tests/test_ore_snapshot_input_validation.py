@@ -328,6 +328,180 @@ class TestOreSnapshotInputValidation(unittest.TestCase):
 
         self.assertEqual(_resolve_discount_column(tm_root, "default", "EUR"), "EUR")
 
+    def test_validation_does_not_force_default_or_irrelevant_index_quotes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+
+            (input_dir / "ore.xml").write_text(
+                """<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2025-01-01</Parameter>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="fixingDataFile">fixings.txt</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+    <Parameter name="implyTodaysFixings">N</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="pricing">xois</Parameter>
+    <Parameter name="simulation">xois</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="npv">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+    <Analytic type="curves">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="configuration">xois</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "portfolio.xml").write_text(
+                """<?xml version="1.0"?>
+<Portfolio>
+  <Trade id="FXNDF">
+    <TradeType>FxForward</TradeType>
+    <Envelope>
+      <CounterParty>CP</CounterParty>
+      <NettingSetId>NS</NettingSetId>
+    </Envelope>
+    <FxForwardData>
+      <ValueDate>2026-01-01</ValueDate>
+      <BoughtCurrency>GBP</BoughtCurrency>
+      <BoughtAmount>1000000</BoughtAmount>
+      <SoldCurrency>USD</SoldCurrency>
+      <SoldAmount>1200000</SoldAmount>
+      <Settlement>Cash</Settlement>
+      <SettlementData>
+        <Currency>USD</Currency>
+        <FXIndex>FX-ECB-GBP-USD</FXIndex>
+        <Date>2026-01-05</Date>
+      </SettlementData>
+    </FxForwardData>
+  </Trade>
+</Portfolio>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "curveconfig.xml").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<CurveConfiguration>
+  <YieldCurves>
+    <YieldCurve>
+      <CurveId>USD1D</CurveId>
+      <CurveDescription>USD OIS</CurveDescription>
+      <Currency>USD</Currency>
+      <DiscountCurve>USD1D</DiscountCurve>
+      <Segments>
+        <Simple>
+          <Type>Deposit</Type>
+          <Quotes>
+            <Quote>MM/RATE/USD/USD-FED-FUNDS/1D</Quote>
+          </Quotes>
+          <Conventions>USD-CONV</Conventions>
+        </Simple>
+      </Segments>
+    </YieldCurve>
+    <YieldCurve>
+      <CurveId>GBP-IN-USD</CurveId>
+      <CurveDescription>GBP in USD</CurveDescription>
+      <Currency>GBP</Currency>
+      <DiscountCurve>USD1D</DiscountCurve>
+      <Segments>
+        <Simple>
+          <Type>FX Forward</Type>
+          <Quotes>
+            <Quote>FXFWD/RATE/GBP/USD/1Y</Quote>
+          </Quotes>
+          <Conventions>USD-CONV</Conventions>
+        </Simple>
+      </Segments>
+    </YieldCurve>
+    <YieldCurve>
+      <CurveId>USD3M</CurveId>
+      <CurveDescription>USD 3M</CurveDescription>
+      <Currency>USD</Currency>
+      <DiscountCurve>USD1D</DiscountCurve>
+      <Segments>
+        <Simple>
+          <Type>Deposit</Type>
+          <Quotes>
+            <Quote>MM/RATE/USD/USD-LIBOR-3M/3M</Quote>
+          </Quotes>
+          <Conventions>USD-CONV</Conventions>
+        </Simple>
+      </Segments>
+    </YieldCurve>
+  </YieldCurves>
+</CurveConfiguration>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "conventions.xml").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<Conventions>
+  <Deposit>
+    <Id>USD-CONV</Id>
+    <IndexBased>false</IndexBased>
+    <Calendar>TARGET</Calendar>
+    <DayCounter>A360</DayCounter>
+    <BusinessDayConvention>F</BusinessDayConvention>
+    <SettlementDays>2</SettlementDays>
+    <EOM>false</EOM>
+  </Deposit>
+</Conventions>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "todaysmarket.xml").write_text(
+                """<?xml version="1.0"?>
+<TodaysMarket>
+  <Configuration id="xois">
+    <DiscountingCurvesId>xois</DiscountingCurvesId>
+    <IndexForwardingCurvesId>default</IndexForwardingCurvesId>
+  </Configuration>
+  <DiscountingCurves id="xois">
+    <DiscountingCurve currency="USD">Yield/USD/USD1D</DiscountingCurve>
+    <DiscountingCurve currency="GBP">Yield/GBP/GBP-IN-USD</DiscountingCurve>
+  </DiscountingCurves>
+  <IndexForwardingCurves id="default">
+    <Index name="USD-LIBOR-3M">Yield/USD/USD3M</Index>
+  </IndexForwardingCurves>
+  <FxSpots id="default">
+    <FxSpot pair="GBPUSD">FX/GBP/USD</FxSpot>
+  </FxSpots>
+</TodaysMarket>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "market.txt").write_text(
+                "\n".join(
+                    [
+                        "2025-01-01 MM/RATE/USD/USD-FED-FUNDS/1D 0.01",
+                        "2025-01-01 FXFWD/RATE/GBP/USD/1Y 1.25",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (input_dir / "fixings.txt").write_text("", encoding="utf-8")
+
+            report = validate_ore_input_snapshot(input_dir / "ore.xml")
+
+            self.assertTrue(report["market_configurations"]["valid"])
+            self.assertEqual(report["market_configurations"]["requested"], ["xois"])
+            self.assertTrue(report["quotes"]["valid"])
+            self.assertEqual(report["quotes"]["missing_mandatory"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
