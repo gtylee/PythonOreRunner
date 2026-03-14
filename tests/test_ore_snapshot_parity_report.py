@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 
 import pandas as pd
 
@@ -84,8 +86,7 @@ class TestOreSnapshotParityReport(unittest.TestCase):
         self.assertEqual(snap.n_samples, 1000)
 
     def test_load_from_ore_xml_falls_back_to_matching_example_calibration(self):
-        engine_root = require_engine_repo_root()
-        ore_xml = engine_root / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
+        ore_xml = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
         snap = load_from_ore_xml(ore_xml)
 
         self.assertEqual(snap.alpha_source, "calibration")
@@ -93,13 +94,63 @@ class TestOreSnapshotParityReport(unittest.TestCase):
         self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
 
     def test_load_from_ore_xml_falls_back_to_matching_cross_example_calibration(self):
-        engine_root = require_engine_repo_root()
-        ore_xml = engine_root / "Examples" / "Legacy" / "Example_1" / "Input" / "ore.xml"
+        ore_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_1" / "Input" / "ore.xml"
         snap = load_from_ore_xml(ore_xml)
 
         self.assertEqual(snap.alpha_source, "calibration")
         self.assertIsNotNone(snap.calibration_xml_path)
         self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
+    def test_load_from_ore_xml_falls_back_to_matching_calibration_for_cloned_case_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            shutil.copytree(TOOLS_DIR / "Examples" / "Exposure", tmp / "Examples" / "Exposure")
+            shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp / "Examples" / "Input")
+            ore_xml = tmp / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
+
+            snap = load_from_ore_xml(ore_xml)
+
+            self.assertEqual(snap.alpha_source, "calibration")
+            self.assertIsNotNone(snap.calibration_xml_path)
+            self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
+    def test_load_from_ore_xml_cloned_case_with_rewritten_samples_keeps_calibration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            shutil.copytree(TOOLS_DIR / "Examples" / "Exposure", tmp / "Examples" / "Exposure")
+            shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp / "Examples" / "Input")
+            simulation_xml = tmp / "Examples" / "Exposure" / "Input" / "simulation_ba.xml"
+            simulation_xml.write_text(
+                simulation_xml.read_text(encoding="utf-8").replace("<Samples>1000</Samples>", "<Samples>2000</Samples>"),
+                encoding="utf-8",
+            )
+            ore_xml = tmp / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
+
+            snap = load_from_ore_xml(ore_xml)
+
+            self.assertEqual(snap.n_samples, 2000)
+            self.assertEqual(snap.alpha_source, "calibration")
+            self.assertIsNotNone(snap.calibration_xml_path)
+            self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
+    def test_load_from_ore_xml_cloned_cross_example_with_rewritten_samples_keeps_calibration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            shutil.copytree(TOOLS_DIR / "Examples" / "Legacy" / "Example_1", tmp / "Examples" / "Legacy" / "Example_1")
+            shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp / "Examples" / "Input")
+            simulation_xml = tmp / "Examples" / "Legacy" / "Example_1" / "Input" / "simulation.xml"
+            simulation_xml.write_text(
+                simulation_xml.read_text(encoding="utf-8").replace("<Samples>1000</Samples>", "<Samples>2000</Samples>"),
+                encoding="utf-8",
+            )
+            ore_xml = tmp / "Examples" / "Legacy" / "Example_1" / "Input" / "ore.xml"
+
+            snap = load_from_ore_xml(ore_xml)
+
+            self.assertEqual(snap.n_samples, 2000)
+            self.assertEqual(snap.alpha_source, "calibration")
+            self.assertIsNotNone(snap.calibration_xml_path)
+            self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
 
 
 if __name__ == "__main__":

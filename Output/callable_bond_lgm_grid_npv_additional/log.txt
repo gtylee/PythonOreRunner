@@ -1,0 +1,40 @@
+NOTICE   [2026-Mar-14 18:03:36.034200]    (OREAnalytics/orea/app/parameters.cpp:133) : Parameters:
+NOTICE   [2026-Mar-14 18:03:36.034388]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : active = N
+NOTICE   [2026-Mar-14 18:03:36.034495]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : outputFileName = flows.csv
+NOTICE   [2026-Mar-14 18:03:36.034596]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : active = N
+NOTICE   [2026-Mar-14 18:03:36.034687]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : configuration = default
+NOTICE   [2026-Mar-14 18:03:36.034777]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : grid = 240,1M
+NOTICE   [2026-Mar-14 18:03:36.034866]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : outputFileName = curves.csv
+NOTICE   [2026-Mar-14 18:03:36.034956]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : fxcalibration = xois_eur
+NOTICE   [2026-Mar-14 18:03:36.035046]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : lgmcalibration = collateral_inccy
+NOTICE   [2026-Mar-14 18:03:36.035136]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : pricing = xois_eur
+NOTICE   [2026-Mar-14 18:03:36.035224]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : sensitivity = xois_eur
+NOTICE   [2026-Mar-14 18:03:36.035313]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : simulation = xois_eur
+NOTICE   [2026-Mar-14 18:03:36.035402]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : active = Y
+NOTICE   [2026-Mar-14 18:03:36.035489]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : additionalResults = Y
+NOTICE   [2026-Mar-14 18:03:36.035583]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : additionalResultsReportPrecision = 12
+NOTICE   [2026-Mar-14 18:03:36.035671]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : baseCurrency = EUR
+NOTICE   [2026-Mar-14 18:03:36.035759]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : outputFileName = npv.csv
+NOTICE   [2026-Mar-14 18:03:36.035849]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : asofDate = 2016-02-05
+NOTICE   [2026-Mar-14 18:03:36.035936]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : conventionsFile = ../../Input/conventions.xml
+NOTICE   [2026-Mar-14 18:03:36.036022]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : curveConfigFile = ../../Input/curveconfig.xml
+NOTICE   [2026-Mar-14 18:03:36.036110]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : fixingDataFile = ../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-14 18:03:36.036199]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : implyTodaysFixings = N
+NOTICE   [2026-Mar-14 18:03:36.036287]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : inputPath = Input
+NOTICE   [2026-Mar-14 18:03:36.036377]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logFile = log.txt
+NOTICE   [2026-Mar-14 18:03:36.036467]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logMask = 31
+NOTICE   [2026-Mar-14 18:03:36.036558]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketConfigFile = ../../Input/todaysmarket.xml
+NOTICE   [2026-Mar-14 18:03:36.036647]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketDataFile = ../../Input/market_20160205.txt
+NOTICE   [2026-Mar-14 18:03:36.036736]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : nThreads = 1
+NOTICE   [2026-Mar-14 18:03:36.036841]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : observationModel = None
+NOTICE   [2026-Mar-14 18:03:36.036932]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : outputPath = Output/callable_bond_lgm_grid_npv_additional
+NOTICE   [2026-Mar-14 18:03:36.037027]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : portfolioFile = portfolio_callablebond.xml
+NOTICE   [2026-Mar-14 18:03:36.037129]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : pricingEnginesFile = pricingengine_callablebond_lgm_grid.xml
+NOTICE   [2026-Mar-14 18:03:36.037232]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : referenceDataFile = reference_data_callablebond.xml
+NOTICE   [2026-Mar-14 18:03:36.037330]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : active = N
+NOTICE   [2026-Mar-14 18:03:36.037419]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : active = N
+NOTICE   [2026-Mar-14 18:03:36.037553]        (OREAnalytics/orea/app/oreapp.cpp:660) : load OREAppInputParameters called
+WARNING  [2026-Mar-14 18:03:36.037650]        (OREAnalytics/orea/app/oreapp.cpp:681) : Calendar adjustments not found, using defaults
+WARNING  [2026-Mar-14 18:03:36.037741]        (OREAnalytics/orea/app/oreapp.cpp:691) : Currency configurations not found, using defaults
+NOTICE   [2026-Mar-14 18:03:36.037841]        (OREAnalytics/orea/app/oreapp.cpp:759) : Observation Mode is None
+NOTICE   [2026-Mar-14 18:03:36.037939]        (OREAnalytics/orea/app/oreapp.cpp:801) : Loading reference data from file: "Input/reference_data_callablebond.xml"

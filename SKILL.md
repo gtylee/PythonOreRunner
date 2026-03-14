@@ -236,6 +236,18 @@ This script now:
 - runs the local `build/App/ore`
 - compares Python LGM against those fresh ORE outputs
 
+### Cloned rerun cases must still resolve calibrated LGM params
+
+Fresh native reruns in `/tmp` can look like a model/XVA mismatch when they are really a calibration provenance bug.
+
+- If a cloned case tree loses `calibration.xml` in its local `Output/`, Python must still resolve the matching calibrated LGM term structure from another example run.
+- Matching on absolute shared-input paths is not robust enough because cloned trees rewrite the root path. Match on stable example-relative resource ids instead.
+- Symptom of the bad state:
+  - repo case loads `alpha_source=calibration`
+  - cloned rerun loads `alpha_source=simulation`
+  - Python cube variance jumps materially and CVA/EEPE drift high
+- Check this early on any fresh rerun parity failure before debugging bond formulas or XVA aggregation.
+
 ### Sticky MPOR changes exposure semantics at `t=0`
 
 ---

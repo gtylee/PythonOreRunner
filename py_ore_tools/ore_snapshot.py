@@ -605,8 +605,8 @@ def _simulation_lgm_signature(simulation_xml: str, domestic_ccy: str) -> tuple[s
 
 
 @lru_cache(maxsize=32)
-def _candidate_ore_xmls_with_calibration() -> tuple[str, ...]:
-    examples_root = PROJECT_ROOT / "Examples"
+def _candidate_ore_xmls_with_calibration(search_root: str) -> tuple[str, ...]:
+    examples_root = Path(search_root).resolve() / "Examples"
     if not examples_root.exists():
         return ()
     candidates: list[str] = []
@@ -618,6 +618,29 @@ def _candidate_ore_xmls_with_calibration() -> tuple[str, ...]:
         if (Path(ctx["output_dir"]) / "calibration.xml").exists():
             candidates.append(str(Path(ctx["ore_xml"]).resolve()))
     return tuple(candidates)
+
+
+def _candidate_search_roots(ore_xml_path: str | Path) -> tuple[Path, ...]:
+    ore_path = Path(ore_xml_path).resolve()
+    roots: list[Path] = []
+    for parent in ore_path.parents:
+        if (parent / "Examples").exists():
+            roots.append(parent)
+            break
+    if PROJECT_ROOT not in roots and (PROJECT_ROOT / "Examples").exists():
+        roots.append(PROJECT_ROOT)
+    return tuple(roots)
+
+
+def _canonical_example_resource_id(path: str | Path) -> str:
+    resolved = Path(path).resolve()
+    for parent in (resolved.parent,) + tuple(resolved.parents):
+        if parent.name == "Examples":
+            try:
+                return resolved.relative_to(parent).as_posix()
+            except Exception:
+                break
+    return str(resolved)
 
 
 def resolve_calibration_xml_path(
@@ -635,32 +658,33 @@ def resolve_calibration_xml_path(
     if direct.exists():
         return direct
     current_key = (
-        Path(market_data_path).resolve(),
-        Path(curve_config_path).resolve(),
-        Path(conventions_path).resolve(),
-        Path(todaysmarket_xml_path).resolve(),
+        _canonical_example_resource_id(market_data_path),
+        _canonical_example_resource_id(curve_config_path),
+        _canonical_example_resource_id(conventions_path),
+        _canonical_example_resource_id(todaysmarket_xml_path),
         str(domestic_ccy).strip() or "EUR",
         _simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
     )
-    for candidate_ore_xml in _candidate_ore_xmls_with_calibration():
-        if Path(candidate_ore_xml).resolve() == Path(ore_xml_path).resolve():
-            continue
-        try:
-            ctx = _parse_ore_setup_context(candidate_ore_xml)
-            candidate_key = (
-                Path(ctx["market_data"]).resolve(),
-                Path(ctx["curve_config"]).resolve(),
-                Path(ctx["conventions"]).resolve(),
-                Path(ctx["todaysmarket"]).resolve(),
-                str(ctx["domestic_ccy"]),
-                _simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
-            )
-        except Exception:
-            continue
-        if candidate_key == current_key:
-            calibration_xml = Path(ctx["output_dir"]) / "calibration.xml"
-            if calibration_xml.exists():
-                return calibration_xml.resolve()
+    for root in _candidate_search_roots(ore_xml_path):
+        for candidate_ore_xml in _candidate_ore_xmls_with_calibration(str(root)):
+            if Path(candidate_ore_xml).resolve() == Path(ore_xml_path).resolve():
+                continue
+            try:
+                ctx = _parse_ore_setup_context(candidate_ore_xml)
+                candidate_key = (
+                    _canonical_example_resource_id(ctx["market_data"]),
+                    _canonical_example_resource_id(ctx["curve_config"]),
+                    _canonical_example_resource_id(ctx["conventions"]),
+                    _canonical_example_resource_id(ctx["todaysmarket"]),
+                    str(ctx["domestic_ccy"]),
+                    _simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
+                )
+            except Exception:
+                continue
+            if candidate_key == current_key:
+                calibration_xml = Path(ctx["output_dir"]) / "calibration.xml"
+                if calibration_xml.exists():
+                    return calibration_xml.resolve()
     return None
 
 
@@ -2001,10 +2025,14 @@ def load_from_ore_xml(
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     market_data_rel = setup_params.get("marketDataFile", "../../Input/market_20160205_flat.txt")
+    curve_config_rel = setup_params.get("curveConfigFile", "../../Input/curveconfig.xml")
+    conventions_rel = setup_params.get("conventionsFile", "../../Input/conventions.xml")
     portfolio_rel = setup_params.get("portfolioFile", "portfolio_singleswap.xml")
 
     todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, input_dir)
     market_data_file = _resolve_ore_path(market_data_rel, input_dir)
+    curve_config_file = _resolve_ore_path(curve_config_rel, input_dir)
+    conventions_path = _resolve_ore_path(conventions_rel, input_dir)
     portfolio_xml = _resolve_ore_path(portfolio_rel, input_dir)
 
     sim_config_id = markets_params.get("simulation", "libor")
@@ -2098,10 +2126,10 @@ def load_from_ore_xml(
     # 5. Determine LGM parameters (calibration.xml preferred)
     # ------------------------------------------------------------------
     calibration_xml = resolve_calibration_xml_path(
-        ore_xml_path=str(ore_xml),
+        ore_xml_path=str(ore_xml_path),
         output_path=output_path,
-        market_data_path=market_data_path,
-        curve_config_path=curve_config_path,
+        market_data_path=market_data_file,
+        curve_config_path=curve_config_file,
         conventions_path=conventions_path,
         todaysmarket_xml_path=todaysmarket_xml,
         simulation_xml_path=simulation_xml,

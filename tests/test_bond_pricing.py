@@ -51,6 +51,9 @@ CALLABLE_PORTFOLIO = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "portfolio_
 CALLABLE_REFERENCE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "reference_data_callablebond.xml"
 CALLABLE_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricingengine_callablebond.xml"
 CALLABLE_SIM = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "simulation_callablebond.xml"
+CALLABLE_LGM_GRID_ORE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callable_bond_lgm_grid_npv_only.xml"
+CALLABLE_LGM_GRID_PE = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "pricingengine_callablebond_lgm_grid.xml"
+CALLABLE_LGM_GRID_NPV = TOOLS_DIR / "Examples" / "Exposure" / "Output" / "callable_bond_lgm_grid_npv_only" / "npv.csv"
 EXAMPLE_SHARED_MARKET_FULL = TOOLS_DIR / "Examples" / "Input" / "market_20160205.txt"
 
 
@@ -349,6 +352,30 @@ class TestBondPricing(unittest.TestCase):
         self.assertGreater(float(put_call["py_npv"]), float(call_only["py_npv"]))
         self.assertEqual(int(put_call["put_schedule_count"]), 3)
         self.assertEqual(int(put_call["call_schedule_count"]), 3)
+
+    def test_callable_lgm_grid_parity_against_native_ore_npv(self):
+        tolerances = {
+            "CallableBondTrade": 3.2e6,
+            "CallableBondNoCall": 5.1e5,
+            "CallableBondCertainCall": 1.4e6,
+            "PutCallBondTrade": 1.95e6,
+        }
+        for trade_id, tol in tolerances.items():
+            with self.subTest(trade_id=trade_id):
+                out = price_bond_trade(
+                    ore_xml=CALLABLE_LGM_GRID_ORE_XML,
+                    portfolio_xml=CALLABLE_PORTFOLIO,
+                    trade_id=trade_id,
+                    asof_date="2016-02-05",
+                    model_day_counter="A365F",
+                    market_data_file=EXAMPLE_SHARED_MARKET_FULL,
+                    todaysmarket_xml=EXAMPLE_SHARED_TM,
+                    reference_data_path=CALLABLE_REFERENCE,
+                    pricingengine_path=CALLABLE_LGM_GRID_PE,
+                    flows_csv=None,
+                )
+                ore_npv = _load_ore_npv_details(CALLABLE_LGM_GRID_NPV, trade_id=trade_id)["npv"]
+                self.assertLess(abs(float(out["py_npv"]) - float(ore_npv)), tol)
 
     def test_positive_hazard_reduces_bond_value(self):
         spec = BondTradeSpec(

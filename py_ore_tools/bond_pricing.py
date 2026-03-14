@@ -38,6 +38,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 import math
 from pathlib import Path
 import re
@@ -50,6 +51,11 @@ try:
 except Exception:  # pragma: no cover - torch is optional in some environments
     torch = None
 
+try:
+    import QuantLib as ql
+except Exception:  # pragma: no cover - QuantLib is optional in some environments
+    ql = None
+
 from py_ore_tools.irs_xva_utils import (
     _parse_yyyymmdd,
     load_ore_default_curve_inputs,
@@ -57,8 +63,19 @@ from py_ore_tools.irs_xva_utils import (
     survival_probability_from_hazard,
 )
 from py_ore_tools.lgm import LGM1F, LGMParams
+from py_ore_tools.lgm_calibration import (
+    CalibrationType,
+    CurrencyLgmConfig,
+    LgmMarketInputs,
+    ParamType,
+    ReversionType,
+    SwaptionSpec,
+    VolatilityType,
+    calibrate_lgm_currency,
+)
 from py_ore_tools.lgm_ir_options import _convolution_nodes_and_weights, _convolution_rollback
 from py_ore_tools.ore_snapshot import (
+    _resolve_ore_path,
     build_discount_curve_from_discount_pairs,
     fit_discount_curves_from_ore_market,
 )
@@ -1297,12 +1314,349 @@ def _resolve_simulation_config_path(ore_xml: Path) -> Path | None:
     return None
 
 
+def _resolve_curveconfig_path(ore_xml: Path) -> Path | None:
+    root = ET.parse(ore_xml).getroot()
+    base = ore_xml.resolve().parent
+    run_dir = base.parent
+    input_dir = base
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in root.findall("./Setup/Parameter")
+    }
+    if setup_params.get("inputPath"):
+        input_dir = (run_dir / setup_params["inputPath"]).resolve()
+    raw = setup_params.get("curveConfigFile", "../../Input/curveconfig.xml")
+    return _resolve_ore_path(raw, input_dir)
+
+
+def _ql_day_counter(name: str):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for callable bond calibration")
+    norm = _norm_dc(name)
+    if norm in {"A360", "ACT/360"}:
+        return ql.Actual360()
+    if norm in {"30/360", "30E/360"}:
+        return ql.Thirty360(ql.Thirty360.BondBasis)
+    return ql.Actual365Fixed()
+
+
+def _ql_calendar(name: str):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for callable bond calibration")
+    return ql.TARGET()
+
+
+def _ql_bdc(name: str):
+    txt = (name or "Following").strip().lower()
+    if txt in {"modifiedfollowing", "modified following", "mf"}:
+        return ql.ModifiedFollowing
+    if txt in {"preceding", "p"}:
+        return ql.Preceding
+    if txt in {"unadjusted", "u"}:
+        return ql.Unadjusted
+    return ql.Following
+
+
+def _parse_reference_grid_dates(asof_date: date, maturity_date: date, grid_text: str) -> list[date]:
+    parts = [x.strip() for x in (grid_text or "").split(",") if x.strip()]
+    if len(parts) != 2 or not parts[0].isdigit():
+        return []
+    count = int(parts[0])
+    step = parts[1]
+    try:
+        months = _parse_tenor_months(step)
+    except Exception:
+        return []
+    dates: list[date] = []
+    current = asof_date
+    for _ in range(max(count, 0)):
+        current = _add_months(current, months)
+        if current >= maturity_date:
+            break
+        dates.append(current)
+    return dates
+
+
+def _load_ore_swaption_surface_spec(todaysmarket_xml: Path, curveconfig_path: Path, currency: str) -> dict[str, object]:
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    mapping = tm_root.find("./SwaptionVolatilities[@id='default']")
+    if mapping is None:
+        raise ValueError("todaysmarket.xml missing SwaptionVolatilities id='default'")
+    handle = mapping.findtext(f"./SwaptionVolatility[@currency='{currency}']")
+    if not handle:
+        raise ValueError(f"todaysmarket.xml missing swaption volatility mapping for currency '{currency}'")
+    curve_id = handle.strip().split("/")[-1]
+    cfg_root = ET.parse(curveconfig_path).getroot()
+    node = None
+    for candidate in cfg_root.findall(".//SwaptionVolatility"):
+        if (candidate.findtext("./CurveId") or "").strip() == curve_id:
+            node = candidate
+            break
+    if node is None:
+        raise ValueError(f"curveconfig.xml missing SwaptionVolatility with CurveId '{curve_id}'")
+    option_tenors = [x.strip() for x in (node.findtext("./OptionTenors") or "").replace("\n", "").split(",") if x.strip()]
+    swap_tenors = [x.strip() for x in (node.findtext("./SwapTenors") or "").replace("\n", "").split(",") if x.strip()]
+    return {
+        "curve_id": curve_id,
+        "volatility_type": (node.findtext("./VolatilityType") or "Normal").strip(),
+        "day_counter": (node.findtext("./DayCounter") or "Actual/365 (Fixed)").strip(),
+        "calendar": (node.findtext("./Calendar") or "TARGET").strip(),
+        "business_day_convention": (node.findtext("./BusinessDayConvention") or "Following").strip(),
+        "option_tenors": option_tenors,
+        "swap_tenors": swap_tenors,
+        "short_swap_index_base": (node.findtext("./ShortSwapIndexBase") or "").strip(),
+        "swap_index_base": (node.findtext("./SwapIndexBase") or "").strip(),
+    }
+
+
+def _load_ore_swaption_quotes(
+    market_data_file: Path,
+    *,
+    currency: str,
+    option_tenors: list[str],
+    swap_tenors: list[str],
+    volatility_type: str,
+) -> np.ndarray:
+    quote_kind = "RATE_NVOL" if (volatility_type or "").strip().lower() == "normal" else "RATE_LNVOL"
+    prefix = f"SWAPTION/{quote_kind}/{currency}/"
+    quotes: dict[tuple[str, str], float] = {}
+    with open(market_data_file, encoding="utf-8") as handle:
+        for line in handle:
+            toks = line.strip().split()
+            if len(toks) < 3:
+                continue
+            key = toks[1]
+            if not key.startswith(prefix):
+                continue
+            parts = key.split("/")
+            if len(parts) < 6:
+                continue
+            expiry = parts[3].strip()
+            term = parts[4].strip()
+            strike = parts[5].strip().upper()
+            if strike != "ATM":
+                continue
+            quotes[(expiry, term)] = float(toks[2])
+    matrix = np.empty((len(option_tenors), len(swap_tenors)), dtype=float)
+    for i, expiry in enumerate(option_tenors):
+        for j, term in enumerate(swap_tenors):
+            key = (expiry, term)
+            if key not in quotes:
+                raise ValueError(f"missing swaption quote '{quote_kind}/{currency}/{expiry}/{term}/ATM'")
+            matrix[i, j] = quotes[key]
+    return matrix
+
+
+def _build_ql_discount_curve(ore_xml: Path, currency: str, asof_date: date):
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for callable bond calibration")
+    fitted = fit_discount_curves_from_ore_market(ore_xml)
+    if currency not in fitted:
+        raise ValueError(f"no fitted market curve available for currency '{currency}'")
+    payload = fitted[currency]
+    base_curve = build_discount_curve_from_discount_pairs(list(zip(payload["times"], payload["dfs"])))
+    dates = [ql.Date(asof_date.day, asof_date.month, asof_date.year)]
+    dfs = [1.0]
+    max_time = max(float(payload["times"][-1]) if payload["times"] else 0.0, 61.0)
+    sample_times = sorted(
+        set(
+            [round(float(t), 8) for t in payload["times"] if float(t) > 0.0]
+            + [round(0.25 * i, 8) for i in range(1, int(math.ceil(max_time / 0.25)) + 1)]
+        )
+    )
+    for tt in sample_times:
+        qd = ql.Date(asof_date.day, asof_date.month, asof_date.year) + int(round(tt * 365.0))
+        if qd <= dates[-1]:
+            continue
+        dates.append(qd)
+        dfs.append(float(base_curve(tt)))
+    return ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
+
+
+def _build_callable_lgm_market_inputs(
+    *,
+    ore_xml: Path,
+    todaysmarket_xml: Path,
+    market_data_file: Path,
+    currency: str,
+    asof_date: date,
+) -> LgmMarketInputs:
+    if ql is None:  # pragma: no cover - exercised only without QuantLib
+        raise ImportError("QuantLib Python bindings are required for callable bond calibration")
+    ql.Settings.instance().evaluationDate = ql.Date(asof_date.day, asof_date.month, asof_date.year)
+    curveconfig_path = _resolve_curveconfig_path(ore_xml)
+    if curveconfig_path is None or not curveconfig_path.exists():
+        raise FileNotFoundError("curveconfig.xml could not be resolved for callable bond calibration")
+    spec = _load_ore_swaption_surface_spec(todaysmarket_xml, curveconfig_path, currency)
+    quotes = _load_ore_swaption_quotes(
+        market_data_file,
+        currency=currency,
+        option_tenors=list(spec["option_tenors"]),
+        swap_tenors=list(spec["swap_tenors"]),
+        volatility_type=str(spec["volatility_type"]),
+    )
+    option_periods = ql.PeriodVector()
+    for tenor in spec["option_tenors"]:
+        option_periods.push_back(ql.Period(str(tenor)))
+    swap_periods = ql.PeriodVector()
+    for tenor in spec["swap_tenors"]:
+        swap_periods.push_back(ql.Period(str(tenor)))
+    vols = ql.Matrix(quotes.shape[0], quotes.shape[1])
+    for i in range(quotes.shape[0]):
+        for j in range(quotes.shape[1]):
+            vols[i][j] = float(quotes[i, j])
+    dc = _ql_day_counter(str(spec["day_counter"]))
+    cal = _ql_calendar(str(spec["calendar"]))
+    bdc = _ql_bdc(str(spec["business_day_convention"]))
+    vol_type = ql.Normal if str(spec["volatility_type"]).strip().lower() == "normal" else ql.ShiftedLognormal
+    vol_surface = ql.SwaptionVolatilityMatrix(cal, bdc, option_periods, swap_periods, vols, dc, False, vol_type)
+    discount_curve = _build_ql_discount_curve(ore_xml, currency, asof_date)
+    short_tenor = str(spec["short_swap_index_base"]).strip().split("-")[-1] or "1Y"
+    long_tenor = str(spec["swap_index_base"]).strip().split("-")[-1] or "30Y"
+    short_index = ql.EuriborSwapIsdaFixA(ql.Period(short_tenor), discount_curve)
+    long_index = ql.EuriborSwapIsdaFixA(ql.Period(long_tenor), discount_curve)
+    return LgmMarketInputs(
+        swaption_vol_surface=ql.SwaptionVolatilityStructureHandle(vol_surface),
+        swap_index=long_index,
+        short_swap_index=short_index,
+        calibration_discount_curve=discount_curve,
+        model_discount_curve=discount_curve,
+    )
+
+
+@lru_cache(maxsize=16)
+def _try_calibrate_callable_lgm(
+    *,
+    ore_xml: Path,
+    pricingengine_path: Path | None,
+    todaysmarket_xml: Path,
+    market_data_file: Path,
+    currency: str,
+    maturity_date: date,
+    asof_date: date,
+) -> LGM1F | None:
+    if ql is None:
+        return None
+    model_params: dict[str, str] = {}
+    if pricingengine_path is not None and pricingengine_path.exists():
+        root = ET.parse(pricingengine_path).getroot()
+        product = root.find("./Product[@type='CallableBond']")
+        if product is not None:
+            model_params = {
+                (n.attrib.get("name", "") or "").strip(): (n.text or "").strip()
+                for n in product.findall("./ModelParameters/Parameter")
+            }
+    calibration = (model_params.get("Calibration") or "None").strip()
+    strategy = (model_params.get("CalibrationStrategy") or "None").strip()
+    if calibration == "None" or strategy not in {"CoterminalATM", "CoterminalDealStrike"}:
+        return None
+    try:
+        market_inputs = _build_callable_lgm_market_inputs(
+            ore_xml=ore_xml,
+            todaysmarket_xml=todaysmarket_xml,
+            market_data_file=market_data_file,
+            currency=currency,
+            asof_date=asof_date,
+        )
+        expiries = _parse_reference_grid_dates(
+            asof_date,
+            maturity_date,
+            model_params.get("ReferenceCalibrationGrid", ""),
+        )
+        if not expiries:
+            return None
+        sigma = [float(x.strip()) for x in (model_params.get("Volatility") or "0.01").split(",") if x.strip()]
+        sigma_times = [float(x.strip()) for x in (model_params.get("VolatilityTimes") or "").split(",") if x.strip()]
+        lambda_value = float((model_params.get("Reversion") or "0.03").strip() or "0.03")
+        result = calibrate_lgm_currency(
+            CurrencyLgmConfig(
+                currency=currency,
+                calibration_type=CalibrationType.BOOTSTRAP if calibration == "Bootstrap" else CalibrationType.BEST_FIT,
+                volatility=replace(
+                    CurrencyLgmConfig(currency=currency).volatility,
+                    calibrate=True,
+                    # The external calibration backend is QuantLib GSR-based
+                    # and only supports the Hull-White parametrisation. ORE's
+                    # callable-bond config here requests Hagan volatility, but
+                    # calibrating the same coterminal basket with the available
+                    # HW/GSR engine is still much closer to native ORE than
+                    # keeping the fixed sigma/lambda fallback.
+                    type=VolatilityType.HULL_WHITE,
+                    param_type=ParamType.PIECEWISE if calibration == "Bootstrap" else ParamType.CONSTANT,
+                    time_grid=tuple(sigma_times),
+                    initial_values=tuple(sigma),
+                ),
+                reversion=replace(
+                    CurrencyLgmConfig(currency=currency).reversion,
+                    calibrate=False,
+                    type=ReversionType.HULL_WHITE if (model_params.get("ReversionType") or "HullWhite").strip() == "HullWhite" else ReversionType.HAGAN,
+                    param_type=ParamType.CONSTANT,
+                    time_grid=(),
+                    initial_values=(lambda_value,),
+                ),
+                calibration_swaptions=tuple(
+                    [
+                        # Mirror ORE's coterminal basket: calibration expiry grid
+                        # before maturity, each swap maturing on the callable
+                        # bond's maturity date.
+                        SwaptionSpec(
+                            expiry=d.isoformat(),
+                            term=maturity_date.isoformat(),
+                            strike="ATM",
+                        )
+                        for d in expiries
+                    ]
+                ),
+                # `lgm_calibration.py` expects the basket to be provided
+                # explicitly; its `reference_calibration_grid` helper parses a
+                # list of dates / periods rather than ORE's `400,3M` date-grid
+                # shorthand. We already expanded that shorthand into the
+                # coterminal expiry list above, so leave the secondary filter
+                # empty here.
+                reference_calibration_grid="",
+                bootstrap_tolerance=float((model_params.get("Tolerance") or "1e-4").strip() or "1e-4"),
+                continue_on_error=False,
+            ),
+            market_inputs,
+        )
+    except Exception:
+        return None
+    alpha_values = tuple(max(float(x), 0.0) for x in result.volatility.values)
+    params = LGMParams(
+        alpha_times=tuple(float(x) for x in result.volatility.time_grid),
+        # QuantLib's bootstrap can leave a handful of sigma buckets at tiny
+        # negative values from numerical noise (order 1e-8 to 1e-7). The Python
+        # LGM kernel requires non-negative alpha, so floor those residuals at 0.
+        alpha_values=alpha_values,
+        kappa_times=tuple(float(x) for x in result.reversion.time_grid),
+        kappa_values=tuple(float(x) for x in result.reversion.values),
+        shift=0.0,
+        scaling=1.0,
+    )
+    return LGM1F(params)
+
+
 def _build_lgm_model_for_callable(
     *,
     ore_xml: Path,
     pricingengine_path: Path | None,
+    todaysmarket_xml: Path,
+    market_data_file: Path,
     currency: str,
+    maturity_date: date,
+    asof_date: date,
 ) -> LGM1F:
+    calibrated = _try_calibrate_callable_lgm(
+        ore_xml=ore_xml,
+        pricingengine_path=pricingengine_path,
+        todaysmarket_xml=todaysmarket_xml,
+        market_data_file=market_data_file,
+        currency=currency,
+        maturity_date=maturity_date,
+        asof_date=asof_date,
+    )
+    if calibrated is not None:
+        return calibrated
     sim_cfg = _resolve_simulation_config_path(ore_xml)
     payload = None
     if sim_cfg is not None and sim_cfg.exists():
@@ -1749,7 +2103,11 @@ def price_bond_trade(
         model = _build_lgm_model_for_callable(
             ore_xml=ore_xml,
             pricingengine_path=pricingengine_path,
+            todaysmarket_xml=todaysmarket_xml,
+            market_data_file=market_data_file,
             currency=spec.currency,
+            maturity_date=max(cf.pay_date for cf in spec.bond.cashflows),
+            asof_date=asof,
         )
         result = _price_callable_bond_lgm(
             spec,
