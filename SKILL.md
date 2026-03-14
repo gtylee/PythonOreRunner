@@ -252,6 +252,256 @@ Fresh native reruns in `/tmp` can look like a model/XVA mismatch when they are r
 
 ---
 
+## Callable Bond Parity
+
+### The active callable-bond parity target is native ORE deterministic `LGM + Grid`
+
+For the callable-bond exposure example, do **not** treat the native `CrossAssetModel + MC` path as the primary parity target in this workspace.
+
+Reason:
+- the local native run crashes in `McCamCallableBondBaseEngine`
+- the stable apples-to-apples target is native deterministic `LGM` + `Grid`
+
+Use:
+- `Examples/Exposure/Input/ore_callable_bond_lgm_grid_npv_only.xml`
+- `Examples/Exposure/Input/pricingengine_callablebond_lgm_grid.xml`
+- `Examples/Exposure/Output/callable_bond_lgm_grid_npv_only/npv.csv`
+- `Examples/Exposure/Output/callable_bond_lgm_grid_npv_additional/additional_results.csv`
+
+### The ORE C++ route being mirrored is specific
+
+When debugging Python callable bonds, the relevant native path is:
+
+1. `OREData/ored/portfolio/callablebond.cpp`
+2. `OREData/ored/portfolio/builders/callablebond.cpp`
+3. `QuantExt/qle/pricingengines/numericlgmcallablebondengine.cpp`
+4. `QuantExt/qle/pricingengines/fdcallablebondevents.cpp`
+5. `QuantExt/qle/pricingengines/numericlgmmultilegoptionengine.cpp`
+6. `QuantExt/qle/termstructures/effectivebonddiscountcurve.hpp`
+
+Important native builder semantics:
+- `referenceCurve = market_->yieldCurve(referenceCurveId, pricing)`
+- `incomeCurve = referenceCurve` unless explicitly overridden
+- `defaultCurve = securitySpecificCreditCurve(...)->curve()`
+- `recovery = market_->recoveryRate(securityId)` and falls back to `recoveryRate(creditCurveId)`
+- `spread = market_->securitySpread(securityId)`
+
+Important native engine semantics:
+- the rollback discounts on `EffectiveBondDiscountCurve`
+- that effective curve is:
+  - `referenceCurve.discount(t)`
+  - times `survivalProbability(t)^(1 - recoveryRate)`
+  - times `exp(-securitySpread * t)` if spread exists
+- this is **not** the same as the risky-bond helper formula `df * survival`
+
+### The callable path has two valuation layers and they should not be treated identically
+
+This was the hard-fought part.
+
+There are two economically different layers:
+
+1. stripped risky bond
+2. callable option rollback
+
+A very plausible but wrong instinct is:
+- “native ORE uses `referenceCurveId = EUR-EURIBOR-3M`, so switch the whole Python callable pricer to that native curve”
+
+That made parity **worse**.
+
+What eventually worked:
+- keep the **stripped risky bond** on the existing generic fitted EUR curve
+- use the **native ORE reference curve from `curves.csv`** for the callable **option rollback only**
+
+This is currently implemented in:
+- `py_ore_tools/bond_pricing.py`
+
+Specifically:
+- `price_bond_trade(...)` keeps `base_curve = _fit_curve_for_currency(...)`
+- `_price_callable_bond_lgm(...)` can receive a callable-specific reference curve
+- `_load_callable_option_curve_from_reference_output(...)` looks for native `curves.csv`, including sibling output variants like `_curves`
+
+### Why the split exists
+
+Working backward from native ORE event diagnostics:
+
+- native `additional_results.csv` reports `refDsc`
+- for `PutCallBondTrade`, those `refDsc` values match the native `curves.csv` `EUR-EURIBOR-3M` column closely
+- so native ORE **is** using the named reference curve in the callable engine
+
+But:
+- plugging that same native 3M curve into the Python stripped risky-bond layer overstates the stripped value badly
+- the current generic fitted EUR curve was compensating for other mismatches in the stripped-bond approximation
+
+The useful hybrid discovered in this repo is therefore:
+- stripped layer: current generic fitted curve
+- option layer: native callable reference curve if available
+
+### This one change moved parity a lot
+
+Before the callable option/native curve split, deterministic callable parity was roughly:
+
+- `CallableBondTrade`: about `1.3m` to `1.6m` off depending on intermediate pass
+- `PutCallBondTrade`: about `2.1m` off
+
+After the split:
+
+- `CallableBondTrade`: about `385k` off
+- `CallableBondNoCall`: about `288k` off
+- `CallableBondCertainCall`: about `250k` off
+- `PutCallBondTrade`: about `259k` off
+
+That is the current stable deterministic `LGM/Grid` parity level.
+
+### The calibration path had a silent failure mode
+
+There was a real bug in callable calibration:
+
+- `lgm_calibration.py` built QuantLib `Gsr(..., 60.0)` with a hardcoded `60Y` numeraire time
+- the discount curve only extended to about `50Y`
+- QuantLib threw `time (60) is past max curve time`
+- `_try_calibrate_callable_lgm(...)` swallowed the exception and returned `None`
+- pricing silently fell back to flat uncalibrated XML defaults
+
+The fix was:
+- `numeraire_time = max(maturity_times) + 2.0`
+
+Do not remove or “simplify” that. It is the difference between real calibration and silent fallback.
+
+### `ReferenceCalibrationGrid` semantics matter
+
+Another real source-faithfulness fix:
+
+- ORE expands `ReferenceCalibrationGrid` via `DateGrid(...)`
+- that means `TARGET` calendar + `Following` adjustment
+- naive month addition is wrong
+
+This is now mirrored in Python and covered by tests.
+
+If callable calibration starts drifting again, check this before blaming the model.
+
+### What did not fix parity, despite sounding plausible
+
+These were all tried and should not be repeated blindly:
+
+1. Switch the whole callable pricing path to `referenceCurveId`
+- made parity materially worse
+
+2. Use native `curves.csv` columns directly everywhere
+- also made parity worse
+
+3. Tune only the grid (`nx`, `ny`, `exerciseTimeStepsPerYear`)
+- moved values, but did not close the large mixed put/call gap
+
+4. Assume the remaining miss was mostly calibration
+- not true after the calibration fixes
+- native alpha/kappa substitution did not explain the remaining `PutCallBondTrade` miss
+
+### The native logs are useful and should be read
+
+For this example, native logs already tell you some things:
+
+- security-specific recovery for `SECURITY_PUTCALL` is **not** found
+- ORE falls back to the credit-curve recovery for `CPTY_A`
+
+That means:
+- a missing security-specific recovery is **not** the remaining parity issue here
+
+### The callable engine is using `EffectiveBondDiscountCurve`, not the risky-bond helper formula
+
+This is easy to miss if you only stare at the Python risky-bond implementation.
+
+Native callable rollback uses:
+- `EffectiveBondDiscountCurve(referenceCurve, creditCurve, spread, recovery)`
+
+which implies:
+- `effDsc = refDsc * survival^(1 - rr) * secSpreadDiscount`
+
+Native event diagnostics in `additional_results.csv` expose:
+- `refDsc`
+- `survProb`
+- `secSprdDsc`
+- `effDsc`
+
+Use those columns.
+If Python callable discounting looks off, compare against `effDsc`, not just `refDsc`.
+
+### The remaining hard part used to be the mixed put/call case
+
+The historically hardest trade was:
+- `PutCallBondTrade`
+
+Why it was hard:
+- pure call was already close
+- no-call stripped value was much tighter
+- the remaining miss was concentrated in mixed call/put interaction
+
+The eventual large improvement did **not** come from another rollback rewrite.
+It came from the option-layer native reference curve split described above.
+
+So if parity worsens again specifically on `PutCallBondTrade`, check these in order:
+
+1. did callable option rollback still pick up native `curves.csv`?
+2. did the code fall back to generic curve because `_curves` output was not found?
+3. did somebody accidentally change callable stripped bond to also use the native 3M curve?
+
+### The current callable-specific reference curve loader has sibling fallback logic
+
+Native `curves.csv` is not always written in the exact same callable output directory as `npv.csv`.
+
+The repo now has:
+- `_load_curve_from_reference_output(...)`
+- `_load_callable_option_curve_from_reference_output(...)`
+
+The second helper tries:
+- direct output directory
+- sibling variants such as `_curves` when running from `_npv_only` or `_npv_additional`
+
+This is important for parity tests, because the deterministic callable run often has:
+- `npv.csv` in `callable_bond_lgm_grid_npv_only`
+- `curves.csv` in `callable_bond_lgm_grid_curves`
+
+### Current callable parity tests are much tighter now
+
+Relevant tests live in:
+- `tests/test_bond_pricing.py`
+- `tests/test_ore_snapshot_cli.py`
+
+Important callable tests:
+- native reference curve loader matches native `refDsc`
+- sibling `_curves` discovery works
+- deterministic callable NPV parity against native ORE `npv.csv`
+
+Current deterministic tolerances are around:
+- `CallableBondTrade`: `4e5`
+- `CallableBondNoCall`: `5.1e5`
+- `CallableBondCertainCall`: `3e5`
+- `PutCallBondTrade`: `3e5`
+
+These are much tighter than the earlier `1m+` / `2m+` bands.
+
+### If you need the shortest trustworthy callable debug recipe
+
+1. Use deterministic `LGM/Grid`, not CAM/MC.
+2. Compare against native:
+   - `npv.csv`
+   - `additional_results.csv`
+3. Confirm calibration is actually live.
+4. Confirm `ReferenceCalibrationGrid` uses ORE `DateGrid` semantics.
+5. Confirm callable option rollback resolves native `EUR-EURIBOR-3M` from `curves.csv`.
+6. Confirm stripped risky bond is still on the generic fitted curve.
+7. Only after that, touch rollback state logic.
+
+### If parity regresses, suspect these first
+
+1. Callable calibration silently fell back again.
+2. Callable option curve could not find sibling `_curves` output and fell back to generic.
+3. Someone unified callable stripped curve and option curve “for consistency”.
+4. Day-count labels drifted between `A365F` and the curve loader’s accepted labels.
+
+Do **not** start by retuning `nx` or rewriting put/call precedence unless the curve split and calibration path are already confirmed.
+
+---
+
 ## Torch Backend Dispatch
 
 ### Use one CLI/runtime surface, not separate NumPy vs torch workflows

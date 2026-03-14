@@ -114,6 +114,27 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertNotIn("ore_t0_npv", payload["pricing"])
 
+    def test_fx_option_xva_runs_native_compare_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(FX_OPTION_CASE_XML),
+                    "--price",
+                    "--xva",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_13" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "compare")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_option_hybrid")
+            self.assertEqual(payload["pricing"]["trade_type"], "FxOption")
+            self.assertIn("py_cva", payload["xva"])
+            self.assertIn("ore_cva", payload["xva"])
+            self.assertGreater(len(payload["py_epe"]), 1)
+
     def test_run_case_from_buffers_python_engine_returns_python_only_summary(self):
         input_files, output_files = self._real_case_buffers()
         result = ore_snapshot_cli.run_case_from_buffers(

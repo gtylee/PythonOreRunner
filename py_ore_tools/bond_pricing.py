@@ -2389,7 +2389,8 @@ class _CallableCashflowState:
     amount: float
     pay_time: float
     belongs_to_underlying_max_time: float
-    max_estimation_time: float
+    max_estimation_time: float | None
+    exact_estimation_time: float | None
     coupon_start_time: float | None
     coupon_end_time: float | None
 
@@ -2430,6 +2431,7 @@ def _build_callable_cashflow_states(
                     pay_time=float(pay_t),
                     belongs_to_underlying_max_time=float(end_t),
                     max_estimation_time=float(pay_t),
+                    exact_estimation_time=None,
                     coupon_start_time=float(start_t),
                     coupon_end_time=float(end_t),
                 )
@@ -2441,11 +2443,36 @@ def _build_callable_cashflow_states(
                     pay_time=float(pay_t),
                     belongs_to_underlying_max_time=float(pay_t),
                     max_estimation_time=float(pay_t),
+                    exact_estimation_time=None,
                     coupon_start_time=None,
                     coupon_end_time=None,
                 )
             )
     return out
+
+
+def _callable_close_enough(a: float, b: float, tol: float = 1.0e-12) -> bool:
+    return abs(float(a) - float(b)) <= tol
+
+
+def _callable_is_part_of_underlying(cf: _CallableCashflowState, t: float) -> bool:
+    return float(t) < cf.belongs_to_underlying_max_time or _callable_close_enough(float(t), cf.belongs_to_underlying_max_time)
+
+
+def _callable_can_be_estimated(cf: _CallableCashflowState, t: float) -> bool:
+    tt = float(t)
+    if cf.max_estimation_time is not None:
+        return tt < cf.max_estimation_time or _callable_close_enough(tt, cf.max_estimation_time)
+    if cf.exact_estimation_time is not None:
+        return _callable_close_enough(tt, cf.exact_estimation_time)
+    return False
+
+
+def _callable_must_be_estimated(cf: _CallableCashflowState, t: float) -> bool:
+    if cf.max_estimation_time is not None or cf.exact_estimation_time is None:
+        return False
+    tt = float(t)
+    return tt < cf.exact_estimation_time or _callable_close_enough(tt, cf.exact_estimation_time)
 
 
 def _callable_coupon_ratio(cf: _CallableCashflowState, t: float) -> float:
@@ -2543,7 +2570,8 @@ def _rollback_callable_bond_lgm_value(
     )
     change_times, notionals = _callable_notional_schedule(spec, asof_date, day_counter)
     cashflows = _build_callable_cashflow_states(spec, asof_date=asof_date, day_counter=day_counter)
-    cf_done = np.zeros(len(cashflows), dtype=bool)
+    cf_status = ["Open"] * len(cashflows)
+    cf_cache: list[np.ndarray | None] = [None] * len(cashflows)
 
     # Mirror the ORE engine loop more directly:
     # - `underlying_npv` is the reduced-form value of already-activated bond
@@ -2588,14 +2616,30 @@ def _rollback_callable_bond_lgm_value(
                     y_nodes=y_nodes,
                     y_weights=y_weights,
                 )
+            for j, cached in enumerate(cf_cache):
+                if cached is None:
+                    continue
+                cf_cache[j] = _convolution_rollback(
+                    np.asarray(cached, dtype=float),
+                    zeta_t1=float(zeta_grid[i + 1]),
+                    zeta_t0=float(zeta_grid[i]),
+                    mx=mx,
+                    nx=int(engine_spec.grid_nx),
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
 
         provisional_npv = np.zeros_like(provisional_npv)
         flow_amount = 0.0
         for j, cf in enumerate(cashflows):
-            if cf_done[j]:
+            if cf_status[j] == "Done":
                 continue
-            if t_from <= cf.belongs_to_underlying_max_time + 1.0e-12 and _callable_coupon_ratio(cf, t_from) > 0.0:
-                if t_from <= cf.max_estimation_time + 1.0e-12:
+            if _callable_is_part_of_underlying(cf, t_from) and _callable_coupon_ratio(cf, t_from) > 0.0:
+                if cf_status[j] == "Cached":
+                    underlying_npv = underlying_npv + np.asarray(cf_cache[j], dtype=float)
+                    cf_cache[j] = None
+                    cf_status[j] = "Done"
+                elif _callable_can_be_estimated(cf, t_from):
                     flow_amount += float(cf.amount)
                     underlying_npv = underlying_npv + _callable_cashflow_reduced_pv(
                         cf,
@@ -2604,7 +2648,7 @@ def _rollback_callable_bond_lgm_value(
                         t=t_from,
                         x_grid=grid_i,
                     )
-                    cf_done[j] = True
+                    cf_status[j] = "Done"
                 else:
                     provisional_npv = provisional_npv + _callable_cashflow_reduced_pv(
                         cf,
@@ -2613,6 +2657,15 @@ def _rollback_callable_bond_lgm_value(
                         t=t_from,
                         x_grid=grid_i,
                     )
+            elif _callable_must_be_estimated(cf, t_from) and cf_status[j] == "Open":
+                cf_cache[j] = _callable_cashflow_reduced_pv(
+                    cf,
+                    model,
+                    eff_discount_curve,
+                    t=t_from,
+                    x_grid=grid_i,
+                )
+                cf_status[j] = "Cached"
         if i in call_map or i in put_map:
             continuation = option_values.copy()
             option_before_call_center = float(option_values[mx])

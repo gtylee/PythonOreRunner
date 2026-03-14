@@ -35,13 +35,15 @@ from py_ore_tools.irs_xva_utils import (
     compute_realized_float_coupons,
     compute_xva_from_exposure_profile,
     deflate_lgm_npv_paths,
+    load_ore_default_curve_inputs,
+    load_ore_exposure_profile,
     load_ore_legs_from_flows,
     load_simulation_yield_tenors,
     load_swap_legs_from_portfolio,
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
-from py_ore_tools.lgm_fx_xva_utils import FxForwardDef
+from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, FxOptionDef, build_two_ccy_hybrid, fx_option_npv
 from py_ore_tools.lgm import make_ore_gaussian_rng, simulate_ba_measure, simulate_lgm_measure
 from py_ore_tools.ore_snapshot import (
     load_from_ore_xml,
@@ -794,6 +796,51 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     }
 
 
+def _requested_xva_metrics_from_ore_xml(ore_xml: Path) -> list[str]:
+    root = ET.parse(ore_xml).getroot()
+    analytic = root.find("./Analytics/Analytic[@type='xva']")
+    if analytic is None:
+        return []
+    params = {
+        (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+        for node in analytic.findall("./Parameter")
+    }
+    requested: list[str] = []
+    if params.get("cva", "Y").strip().upper() != "N":
+        requested.append("CVA")
+    if params.get("dva", "N").strip().upper() == "Y":
+        requested.append("DVA")
+    if params.get("fva", "N").strip().upper() == "Y":
+        requested.append("FVA")
+    return requested
+
+
+def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: str) -> tuple[float, float]:
+    root = ET.parse(simulation_xml).getroot()
+    corr_nodes = root.findall("./CrossAssetModel/InstantaneousCorrelations/Correlation")
+    corr_dom_fx = 0.0
+    corr_for_fx = 0.0
+    direct = f"FX:{base}{quote}"
+    inverse = f"FX:{quote}{base}"
+    for node in corr_nodes:
+        f1 = (node.attrib.get("factor1", "") or "").strip().upper()
+        f2 = (node.attrib.get("factor2", "") or "").strip().upper()
+        val = float((node.text or "0").strip() or "0")
+        factors = {f1, f2}
+        sign = 1.0
+        if direct in factors:
+            sign = 1.0
+        elif inverse in factors:
+            sign = -1.0
+        else:
+            continue
+        if f"IR:{quote}" in factors:
+            corr_dom_fx = sign * val
+        if f"IR:{base}" in factors:
+            corr_for_fx = sign * val
+    return float(corr_dom_fx), float(corr_for_fx)
+
+
 def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
@@ -816,7 +863,6 @@ def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
     portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
     pricing_config_id = markets_params.get("pricing", "default")
-
     portfolio_root = ET.parse(portfolio_xml).getroot()
     trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
@@ -851,6 +897,13 @@ def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     if not bought_ccy or not sold_ccy or bought_amount == 0.0 or not exercise_date:
         raise ValueError(f"Incomplete FxOptionData for trade '{trade_id}' in {portfolio_xml}")
     strike = sold_amount / bought_amount
+    npv_analytic = ore_root.find("./Analytics/Analytic[@type='npv']")
+    xva_analytic = ore_root.find("./Analytics/Analytic[@type='xva']")
+    report_ccy = (
+        (npv_analytic.findtext("./Parameter[@name='baseCurrency']") if npv_analytic is not None else "")
+        or (xva_analytic.findtext("./Parameter[@name='baseCurrency']") if xva_analytic is not None else "")
+        or bought_ccy
+    ).strip().upper()
 
     tm_root = ET.parse(todaysmarket_xml).getroot()
     mappings = ore_snapshot_mod._resolve_discount_columns_by_currency(tm_root, pricing_config_id)
@@ -927,6 +980,7 @@ def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "notional_base": float(bought_amount),
         "bought_currency": bought_ccy,
         "sold_currency": sold_ccy,
+        "report_ccy": report_ccy,
         "option_type": (option_data.findtext("./OptionType") or "").strip().upper(),
         "long_short": (option_data.findtext("./LongShort") or "").strip().upper(),
         "atm_vol": float(atm_vol),
@@ -1301,7 +1355,12 @@ def _compute_price_only_case(
             else:
                 undiscounted = max(strike - forward, 0.0)
         sign = 1.0 if str(payload["long_short"]).upper() != "SHORT" else -1.0
-        py_t0_npv = sign * float(payload["notional_base"]) * df_dom * undiscounted
+        npv_quote = sign * float(payload["notional_base"]) * df_dom * undiscounted
+        report_ccy = str(payload.get("report_ccy") or payload["sold_currency"]).upper()
+        if report_ccy == str(payload["bought_currency"]).upper():
+            py_t0_npv = npv_quote / max(float(payload["spot0"]), 1.0e-12)
+        else:
+            py_t0_npv = npv_quote
         pricing = {
             "py_t0_npv": py_t0_npv,
             "trade_type": payload["trade_type"],
@@ -1312,6 +1371,7 @@ def _compute_price_only_case(
             "fx_strike": strike,
             "fx_vol_atm": vol,
             "option_type": payload["option_type"],
+            "report_ccy": report_ccy,
         }
         diagnostics = {
             "engine": "python_price_only",
@@ -1367,6 +1427,287 @@ def _compute_price_only_case(
             "using_expected_output": bool(payload.get("using_expected_output", False)),
         },
     }
+
+
+def _compute_fx_option_snapshot_case(
+    ore_xml: Path,
+    *,
+    paths: int | None,
+    seed: int,
+    rng_mode: str,
+    anchor_t0_npv: bool,
+    own_hazard: float,
+    own_recovery: float,
+    xva_mode: str,
+) -> SnapshotComputation:
+    _ = anchor_t0_npv
+    _ = xva_mode
+    payload = _build_fx_option_pricing_payload(ore_xml)
+    ore_root = ET.parse(ore_xml).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    xva_analytic = ore_root.find("./Analytics/Analytic[@type='xva']")
+    xva_params = {
+        (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+        for node in (xva_analytic.findall("./Parameter") if xva_analytic is not None else [])
+    }
+    asof_date = setup_params.get("asofDate", "")
+    base_dir = ore_xml.resolve().parent
+    run_dir = base_dir.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base_dir.name or "Input")).resolve()
+    output_path = (run_dir / setup_params.get("outputPath", "Output")).resolve()
+    market_data_path = (input_dir / setup_params.get("marketDataFile", "")).resolve()
+    curve_config_path = (input_dir / setup_params.get("curveConfigFile", "")).resolve()
+    conventions_path = (input_dir / setup_params.get("conventionsFile", "")).resolve()
+    todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+    pricing_config_id = markets_params.get("pricing", "default")
+    sim_config_id = markets_params.get("simulation", pricing_config_id)
+    simulation_xml = None
+    simulation_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
+    if simulation_analytic is not None:
+        sim_params = {
+            (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+            for node in simulation_analytic.findall("./Parameter")
+        }
+        simulation_xml = (input_dir / sim_params.get("simulationConfigFile", "simulation.xml")).resolve()
+    if simulation_xml is None or not simulation_xml.exists():
+        raise FileNotFoundError(f"simulation xml not found for FX option XVA: {simulation_xml}")
+
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    base = str(payload["bought_currency"]).upper()
+    quote = str(payload["sold_currency"]).upper()
+    report_ccy = str(payload.get("report_ccy") or base).upper()
+    report_curve_col = ore_snapshot_mod._resolve_discount_column(tm_root, sim_config_id, report_ccy)
+
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    exposure_csv = _find_reference_output_file(ore_xml, f"exposure_trade_{payload['trade_id']}.csv")
+    xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
+    if curves_csv is None or exposure_csv is None or xva_csv is None:
+        raise FileNotFoundError("FX option XVA requires curves.csv, exposure_trade_<id>.csv and xva.csv")
+
+    exposure_profile = load_ore_exposure_profile(str(exposure_csv))
+    exposure_times = np.asarray(exposure_profile["time"], dtype=float)
+    exposure_dates = [str(x) for x in exposure_profile["date"]]
+    if exposure_times.size == 0 or exposure_times[0] != 0.0:
+        raise ValueError("FX option exposure profile must start at time 0.0")
+
+    report_curve_data = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+        str(curves_csv),
+        [report_curve_col],
+        asof_date=asof_date,
+        day_counter="A365F",
+    )
+    _, curve_times_report, curve_dfs_report = report_curve_data[report_curve_col]
+    p0_report = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_report, curve_dfs_report)))
+
+    sim_root = ET.parse(simulation_xml).getroot()
+    calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
+        ore_xml_path=str(ore_xml.resolve()),
+        output_path=output_path,
+        market_data_path=market_data_path,
+        curve_config_path=curve_config_path,
+        conventions_path=conventions_path,
+        todaysmarket_xml_path=todaysmarket_xml,
+        simulation_xml_path=simulation_xml,
+        domestic_ccy=(sim_root.findtext("./CrossAssetModel/DomesticCcy") or report_ccy).strip(),
+    )
+    ir_specs: dict[str, dict[str, object]] = {}
+    for ccy in (base, quote):
+        params_dict = None
+        if calibration_xml is not None and calibration_xml.exists():
+            try:
+                params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy)
+            except Exception:
+                params_dict = None
+        if params_dict is None:
+            params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(str(simulation_xml), ccy_key=ccy)
+        ir_specs[ccy] = {
+            "alpha": (params_dict["alpha_times"], params_dict["alpha_values"]),
+            "kappa": (params_dict["kappa_times"], params_dict["kappa_values"]),
+            "shift": float(params_dict["shift"]),
+            "scaling": float(params_dict["scaling"]),
+        }
+    corr_dom_fx, corr_for_fx = _load_hybrid_corr_from_simulation(simulation_xml, base, quote)
+    hybrid = build_two_ccy_hybrid(
+        pair=f"{base}/{quote}",
+        ir_specs=ir_specs,
+        fx_vol=float(payload["atm_vol"]),
+        corr_dom_fx=corr_dom_fx,
+        corr_for_fx=corr_for_fx,
+    )
+
+    effective_paths = int(paths) if paths is not None else int((sim_root.findtext("./Parameters/Samples") or "500").strip() or "500")
+    if rng_mode == "ore_parity":
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng(seed)
+    rd = np.asarray([-(np.log(max(float(payload["p0_dom"](max(t, 1.0e-8))), 1.0e-18)) / max(float(t), 1.0e-8)) for t in np.maximum(exposure_times, 1.0e-8)])
+    rf = np.asarray([-(np.log(max(float(payload["p0_for"](max(t, 1.0e-8))), 1.0e-18)) / max(float(t), 1.0e-8)) for t in np.maximum(exposure_times, 1.0e-8)])
+    mu = float(np.mean(rd - rf))
+    sim = hybrid.simulate_paths(
+        exposure_times,
+        effective_paths,
+        rng,
+        log_s0={f"{base}/{quote}": float(np.log(float(payload["spot0"])))},
+        rd_minus_rf={f"{base}/{quote}": mu},
+    )
+    s = sim["s"][f"{base}/{quote}"]
+    x_dom = sim["x"][quote]
+    x_for = sim["x"][base]
+    fx_option = FxOptionDef(
+        trade_id=str(payload["trade_id"]),
+        pair=f"{base}/{quote}",
+        notional_base=float(payload["notional_base"]),
+        strike=float(payload["strike"]),
+        maturity=float(payload["maturity_time"]),
+        option_type=str(payload["option_type"]),
+        long_short=str(payload["long_short"]),
+        report_ccy=report_ccy,
+    )
+    npv = np.zeros((exposure_times.size, effective_paths), dtype=float)
+    for i, t in enumerate(exposure_times):
+        npv[i, :] = fx_option_npv(
+            hybrid,
+            fx_option,
+            float(t),
+            s[i, :],
+            x_dom[i, :],
+            x_for[i, :],
+            payload["p0_dom"],
+            payload["p0_for"],
+            float(payload["atm_vol"]),
+        )
+
+    epe = np.mean(np.maximum(npv, 0.0), axis=1)
+    ene = np.mean(np.maximum(-npv, 0.0), axis=1)
+    pfe = np.quantile(np.maximum(npv, 0.0), 0.95, axis=1)
+    credit = load_ore_default_curve_inputs(str(todaysmarket_xml), str(market_data_path), cpty_name=str(payload["counterparty"]))
+    q_c = survival_probability_from_hazard(exposure_times, credit["hazard_times"], credit["hazard_rates"])
+    dva_name = (xva_params.get("dvaName") or "BANK").strip() or "BANK"
+    own_credit = None
+    if dva_name and dva_name != str(payload["counterparty"]):
+        try:
+            own_credit = load_ore_default_curve_inputs(str(todaysmarket_xml), str(market_data_path), cpty_name=dva_name)
+        except Exception:
+            own_credit = None
+    if own_credit is not None:
+        q_b = survival_probability_from_hazard(exposure_times, own_credit["hazard_times"], own_credit["hazard_rates"])
+        recovery_own_eff = float(own_credit["recovery"])
+        own_credit_source = "market"
+    else:
+        q_b = survival_probability_from_hazard(
+            exposure_times,
+            np.array([0.5, 1.0, 5.0, 10.0]),
+            np.full(4, own_hazard),
+        )
+        recovery_own_eff = float(own_recovery)
+        own_credit_source = "fallback"
+    discount = np.asarray([p0_report(float(t)) for t in exposure_times], dtype=float)
+    xva_pack = compute_xva_from_exposure_profile(
+        times=exposure_times,
+        epe=epe,
+        ene=ene,
+        discount=discount,
+        survival_cpty=q_c,
+        survival_own=q_b,
+        recovery_cpty=float(credit["recovery"]),
+        recovery_own=recovery_own_eff,
+        exposure_discounting="discount_curve",
+    )
+    xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(payload["netting_set_id"]))
+    basel_ee = epe.copy()
+    basel_eee = np.maximum.accumulate(basel_ee)
+    time_weighted_basel_epe = np.zeros_like(basel_ee)
+    time_weighted_basel_eepe = np.zeros_like(basel_eee)
+    acc_epe = 0.0
+    acc_eepe = 0.0
+    prev_time = 0.0
+    for i, t in enumerate(exposure_times):
+        dt = max(float(t) - prev_time, 0.0)
+        prev_time = float(t)
+        if i == 0 and float(t) == 0.0:
+            time_weighted_basel_epe[i] = float(basel_ee[i])
+            time_weighted_basel_eepe[i] = float(basel_eee[i])
+            continue
+        acc_epe += float(basel_ee[i]) * dt
+        acc_eepe += float(basel_eee[i]) * dt
+        denom = max(float(t), 1.0e-12)
+        time_weighted_basel_epe[i] = acc_epe / denom
+        time_weighted_basel_eepe[i] = acc_eepe / denom
+    one_year_idx = int(np.searchsorted(exposure_times, 1.0, side="left")) if exposure_times.size else 0
+    one_year_idx = min(one_year_idx, max(exposure_times.size - 1, 0))
+    py_basel_epe = float(time_weighted_basel_epe[one_year_idx]) if exposure_times.size else 0.0
+    py_basel_eepe = float(time_weighted_basel_eepe[one_year_idx]) if exposure_times.size else 0.0
+
+    pricing = {
+        "py_t0_npv": float(np.mean(npv[0, :])),
+        "discount_column": report_curve_col,
+        "forward_column": payload["forward_column"],
+        "trade_type": "FxOption",
+    }
+    if payload.get("ore_t0_npv") is not None:
+        pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+        pricing["t0_npv_abs_diff"] = abs(float(pricing["py_t0_npv"]) - float(payload["ore_t0_npv"]))
+    xva_summary = {
+        "ore_cva": float(xva_row["cva"]),
+        "py_cva": float(xva_pack["cva"]),
+        "cva_rel_diff": _safe_rel_diff(float(xva_pack["cva"]), float(xva_row["cva"])),
+        "ore_dva": float(xva_row["dva"]),
+        "py_dva": float(xva_pack["dva"]),
+        "dva_rel_diff": _safe_rel_diff(float(xva_pack["dva"]), float(xva_row["dva"])),
+        "ore_fba": float(xva_row["fba"]),
+        "py_fba": float(xva_pack.get("fba", 0.0)),
+        "fba_rel_diff": _safe_rel_diff(float(xva_pack.get("fba", 0.0)), float(xva_row["fba"])),
+        "ore_fca": float(xva_row["fca"]),
+        "py_fca": float(xva_pack.get("fca", 0.0)),
+        "fca_rel_diff": _safe_rel_diff(float(xva_pack.get("fca", 0.0)), float(xva_row["fca"])),
+        "py_fva": float(xva_pack.get("fva", 0.0)),
+        "own_credit_source": own_credit_source,
+        "ore_basel_epe": float(xva_row["basel_epe"]),
+        "ore_basel_eepe": float(xva_row["basel_eepe"]),
+        "py_basel_epe": py_basel_epe,
+        "py_basel_eepe": py_basel_eepe,
+    }
+    requested_metrics = _requested_xva_metrics_from_ore_xml(ore_xml)
+    diagnostics = {
+        "engine": "compare",
+        "pricing_mode": "python_fx_option_hybrid",
+        "reference_output_dirs": payload.get("reference_output_dirs", []),
+        "using_expected_output": bool(payload.get("using_expected_output", False)),
+        "epe_rel_median": float(np.median(_safe_rel_vector(epe, np.asarray(exposure_profile["epe"], dtype=float)))),
+        "ene_rel_median": float(np.median(_safe_rel_vector(ene, np.asarray(exposure_profile["ene"], dtype=float)))),
+        "exposure_points": int(exposure_times.size),
+        "own_credit_source": own_credit_source,
+        **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
+    }
+    return SnapshotComputation(
+        ore_xml=str(ore_xml),
+        trade_id=str(payload["trade_id"]),
+        counterparty=str(payload["counterparty"]),
+        netting_set_id=str(payload["netting_set_id"]),
+        paths=effective_paths,
+        seed=seed,
+        rng_mode=rng_mode,
+        pricing=pricing,
+        xva=xva_summary,
+        parity={"summary": {"requested_xva_metrics": requested_metrics}},
+        diagnostics=diagnostics,
+        maturity_date=str(payload["maturity_date"]),
+        maturity_time=float(payload["maturity_time"]),
+        exposure_dates=exposure_dates,
+        exposure_times=[float(x) for x in exposure_times],
+        py_epe=[float(x) for x in epe],
+        py_ene=[float(x) for x in ene],
+        py_pfe=[float(x) for x in pfe],
+        ore_basel_epe=float(xva_row["basel_epe"]),
+        ore_basel_eepe=float(xva_row["basel_eepe"]),
+    )
 
 
 def _compute_snapshot_case(
@@ -2542,16 +2883,28 @@ def _run_case(
 
     if modes.xva:
         try:
-            base_summary = _compute_snapshot_case(
-                ore_xml,
-                paths=args.paths,
-                seed=args.seed,
-                rng_mode=args.rng,
-                anchor_t0_npv=args.anchor_t0_npv,
-                own_hazard=args.own_hazard,
-                own_recovery=args.own_recovery,
-                xva_mode=args.xva_mode,
-            )
+            if first_trade_type == "FxOption":
+                base_summary = _compute_fx_option_snapshot_case(
+                    ore_xml,
+                    paths=args.paths,
+                    seed=args.seed,
+                    rng_mode=args.rng,
+                    anchor_t0_npv=args.anchor_t0_npv,
+                    own_hazard=args.own_hazard,
+                    own_recovery=args.own_recovery,
+                    xva_mode=args.xva_mode,
+                )
+            else:
+                base_summary = _compute_snapshot_case(
+                    ore_xml,
+                    paths=args.paths,
+                    seed=args.seed,
+                    rng_mode=args.rng,
+                    anchor_t0_npv=args.anchor_t0_npv,
+                    own_hazard=args.own_hazard,
+                    own_recovery=args.own_recovery,
+                    xva_mode=args.xva_mode,
+                )
         except Exception as exc:
             if not _is_reference_fallback_error(exc):
                 raise

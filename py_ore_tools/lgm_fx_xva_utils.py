@@ -15,6 +15,7 @@ analytics stack.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable, Dict, Iterable, List, Literal, Mapping, Sequence, Tuple
 
 import numpy as np
@@ -45,6 +46,20 @@ class FxForwardDef:
     strike: float
     maturity: float
     pay_ccy: str | None = None
+
+
+@dataclass(frozen=True)
+class FxOptionDef:
+    """Compact ORE-like European FX option definition used by hybrid pricers."""
+
+    trade_id: str
+    pair: str  # BASE/QUOTE
+    notional_base: float
+    strike: float
+    maturity: float
+    option_type: str  # CALL or PUT on BASE vs QUOTE
+    long_short: str = "LONG"
+    report_ccy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +187,11 @@ def _normalize_zero_rate_curve_input(zero_rate, horizon: float) -> List[Tuple[fl
 TensorBackend = Literal["auto", "numpy", "torch-cpu", "torch-mps"]
 
 
+def _normal_cdf(x: np.ndarray | float) -> np.ndarray | float:
+    vec = np.vectorize(lambda y: 0.5 * (1.0 + math.erf(float(y) / math.sqrt(2.0))))
+    return vec(x)
+
+
 def _torch_mps_available() -> bool:
     try:
         import torch
@@ -254,6 +274,67 @@ def fx_forward_npv(
     p_f = hybrid.zc_bond(base, t, fx_def.maturity, x_for_t, float(p0_for(t)), float(p0_for(fx_def.maturity)))
     fwd = hybrid.fx_forward(fx_def.pair, t, fx_def.maturity, s_t, p_d, p_f)
     return fx_def.notional_base * p_d * (fwd - fx_def.strike)
+
+
+def fx_option_npv(
+    hybrid: LgmFxHybrid,
+    fx_def: FxOptionDef,
+    t: float,
+    s_t: np.ndarray,
+    x_dom_t: np.ndarray,
+    x_for_t: np.ndarray,
+    p0_dom: Callable[[float], float],
+    p0_for: Callable[[float], float],
+    vol: float | Callable[[float, float], float],
+) -> np.ndarray:
+    """Pathwise European FX option NPV in the requested reporting currency.
+
+    The payoff is an option on the BASE currency expressed against QUOTE:
+      N_base * max(S_T - K, 0) for a call, or max(K - S_T, 0) for a put.
+    Black/Garman-Kohlhagen pricing is applied on each path using the hybrid
+    pathwise forward and deterministic residual volatility input.
+    """
+    base, quote = fx_def.pair.upper().replace("-", "/").split("/")
+    if quote not in hybrid.ir_models or base not in hybrid.ir_models:
+        raise ValueError("hybrid model missing required currencies for FX option")
+
+    s = np.asarray(s_t, dtype=float)
+    if t > fx_def.maturity + 1.0e-12:
+        return np.zeros_like(s)
+
+    p_d = hybrid.zc_bond(quote, t, fx_def.maturity, x_dom_t, float(p0_dom(t)), float(p0_dom(fx_def.maturity)))
+    p_f = hybrid.zc_bond(base, t, fx_def.maturity, x_for_t, float(p0_for(t)), float(p0_for(fx_def.maturity)))
+    fwd = hybrid.fx_forward(fx_def.pair, t, fx_def.maturity, s, p_d, p_f)
+    tau = max(float(fx_def.maturity) - float(t), 0.0)
+    sigma = float(vol(float(t), float(fx_def.maturity)) if callable(vol) else vol)
+    sigma = max(sigma, 0.0)
+    stddev = sigma * math.sqrt(max(tau, 0.0))
+
+    strike = float(fx_def.strike)
+    if stddev > 0.0 and strike > 0.0:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d1 = (np.log(np.clip(fwd, 1.0e-18, None) / strike) + 0.5 * stddev * stddev) / stddev
+        d2 = d1 - stddev
+        if str(fx_def.option_type).upper() == "CALL":
+            undiscounted = fwd * _normal_cdf(d1) - strike * _normal_cdf(d2)
+        else:
+            undiscounted = strike * _normal_cdf(-d2) - fwd * _normal_cdf(-d1)
+    else:
+        if str(fx_def.option_type).upper() == "CALL":
+            undiscounted = np.maximum(fwd - strike, 0.0)
+        else:
+            undiscounted = np.maximum(strike - fwd, 0.0)
+
+    npv_quote = float(fx_def.notional_base) * np.asarray(p_d, dtype=float) * np.asarray(undiscounted, dtype=float)
+    if str(fx_def.long_short).upper() == "SHORT":
+        npv_quote = -npv_quote
+
+    report_ccy = (fx_def.report_ccy or quote).upper()
+    if report_ccy == quote:
+        return npv_quote
+    if report_ccy == base:
+        return npv_quote / np.clip(s, 1.0e-18, None)
+    raise ValueError(f"unsupported report currency '{report_ccy}' for pair {fx_def.pair}")
 
 
 def fx_forward_npv_torch(
@@ -879,10 +960,12 @@ __all__ = [
     "TensorBackend",
     "resolve_tensor_backend",
     "FxForwardDef",
+    "FxOptionDef",
     "XccyFloatLegDef",
     "build_lgm_params",
     "build_two_ccy_hybrid",
     "fx_forward_npv",
+    "fx_option_npv",
     "fx_forward_npv_torch",
     "fx_forward_portfolio_npv_paths",
     "fx_forward_portfolio_npv_paths_torch",
