@@ -138,6 +138,7 @@ class FXForward(Product):
     strike: float
     maturity_years: float
     buy_base: bool = True
+    value_date: Optional[str] = None
     product_type: ProductType = field(init=False, default="FXForward")
 
     def __post_init__(self) -> None:
@@ -147,6 +148,8 @@ class FXForward(Product):
             raise ValueError("FXForward.notional must be > 0")
         if self.maturity_years <= 0:
             raise ValueError("FXForward.maturity_years must be > 0")
+        if self.value_date is not None:
+            _validate_date_like(self.value_date, "FXForward.value_date")
 
 
 @dataclass(frozen=True)
@@ -182,7 +185,27 @@ class BermudanSwaption(Product):
     settlement: str = "Physical"
     option_type: str = "Call"
     long_short: str = "Long"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    fixed_leg_tenor: str = "1Y"
+    float_leg_tenor: str = "6M"
+    fixed_day_counter: Optional[str] = None
+    float_day_counter: Optional[str] = None
+    calendar: Optional[str] = None
+    fixed_payment_convention: str = "Following"
+    float_payment_convention: str = "ModifiedFollowing"
+    fixed_schedule_convention: Optional[str] = None
+    float_schedule_convention: Optional[str] = None
+    fixed_term_convention: Optional[str] = None
+    float_term_convention: Optional[str] = None
+    fixed_schedule_rule: str = "Forward"
+    float_schedule_rule: str = "Forward"
+    end_of_month: bool = False
     float_index: str = ""
+    fixing_days: int = 2
+    float_spread: float = 0.0
+    payoff_at_expiry: bool = False
+    is_in_arrears: bool = False
     product_type: ProductType = field(init=False, default="BermudanSwaption")
 
     def __post_init__(self) -> None:
@@ -194,6 +217,12 @@ class BermudanSwaption(Product):
             raise ValueError("BermudanSwaption.exercise_dates must not be empty")
         for d in self.exercise_dates:
             _validate_date_like(d, "BermudanSwaption.exercise_dates")
+        if self.start_date is not None:
+            _validate_date_like(self.start_date, "BermudanSwaption.start_date")
+        if self.end_date is not None:
+            _validate_date_like(self.end_date, "BermudanSwaption.end_date")
+        if self.fixing_days < 0:
+            raise ValueError("BermudanSwaption.fixing_days must be >= 0")
 
 
 ProductSpec = Union[IRS, FXForward, EuropeanOption, BermudanSwaption, GenericProduct]
@@ -276,6 +305,19 @@ class CollateralConfig:
 class PricingEngineConfig:
     model: str = "BlackScholes"
     npv_engine: str = "DiscountedCashflows"
+    fx_model: Optional[str] = None
+    fx_engine: Optional[str] = None
+    swap_model: str = "DiscountedCashflows"
+    swap_engine: str = "DiscountingSwapEngine"
+    bermudan_model: str = "LGM"
+    bermudan_engine: str = "Gaussian1dNonstandardSwaptionEngine"
+    bermudan_reversion: float = 0.03
+    bermudan_volatility: float = 0.01
+    bermudan_shift_horizon: float = 0.0
+    bermudan_sx: float = 3.0
+    bermudan_nx: int = 10
+    bermudan_sy: float = 3.0
+    bermudan_ny: int = 10
 
 
 @dataclass(frozen=True)
@@ -283,6 +325,13 @@ class TodaysMarketConfig:
     market_id: str = "default"
     discount_curve: str = "EUR-EONIA"
     fx_pairs: Tuple[str, ...] = ("EURUSD",)
+    yield_curves_id: Optional[str] = None
+    discounting_curves_id: Optional[str] = None
+    index_forwarding_curves_id: Optional[str] = None
+    fx_spots_id: Optional[str] = None
+    fx_volatilities_id: Optional[str] = None
+    swaption_volatilities_id: Optional[str] = None
+    default_curves_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +347,13 @@ class SimulationConfig:
     seed: int = 42
     dates: Tuple[str, ...] = ()
     strict_template: bool = False
+    discretization: str = "Exact"
+    sequence: str = "SobolBrownianBridge"
+    scenario: str = "Simple"
+    closeout_lag: str = "2W"
+    mpor_mode: str = "StickyDate"
+    day_counter: str = "A365F"
+    calendar: Optional[str] = None
     xva_cg_dynamic_im: bool = False
     xva_cg_dynamic_im_step_size: int = 1
     xva_cg_regression_order_dynamic_im: Optional[int] = None
@@ -317,6 +373,21 @@ class SimulationMarketConfig:
     indices: Tuple[str, ...] = ("EUR-ESTER", "USD-SOFR")
     default_curve_names: Tuple[str, ...] = ("BANK", "CPTY_A")
     fx_pairs: Tuple[str, ...] = ("USDEUR",)
+    yield_curve_tenors: Tuple[str, ...] = ("3M", "6M", "1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "12Y", "15Y", "20Y")
+    yield_curve_interpolation: str = "LogLinear"
+    yield_curve_extrapolation: bool = True
+    default_curve_tenors: Tuple[str, ...] = ("1Y", "2Y", "5Y", "10Y")
+    default_simulate_survival_probabilities: bool = True
+    default_simulate_recovery_rates: bool = True
+    default_curve_calendar: str = "TARGET"
+    default_curve_extrapolation: str = "FlatZero"
+    swaption_simulate: bool = False
+    swaption_reaction_to_time_decay: str = "ForwardVariance"
+    swaption_expiries: Tuple[str, ...] = ("6M", "1Y", "2Y", "3Y", "5Y", "10Y", "12Y", "15Y", "20Y")
+    swaption_terms: Tuple[str, ...] = ("1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y")
+    fxvol_simulate: bool = False
+    fxvol_reaction_to_time_decay: str = "ForwardVariance"
+    fxvol_expiries: Tuple[str, ...] = ("1Y", "2Y", "5Y")
 
 
 @dataclass(frozen=True)
@@ -325,6 +396,17 @@ class CrossAssetModelConfig:
     currencies: Tuple[str, ...] = ("EUR", "USD")
     ir_model_ccys: Tuple[str, ...] = ("EUR", "USD")
     fx_model_ccys: Tuple[str, ...] = ("USD",)
+    bootstrap_tolerance: float = 0.0001
+    ir_calibration_type: str = "Bootstrap"
+    ir_volatility: float = 0.01
+    ir_reversion: float = 0.0
+    ir_shift_horizon: float = 20.0
+    ir_scaling: float = 1.0
+    ir_calibration_expiries: Tuple[str, ...] = ("1Y",)
+    ir_calibration_terms: Tuple[str, ...] = ("5Y",)
+    fx_calibration_type: str = "Bootstrap"
+    fx_sigma: float = 0.1
+    fx_calibration_expiries: Tuple[str, ...] = ("1Y",)
     correlations: Tuple[Tuple[str, str, float], ...] = (
         ("IR:EUR", "IR:USD", 0.0),
         ("IR:EUR", "FX:USDEUR", 0.0),
@@ -399,6 +481,9 @@ class CreditSimulationConfig:
 class ConventionsConfig:
     day_counter: str = "A365"
     calendar: str = "TARGET"
+    yield_curve_day_counter: str = "A365"
+    cds_day_counter: str = "Actual/365 (Fixed)"
+    cds_conventions: str = "CDS-STANDARD-CONVENTIONS"
 
 
 @dataclass(frozen=True)
@@ -508,7 +593,7 @@ def _parse_product(data: Dict[str, Any]) -> ProductSpec:
             }
         )
     if t == "FXForward":
-        return FXForward(**{k: data[k] for k in ("pair", "notional", "strike", "maturity_years", "buy_base") if k in data})
+        return FXForward(**{k: data[k] for k in ("pair", "notional", "strike", "maturity_years", "buy_base", "value_date") if k in data})
     if t == "EuropeanOption":
         return EuropeanOption(**{k: data[k] for k in ("underlying", "kind", "strike", "notional", "maturity_years") if k in data})
     if t == "BermudanSwaption":
@@ -525,7 +610,27 @@ def _parse_product(data: Dict[str, Any]) -> ProductSpec:
                     "settlement",
                     "option_type",
                     "long_short",
+                    "start_date",
+                    "end_date",
+                    "fixed_leg_tenor",
+                    "float_leg_tenor",
+                    "fixed_day_counter",
+                    "float_day_counter",
+                    "calendar",
+                    "fixed_payment_convention",
+                    "float_payment_convention",
+                    "fixed_schedule_convention",
+                    "float_schedule_convention",
+                    "fixed_term_convention",
+                    "float_term_convention",
+                    "fixed_schedule_rule",
+                    "float_schedule_rule",
+                    "end_of_month",
                     "float_index",
+                    "fixing_days",
+                    "float_spread",
+                    "payoff_at_expiry",
+                    "is_in_arrears",
                 )
                 if k in data
             }
@@ -635,11 +740,31 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
         pricing_engine=PricingEngineConfig(
             model=pe.get("model", "BlackScholes"),
             npv_engine=pe.get("npv_engine", "DiscountedCashflows"),
+            fx_model=pe.get("fx_model"),
+            fx_engine=pe.get("fx_engine"),
+            swap_model=pe.get("swap_model", "DiscountedCashflows"),
+            swap_engine=pe.get("swap_engine", "DiscountingSwapEngine"),
+            bermudan_model=pe.get("bermudan_model", "LGM"),
+            bermudan_engine=pe.get("bermudan_engine", "Gaussian1dNonstandardSwaptionEngine"),
+            bermudan_reversion=float(pe.get("bermudan_reversion", 0.03)),
+            bermudan_volatility=float(pe.get("bermudan_volatility", 0.01)),
+            bermudan_shift_horizon=float(pe.get("bermudan_shift_horizon", 0.0)),
+            bermudan_sx=float(pe.get("bermudan_sx", 3.0)),
+            bermudan_nx=int(pe.get("bermudan_nx", 10)),
+            bermudan_sy=float(pe.get("bermudan_sy", 3.0)),
+            bermudan_ny=int(pe.get("bermudan_ny", 10)),
         ),
         todays_market=TodaysMarketConfig(
             market_id=tm.get("market_id", "default"),
             discount_curve=tm.get("discount_curve", "EUR-EONIA"),
             fx_pairs=tuple(tm.get("fx_pairs", ("EURUSD",))),
+            yield_curves_id=tm.get("yield_curves_id"),
+            discounting_curves_id=tm.get("discounting_curves_id"),
+            index_forwarding_curves_id=tm.get("index_forwarding_curves_id"),
+            fx_spots_id=tm.get("fx_spots_id"),
+            fx_volatilities_id=tm.get("fx_volatilities_id"),
+            swaption_volatilities_id=tm.get("swaption_volatilities_id"),
+            default_curves_id=tm.get("default_curves_id"),
         ),
         curve_configs=curves,
         simulation=SimulationConfig(
@@ -647,6 +772,13 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             seed=sim.get("seed", 42),
             dates=tuple(sim.get("dates", ())),
             strict_template=bool(sim.get("strict_template", False)),
+            discretization=sim.get("discretization", "Exact"),
+            sequence=sim.get("sequence", "SobolBrownianBridge"),
+            scenario=sim.get("scenario", "Simple"),
+            closeout_lag=sim.get("closeout_lag", "2W"),
+            mpor_mode=sim.get("mpor_mode", "StickyDate"),
+            day_counter=sim.get("day_counter", "A365F"),
+            calendar=sim.get("calendar"),
             xva_cg_dynamic_im=bool(sim.get("xva_cg_dynamic_im", False)),
             xva_cg_dynamic_im_step_size=int(sim.get("xva_cg_dynamic_im_step_size", 1)),
             xva_cg_regression_order_dynamic_im=(
@@ -664,12 +796,38 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             indices=tuple(sim_market.get("indices", ("EUR-ESTER", "USD-SOFR"))),
             default_curve_names=tuple(sim_market.get("default_curve_names", ("BANK", "CPTY_A"))),
             fx_pairs=tuple(sim_market.get("fx_pairs", ("USDEUR",))),
+            yield_curve_tenors=tuple(sim_market.get("yield_curve_tenors", ("3M", "6M", "1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "12Y", "15Y", "20Y"))),
+            yield_curve_interpolation=sim_market.get("yield_curve_interpolation", "LogLinear"),
+            yield_curve_extrapolation=bool(sim_market.get("yield_curve_extrapolation", True)),
+            default_curve_tenors=tuple(sim_market.get("default_curve_tenors", ("1Y", "2Y", "5Y", "10Y"))),
+            default_simulate_survival_probabilities=bool(sim_market.get("default_simulate_survival_probabilities", True)),
+            default_simulate_recovery_rates=bool(sim_market.get("default_simulate_recovery_rates", True)),
+            default_curve_calendar=sim_market.get("default_curve_calendar", "TARGET"),
+            default_curve_extrapolation=sim_market.get("default_curve_extrapolation", "FlatZero"),
+            swaption_simulate=bool(sim_market.get("swaption_simulate", False)),
+            swaption_reaction_to_time_decay=sim_market.get("swaption_reaction_to_time_decay", "ForwardVariance"),
+            swaption_expiries=tuple(sim_market.get("swaption_expiries", ("6M", "1Y", "2Y", "3Y", "5Y", "10Y", "12Y", "15Y", "20Y"))),
+            swaption_terms=tuple(sim_market.get("swaption_terms", ("1Y", "2Y", "3Y", "4Y", "5Y", "7Y", "10Y", "15Y", "20Y", "30Y"))),
+            fxvol_simulate=bool(sim_market.get("fxvol_simulate", False)),
+            fxvol_reaction_to_time_decay=sim_market.get("fxvol_reaction_to_time_decay", "ForwardVariance"),
+            fxvol_expiries=tuple(sim_market.get("fxvol_expiries", ("1Y", "2Y", "5Y"))),
         ),
         cross_asset_model=CrossAssetModelConfig(
             domestic_ccy=cam.get("domestic_ccy", "EUR"),
             currencies=tuple(cam.get("currencies", ("EUR", "USD"))),
             ir_model_ccys=tuple(cam.get("ir_model_ccys", ("EUR", "USD"))),
             fx_model_ccys=tuple(cam.get("fx_model_ccys", ("USD",))),
+            bootstrap_tolerance=float(cam.get("bootstrap_tolerance", 0.0001)),
+            ir_calibration_type=cam.get("ir_calibration_type", "Bootstrap"),
+            ir_volatility=float(cam.get("ir_volatility", 0.01)),
+            ir_reversion=float(cam.get("ir_reversion", 0.0)),
+            ir_shift_horizon=float(cam.get("ir_shift_horizon", 20.0)),
+            ir_scaling=float(cam.get("ir_scaling", 1.0)),
+            ir_calibration_expiries=tuple(cam.get("ir_calibration_expiries", ("1Y",))),
+            ir_calibration_terms=tuple(cam.get("ir_calibration_terms", ("5Y",))),
+            fx_calibration_type=cam.get("fx_calibration_type", "Bootstrap"),
+            fx_sigma=float(cam.get("fx_sigma", 0.1)),
+            fx_calibration_expiries=tuple(cam.get("fx_calibration_expiries", ("1Y",))),
             correlations=tuple(
                 (str(a), str(b), float(v)) for a, b, v in cam.get(
                     "correlations",
@@ -751,6 +909,9 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
         conventions=ConventionsConfig(
             day_counter=conv.get("day_counter", "A365"),
             calendar=conv.get("calendar", "TARGET"),
+            yield_curve_day_counter=conv.get("yield_curve_day_counter", "A365"),
+            cds_day_counter=conv.get("cds_day_counter", "Actual/365 (Fixed)"),
+            cds_conventions=conv.get("cds_conventions", "CDS-STANDARD-CONVENTIONS"),
         ),
         counterparties=CounterpartyConfig(
             ids=tuple(cp.get("ids", ())),
