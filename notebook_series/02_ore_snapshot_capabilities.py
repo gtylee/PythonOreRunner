@@ -92,13 +92,16 @@ from native_xva_interface import (
 )
 from py_ore_tools import validate_xva_snapshot_dataclasses, xva_snapshot_validation_dataframe
 
-# Run ORE now, then load the fresh inputs and outputs into Python-facing snapshot objects.
-snapshot, ore_snapshot, fresh_meta = nh.load_fresh_case_snapshots("flat_EUR_5Y_A", label="notebook_02")
+# Load an existing repo case, then run the canonical in-memory OreSnapshotApp on buffers.
+source_ore_xml = nh.default_live_parity_ore_xml()
+snapshot, ore_snapshot, case_meta = nh.load_case_snapshots(source_ore_xml)
+app_result, app_meta = nh.run_ore_snapshot_app_case(source_ore_xml, engine="compare", price=True, xva=True, paths=500)
 mapped = map_snapshot(snapshot)
 
-print("Fresh run root:", fresh_meta["run_root"])
-print("Fresh ORE xml:", fresh_meta["ore_xml"])
-print("Fresh output dir:", fresh_meta["output_dir"])
+print("Source ORE xml:", case_meta["ore_xml"])
+print("Input dir:", case_meta["input_dir"])
+print("Output dir:", case_meta["output_dir"])
+print("OreSnapshotApp elapsed (s):", round(app_meta["elapsed_sec"], 4))
 display(nh.snapshot_overview(snapshot))
 nh.plot_snapshot_composition(snapshot, title="Fresh loader-backed snapshot: inventory and market mix")
 
@@ -106,9 +109,8 @@ nh.plot_snapshot_composition(snapshot, title="Fresh loader-backed snapshot: inve
 """
 ## Inputs we reuse from the repo
 
-The notebook starts from the aligned benchmark case but does not trust its checked-in outputs. Instead it executes a
-new ORE run first and only then loads the results. That means the portfolio, curves, exposure files, and XVA outputs
-shown below are all from the current run.
+The notebook starts from a repo-backed ORE case and uses the canonical in-memory `OreSnapshotApp` surface for the
+parity workflow. That keeps the demonstration programmatic and avoids creating persistent notebook output folders.
 
 The loader-backed path still follows the same code used in the tests and demos:
 - `native_xva_interface/loader.py`
@@ -148,6 +150,20 @@ nh.plot_xml_buffer_sizes(mapped, title="Mapped XML payload sizes for the fresh l
 
 # %% cell 7
 """
+## Canonical ORE app run without persistent notebook outputs
+
+The same case can be run through the buffer-based `OreSnapshotApp` API. It materializes the case in a temporary
+workspace internally, returns the comparison and validation payloads to Python, and leaves no new repo artifacts
+behind.
+"""
+
+# %% cell 8
+display(nh.ore_snapshot_app_summary_frame(app_result))
+display(pd.DataFrame(app_result.comparison_rows))
+display(pd.DataFrame(app_result.input_validation_rows).head(12))
+
+# %% cell 9
+"""
 ## Parity completeness audit
 
 A runtime snapshot being usable is not the same thing as a case being parity-ready. The `OreSnapshot` audit is more
@@ -155,7 +171,7 @@ strict: it checks whether the run captured enough schedule, curve, credit, fundi
 fair Python-vs-ORE comparison.
 """
 
-# %% cell 8
+# %% cell 10
 if ore_snapshot is not None:
     parity_report = ore_snapshot.parity_completeness_report()
     parity_df = ore_snapshot.parity_completeness_dataframe()
@@ -168,13 +184,13 @@ if ore_snapshot is not None:
 else:
     print("No parity-grade OreSnapshot audit available for this loader bundle.")
 
-# %% cell 9
+# %% cell 11
 """
 The audit table is the one to trust when you want to compare engines. It separates “the case runs” from “the case is
 economically lined up well enough to compare specific XVA numbers.”
 """
 
-# %% cell 10
+# %% cell 12
 """
 ## File-backed validation as a fix list
 
@@ -182,10 +198,10 @@ The XML/file validator is meant to answer a more operational question: if the ca
 what exactly should be changed next? The report below is shown as a fix list rather than a generic status dump.
 """
 
-# %% cell 11
+# %% cell 13
 from py_ore_tools import validate_ore_input_snapshot, ore_input_validation_dataframe
 
-file_validation = validate_ore_input_snapshot(fresh_meta["ore_xml"])
+file_validation = validate_ore_input_snapshot(case_meta["ore_xml"])
 file_validation_df = ore_input_validation_dataframe(file_validation)
 display(file_validation_df[file_validation_df["section"] == "action_items"])
 
@@ -196,7 +212,7 @@ for item in file_validation.get("action_items", []):
     print("  fix    :", item["what_to_fix"])
     print("  where  :", ", ".join(str(x) for x in item.get("where_to_fix", [])))
 
-# %% cell 12
+# %% cell 14
 """
 ## Dataclass validation: good and bad examples
 
@@ -215,7 +231,7 @@ The bad example breaks a few basic contracts on purpose:
 - analytics includes an unsupported metric
 """
 
-# %% cell 13
+# %% cell 15
 good_snapshot = nh.make_programmatic_snapshot(num_paths=128)
 good_report = validate_xva_snapshot_dataclasses(good_snapshot)
 good_df = xva_snapshot_validation_dataframe(good_report)
@@ -224,7 +240,7 @@ print("Good snapshot issues:", good_report["issues"])
 display(good_df)
 display(good_df[good_df["section"] == "action_items"])
 
-# %% cell 14
+# %% cell 16
 bad_snapshot = replace(
     good_snapshot,
     market=replace(
@@ -265,21 +281,22 @@ for item in bad_report.get("action_items", []):
     print("  fix    :", item["what_to_fix"])
     print("  where  :", ", ".join(str(x) for x in item.get("where_to_fix", [])))
 
-# %% cell 15
+# %% cell 17
 # One cheap engine pass shows that the fresh snapshot is immediately executable from Python.
 toy_result, toy_elapsed = nh.run_adapter(snapshot, DeterministicToyAdapter())
 print(f"Deterministic toy run elapsed: {toy_elapsed:.4f}s")
 display(nh.result_metrics_frame(toy_result))
 
-# %% cell 16
+# %% cell 18
 """
 ## Key takeaways
 
 - The snapshot is the cleanest inspection boundary in the current Python-facing stack.
-- Fresh ORE output generation removes the ambiguity of stale checked-in files.
+- The canonical `OreSnapshotApp` path keeps the notebook run in-memory and avoids new persistent output folders.
 - The parity audit is the right place to decide what can be compared, not an afterthought.
 
 ## Where this connects next
 
 The next notebook zooms into the market side: curve extraction, curve fitting, and how those outputs feed the LGM model.
 """
+

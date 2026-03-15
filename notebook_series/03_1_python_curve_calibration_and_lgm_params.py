@@ -379,3 +379,4 @@ plt.close(fig)
 - The fitting method changes the curve shape more subtly than the quote mix does.
 - The LGM parameter tables can be inspected as ordinary Python data before any larger workflow is built on top.
 """
+

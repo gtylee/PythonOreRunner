@@ -10,12 +10,12 @@ This notebook closes the series with two distinct stories that should not be mix
 2. a **live ORE-SWIG workflow** on the native snapshot interface, used to show the end-to-end runtime path
 
 **Purpose**
-- show the cleanest current comparison baseline
-- keep the live SWIG workflow visible without overselling it as the parity benchmark
+- show the cleanest current in-memory comparison baseline
+- keep the live SWIG workflow visible without overselling it as the main regression harness
 - end the series with an explicit recommendation on how to use both paths
 
 **What you will learn**
-- how to run a fresh aligned ORE case and compare it to Python
+- how to run the canonical in-memory `OreSnapshotApp` comparison path
 - how to audit that case before trusting the numbers
 - how the live ORE-SWIG workflow fits into the current prototype story
 """
@@ -80,42 +80,40 @@ from native_xva_interface import PythonLgmAdapter
 swig = nh.swig_status()
 print(swig["message"])
 
-# Run a fresh aligned benchmark case first. This is the comparison to trust.
-py_result, aligned_comparison, aligned_meta, aligned_ore_snapshot = nh.run_aligned_case_compare("flat_EUR_5Y_A", paths=2000)
-print("Aligned case:", aligned_meta["case_name"])
-print("Source case directory:", aligned_meta["source_case_dir"])
-print("Fresh run root:", aligned_meta["fresh_run_root"])
-print("Fresh ORE xml:", aligned_meta["fresh_ore_xml"])
-print("Fresh output dir:", aligned_meta["fresh_output_dir"])
-print("Trade ids:", aligned_meta["trade_ids"])
-print("Requested metrics in original ORE case:", aligned_meta["requested_metrics_in_case"])
-print("Python elapsed (s):", round(aligned_meta["python_elapsed_sec"], 4))
-print("ORE fresh run elapsed (s):", round(aligned_meta["ore_elapsed_sec"], 4))
+# Use the canonical in-memory OreSnapshotApp surface first. This is the maintained regression path.
+app_ore_xml = nh.default_live_parity_ore_xml()
+app_result, app_meta = nh.run_ore_snapshot_app_case(app_ore_xml, engine="compare", price=True, xva=True, paths=1000)
+app_comparison = nh.ore_snapshot_app_metric_frame(app_result)
+app_validation = pd.DataFrame(app_result.input_validation_rows)
+live_snapshot, aligned_ore_snapshot, live_meta = nh.load_case_snapshots(app_ore_xml)
+live_py_result, live_py_elapsed = nh.run_adapter(live_snapshot, PythonLgmAdapter(fallback_to_swig=False))
 
-# Run a fresh live/native parity case that is known to line up on the current code path.
-live_snapshot, live_py_result, live_comparison, live_perf_df, live_meta = nh.run_live_measure_lgm_compare(paths=1000)
-print("Live/native source ORE xml:", live_meta["source_ore_xml"])
-print("Live/native fresh run root:", live_meta["fresh_run_root"])
-print("Live/native trade ids:", live_meta["trade_ids"])
+print("App source ORE xml:", app_meta["ore_xml"])
+print("App input dir:", app_meta["input_dir"])
+print("App output dir:", app_meta["output_dir"])
+print("App elapsed (s):", round(app_meta["elapsed_sec"], 4))
+print("Trade ids:", live_meta["trade_ids"])
+print("Python adapter elapsed (s):", round(live_py_elapsed, 4))
 
 # %% cell 3
 """
 ## Inputs we reuse from the repo
 
-The aligned comparison still starts from the repo's benchmark case definition:
-- `Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A`
-- `run_ore_snapshot_native_xva.py`
+The comparison starts from the repo-backed parity case and runs it through the canonical in-memory app surface:
+- `pythonore.workflows.OreSnapshotApp`
+- `pythonore.workflows.run_case_from_buffers`
 - parity notes in `SKILL.md`
 
-The difference is that this notebook now regenerates the ORE outputs during execution, so the comparison is based on
-fresh run data rather than on the checked-in output folder.
+The important operational point is that the notebook receives the comparison payload back in Python without creating
+new persistent output folders in the repo.
 """
 
 # %% cell 4
-display(aligned_comparison)
-aligned_plot = aligned_comparison[aligned_comparison["metric"].isin(["PV", "CVA", "DVA"])].copy()
-nh.plot_metric_comparison(aligned_plot, "python_lgm", "ore_output", title="Aligned benchmark case: Python vs fresh ORE output")
-nh.plot_metric_delta(aligned_plot, title="Aligned benchmark case: Python minus ORE")
+display(nh.ore_snapshot_app_summary_frame(app_result))
+display(app_comparison)
+aligned_plot = app_comparison[app_comparison["metric"].isin(["PV", "CVA", "DVA"])].copy()
+nh.plot_metric_comparison(aligned_plot, "python_lgm", "ore_output", title="OreSnapshotApp compare mode: Python vs ORE reference")
+nh.plot_metric_delta(aligned_plot, title="OreSnapshotApp compare mode: Python minus ORE")
 
 # %% cell 5
 """
@@ -127,22 +125,22 @@ whether the remaining gap is economically small or still material relative to th
 """
 ## Runtime comparison on the aligned case
 
-The numerical comparison is only half of the story. The table below shows the wall-clock cost of the Python LGM run
-versus the fresh ORE executable run used to produce the benchmark outputs for this notebook execution.
+The numerical comparison is only half of the story. The table below shows the in-memory app cost and the direct
+Python adapter cost on the same case.
 """
 
 # %% cell 7
 perf_df = pd.DataFrame(
     [
-        {"engine": "python_lgm", "elapsed_sec": aligned_meta["python_elapsed_sec"]},
-        {"engine": "ore_fresh_run", "elapsed_sec": aligned_meta["ore_elapsed_sec"]},
+        {"engine": "ore_snapshot_app_compare", "elapsed_sec": app_meta["elapsed_sec"]},
+        {"engine": "python_lgm_adapter", "elapsed_sec": live_py_elapsed},
     ]
 )
-perf_df["speed_ratio_vs_python"] = perf_df["elapsed_sec"] / max(aligned_meta["python_elapsed_sec"], 1e-12)
+perf_df["speed_ratio_vs_python"] = perf_df["elapsed_sec"] / max(live_py_elapsed, 1e-12)
 display(perf_df)
 
 fig, ax = plt.subplots(figsize=(8.0, 4.2))
-nh.plot_bar_frame(perf_df, "engine", "elapsed_sec", title="Aligned case runtime: Python vs ORE", color=nh.PALETTE["rose"], ax=ax)
+nh.plot_bar_frame(perf_df, "engine", "elapsed_sec", title="In-memory app vs direct Python adapter", color=nh.PALETTE["rose"], ax=ax)
 plt.tight_layout()
 plt.show()
 plt.close(fig)
@@ -167,40 +165,34 @@ nh.plot_boolean_matrix(comparability_df, row_col="field", value_cols=["comparabl
 
 # %% cell 10
 """
-The aligned case is the main numerical comparison in this notebook. One important caveat remains:
+The in-memory app case is the main numerical comparison in this notebook. One important caveat remains:
 
-- `flat_EUR_5Y_A` only requests `CVA` in the underlying ORE case
+- the underlying ORE case still determines which analytics are actually comparable
 
-That is why funding-related metrics are not treated as comparable in the aligned section. The audit makes that visible
+That is why funding-related metrics are not always treated as comparable. The audit makes that visible
 rather than leaving it implicit.
 """
 
 # %% cell 11
 """
-## Live Native Parity Case
+## Live Native Snapshot Workflow
 
-The aligned benchmark above is file-based. This section uses a fresh live/native case from the current ORE example
-set, chosen because it already lines up well in the regression pack: `ore_measure_lgm_fixed.xml`.
-
-Unlike the old stress-classic demo, this is a real parity section. It is the right place to look at live `FBA/FCA`
-because both engines are materially closer on this case.
+The app comparison above is the maintained regression surface. This section keeps the direct native snapshot
+interface visible on the same case, so the reader can still see how the `XVALoader` + `PythonLgmAdapter` path
+fits into the overall workflow.
 """
 
 # %% cell 12
 display(nh.snapshot_overview(live_snapshot))
 display(nh.trade_frame(live_snapshot))
-display(live_perf_df)
-display(live_comparison)
-
-live_plot = live_comparison[live_comparison["metric"].isin(["CVA", "DVA", "FBA", "FCA"])].copy()
-nh.plot_metric_comparison(live_plot, "python_lgm", "ore_output", title="Live/native parity case: Python vs fresh ORE")
-nh.plot_metric_delta(live_plot, title="Live/native parity case: Python minus ORE")
+display(app_validation.head(12))
+display(nh.result_metrics_frame(live_py_result))
 
 # %% cell 13
 """
-Read this section differently from the stress-classic workflow demo that appeared earlier in the series. Here the
-numbers are supposed to match. The point is to show that the current native Python path can in fact track a fresh ORE
-live run on a case that is set up for parity rather than for broad stress-style coverage.
+Read this section differently from the app comparison above. The point here is not to create another benchmark table,
+but to keep the direct native runtime path visible. That path is still useful when you want explicit control over the
+dataclass snapshot and adapter boundary.
 """
 
 # %% cell 14
@@ -234,3 +226,4 @@ nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python"
 These five notebooks now form one continuous story: Python snapshot construction, fresh ORE-backed loading, market
 calibration, Python LGM XVA, and a final Python-and-ORE workflow that distinguishes aligned comparisons from live demos.
 """
+

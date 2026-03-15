@@ -32,6 +32,8 @@ CALLABLE_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_callabl
 FX_FORWARD_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_28" / "Input" / "ore_eur_base.xml"
 FX_OPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_E0.xml"
 FX_NDF_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_71" / "Input" / "ore.xml"
+SWAPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_flat.xml"
+CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -154,6 +156,43 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "FxOption")
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertNotIn("ore_t0_npv", payload["pricing"])
+
+    def test_price_only_swaption_runs_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(SWAPTION_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_19" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swaption_static")
+            self.assertEqual(payload["pricing"]["trade_type"], "Swaption")
+            self.assertIn("py_t0_npv", payload["pricing"])
+            self.assertGreater(float(payload["pricing"]["py_t0_npv"]), 0.0)
+
+    def test_capfloor_xva_runs_native_compare_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(CAPFLOOR_CASE_XML),
+                    "--xva",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_6" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "compare")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_capfloor_lgm")
+            self.assertEqual(payload["trade_id"], "cap_01")
+            self.assertIn("py_cva", payload["xva"])
 
     def test_fx_option_xva_runs_native_compare_path(self):
         with tempfile.TemporaryDirectory() as tmp:

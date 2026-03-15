@@ -242,20 +242,22 @@ earns its keep. The bigger batched multi-currency FX forward portfolio is the be
 portfolio_commands = pd.DataFrame(
     [
         {
-            "backend": "numpy",
-            "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend numpy",
+            "surface": "OreSnapshotApp",
+            "mode": "python",
+            "entry_pattern": "OreSnapshotApp.from_strings(..., options=PurePythonRunOptions(engine='python', price=True, xva=True))",
             "representative_runtime_sec": 1.55,
             "paths": 10000,
             "trades": 256,
-            "parity_max_abs": 1.8e-7,
+            "artifacts_written_to_repo": False,
         },
         {
-            "backend": "torch-cpu",
-            "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend torch-cpu",
+            "surface": "OreSnapshotApp",
+            "mode": "compare",
+            "entry_pattern": "OreSnapshotApp.from_strings(..., options=PurePythonRunOptions(engine='compare', price=True, xva=True))",
             "representative_runtime_sec": 0.17,
             "paths": 10000,
             "trades": 256,
-            "parity_max_abs": 1.8e-7,
+            "artifacts_written_to_repo": False,
         },
     ]
 )
@@ -264,31 +266,31 @@ display(portfolio_commands)
 fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
 nh.plot_bar_frame(
     portfolio_commands,
-    "backend",
+    "mode",
     "representative_runtime_sec",
-    title="256-trade portfolio runtime",
+    title="Representative portfolio runtime shape",
     color=nh.PALETTE["gold"],
     ax=axes[0],
 )
 nh.plot_bar_frame(
-    portfolio_commands.assign(speedup_vs_numpy=portfolio_commands["representative_runtime_sec"].iloc[0] / portfolio_commands["representative_runtime_sec"]),
-    "backend",
-    "speedup_vs_numpy",
-    title="Speedup vs numpy",
+    portfolio_commands.assign(paths_per_trade=portfolio_commands["paths"] / portfolio_commands["trades"]),
+    "mode",
+    "paths_per_trade",
+    title="Workload density (paths per trade)",
     color=nh.PALETTE["teal"],
     ax=axes[1],
 )
 axes[0].set_ylabel("Seconds")
-axes[1].set_ylabel("Multiple")
+axes[1].set_ylabel("Paths / trade")
 plt.tight_layout()
 plt.show()
 plt.close(fig)
 
 # %% cell 14
 """
-These commands come from the repo's unified-backend notes for the torch-capable CLI surface. The important point is
-not the exact hardware number, but the workload shape: large batched FX portfolios are where torch materially changes
-the runtime, while the earlier single-trade notebook examples are mostly about transparency and parity.
+The important point is the entry surface, not the literal syntax. For notebook and library use, the maintained
+path is the programmatic `OreSnapshotApp` API. It keeps the case in memory from the caller's perspective and avoids
+creating new repo output folders just to inspect one run.
 """
 
 # %% cell 15
@@ -301,3 +303,4 @@ the runtime, while the earlier single-trade notebook examples are mostly about t
 - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
 - The large 256-trade multi-currency portfolio is the right place to compare numpy and torch backends.
 """
+

@@ -92,7 +92,7 @@ from py_ore_tools import (
 from ore_curve_fit_parity import compare_python_vs_ore, trace_discount_curve_from_ore, trace_index_curve_from_ore
 
 ORE_XML = nh.default_curve_case_ore_xml(repo)
-CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "Tools" / "PythonOreRunner" / "py_ore_tools" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
+CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "src" / "pythonore" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
 df_payload = extract_discount_factors_by_currency(ORE_XML, configuration_id="default")
 df_long = discount_factors_to_dataframe(df_payload)
 instruments = extract_market_instruments_by_currency(ORE_XML)
@@ -649,3 +649,4 @@ structures in the same run.
 
 The next notebook uses the Python LGM stack directly for a transparent IRS exposure and XVA walkthrough.
 """
+

@@ -252,3 +252,4 @@ elapsed time because it shows variance across runs and the throughput difference
 
 The final notebook puts Python and ORE side by side on a shared workflow and separates clean parity cases from live demos.
 """
+

@@ -278,3 +278,4 @@ plt.close(fig)
 - Treat `backward` as the ORE-classic parity engine and `lsmc` as the control.
 - On these Bermudan cases, `calibration.xml` is the right model source whenever ORE has already produced it.
 """
+

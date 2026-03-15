@@ -382,3 +382,4 @@ plt.close(fig)
 - The swap and cap/floor examples share the one-factor IR setup, while the FX forward needs the hybrid IR/FX model.
 - The notebook stays on direct pricing: no exposure aggregation, no CVA, and no XVA workflow machinery.
 """
+

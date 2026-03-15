@@ -444,13 +444,16 @@ def notebook_02() -> list[dict]:
             )
             from py_ore_tools import validate_xva_snapshot_dataclasses, xva_snapshot_validation_dataframe
 
-            # Run ORE now, then load the fresh inputs and outputs into Python-facing snapshot objects.
-            snapshot, ore_snapshot, fresh_meta = nh.load_fresh_case_snapshots("flat_EUR_5Y_A", label="notebook_02")
+            # Load an existing repo case, then run the canonical in-memory OreSnapshotApp on buffers.
+            source_ore_xml = nh.default_live_parity_ore_xml()
+            snapshot, ore_snapshot, case_meta = nh.load_case_snapshots(source_ore_xml)
+            app_result, app_meta = nh.run_ore_snapshot_app_case(source_ore_xml, engine="compare", price=True, xva=True, paths=500)
             mapped = map_snapshot(snapshot)
 
-            print("Fresh run root:", fresh_meta["run_root"])
-            print("Fresh ORE xml:", fresh_meta["ore_xml"])
-            print("Fresh output dir:", fresh_meta["output_dir"])
+            print("Source ORE xml:", case_meta["ore_xml"])
+            print("Input dir:", case_meta["input_dir"])
+            print("Output dir:", case_meta["output_dir"])
+            print("OreSnapshotApp elapsed (s):", round(app_meta["elapsed_sec"], 4))
             display(nh.snapshot_overview(snapshot))
             nh.plot_snapshot_composition(snapshot, title="Fresh loader-backed snapshot: inventory and market mix")
             """
@@ -459,9 +462,8 @@ def notebook_02() -> list[dict]:
             """
             ## Inputs we reuse from the repo
 
-            The notebook starts from the aligned benchmark case but does not trust its checked-in outputs. Instead it executes a
-            new ORE run first and only then loads the results. That means the portfolio, curves, exposure files, and XVA outputs
-            shown below are all from the current run.
+            The notebook starts from a repo-backed ORE case and uses the canonical in-memory `OreSnapshotApp` surface for the
+            parity workflow. That keeps the demonstration programmatic and avoids creating persistent notebook output folders.
 
             The loader-backed path still follows the same code used in the tests and demos:
             - `native_xva_interface/loader.py`
@@ -501,6 +503,22 @@ def notebook_02() -> list[dict]:
             display(nh.mapped_input_summary(mapped))
             display(nh.xml_buffer_summary(mapped).head(12))
             nh.plot_xml_buffer_sizes(mapped, title="Mapped XML payload sizes for the fresh loader snapshot")
+            """
+        ),
+        md(
+            """
+            ## Canonical ORE app run without persistent notebook outputs
+
+            The same case can be run through the buffer-based `OreSnapshotApp` API. It materializes the case in a temporary
+            workspace internally, returns the comparison and validation payloads to Python, and leaves no new repo artifacts
+            behind.
+            """
+        ),
+        code(
+            """
+            display(nh.ore_snapshot_app_summary_frame(app_result))
+            display(pd.DataFrame(app_result.comparison_rows))
+            display(pd.DataFrame(app_result.input_validation_rows).head(12))
             """
         ),
         md(
@@ -545,7 +563,7 @@ def notebook_02() -> list[dict]:
             """
             from py_ore_tools import validate_ore_input_snapshot, ore_input_validation_dataframe
 
-            file_validation = validate_ore_input_snapshot(fresh_meta["ore_xml"])
+            file_validation = validate_ore_input_snapshot(case_meta["ore_xml"])
             file_validation_df = ore_input_validation_dataframe(file_validation)
             display(file_validation_df[file_validation_df["section"] == "action_items"])
 
@@ -643,7 +661,7 @@ def notebook_02() -> list[dict]:
             ## Key takeaways
 
             - The snapshot is the cleanest inspection boundary in the current Python-facing stack.
-            - Fresh ORE output generation removes the ambiguity of stale checked-in files.
+            - The canonical `OreSnapshotApp` path keeps the notebook run in-memory and avoids new persistent output folders.
             - The parity audit is the right place to decide what can be compared, not an afterthought.
 
             ## Where this connects next
@@ -695,7 +713,7 @@ def notebook_03() -> list[dict]:
             from ore_curve_fit_parity import compare_python_vs_ore, trace_discount_curve_from_ore, trace_index_curve_from_ore
 
             ORE_XML = nh.default_curve_case_ore_xml(repo)
-            CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "Tools" / "PythonOreRunner" / "py_ore_tools" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
+            CALIBRATION_PARITY_SCRIPT = REPO_ROOT / "src" / "pythonore" / "benchmarks" / "benchmark_lgm_calibration_parity.py"
             df_payload = extract_discount_factors_by_currency(ORE_XML, configuration_id="default")
             df_long = discount_factors_to_dataframe(df_payload)
             instruments = extract_market_instruments_by_currency(ORE_XML)
@@ -2033,20 +2051,22 @@ def notebook_04_1() -> list[dict]:
             portfolio_commands = pd.DataFrame(
                 [
                     {
-                        "backend": "numpy",
-                        "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend numpy",
+                        "surface": "OreSnapshotApp",
+                        "mode": "python",
+                        "entry_pattern": "OreSnapshotApp.from_strings(..., options=PurePythonRunOptions(engine='python', price=True, xva=True))",
                         "representative_runtime_sec": 1.55,
                         "paths": 10000,
                         "trades": 256,
-                        "parity_max_abs": 1.8e-7,
+                        "artifacts_written_to_repo": False,
                     },
                     {
-                        "backend": "torch-cpu",
-                        "command": "python -m py_ore_tools.ore_snapshot_cli --example lgm_fx_portfolio_256 --tensor-backend torch-cpu",
+                        "surface": "OreSnapshotApp",
+                        "mode": "compare",
+                        "entry_pattern": "OreSnapshotApp.from_strings(..., options=PurePythonRunOptions(engine='compare', price=True, xva=True))",
                         "representative_runtime_sec": 0.17,
                         "paths": 10000,
                         "trades": 256,
-                        "parity_max_abs": 1.8e-7,
+                        "artifacts_written_to_repo": False,
                     },
                 ]
             )
@@ -2055,22 +2075,22 @@ def notebook_04_1() -> list[dict]:
             fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.2))
             nh.plot_bar_frame(
                 portfolio_commands,
-                "backend",
+                "mode",
                 "representative_runtime_sec",
-                title="256-trade portfolio runtime",
+                title="Representative portfolio runtime shape",
                 color=nh.PALETTE["gold"],
                 ax=axes[0],
             )
             nh.plot_bar_frame(
-                portfolio_commands.assign(speedup_vs_numpy=portfolio_commands["representative_runtime_sec"].iloc[0] / portfolio_commands["representative_runtime_sec"]),
-                "backend",
-                "speedup_vs_numpy",
-                title="Speedup vs numpy",
+                portfolio_commands.assign(paths_per_trade=portfolio_commands["paths"] / portfolio_commands["trades"]),
+                "mode",
+                "paths_per_trade",
+                title="Workload density (paths per trade)",
                 color=nh.PALETTE["teal"],
                 ax=axes[1],
             )
             axes[0].set_ylabel("Seconds")
-            axes[1].set_ylabel("Multiple")
+            axes[1].set_ylabel("Paths / trade")
             plt.tight_layout()
             plt.show()
             plt.close(fig)
@@ -2078,9 +2098,9 @@ def notebook_04_1() -> list[dict]:
         ),
         md(
             """
-            These commands come from the repo's unified-backend notes for the torch-capable CLI surface. The important point is
-            not the exact hardware number, but the workload shape: large batched FX portfolios are where torch materially changes
-            the runtime, while the earlier single-trade notebook examples are mostly about transparency and parity.
+            The important point is the entry surface, not the literal syntax. For notebook and library use, the maintained
+            path is the programmatic `OreSnapshotApp` API. It keeps the case in memory from the caller's perspective and avoids
+            creating new repo output folders just to inspect one run.
             """
         ),
         md(
@@ -2108,12 +2128,12 @@ def notebook_05() -> list[dict]:
             2. a **live ORE-SWIG workflow** on the native snapshot interface, used to show the end-to-end runtime path
 
             **Purpose**
-            - show the cleanest current comparison baseline
-            - keep the live SWIG workflow visible without overselling it as the parity benchmark
+            - show the cleanest current in-memory comparison baseline
+            - keep the live SWIG workflow visible without overselling it as the main regression harness
             - end the series with an explicit recommendation on how to use both paths
 
             **What you will learn**
-            - how to run a fresh aligned ORE case and compare it to Python
+            - how to run the canonical in-memory `OreSnapshotApp` comparison path
             - how to audit that case before trusting the numbers
             - how the live ORE-SWIG workflow fits into the current prototype story
             """
@@ -2126,44 +2146,42 @@ def notebook_05() -> list[dict]:
             swig = nh.swig_status()
             print(swig["message"])
 
-            # Run a fresh aligned benchmark case first. This is the comparison to trust.
-            py_result, aligned_comparison, aligned_meta, aligned_ore_snapshot = nh.run_aligned_case_compare("flat_EUR_5Y_A", paths=2000)
-            print("Aligned case:", aligned_meta["case_name"])
-            print("Source case directory:", aligned_meta["source_case_dir"])
-            print("Fresh run root:", aligned_meta["fresh_run_root"])
-            print("Fresh ORE xml:", aligned_meta["fresh_ore_xml"])
-            print("Fresh output dir:", aligned_meta["fresh_output_dir"])
-            print("Trade ids:", aligned_meta["trade_ids"])
-            print("Requested metrics in original ORE case:", aligned_meta["requested_metrics_in_case"])
-            print("Python elapsed (s):", round(aligned_meta["python_elapsed_sec"], 4))
-            print("ORE fresh run elapsed (s):", round(aligned_meta["ore_elapsed_sec"], 4))
+            # Use the canonical in-memory OreSnapshotApp surface first. This is the maintained regression path.
+            app_ore_xml = nh.default_live_parity_ore_xml()
+            app_result, app_meta = nh.run_ore_snapshot_app_case(app_ore_xml, engine="compare", price=True, xva=True, paths=1000)
+            app_comparison = nh.ore_snapshot_app_metric_frame(app_result)
+            app_validation = pd.DataFrame(app_result.input_validation_rows)
+            live_snapshot, aligned_ore_snapshot, live_meta = nh.load_case_snapshots(app_ore_xml)
+            live_py_result, live_py_elapsed = nh.run_adapter(live_snapshot, PythonLgmAdapter(fallback_to_swig=False))
 
-            # Run a fresh live/native parity case that is known to line up on the current code path.
-            live_snapshot, live_py_result, live_comparison, live_perf_df, live_meta = nh.run_live_measure_lgm_compare(paths=1000)
-            print("Live/native source ORE xml:", live_meta["source_ore_xml"])
-            print("Live/native fresh run root:", live_meta["fresh_run_root"])
-            print("Live/native trade ids:", live_meta["trade_ids"])
+            print("App source ORE xml:", app_meta["ore_xml"])
+            print("App input dir:", app_meta["input_dir"])
+            print("App output dir:", app_meta["output_dir"])
+            print("App elapsed (s):", round(app_meta["elapsed_sec"], 4))
+            print("Trade ids:", live_meta["trade_ids"])
+            print("Python adapter elapsed (s):", round(live_py_elapsed, 4))
             """
         ),
         md(
             """
             ## Inputs we reuse from the repo
 
-            The aligned comparison still starts from the repo's benchmark case definition:
-            - `Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A`
-            - `run_ore_snapshot_native_xva.py`
+            The comparison starts from the repo-backed parity case and runs it through the canonical in-memory app surface:
+            - `pythonore.workflows.OreSnapshotApp`
+            - `pythonore.workflows.run_case_from_buffers`
             - parity notes in `SKILL.md`
 
-            The difference is that this notebook now regenerates the ORE outputs during execution, so the comparison is based on
-            fresh run data rather than on the checked-in output folder.
+            The important operational point is that the notebook receives the comparison payload back in Python without creating
+            new persistent output folders in the repo.
             """
         ),
         code(
             """
-            display(aligned_comparison)
-            aligned_plot = aligned_comparison[aligned_comparison["metric"].isin(["PV", "CVA", "DVA"])].copy()
-            nh.plot_metric_comparison(aligned_plot, "python_lgm", "ore_output", title="Aligned benchmark case: Python vs fresh ORE output")
-            nh.plot_metric_delta(aligned_plot, title="Aligned benchmark case: Python minus ORE")
+            display(nh.ore_snapshot_app_summary_frame(app_result))
+            display(app_comparison)
+            aligned_plot = app_comparison[app_comparison["metric"].isin(["PV", "CVA", "DVA"])].copy()
+            nh.plot_metric_comparison(aligned_plot, "python_lgm", "ore_output", title="OreSnapshotApp compare mode: Python vs ORE reference")
+            nh.plot_metric_delta(aligned_plot, title="OreSnapshotApp compare mode: Python minus ORE")
             """
         ),
         md(
@@ -2176,23 +2194,23 @@ def notebook_05() -> list[dict]:
             """
             ## Runtime comparison on the aligned case
 
-            The numerical comparison is only half of the story. The table below shows the wall-clock cost of the Python LGM run
-            versus the fresh ORE executable run used to produce the benchmark outputs for this notebook execution.
+            The numerical comparison is only half of the story. The table below shows the in-memory app cost and the direct
+            Python adapter cost on the same case.
             """
         ),
         code(
             """
             perf_df = pd.DataFrame(
                 [
-                    {"engine": "python_lgm", "elapsed_sec": aligned_meta["python_elapsed_sec"]},
-                    {"engine": "ore_fresh_run", "elapsed_sec": aligned_meta["ore_elapsed_sec"]},
+                    {"engine": "ore_snapshot_app_compare", "elapsed_sec": app_meta["elapsed_sec"]},
+                    {"engine": "python_lgm_adapter", "elapsed_sec": live_py_elapsed},
                 ]
             )
-            perf_df["speed_ratio_vs_python"] = perf_df["elapsed_sec"] / max(aligned_meta["python_elapsed_sec"], 1e-12)
+            perf_df["speed_ratio_vs_python"] = perf_df["elapsed_sec"] / max(live_py_elapsed, 1e-12)
             display(perf_df)
 
             fig, ax = plt.subplots(figsize=(8.0, 4.2))
-            nh.plot_bar_frame(perf_df, "engine", "elapsed_sec", title="Aligned case runtime: Python vs ORE", color=nh.PALETTE["rose"], ax=ax)
+            nh.plot_bar_frame(perf_df, "engine", "elapsed_sec", title="In-memory app vs direct Python adapter", color=nh.PALETTE["rose"], ax=ax)
             plt.tight_layout()
             plt.show()
             plt.close(fig)
@@ -2220,42 +2238,36 @@ def notebook_05() -> list[dict]:
         ),
         md(
             """
-            The aligned case is the main numerical comparison in this notebook. One important caveat remains:
+            The in-memory app case is the main numerical comparison in this notebook. One important caveat remains:
 
-            - `flat_EUR_5Y_A` only requests `CVA` in the underlying ORE case
+            - the underlying ORE case still determines which analytics are actually comparable
 
-            That is why funding-related metrics are not treated as comparable in the aligned section. The audit makes that visible
+            That is why funding-related metrics are not always treated as comparable. The audit makes that visible
             rather than leaving it implicit.
             """
         ),
         md(
             """
-            ## Live Native Parity Case
+            ## Live Native Snapshot Workflow
 
-            The aligned benchmark above is file-based. This section uses a fresh live/native case from the current ORE example
-            set, chosen because it already lines up well in the regression pack: `ore_measure_lgm_fixed.xml`.
-
-            Unlike the old stress-classic demo, this is a real parity section. It is the right place to look at live `FBA/FCA`
-            because both engines are materially closer on this case.
+            The app comparison above is the maintained regression surface. This section keeps the direct native snapshot
+            interface visible on the same case, so the reader can still see how the `XVALoader` + `PythonLgmAdapter` path
+            fits into the overall workflow.
             """
         ),
         code(
             """
             display(nh.snapshot_overview(live_snapshot))
             display(nh.trade_frame(live_snapshot))
-            display(live_perf_df)
-            display(live_comparison)
-
-            live_plot = live_comparison[live_comparison["metric"].isin(["CVA", "DVA", "FBA", "FCA"])].copy()
-            nh.plot_metric_comparison(live_plot, "python_lgm", "ore_output", title="Live/native parity case: Python vs fresh ORE")
-            nh.plot_metric_delta(live_plot, title="Live/native parity case: Python minus ORE")
+            display(app_validation.head(12))
+            display(nh.result_metrics_frame(live_py_result))
             """
         ),
         md(
             """
-            Read this section differently from the stress-classic workflow demo that appeared earlier in the series. Here the
-            numbers are supposed to match. The point is to show that the current native Python path can in fact track a fresh ORE
-            live run on a case that is set up for parity rather than for broad stress-style coverage.
+            Read this section differently from the app comparison above. The point here is not to create another benchmark table,
+            but to keep the direct native runtime path visible. That path is still useful when you want explicit control over the
+            dataclass snapshot and adapter boundary.
             """
         ),
         md(

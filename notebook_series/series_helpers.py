@@ -314,6 +314,193 @@ def load_fresh_case_snapshots(case_name: str, *, label: str):
     return runtime_snapshot, ore_snapshot, meta
 
 
+def _case_setup_params(ore_xml: Path) -> dict[str, str]:
+    root = ET.parse(ore_xml).getroot()
+    return {
+        node.attrib.get("name", ""): (node.text or "").strip()
+        for node in root.findall("./Setup/Parameter")
+        if node.attrib.get("name")
+    }
+
+
+def resolve_case_dirs(ore_xml: str | Path) -> tuple[Path, Path]:
+    ore_xml = Path(ore_xml).resolve()
+    setup_params = _case_setup_params(ore_xml)
+    run_root = ore_xml.parent.parent
+    input_dir = run_root / setup_params.get("inputPath", ore_xml.parent.name or "Input")
+    output_dir = run_root / setup_params.get("outputPath", "Output")
+    return input_dir.resolve(), output_dir.resolve()
+
+
+def load_case_buffers(ore_xml: str | Path, *, include_output: bool = True) -> tuple[dict[str, str], dict[str, str], dict[str, object]]:
+    ore_xml = Path(ore_xml).resolve()
+    setup_params = _case_setup_params(ore_xml)
+    input_dir, output_dir = resolve_case_dirs(ore_xml)
+    input_files = {
+        path.name: path.read_text(encoding="utf-8", errors="ignore")
+        for path in sorted(input_dir.iterdir())
+        if path.is_file()
+    }
+    file_ref_root = ore_xml.parent
+    for key, text in setup_params.items():
+        if not text:
+            continue
+        if not (key.endswith("File") or key in {"calendarAdjustment"}):
+            continue
+        ref_path = Path(text)
+        if not ref_path.is_absolute():
+            ref_path = (file_ref_root / ref_path).resolve()
+        if ref_path.exists() and ref_path.is_file():
+            input_files.setdefault(ref_path.name, ref_path.read_text(encoding="utf-8", errors="ignore"))
+    if ore_xml.name not in input_files:
+        input_files[ore_xml.name] = ore_xml.read_text(encoding="utf-8", errors="ignore")
+    output_files: dict[str, str] = {}
+    if include_output and output_dir.exists():
+        output_files = {
+            path.name: path.read_text(encoding="utf-8", errors="ignore")
+            for path in sorted(output_dir.iterdir())
+            if path.is_file()
+        }
+    meta = {
+        "ore_xml": str(ore_xml),
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "input_file_count": len(input_files),
+        "output_file_count": len(output_files),
+    }
+    return input_files, output_files, meta
+
+
+def load_case_snapshots(ore_xml: str | Path):
+    bootstrap_notebook_env()
+    from native_xva_interface import XVALoader
+    from py_ore_tools.ore_snapshot import load_from_ore_xml
+
+    ore_xml = Path(ore_xml).resolve()
+    input_dir, output_dir = resolve_case_dirs(ore_xml)
+    runtime_snapshot = XVALoader.from_files(str(input_dir), ore_file=ore_xml.name)
+    ore_snapshot = load_from_ore_xml(ore_xml)
+    meta = {
+        "ore_xml": str(ore_xml),
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "trade_ids": [t.trade_id for t in runtime_snapshot.portfolio.trades],
+        "base_currency": runtime_snapshot.config.base_currency,
+    }
+    return runtime_snapshot, ore_snapshot, meta
+
+
+def run_ore_snapshot_app_case(
+    ore_xml: str | Path,
+    *,
+    engine: str = "compare",
+    price: bool = True,
+    xva: bool = True,
+    sensi: bool = False,
+    paths: int = 500,
+    seed: int = 42,
+    rng: str = "ore_parity",
+    ore_output_only: bool = False,
+):
+    bootstrap_notebook_env()
+    from pythonore.workflows import OreSnapshotApp, PurePythonRunOptions
+
+    ore_xml = Path(ore_xml).resolve()
+    input_files, output_files, case_meta = load_case_buffers(ore_xml, include_output=engine in {"compare", "ore"})
+    options = PurePythonRunOptions(
+        engine=engine,
+        price=price,
+        xva=xva,
+        sensi=sensi,
+        paths=paths,
+        seed=seed,
+        rng=rng,
+        ore_output_only=ore_output_only,
+    )
+    app = OreSnapshotApp.from_strings(
+        input_files=input_files,
+        output_files=output_files,
+        ore_xml_name=ore_xml.name,
+        options=options,
+    )
+    start = time.perf_counter()
+    result = app.run()
+    elapsed = time.perf_counter() - start
+    meta = {
+        **case_meta,
+        "engine": engine,
+        "paths": paths,
+        "seed": seed,
+        "rng": rng,
+        "elapsed_sec": elapsed,
+        "comparison_rows": len(result.comparison_rows),
+        "input_validation_rows": len(result.input_validation_rows),
+        "ore_output_files": sorted(result.ore_output_files.keys()),
+    }
+    return result, meta
+
+
+def ore_snapshot_app_summary_frame(result) -> pd.DataFrame:
+    summary = dict(result.summary)
+    pricing = summary.get("pricing") or {}
+    xva = summary.get("xva") or {}
+    diagnostics = summary.get("diagnostics") or {}
+    rows = [
+        {"field": "trade_id", "value": summary.get("trade_id", "")},
+        {"field": "counterparty", "value": summary.get("counterparty", "")},
+        {"field": "netting_set_id", "value": summary.get("netting_set_id", "")},
+        {"field": "paths", "value": summary.get("paths", "")},
+        {"field": "seed", "value": summary.get("seed", "")},
+        {"field": "rng_mode", "value": summary.get("rng_mode", "")},
+        {"field": "py_t0_npv", "value": pricing.get("py_t0_npv", np.nan)},
+        {"field": "ore_t0_npv", "value": pricing.get("ore_t0_npv", np.nan)},
+        {"field": "py_cva", "value": xva.get("py_cva", np.nan)},
+        {"field": "ore_cva", "value": xva.get("ore_cva", np.nan)},
+        {"field": "report_bucket", "value": diagnostics.get("report_bucket", "")},
+    ]
+    return pd.DataFrame(rows)
+
+
+def ore_snapshot_app_metric_frame(result) -> pd.DataFrame:
+    summary = dict(result.summary)
+    pricing = summary.get("pricing") or {}
+    xva = summary.get("xva") or {}
+    rows = [
+        {
+            "metric": "PV",
+            "python_lgm": float(pricing.get("py_t0_npv", np.nan)),
+            "ore_output": float(pricing.get("ore_t0_npv", np.nan)),
+        },
+        {
+            "metric": "CVA",
+            "python_lgm": float(xva.get("py_cva", np.nan)),
+            "ore_output": float(xva.get("ore_cva", np.nan)),
+        },
+        {
+            "metric": "DVA",
+            "python_lgm": float(xva.get("py_dva", np.nan)),
+            "ore_output": float(xva.get("ore_dva", np.nan)),
+        },
+        {
+            "metric": "FBA",
+            "python_lgm": float(xva.get("py_fba", np.nan)),
+            "ore_output": float(xva.get("ore_fba", np.nan)),
+        },
+        {
+            "metric": "FCA",
+            "python_lgm": float(xva.get("py_fca", np.nan)),
+            "ore_output": float(xva.get("ore_fca", np.nan)),
+        },
+    ]
+    frame = pd.DataFrame(rows)
+    frame["delta"] = frame["python_lgm"] - frame["ore_output"]
+    frame["abs_rel_diff"] = frame.apply(
+        lambda row: np.nan if pd.isna(row["ore_output"]) else abs(float(row["delta"])) / max(abs(float(row["ore_output"])), 1.0),
+        axis=1,
+    )
+    return frame
+
+
 def make_programmatic_snapshot(num_paths: int = 128):
     bootstrap_notebook_env()
     from native_xva_interface import (

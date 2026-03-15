@@ -211,3 +211,4 @@ nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python_
 - Base, market-bumped, and portfolio-patched runs are easiest to compare in one persistent session.
 - The notebook is most useful as a workflow demo when the snapshot stays small and explicit.
 """
+

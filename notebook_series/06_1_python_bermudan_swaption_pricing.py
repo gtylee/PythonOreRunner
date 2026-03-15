@@ -239,3 +239,4 @@ plt.close(fig)
 - The backward solver and the LSMC solver are complementary methods, not interchangeable black boxes.
 - Exercise diagnostics matter as much as the headline price when checking method behaviour.
 """
+

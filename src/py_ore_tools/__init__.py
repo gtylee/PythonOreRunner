@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from importlib import import_module
 from pathlib import Path
 
@@ -50,14 +51,28 @@ _EXPORTS = {
     "ore_input_validation_dataframe": ("pythonore.io.ore_snapshot", "ore_input_validation_dataframe"),
     "validate_xva_snapshot_dataclasses": ("pythonore.io.ore_snapshot", "validate_xva_snapshot_dataclasses"),
     "xva_snapshot_validation_dataframe": ("pythonore.io.ore_snapshot", "xva_snapshot_validation_dataframe"),
+    "extract_discount_factors_by_currency": ("pythonore.io.ore_snapshot", "extract_discount_factors_by_currency"),
+    "discount_factors_to_dataframe": ("pythonore.io.ore_snapshot", "discount_factors_to_dataframe"),
+    "extract_market_instruments_by_currency": ("pythonore.io.ore_snapshot", "extract_market_instruments_by_currency"),
     "RateFutureModelParams": ("pythonore.compute.rate_futures", "RateFutureModelParams"),
     "extract_market_instruments_by_currency_from_quotes": (
-        "pythonore.compute.rate_futures",
+        "pythonore.io.ore_snapshot",
         "extract_market_instruments_by_currency_from_quotes",
     ),
+    "fit_discount_curves_from_ore_market": ("pythonore.io.ore_snapshot", "fit_discount_curves_from_ore_market"),
     "fit_discount_curves_from_programmatic_quotes": (
-        "pythonore.compute.rate_futures",
+        "pythonore.io.ore_snapshot",
         "fit_discount_curves_from_programmatic_quotes",
+    ),
+    "fitted_curves_to_dataframe": ("pythonore.io.ore_snapshot", "fitted_curves_to_dataframe"),
+    "quote_dicts_from_pairs": ("pythonore.io.ore_snapshot", "quote_dicts_from_pairs"),
+    "parse_lgm_params_from_calibration_xml": (
+        "pythonore.compute.irs_xva_utils",
+        "parse_lgm_params_from_calibration_xml",
+    ),
+    "parse_lgm_params_from_simulation_xml": (
+        "pythonore.compute.irs_xva_utils",
+        "parse_lgm_params_from_simulation_xml",
     ),
     "DEFAULT_BASELINE_ROOT": ("pythonore.workflows.examples_regression", "DEFAULT_BASELINE_ROOT"),
     "DEFAULT_MANIFEST": ("pythonore.workflows.examples_regression", "DEFAULT_MANIFEST"),
@@ -69,6 +84,33 @@ _EXPORTS = {
 }
 
 __all__ = sorted(_EXPORTS)
+
+_SUBMODULES = {
+    "bond_pricing": "pythonore.compute.bond_pricing",
+    "file_lists": "pythonore.file_lists",
+    "hw2f": "pythonore.hw2f",
+    "hw2f_integration": "pythonore.hw2f_integration",
+    "hw2f_ore_runner": "pythonore.hw2f_ore_runner",
+    "irs_xva_utils": "pythonore.compute.irs_xva_utils",
+    "lgm": "pythonore.compute.lgm",
+    "lgm_calibration": "pythonore.compute.lgm_calibration",
+    "lgm_fx_hybrid": "pythonore.compute.lgm_fx_hybrid",
+    "lgm_fx_hybrid_torch": "pythonore.compute.lgm_fx_hybrid_torch",
+    "lgm_fx_xva_utils": "pythonore.compute.lgm_fx_xva_utils",
+    "lgm_ir_options": "pythonore.compute.lgm_ir_options",
+    "lgm_torch": "pythonore.compute.lgm_torch",
+    "lgm_torch_xva": "pythonore.compute.lgm_torch_xva",
+    "ore": "pythonore.ore",
+    "ore_parity_artifacts": "pythonore.parity_artifacts",
+    "ore_snapshot": "pythonore.io.ore_snapshot",
+    "ore_snapshot_cli": "pythonore.workflows.ore_snapshot_cli",
+    "plotter": "pythonore.plotter",
+    "rate_futures": "pythonore.compute.rate_futures",
+    "repo_paths": "pythonore.repo_paths",
+}
+
+for old_name, new_name in _SUBMODULES.items():
+    sys.modules.setdefault(f"{__name__}.{old_name}", import_module(new_name))
 
 
 def __getattr__(name: str):

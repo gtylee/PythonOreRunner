@@ -17,6 +17,9 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from py_ore_tools.repo_paths import (
     default_ore_bin,
@@ -29,6 +32,8 @@ from py_ore_tools.repo_paths import (
 def _bootstrap() -> None:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
+    if str(SRC_ROOT) not in sys.path:
+        sys.path.insert(0, str(SRC_ROOT))
 
 
 def _locate_ore_exe() -> Path:

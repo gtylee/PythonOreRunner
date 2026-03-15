@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from importlib import import_module
 from pathlib import Path
 
@@ -117,6 +118,23 @@ _EXPORTS = {
 }
 
 __all__ = sorted(_EXPORTS)
+
+_SUBMODULES = {
+    "bermudan": "pythonore.runtime.bermudan",
+    "dataclasses": "pythonore.domain.dataclasses",
+    "dim": "pythonore.runtime.dim",
+    "exceptions": "pythonore.runtime.exceptions",
+    "loader": "pythonore.io.loader",
+    "mapper": "pythonore.mapping.mapper",
+    "parity": "pythonore.runtime.parity",
+    "presets": "pythonore.runtime.presets",
+    "results": "pythonore.runtime.results",
+    "runtime": "pythonore.runtime.runtime",
+    "sensitivity": "pythonore.runtime.sensitivity",
+}
+
+for old_name, new_name in _SUBMODULES.items():
+    sys.modules.setdefault(f"{__name__}.{old_name}", import_module(new_name))
 
 
 def __getattr__(name: str):
