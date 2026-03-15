@@ -440,10 +440,13 @@ def _parse_portfolio(path: Path) -> Portfolio:
 def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
     if trade_type == "Swap":
         fixed_leg = None
+        float_leg = None
         for leg in trade.findall(".//SwapData/LegData"):
-            if (_text(leg, "./LegType") or "").lower() == "fixed":
+            leg_type = (_text(leg, "./LegType") or "").lower()
+            if leg_type == "fixed":
                 fixed_leg = leg
-                break
+            elif leg_type == "floating":
+                float_leg = leg
         if fixed_leg is not None:
             ccy = _text(fixed_leg, "./Currency") or "EUR"
             notional = float(_text(fixed_leg, "./Notionals/Notional") or 0.0)
@@ -453,7 +456,39 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
             end = _text(fixed_leg, "./ScheduleData/Rules/EndDate")
             maturity = _maturity_years(start, end)
             if notional > 0 and maturity > 0:
-                return IRS(ccy=ccy, notional=notional, fixed_rate=fixed_rate, maturity_years=maturity, pay_fixed=pay_fixed)
+                return IRS(
+                    ccy=ccy,
+                    notional=notional,
+                    fixed_rate=fixed_rate,
+                    maturity_years=maturity,
+                    pay_fixed=pay_fixed,
+                    start_date=_normalize_date(start) if start else None,
+                    end_date=_normalize_date(end) if end else None,
+                    fixed_leg_tenor=_text(fixed_leg, "./ScheduleData/Rules/Tenor") or "6M",
+                    float_leg_tenor=_text(float_leg, "./ScheduleData/Rules/Tenor") or "3M",
+                    fixed_day_counter=_text(fixed_leg, "./DayCounter") or None,
+                    float_day_counter=_text(float_leg, "./DayCounter") or None,
+                    calendar=_text(fixed_leg, "./ScheduleData/Rules/Calendar")
+                    or _text(float_leg, "./ScheduleData/Rules/Calendar")
+                    or None,
+                    fixed_payment_convention=_text(fixed_leg, "./PaymentConvention") or "MF",
+                    float_payment_convention=_text(float_leg, "./PaymentConvention") or "MF",
+                    fixed_schedule_convention=_text(fixed_leg, "./ScheduleData/Rules/Convention") or None,
+                    float_schedule_convention=_text(float_leg, "./ScheduleData/Rules/Convention") or None,
+                    fixed_term_convention=_text(fixed_leg, "./ScheduleData/Rules/TermConvention") or None,
+                    float_term_convention=_text(float_leg, "./ScheduleData/Rules/TermConvention") or None,
+                    fixed_schedule_rule=_text(fixed_leg, "./ScheduleData/Rules/Rule") or "Forward",
+                    float_schedule_rule=_text(float_leg, "./ScheduleData/Rules/Rule") or "Forward",
+                    end_of_month=(
+                        (_text(fixed_leg, "./ScheduleData/Rules/EndOfMonth") or "").strip().lower()
+                        in {"true", "1", "y", "yes"}
+                        or (_text(float_leg, "./ScheduleData/Rules/EndOfMonth") or "").strip().lower()
+                        in {"true", "1", "y", "yes"}
+                    ),
+                    float_index=_text(float_leg, "./FloatingLegData/Index") or "",
+                    fixing_days=int(_text(float_leg, "./FloatingLegData/FixingDays") or 2),
+                    float_spread=float(_text(float_leg, "./FloatingLegData/Spreads/Spread") or 0.0),
+                )
 
     if trade_type == "FxForward":
         bought_ccy = _text(trade, ".//FxForwardData/BoughtCurrency") or "EUR"

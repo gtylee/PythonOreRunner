@@ -23,8 +23,8 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 | `src/pythonore/` | Canonical Python package layout: shared domain types, IO, mapping, runtime, workflows, and app entrypoints |
 | `py_ore_tools/` | Compatibility package for the standalone Python LGM, ORE runner, and thin legacy entrypoints |
 | `native_xva_interface/` | Compatibility package for dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
-| `legacy/` | Relocated legacy demos, benchmarks, notebooks, docs, and writeups from the pre-`src` package layout |
-| `example*.py` | Example scripts using `OreBasic` and snapshot tools |
+| `legacy/` | Relocated legacy demos, benchmarks, notebooks, docs, writeups, and former root scripts from the pre-`src` package layout |
+| `example_ore_snapshot.py` | Single root quickstart demo for the canonical ORE snapshot flow |
 | `scripts/` | Ad hoc checks, diagnostics, dumps, plots, and parity comparison utilities; see [scripts/README.md](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md) |
 | `notebook_series/legacy/` | Older standalone demo notebooks retained for reference |
 | `docs/` | Project notes and longer-form writeups that do not belong at the root |

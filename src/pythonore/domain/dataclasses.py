@@ -97,6 +97,25 @@ class IRS(Product):
     fixed_rate: float
     maturity_years: float
     pay_fixed: bool = True
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    fixed_leg_tenor: str = "6M"
+    float_leg_tenor: str = "3M"
+    fixed_day_counter: Optional[str] = None
+    float_day_counter: Optional[str] = None
+    calendar: Optional[str] = None
+    fixed_payment_convention: str = "MF"
+    float_payment_convention: str = "MF"
+    fixed_schedule_convention: Optional[str] = None
+    float_schedule_convention: Optional[str] = None
+    fixed_term_convention: Optional[str] = None
+    float_term_convention: Optional[str] = None
+    fixed_schedule_rule: str = "Forward"
+    float_schedule_rule: str = "Forward"
+    end_of_month: bool = False
+    float_index: str = ""
+    fixing_days: int = 2
+    float_spread: float = 0.0
     product_type: ProductType = field(init=False, default="IRS")
 
     def __post_init__(self) -> None:
@@ -104,6 +123,12 @@ class IRS(Product):
             raise ValueError("IRS.notional must be > 0")
         if self.maturity_years <= 0:
             raise ValueError("IRS.maturity_years must be > 0")
+        if self.start_date is not None:
+            _validate_date_like(self.start_date, "IRS.start_date")
+        if self.end_date is not None:
+            _validate_date_like(self.end_date, "IRS.end_date")
+        if self.fixing_days < 0:
+            raise ValueError("IRS.fixing_days must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -450,7 +475,38 @@ class XVASnapshot:
 def _parse_product(data: Dict[str, Any]) -> ProductSpec:
     t = data.get("product_type")
     if t == "IRS":
-        return IRS(**{k: data[k] for k in ("ccy", "notional", "fixed_rate", "maturity_years", "pay_fixed") if k in data})
+        return IRS(
+            **{
+                k: data[k]
+                for k in (
+                    "ccy",
+                    "notional",
+                    "fixed_rate",
+                    "maturity_years",
+                    "pay_fixed",
+                    "start_date",
+                    "end_date",
+                    "fixed_leg_tenor",
+                    "float_leg_tenor",
+                    "fixed_day_counter",
+                    "float_day_counter",
+                    "calendar",
+                    "fixed_payment_convention",
+                    "float_payment_convention",
+                    "fixed_schedule_convention",
+                    "float_schedule_convention",
+                    "fixed_term_convention",
+                    "float_term_convention",
+                    "fixed_schedule_rule",
+                    "float_schedule_rule",
+                    "end_of_month",
+                    "float_index",
+                    "fixing_days",
+                    "float_spread",
+                )
+                if k in data
+            }
+        )
     if t == "FXForward":
         return FXForward(**{k: data[k] for k in ("pair", "notional", "strike", "maturity_years", "buy_base") if k in data})
     if t == "EuropeanOption":

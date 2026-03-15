@@ -195,16 +195,24 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
     conventions = runtime.conventions
     indices = runtime.simulation_market.indices
     if isinstance(p, IRS):
-        start_date = _fmt_yyyymmdd(asof)
-        end_date = _add_months_yyyymmdd(start_date, int(round(p.maturity_years * 12.0)))
+        start_date = _fmt_yyyymmdd(p.start_date or asof)
+        end_date = _fmt_yyyymmdd(p.end_date) if p.end_date else _add_months_yyyymmdd(
+            start_date, int(round(p.maturity_years * 12.0))
+        )
         payer_fixed = str(p.pay_fixed).lower()
         payer_float = str(not p.pay_fixed).lower()
         # This branch is intentionally a convenience fallback, not a full ORE
-        # trade serializer. It bakes in generic conventions (TARGET, A360, 6M
-        # fixed / 3M float, default index by currency). That is acceptable for
-        # lightweight native demos, but it is not sufficient for strict parity
-        # against a real ORE portfolio with bespoke schedules or conventions.
-        idx = _resolve_index_for_trade_currency(p.ccy, indices)
+        # trade serializer. It exposes the main schedule and floating-leg fields
+        # from the IRS dataclass, but it still does not model the entire ORE
+        # trade schema (stubs, explicit calendars per leg, amortisation, etc.).
+        idx = p.float_index or _resolve_index_for_trade_currency(p.ccy, indices)
+        calendar = p.calendar or conventions.calendar
+        fixed_day_counter = p.fixed_day_counter or conventions.day_counter
+        float_day_counter = p.float_day_counter or conventions.day_counter
+        fixed_schedule_convention = p.fixed_schedule_convention or p.fixed_payment_convention
+        float_schedule_convention = p.float_schedule_convention or p.float_payment_convention
+        fixed_term_convention = p.fixed_term_convention or fixed_schedule_convention
+        float_term_convention = p.float_term_convention or float_schedule_convention
         return [
             "    <SwapData>",
             "      <StartDate>" + start_date + "</StartDate>",
@@ -213,8 +221,8 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             "        <LegType>Fixed</LegType>",
             f"        <Payer>{payer_fixed}</Payer>",
             f"        <Currency>{p.ccy}</Currency>",
-            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
-            "        <PaymentConvention>MF</PaymentConvention>",
+            f"        <DayCounter>{fixed_day_counter}</DayCounter>",
+            f"        <PaymentConvention>{p.fixed_payment_convention}</PaymentConvention>",
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
             "        </Notionals>",
@@ -222,12 +230,12 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             "          <Rules>",
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
-            "            <Tenor>6M</Tenor>",
-            f"            <Calendar>{conventions.calendar}</Calendar>",
-            "            <Convention>MF</Convention>",
-            "            <TermConvention>MF</TermConvention>",
-            "            <Rule>Forward</Rule>",
-            "            <EndOfMonth/>",
+            f"            <Tenor>{p.fixed_leg_tenor}</Tenor>",
+            f"            <Calendar>{calendar}</Calendar>",
+            f"            <Convention>{fixed_schedule_convention}</Convention>",
+            f"            <TermConvention>{fixed_term_convention}</TermConvention>",
+            f"            <Rule>{p.fixed_schedule_rule}</Rule>",
+            f"            <EndOfMonth>{str(p.end_of_month).lower()}</EndOfMonth>",
             "          </Rules>",
             "        </ScheduleData>",
             "        <FixedLegData>",
@@ -240,8 +248,8 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             "        <LegType>Floating</LegType>",
             f"        <Payer>{payer_float}</Payer>",
             f"        <Currency>{p.ccy}</Currency>",
-            f"        <DayCounter>{conventions.day_counter}</DayCounter>",
-            "        <PaymentConvention>MF</PaymentConvention>",
+            f"        <DayCounter>{float_day_counter}</DayCounter>",
+            f"        <PaymentConvention>{p.float_payment_convention}</PaymentConvention>",
             "        <Notionals>",
             f"          <Notional>{p.notional}</Notional>",
             "        </Notionals>",
@@ -249,19 +257,19 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             "          <Rules>",
             f"            <StartDate>{start_date}</StartDate>",
             f"            <EndDate>{end_date}</EndDate>",
-            "            <Tenor>3M</Tenor>",
-            f"            <Calendar>{conventions.calendar}</Calendar>",
-            "            <Convention>MF</Convention>",
-            "            <TermConvention>MF</TermConvention>",
-            "            <Rule>Forward</Rule>",
-            "            <EndOfMonth/>",
+            f"            <Tenor>{p.float_leg_tenor}</Tenor>",
+            f"            <Calendar>{calendar}</Calendar>",
+            f"            <Convention>{float_schedule_convention}</Convention>",
+            f"            <TermConvention>{float_term_convention}</TermConvention>",
+            f"            <Rule>{p.float_schedule_rule}</Rule>",
+            f"            <EndOfMonth>{str(p.end_of_month).lower()}</EndOfMonth>",
             "          </Rules>",
             "        </ScheduleData>",
             "        <FloatingLegData>",
             f"          <Index>{idx}</Index>",
-            "          <FixingDays>2</FixingDays>",
+            f"          <FixingDays>{p.fixing_days}</FixingDays>",
             "          <Spreads>",
-            "            <Spread>0.0</Spread>",
+            f"            <Spread>{p.float_spread}</Spread>",
             "          </Spreads>",
             "        </FloatingLegData>",
             "      </LegData>",

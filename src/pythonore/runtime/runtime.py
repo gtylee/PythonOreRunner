@@ -1681,7 +1681,7 @@ class PythonLgmAdapter:
                     UserWarning,
                     stacklevel=2,
                 )
-        return self._apply_historical_fixings_to_legs(snapshot, trade, _build_irs_legs_from_trade(trade))
+        return self._apply_historical_fixings_to_legs(snapshot, trade, _build_irs_legs_from_trade(trade, snapshot.config.asof))
 
     def _apply_historical_fixings_to_legs(
         self, snapshot: XVASnapshot, trade: Trade, legs: Dict[str, np.ndarray]
@@ -2775,8 +2775,8 @@ def _default_index_for_ccy(ccy: str) -> str:
     return "EUR-EURIBOR-3M"
 
 
-def _build_irs_legs_from_trade(trade: Trade) -> Dict[str, np.ndarray]:
-    """Last-resort skeleton leg builder: assumes 6M fixed / 3M float, no historical fixings.
+def _build_irs_legs_from_trade(trade: Trade, asof: str | None = None) -> Dict[str, np.ndarray]:
+    """Last-resort IRS leg builder using the dataclass schedule fields, no historical fixings.
 
     This path is reached only when neither flows.csv nor portfolio.xml loading
     succeeded.  Results will be approximate — calendar, day-count and index
@@ -2785,39 +2785,41 @@ def _build_irs_legs_from_trade(trade: Trade) -> Dict[str, np.ndarray]:
     """
     import warnings as _warnings
     _warnings.warn(
-        f"Using skeleton leg schedule for trade {trade.trade_id} "
+        f"Using fallback leg schedule for trade {trade.trade_id} "
         "(no flows.csv or portfolio.xml available). "
-        "Leg conventions are approximate (6M fixed / 3M float, A365F).",
+        "Schedule timing is generated from the IRS dataclass fields and remains approximate for calendars/day-count roll rules.",
         UserWarning,
         stacklevel=3,
     )
     p = trade.product
     if not isinstance(p, IRS):
         raise EngineRunError(f"Cannot build IRS legs for non-IRS trade {trade.trade_id}")
-    mat = max(float(p.maturity_years), 0.25)
-    fixed_pay = np.arange(0.5, mat + 1.0e-12, 0.5, dtype=float)
-    float_pay = np.arange(0.25, mat + 1.0e-12, 0.25, dtype=float)
-    float_start = np.maximum(float_pay - 0.25, 0.0)
-    float_end = float_pay.copy()
-    fixing = float_start - (2.0 / 365.25)
+    start_offset, end_offset = _irs_schedule_bounds(p, asof)
+    fixed_pay, fixed_start, fixed_end = _schedule_periods(
+        start_offset, end_offset, p.fixed_leg_tenor, p.fixed_schedule_rule
+    )
+    float_pay, float_start, float_end = _schedule_periods(
+        start_offset, end_offset, p.float_leg_tenor, p.float_schedule_rule
+    )
+    fixing = float_start - (float(p.fixing_days) / 365.25)
     fixed_sign = -1.0 if p.pay_fixed else 1.0
     float_sign = -fixed_sign
-    float_index = str(trade.additional_fields.get("index", _default_index_for_ccy(p.ccy))).upper()
+    float_index = str(p.float_index or trade.additional_fields.get("index", _default_index_for_ccy(p.ccy))).upper()
     float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
     return {
         "fixed_pay_time": fixed_pay,
-        "fixed_accrual": np.full(fixed_pay.shape, 0.5),
+        "fixed_accrual": np.maximum(fixed_end - fixed_start, 0.0),
         "fixed_rate": np.full(fixed_pay.shape, float(p.fixed_rate)),
         "fixed_notional": np.full(fixed_pay.shape, float(p.notional)),
         "fixed_sign": np.full(fixed_pay.shape, fixed_sign),
-        "fixed_amount": np.full(fixed_pay.shape, fixed_sign * float(p.notional) * float(p.fixed_rate) * 0.5),
+        "fixed_amount": fixed_sign * float(p.notional) * float(p.fixed_rate) * np.maximum(fixed_end - fixed_start, 0.0),
         "float_pay_time": float_pay,
         "float_start_time": float_start,
         "float_end_time": float_end,
-        "float_accrual": np.full(float_pay.shape, 0.25),
+        "float_accrual": np.maximum(float_end - float_start, 0.0),
         "float_notional": np.full(float_pay.shape, float(p.notional)),
         "float_sign": np.full(float_pay.shape, float_sign),
-        "float_spread": np.zeros(float_pay.shape),
+        "float_spread": np.full(float_pay.shape, float(p.float_spread)),
         "float_coupon": np.zeros(float_pay.shape),
         "float_amount": np.zeros(float_pay.shape),
         "float_fixing_time": fixing,
@@ -2825,6 +2827,67 @@ def _build_irs_legs_from_trade(trade: Trade) -> Dict[str, np.ndarray]:
         "float_index": float_index,
         "float_index_tenor": float_index_tenor,
     }
+
+
+def _irs_schedule_bounds(product: IRS, asof: str | None) -> Tuple[float, float]:
+    if product.start_date and asof:
+        start = _normalize_asof_date(product.start_date)
+        ref = _normalize_asof_date(asof)
+        start_offset = (datetime.strptime(start, "%Y-%m-%d") - datetime.strptime(ref, "%Y-%m-%d")).days / 365.25
+    else:
+        start_offset = 0.0
+    if product.end_date and asof:
+        end = _normalize_asof_date(product.end_date)
+        ref = _normalize_asof_date(asof)
+        end_offset = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(ref, "%Y-%m-%d")).days / 365.25
+    else:
+        end_offset = start_offset + float(product.maturity_years)
+    end_offset = max(end_offset, start_offset + 1.0 / 365.25)
+    return float(start_offset), float(end_offset)
+
+
+def _schedule_periods(start: float, end: float, tenor: str, rule: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    step = _tenor_to_years(tenor)
+    if step <= 0.0:
+        raise EngineRunError(f"Unsupported IRS tenor '{tenor}'")
+    rule_name = str(rule or "Forward").strip().lower()
+    starts: List[float] = []
+    stops: List[float] = []
+    if rule_name == "backward":
+        current = float(end)
+        while current > start + 1.0e-12:
+            prev = max(start, current - step)
+            starts.append(prev)
+            stops.append(current)
+            current = prev
+        starts.reverse()
+        stops.reverse()
+    else:
+        current = float(start)
+        while current < end - 1.0e-12:
+            nxt = min(end, current + step)
+            starts.append(current)
+            stops.append(nxt)
+            current = nxt
+    start_arr = np.asarray(starts, dtype=float)
+    stop_arr = np.asarray(stops, dtype=float)
+    return stop_arr.copy(), start_arr, stop_arr
+
+
+def _tenor_to_years(tenor: str) -> float:
+    text = str(tenor).strip().upper()
+    m = re.fullmatch(r"(\d+)([DWMY])", text)
+    if not m:
+        return 0.0
+    n = float(m.group(1))
+    unit = m.group(2)
+    if unit == "D":
+        return n / 365.25
+    if unit == "W":
+        return (7.0 * n) / 365.25
+    if unit == "M":
+        return n / 12.0
+    return n
 
 
 def _counterparty_for_netting(snapshot: XVASnapshot, netting_set: str) -> str:
