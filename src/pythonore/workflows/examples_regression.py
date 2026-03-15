@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from py_ore_tools import ore_snapshot_cli
+import pythonore.workflows.ore_snapshot_cli as ore_snapshot_cli
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -1,22 +1,7 @@
-class XVAInterfaceError(Exception):
-    """Base error for native xva interface."""
+"""Compatibility facade for the canonical runtime exception types."""
 
+import sys
+from pythonore.runtime import exceptions as _impl
 
-class ValidationError(XVAInterfaceError):
-    """Input validation failure."""
-
-
-class MappingError(XVAInterfaceError):
-    """Dataclass to runtime mapping failure."""
-
-
-class EngineRunError(XVAInterfaceError):
-    """Runtime execution failure."""
-
-
-class ConflictError(XVAInterfaceError):
-    """Conflict in mixed-source merge."""
-
-
-class InputCompatibilityError(ValidationError):
-    """Input shape is structurally incompatible with the requested Python path."""
+globals().update({k: v for k, v in _impl.__dict__.items() if k not in {"__name__", "__package__", "__loader__", "__spec__"}})
+sys.modules[__name__] = _impl

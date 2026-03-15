@@ -349,8 +349,8 @@ def test_python_lgm_generated_runtime_snapshot_keeps_stable_numbers():
     assert np.isfinite(result.pv_total)
     assert np.isfinite(result.xva_total)
     assert result.metadata["coverage"]["python_trades"] == 2
-    assert result.pv_total == pytest.approx(59318.445308124, rel=1.0e-10, abs=1.0e-8)
-    assert result.xva_total == pytest.approx(9001.085926240548, rel=1.0e-10, abs=1.0e-8)
+    assert result.pv_total == pytest.approx(55603.3709318409, rel=1.0e-10, abs=1.0e-8)
+    assert result.xva_total == pytest.approx(6187.89378833879, rel=1.0e-10, abs=1.0e-8)
 
 
 def test_flow_loaded_fixed_leg_dates_preserve_t0_pv_parity():

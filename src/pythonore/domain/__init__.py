@@ -1,4 +1,4 @@
-from native_xva_interface.dataclasses import (
+from pythonore.domain.dataclasses import (
     BermudanSwaption,
     CollateralBalance,
     CollateralConfig,
@@ -37,13 +37,6 @@ from native_xva_interface.dataclasses import (
     XVAConfig,
     XVASnapshot,
 )
-from native_xva_interface.parity import ParityCheckResult, ParityTolerance
-from native_xva_interface.results import CubeAccessor, DIMMarginComponents, DIMResult, XVAResult
-from native_xva_interface.sensitivity import (
-    ORESensitivityEntry,
-    PythonSensitivityEntry,
-    SensitivityComparisonEntry,
-)
 
 
 __all__ = [
@@ -56,12 +49,9 @@ __all__ = [
     "ConventionsConfig",
     "CounterpartyConfig",
     "CrossAssetModelConfig",
-    "CubeAccessor",
     "Curve",
     "CurveConfig",
     "CurvePoint",
-    "DIMMarginComponents",
-    "DIMResult",
     "EuropeanOption",
     "FXForward",
     "FXQuote",
@@ -75,15 +65,10 @@ __all__ = [
     "MporConfig",
     "NettingConfig",
     "NettingSet",
-    "ORESensitivityEntry",
-    "ParityCheckResult",
-    "ParityTolerance",
     "Portfolio",
     "PricingEngineConfig",
     "Product",
-    "PythonSensitivityEntry",
     "RuntimeConfig",
-    "SensitivityComparisonEntry",
     "SimulationConfig",
     "SimulationMarketConfig",
     "SourceMeta",
@@ -91,6 +76,5 @@ __all__ = [
     "Trade",
     "XVAAnalyticConfig",
     "XVAConfig",
-    "XVAResult",
     "XVASnapshot",
 ]

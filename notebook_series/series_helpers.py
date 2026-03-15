@@ -1590,7 +1590,7 @@ def lgm_benchmark_frame(model, times: np.ndarray, *, path_counts: tuple[int, ...
 
 def parse_parity_report() -> tuple[pd.DataFrame, str]:
     repo = find_repo_root()
-    report_path = repo / "Tools" / "PythonOreRunner" / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
+    report_path = _pythonorerunner_root(repo) / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
     text = report_path.read_text(encoding="utf-8")
     rows = []
     for line in text.splitlines():

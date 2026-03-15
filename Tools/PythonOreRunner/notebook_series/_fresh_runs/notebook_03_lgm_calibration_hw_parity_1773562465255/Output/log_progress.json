@@ -1,0 +1,19 @@
+{ "@timestamp": "2026-03-15T08:14:25.436331", "key": "Running Calibration Analytic", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.436742", "key": "Calibration: Build Market", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.439398", "key": "Calibration: Build Market", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.439610", "key": "Calibration: Build Model", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.613368", "key": "Calibration: Build Model", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.613635", "key": "Calibration: Write Modified Model Data", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.614801", "key": "Running Calibration Analytic", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.928728", "key": "Running XVA Analytic", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.928959", "key": "XVA: Build Today's Market", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:25.931159", "key": "XVA: Build Today's Market", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:26.065540", "key": "XVA: Build Portfolio", "progress": 0, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:26.066668", "key": "XVA: Build Portfolio", "progress": 1, "total": 1 }
+{ "@timestamp": "2026-03-15T08:14:26.232819", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 0, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:26.663144", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 10, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:27.102384", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 20, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:27.534117", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 30, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:27.967622", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 40, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:28.402619", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 50, "total": 1000 }
+{ "@timestamp": "2026-03-15T08:14:28.916462", "detail": "1 trade, 1000 samples", "key": "XVA: Building cube", "progress": 60, "total": 1000 }

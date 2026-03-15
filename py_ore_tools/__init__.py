@@ -107,34 +107,6 @@ from py_ore_tools.rate_futures import (
     future_to_fra_rate,
     futures_price_to_rate,
 )
-from py_ore_tools.ore_snapshot import (
-    CurveDFPayload,
-    OreSnapshot,
-    discount_factors_to_dataframe,
-    dump_discount_factors_json,
-    extract_discount_factors_by_currency,
-    extract_market_instruments_by_currency,
-    extract_market_instruments_by_currency_from_quotes,
-    fit_discount_curves_from_ore_market,
-    fit_discount_curves_from_programmatic_quotes,
-    fitted_curves_to_dataframe,
-    load_from_ore_xml,
-    ore_input_validation_dataframe,
-    quote_dicts_from_pairs,
-    validate_ore_input_snapshot,
-    validate_xva_snapshot_dataclasses,
-    xva_snapshot_validation_dataframe,
-)
-from py_ore_tools.examples_regression import (
-    DEFAULT_BASELINE_ROOT,
-    DEFAULT_MANIFEST,
-    ExampleRegressionCase,
-    ExampleRegressionResult,
-    compare_baselines,
-    load_manifest,
-    refresh_baselines,
-)
-
 __all__ = [
     "OreBasic",
     "LGMParams",
@@ -221,27 +193,42 @@ __all__ = [
     "future_convexity_adjustment",
     "future_forward_rate",
     "future_to_fra_rate",
-    "CurveDFPayload",
-    "OreSnapshot",
-    "extract_discount_factors_by_currency",
-    "discount_factors_to_dataframe",
-    "dump_discount_factors_json",
-    "extract_market_instruments_by_currency",
-    "extract_market_instruments_by_currency_from_quotes",
-    "fit_discount_curves_from_ore_market",
-    "fit_discount_curves_from_programmatic_quotes",
-    "fitted_curves_to_dataframe",
-    "load_from_ore_xml",
-    "validate_ore_input_snapshot",
-    "ore_input_validation_dataframe",
-    "validate_xva_snapshot_dataclasses",
-    "xva_snapshot_validation_dataframe",
-    "quote_dicts_from_pairs",
-    "DEFAULT_BASELINE_ROOT",
-    "DEFAULT_MANIFEST",
-    "ExampleRegressionCase",
-    "ExampleRegressionResult",
-    "compare_baselines",
-    "load_manifest",
-    "refresh_baselines",
 ]
+
+_LAZY_EXPORTS = {
+    "CurveDFPayload": ("py_ore_tools.ore_snapshot", "CurveDFPayload"),
+    "OreSnapshot": ("py_ore_tools.ore_snapshot", "OreSnapshot"),
+    "extract_discount_factors_by_currency": ("py_ore_tools.ore_snapshot", "extract_discount_factors_by_currency"),
+    "discount_factors_to_dataframe": ("py_ore_tools.ore_snapshot", "discount_factors_to_dataframe"),
+    "dump_discount_factors_json": ("py_ore_tools.ore_snapshot", "dump_discount_factors_json"),
+    "extract_market_instruments_by_currency": ("py_ore_tools.ore_snapshot", "extract_market_instruments_by_currency"),
+    "extract_market_instruments_by_currency_from_quotes": ("py_ore_tools.ore_snapshot", "extract_market_instruments_by_currency_from_quotes"),
+    "fit_discount_curves_from_ore_market": ("py_ore_tools.ore_snapshot", "fit_discount_curves_from_ore_market"),
+    "fit_discount_curves_from_programmatic_quotes": ("py_ore_tools.ore_snapshot", "fit_discount_curves_from_programmatic_quotes"),
+    "fitted_curves_to_dataframe": ("py_ore_tools.ore_snapshot", "fitted_curves_to_dataframe"),
+    "load_from_ore_xml": ("py_ore_tools.ore_snapshot", "load_from_ore_xml"),
+    "validate_ore_input_snapshot": ("py_ore_tools.ore_snapshot", "validate_ore_input_snapshot"),
+    "ore_input_validation_dataframe": ("py_ore_tools.ore_snapshot", "ore_input_validation_dataframe"),
+    "validate_xva_snapshot_dataclasses": ("py_ore_tools.ore_snapshot", "validate_xva_snapshot_dataclasses"),
+    "xva_snapshot_validation_dataframe": ("py_ore_tools.ore_snapshot", "xva_snapshot_validation_dataframe"),
+    "quote_dicts_from_pairs": ("py_ore_tools.ore_snapshot", "quote_dicts_from_pairs"),
+    "DEFAULT_BASELINE_ROOT": ("py_ore_tools.examples_regression", "DEFAULT_BASELINE_ROOT"),
+    "DEFAULT_MANIFEST": ("py_ore_tools.examples_regression", "DEFAULT_MANIFEST"),
+    "ExampleRegressionCase": ("py_ore_tools.examples_regression", "ExampleRegressionCase"),
+    "ExampleRegressionResult": ("py_ore_tools.examples_regression", "ExampleRegressionResult"),
+    "compare_baselines": ("py_ore_tools.examples_regression", "compare_baselines"),
+    "load_manifest": ("py_ore_tools.examples_regression", "load_manifest"),
+    "refresh_baselines": ("py_ore_tools.examples_regression", "refresh_baselines"),
+}
+
+__all__.extend(sorted(_LAZY_EXPORTS))
+
+
+def __getattr__(name: str):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(name)
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    module = __import__(module_name, fromlist=[attr_name])
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
