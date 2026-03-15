@@ -786,6 +786,7 @@ def _load_swaption_surface_spec(
         raise ValueError(f"curveconfig.xml missing SwaptionVolatility with CurveId '{curve_id}'")
     return {
         "curve_id": curve_id,
+        "dimension": (node.findtext("./Dimension") or "ATM").strip(),
         "volatility_type": (node.findtext("./VolatilityType") or "Normal").strip(),
         "day_counter": (node.findtext("./DayCounter") or "Actual/365 (Fixed)").strip(),
         "calendar": (node.findtext("./Calendar") or "TARGET").strip(),
@@ -1374,6 +1375,32 @@ def _ql_handle_from_fit_payload(asof: date, fit: dict[str, Any]) -> Any:
     return ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
 
 
+def _ql_handle_from_curve_pairs(asof: date, times: Iterable[float], dfs_in: Iterable[float]) -> Any:
+    if ql is None:
+        raise ImportError("QuantLib Python bindings are required to build QuantLib term structures")
+    base_curve = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+        [(float(t), float(df)) for t, df in zip(times, dfs_in)]
+    )
+    dates = [ql.Date(asof.day, asof.month, asof.year)]
+    dfs = [1.0]
+    max_time = max(max(float(t) for t in times), 61.0)
+    sample_times = sorted(
+        set(
+            [round(float(t), 8) for t in times if float(t) > 0.0]
+            + [round(0.25 * i, 8) for i in range(1, int(math.ceil(max_time / 0.25)) + 1)]
+        )
+    )
+    for tt in sample_times:
+        qd = ql.Date(asof.day, asof.month, asof.year) + int(round(tt * 365.0))
+        if qd <= dates[-1]:
+            continue
+        dates.append(qd)
+        dfs.append(float(base_curve(tt)))
+    handle = ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
+    handle.enableExtrapolation()
+    return handle
+
+
 def _fit_market_curve_from_selector(
     ore_xml: Path,
     *,
@@ -1430,6 +1457,42 @@ def _build_fitted_discount_and_forward_curves(
     return p0_disc, p0_fwd, _ql_handle_from_fit_payload(asof, discount_fit), _ql_handle_from_fit_payload(asof, forward_fit)
 
 
+def _build_reference_discount_and_forward_curves(
+    ore_xml: Path,
+    *,
+    asof: date,
+    asof_date: str,
+    pricing_config_id: str,
+    tm_root: ET.Element,
+    currency: str,
+    float_index: str,
+) -> tuple[Any, Any, Any, Any] | None:
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is None:
+        return None
+    discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, currency)
+    forward_column = _resolve_forward_column_from_index(tm_root, pricing_config_id, float_index)
+    try:
+        curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv),
+            [discount_column, forward_column],
+            asof_date=asof_date,
+            day_counter="A365F",
+        )
+        _, disc_times, disc_dfs = curve_dates[discount_column]
+        _, fwd_times, fwd_dfs = curve_dates[forward_column]
+    except Exception:
+        return None
+    p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(disc_times, disc_dfs)))
+    p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(fwd_times, fwd_dfs)))
+    return (
+        p0_disc,
+        p0_fwd,
+        _ql_handle_from_curve_pairs(asof, disc_times, disc_dfs),
+        _ql_handle_from_curve_pairs(asof, fwd_times, fwd_dfs),
+    )
+
+
 def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     if ql is None:
         raise ImportError("QuantLib Python bindings are required for swaption price-only support")
@@ -1448,6 +1511,9 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     curve_config_path = (input_dir / setup_params.get("curveConfigFile", "")).resolve()
     todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
     portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    markets_params = {n.attrib.get("name", ""): (n.text or "").strip() for n in ore_root.findall("./Markets/Parameter")}
+    pricing_config_id = markets_params.get("pricing", "default")
+    tm_root = ET.parse(todaysmarket_xml).getroot()
     portfolio_root = ET.parse(portfolio_xml).getroot()
     trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
     trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
@@ -1470,12 +1536,24 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         raise ValueError(f"failed to identify fixed/floating legs in {portfolio_xml}")
     ccy = (fixed_leg.findtext("./Currency") or float_leg.findtext("./Currency") or "EUR").strip().upper()
     float_index = (float_leg.findtext("./FloatingLegData/Index") or "").strip()
-    _, _, disc_curve, fwd_curve = _build_fitted_discount_and_forward_curves(
+    reference_curves = _build_reference_discount_and_forward_curves(
         ore_xml,
         asof=asof,
+        asof_date=asof_date,
+        pricing_config_id=pricing_config_id,
+        tm_root=tm_root,
         currency=ccy,
         float_index=float_index,
     )
+    if reference_curves is None:
+        _, _, disc_curve, fwd_curve = _build_fitted_discount_and_forward_curves(
+            ore_xml,
+            asof=asof,
+            currency=ccy,
+            float_index=float_index,
+        )
+    else:
+        _, _, disc_curve, fwd_curve = reference_curves
     spec = _load_swaption_surface_spec(todaysmarket_xml, curve_config_path, ccy)
     fixed_rules = fixed_leg.find("./ScheduleData/Rules")
     float_rules = float_leg.find("./ScheduleData/Rules")
@@ -1524,13 +1602,17 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     else:
         instrument = ql.Swaption(underlying, exercise)
     vol_type = str(spec["volatility_type"]).strip().lower()
+    strike_rate = float((fixed_leg.findtext("./FixedLegData/Rates/Rate") or "0").strip() or "0")
+    atm_rate = float(underlying.fairRate())
     swaption_vol = _lookup_swaption_market_vol(
         market_data_path,
         asof_date=asof_date,
         currency=ccy,
         exercise_date=exercise_date,
         maturity_date=underlying.maturityDate(),
+        dimension=str(spec.get("dimension", "ATM")),
         volatility_type=vol_type,
+        strike_spread=strike_rate - atm_rate,
     )
     vol_quote = ql.QuoteHandle(ql.SimpleQuote(float(swaption_vol)))
     if vol_type == "normal":
@@ -1562,15 +1644,20 @@ def _lookup_swaption_market_vol(
     currency: str,
     exercise_date,
     maturity_date,
+    dimension: str,
     volatility_type: str,
+    strike_spread: float = 0.0,
 ) -> float:
     quote_kind = "SWAPTION/RATE_NVOL" if str(volatility_type).lower() == "normal" else "SWAPTION/RATE_LNVOL"
     asof_compact = str(asof_date).replace("-", "")
     asof_dash = str(asof_date)
     target_e = float(ql.Actual365Fixed().yearFraction(ql.Settings.instance().evaluationDate, exercise_date))
     target_t = float(ql.Actual365Fixed().yearFraction(exercise_date, maturity_date))
+    want_smile = str(dimension).strip().lower() == "smile"
     best_val = None
-    best_dist = None
+    best_smile_val = None
+    best_smile_dist = None
+    atm_surface: dict[tuple[float, float], float] = {}
     with open(market_data_path, "r", encoding="utf-8") as handle:
         for line in handle:
             s = line.strip()
@@ -1583,16 +1670,31 @@ def _lookup_swaption_market_vol(
             if not key.startswith(f"{quote_kind}/{currency.upper()}/"):
                 continue
             toks = key.split("/")
-            if len(toks) != 6 or toks[-1] != "ATM":
+            if len(toks) == 6 and toks[-1] == "ATM":
+                exp_y = _ore_tenor_years(toks[3])
+                term_y = _ore_tenor_years(toks[4])
+                if exp_y is None or term_y is None:
+                    continue
+                atm_surface[(float(exp_y), float(term_y))] = float(parts[2])
+                continue
+            if not want_smile or len(toks) != 7 or toks[5] != "SMILE":
                 continue
             exp_y = _ore_tenor_years(toks[3])
             term_y = _ore_tenor_years(toks[4])
             if exp_y is None or term_y is None:
                 continue
-            dist = (exp_y - target_e) ** 2 + (term_y - target_t) ** 2
-            if best_dist is None or dist < best_dist:
-                best_dist = dist
-                best_val = float(parts[2])
+            try:
+                spread = float(toks[6])
+            except Exception:
+                continue
+            dist = (exp_y - target_e) ** 2 + (term_y - target_t) ** 2 + 25.0 * (spread - float(strike_spread)) ** 2
+            if best_smile_dist is None or dist < best_smile_dist:
+                best_smile_dist = dist
+                best_smile_val = float(parts[2])
+    if want_smile and best_smile_val is not None:
+        return float(best_smile_val)
+    if atm_surface:
+        return float(_interpolate_swaption_atm_vol(atm_surface, target_e, target_t))
     if best_val is None:
         raise ValueError(f"missing swaption ATM quote for {currency} near expiry={target_e:.4f}y term={target_t:.4f}y")
     return float(best_val)
@@ -1611,6 +1713,51 @@ def _ore_tenor_years(text: str) -> float | None:
     if s.endswith("D"):
         return float(s[:-1]) / 365.0
     return None
+
+
+def _interp_total_variance_1d(points: list[tuple[float, float]], target: float) -> float:
+    ordered = sorted((float(t), float(v)) for t, v in points if float(t) > 0.0)
+    if not ordered:
+        raise ValueError("no interpolation points")
+    if target <= ordered[0][0]:
+        return float(ordered[0][1])
+    if target >= ordered[-1][0]:
+        return float(ordered[-1][1])
+    for (t0, v0), (t1, v1) in zip(ordered[:-1], ordered[1:]):
+        if t0 <= target <= t1:
+            if t1 <= t0:
+                return float(v1)
+            w = (target - t0) / (t1 - t0)
+            return float((1.0 - w) * v0 + w * v1)
+    return float(ordered[-1][1])
+
+
+def _interpolate_swaption_atm_vol(surface: dict[tuple[float, float], float], target_e: float, target_t: float) -> float:
+    expiries = sorted({key[0] for key in surface})
+    if not expiries:
+        raise ValueError("empty swaption ATM surface")
+    if target_e <= expiries[0]:
+        pts = [(term, vol) for (exp, term), vol in surface.items() if exp == expiries[0]]
+        return _interp_total_variance_1d(pts, target_t)
+    if target_e >= expiries[-1]:
+        pts = [(term, vol) for (exp, term), vol in surface.items() if exp == expiries[-1]]
+        return _interp_total_variance_1d(pts, target_t)
+    for e0, e1 in zip(expiries[:-1], expiries[1:]):
+        if e0 <= target_e <= e1:
+            vol0 = _interp_total_variance_1d(
+                [(term, vol) for (exp, term), vol in surface.items() if exp == e0],
+                target_t,
+            )
+            vol1 = _interp_total_variance_1d(
+                [(term, vol) for (exp, term), vol in surface.items() if exp == e1],
+                target_t,
+            )
+            if e1 <= e0:
+                return float(vol1)
+            w = (target_e - e0) / (e1 - e0)
+            return float((1.0 - w) * vol0 + w * vol1)
+    pts = [(term, vol) for (exp, term), vol in surface.items() if exp == expiries[-1]]
+    return _interp_total_variance_1d(pts, target_t)
 
 
 
@@ -2022,6 +2169,20 @@ def _find_reference_npv_file(ore_xml: Path, trade_id: str) -> Path | None:
         for path in sorted(directory.glob("*npv*.csv")):
             if path not in candidates:
                 candidates.append(path)
+    stem_tokens = [
+        token
+        for token in re.split(r"[_\\-]+", ore_xml.stem.lower())
+        if token and token not in {"ore", "input", "xml"}
+    ]
+    if stem_tokens:
+        candidates = sorted(
+            candidates,
+            key=lambda path: (
+                -sum(1 for token in stem_tokens if token in path.stem.lower()),
+                0 if path.name.lower() == "npv.csv" else 1,
+                path.name.lower(),
+            ),
+        )
     for path in candidates:
         try:
             ore_snapshot_mod._load_ore_npv_details(path, trade_id=trade_id)

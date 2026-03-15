@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import math
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from time import perf_counter
 import xml.etree.ElementTree as ET
@@ -27,9 +25,7 @@ if __package__ in (None, ""):
 from pythonore.compute.lgm import LGM1F, LGMParams
 from pythonore.compute.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
-    calibrate_float_spreads_from_coupon,
     load_ore_discount_pairs_from_curves,
-    load_ore_legs_from_flows,
     load_swap_legs_from_portfolio,
     parse_lgm_params_from_simulation_xml,
     swap_npv_from_ore_legs_dual_curve,
@@ -83,13 +79,13 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ore-bin", type=Path, default=ORE_BIN_DEFAULT)
     p.add_argument("--output-root", type=Path, default=local_parity_artifacts_root() / "multiccy_benchmark")
-    p.add_argument("--ore-samples", type=int, default=256)
+    p.add_argument("--ore-samples", type=int, default=512)
     p.add_argument("--python-paths", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--alpha-scale",
         type=float,
-        default=1.05,
+        default=1.0,
         help="Python-side LGM alpha multiplier passed through to compare_ore_python_lgm.py",
     )
     p.add_argument("--fit-alpha-scale", action="store_true", help="Fit alpha scale to ORE EPE RMSE per case")
@@ -604,71 +600,7 @@ def _load_ore_trade_npv(npv_csv: Path, trade_id: str) -> float:
     raise ValueError(f"trade {trade_id} not found in {npv_csv}")
 
 
-def _build_discount_curve_from_curve_dates(curves_csv: Path, discount_column: str):
-    with open(curves_csv, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    if not rows:
-        raise ValueError(f"empty curves csv: {curves_csv}")
-    if "Date" not in rows[0]:
-        raise ValueError(f"curves csv missing Date column: {curves_csv}")
-    if discount_column not in rows[0]:
-        raise ValueError(f"discount column '{discount_column}' not found in {curves_csv}")
-
-    xs = [datetime.strptime(r["Date"], "%Y-%m-%d").date().toordinal() for r in rows]
-    ys = [math.log(float(r[discount_column])) for r in rows]
-    if len(xs) < 2:
-        raise ValueError(f"need at least two curve points in {curves_csv}")
-
-    left_slope = (ys[1] - ys[0]) / max(xs[1] - xs[0], 1)
-    right_slope = (ys[-1] - ys[-2]) / max(xs[-1] - xs[-2], 1)
-
-    def p0(pay_date: date) -> float:
-        x = pay_date.toordinal()
-        if x <= xs[0]:
-            return float(math.exp(ys[0] + (x - xs[0]) * left_slope))
-        if x >= xs[-1]:
-            return float(math.exp(ys[-1] + (x - xs[-1]) * right_slope))
-        j = int(np.searchsorted(xs, x, side="left"))
-        if xs[j] == x:
-            return float(math.exp(ys[j]))
-        x1, x2 = xs[j - 1], xs[j]
-        y1, y2 = ys[j - 1], ys[j]
-        w = (x - x1) / max(x2 - x1, 1)
-        return float(math.exp((1.0 - w) * y1 + w * y2))
-
-    return p0
-
-
-def _load_ore_trade_flow_npv(flows_csv: Path, trade_id: str, discount_on_date) -> float:
-    with open(flows_csv, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        trade_key = "#TradeId" if reader.fieldnames and "#TradeId" in reader.fieldnames else "TradeId"
-        total = 0.0
-        seen = False
-        for row in reader:
-            if row.get(trade_key, "") != trade_id:
-                continue
-            seen = True
-            pay_date = datetime.strptime(row["PayDate"], "%Y-%m-%d").date()
-            total += float(row["Amount"]) * float(discount_on_date(pay_date))
-    if not seen:
-        raise ValueError(f"trade {trade_id} not found in {flows_csv}")
-    return total
-
-
-def _python_t0_npv(
-    simulation_xml: Path,
-    curves_csv: Path,
-    portfolio_xml: Path,
-    trade_id: str,
-    model_ccy: str,
-    disc_col: str,
-    fwd_col: str,
-    flows_csv: Path | None = None,
-    pricing_disc_col: str | None = None,
-    ore_npv: float | None = None,
-) -> tuple[float, str]:
+def _python_t0_npv(simulation_xml: Path, curves_csv: Path, portfolio_xml: Path, trade_id: str, model_ccy: str, disc_col: str, fwd_col: str) -> float:
     t_d, df_d = load_ore_discount_pairs_from_curves(str(curves_csv), discount_column=disc_col)
     t_f, df_f = load_ore_discount_pairs_from_curves(str(curves_csv), discount_column=fwd_col)
     p0_d = build_discount_curve_from_discount_pairs(list(zip(t_d, df_d)))
@@ -684,46 +616,9 @@ def _python_t0_npv(
             scaling=float(params["scaling"]),
         )
     )
+    legs = load_swap_legs_from_portfolio(str(portfolio_xml), trade_id=trade_id, asof_date="2016-02-05")
     x0 = np.array([0.0], dtype=float)
-    candidates: list[tuple[str, dict]] = [
-        ("portfolio", load_swap_legs_from_portfolio(str(portfolio_xml), trade_id=trade_id, asof_date="2016-02-05"))
-    ]
-    if flows_csv is not None and flows_csv.exists():
-        flow_legs = load_ore_legs_from_flows(str(flows_csv), trade_id=trade_id, asof_date="2016-02-05")
-        flow_disc_col = pricing_disc_col or disc_col
-        flow_disc = _build_discount_curve_from_curve_dates(curves_csv, flow_disc_col)
-        flow_amount_npv = _load_ore_trade_flow_npv(flows_csv, trade_id, flow_disc)
-        candidates.append(("flows_amount_discounted", {"_direct_npv": flow_amount_npv}))
-        candidates.append(("flows", flow_legs))
-        candidates.append(("flows_coupon_calibrated", calibrate_float_spreads_from_coupon(flow_legs, p0_f, t0=0.0)))
-
-    scored: list[tuple[float, str]] = []
-    for source, legs in candidates:
-        if "_direct_npv" in legs:
-            pv = float(legs["_direct_npv"])
-        else:
-            pv = float(swap_npv_from_ore_legs_dual_curve(model, p0_d, p0_f, legs, 0.0, x0)[0])
-        score = abs(pv - ore_npv) if ore_npv is not None else (0.0 if source == "portfolio" else 1.0)
-        scored.append((score, source, pv))
-    _, best_source, best_pv = min(scored, key=lambda x: x[0])
-    return best_pv, best_source
-
-
-def _pricing_discount_column(ccy: str, pricing_market: str, fallback_disc_col: str, forward_col: str) -> str:
-    if pricing_market.strip().lower() == "libor":
-        return forward_col
-    return fallback_disc_col
-
-
-def _load_pricing_market(ore_xml: Path) -> str:
-    root = ET.parse(ore_xml).getroot()
-    markets = root.find("./Markets")
-    if markets is None:
-        return ""
-    for node in markets.findall("./Parameter"):
-        if node.attrib.get("name", "") == "pricing":
-            return (node.text or "").strip()
-    return ""
+    return float(swap_npv_from_ore_legs_dual_curve(model, p0_d, p0_f, legs, 0.0, x0)[0])
 
 
 def main() -> None:
@@ -811,18 +706,7 @@ def main() -> None:
             try:
                 npv_t0 = perf_counter()
                 ore_npv = _load_ore_trade_npv(output_dir / "npv.csv", trade_id)
-                py_npv, npv_source = _python_t0_npv(
-                    simulation_xml,
-                    output_dir / "curves.csv",
-                    portfolio_xml,
-                    trade_id,
-                    case.ccy,
-                    disc_col,
-                    fwd_index,
-                    flows_csv=output_dir / "flows.csv",
-                    pricing_disc_col=_pricing_discount_column(case.ccy, _load_pricing_market(ore_xml), disc_col, fwd_index),
-                    ore_npv=ore_npv,
-                )
+                py_npv = _python_t0_npv(simulation_xml, output_dir / "curves.csv", portfolio_xml, trade_id, case.ccy, disc_col, fwd_index)
                 npv_seconds = perf_counter() - npv_t0
                 rec = {
                     "case_id": case_id,
@@ -834,7 +718,6 @@ def main() -> None:
                     "trade_id": trade_id,
                     "discount_column": disc_col,
                     "forward_column": fwd_index,
-                    "npv_source": npv_source,
                     "ore_npv": float(ore_npv),
                     "py_npv": float(py_npv),
                     "npv_rel_diff": abs(py_npv - ore_npv) / max(abs(ore_npv), 1.0),
@@ -851,7 +734,7 @@ def main() -> None:
                     f"[{idx}/{len(cases)}] {case_id}: "
                     f"ORE_NPV={_fmt_num(float(rec['ore_npv']))}, "
                     f"PY_NPV={_fmt_num(float(rec['py_npv']))}, "
-                    f"npv_rel_diff={rec['npv_rel_diff']:.4%} (NPV-only, source={npv_source})"
+                    f"npv_rel_diff={rec['npv_rel_diff']:.4%} (NPV-only)"
                 )
             except Exception as e:
                 results.append(

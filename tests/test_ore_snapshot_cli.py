@@ -33,6 +33,7 @@ FX_FORWARD_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_28" / "Input"
 FX_OPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_E0.xml"
 FX_NDF_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_71" / "Input" / "ore.xml"
 SWAPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_flat.xml"
+SWAPTION_SMILE_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_smile.xml"
 SWAPTION_LONG_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore_swaption.xml"
 BERMUDAN_CASE_XML = TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_3" / "Input" / "ore_bermudans.xml"
 CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
@@ -183,6 +184,26 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "Swaption")
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertGreater(float(payload["pricing"]["py_t0_npv"]), 0.0)
+            self.assertTrue(payload["pass_all"])
+            self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 500.0)
+
+    def test_price_only_swaption_smile_runs_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(SWAPTION_SMILE_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_19" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swaption_static")
+            self.assertTrue(payload["pass_all"])
+            self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 2000.0)
 
     def test_price_only_bermudan_swaption_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -88,8 +88,6 @@ Generate and run multi-currency IRS parity benchmark cases across currencies, ma
 
 Notes:
 - The Python compare path now defaults to the stronger local parity settings used in this repo: pathwise fixing lock on and `alpha_scale=1.05`.
-- The CAD `NPV-only` branch does not use ORE's per-cashflow `PresentValue` field. It rebuilds t0 PV from `flows.csv` coupon `Amount`s discounted on `PayDate` with a curve reconstructed from `curves.csv`.
-- For these generated multiccy cases, the ORE pricing market is `libor`, so the t0 discount curve for `NPV-only` parity is the in-ccy swap/forward curve (for example `CAD-CDOR-3M`), not the overnight curve (`CAD-CORRA`).
 
 Inputs:
 - ORE example market/config files from `ENGINE_REPO_ROOT/Examples/Input`

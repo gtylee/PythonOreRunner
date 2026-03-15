@@ -792,24 +792,6 @@ Rule of thumb:
 - if pricing is already tight and exposure shape looks qualitatively similar, rerun native ORE at the same sample count before debugging model code
 - do not treat `5000`-vs-`500` XVA deltas as proof of a structural parity bug
 
-### For multiccy `NPV-only` parity, use flow amounts and the pricing curve, not ORE cashflow PVs
-
-On the generated multicurrency IRS benchmark cases, especially CAD:
-
-- do not use `flows.csv` `PresentValue` as the Python parity result
-- do use `flows.csv` `Amount` discounted on each `PayDate`
-- reconstruct discount factors from `curves.csv` on the exported curve-date grid, not only by interpolating year-fraction times
-
-The important configuration detail is in `ore.xml`:
-
-- if `Markets/pricing = libor`, ORE is pricing off the in-ccy swap / forwarding curve for this benchmark
-- for CAD that means `CAD-CDOR-3M`, not `CAD-CORRA`
-
-Practical implication:
-
-- if the CAD t0 NPV is off by about `1%` while coupons already match the exported fixing values, the remaining miss is usually the discount curve choice / interpolation basis
-- summing `Amount * reconstructed_df(PayDate)` on the correct pricing curve should collapse the gap to near-zero without reading ORE `PresentValue`
-
 ### For ORE template comparisons, align the trade dates to the template `asofDate`
 
 When benchmarking Python against a file-driven ORE template such as `Example_9`, do not keep generating trades off a synthetic benchmark date like `2026-03-08` if the template market is on `2016-02-05`.
