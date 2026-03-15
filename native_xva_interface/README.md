@@ -13,6 +13,8 @@ python -m py_ore_tools.ore_snapshot_cli path/to/ore.xml --price --xva
 
 Use `native_xva_interface` when you want to load, inspect, modify, merge, or run snapshots as Python objects.
 
+The maintained implementation now lives under [`src/pythonore/`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore). [`native_xva_interface/`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface) remains the stable compatibility-facing import surface, while legacy demos, docs, and notebooks have been relocated under [`legacy/native_xva_interface/`](/Users/gordonlee/Documents/PythonOreRunner/legacy/native_xva_interface).
+
 ## What It Provides
 
 - typed dataclasses for market, fixings, portfolio, netting, collateral, runtime config, and results
@@ -130,6 +132,16 @@ snapshot = merge_snapshots(base, override, on_conflict="override")
 ```
 
 ## Related Files
+
+Canonical implementation modules:
+
+- [`src/pythonore/domain/dataclasses.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/domain/dataclasses.py)
+- [`src/pythonore/io/loader.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py)
+- [`src/pythonore/mapping/mapper.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/mapping/mapper.py)
+- [`src/pythonore/runtime/runtime.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/runtime.py)
+- [`src/pythonore/runtime/presets.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/presets.py)
+
+Compatibility facades:
 
 - [`loader.py`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface/loader.py)
 - [`mapper.py`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface/mapper.py)

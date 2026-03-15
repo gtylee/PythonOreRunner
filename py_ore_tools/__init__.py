@@ -11,8 +11,8 @@ os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT))
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from py_ore_tools.ore import OreBasic
-from py_ore_tools.lgm import (
+from pythonore.ore import OreBasic
+from pythonore.compute.lgm import (
     LGM1F,
     LGMParams,
     ORE_PARITY_SEQUENCE_TYPE,
@@ -21,7 +21,7 @@ from py_ore_tools.lgm import (
     simulate_ba_measure,
     simulate_lgm_measure,
 )
-from py_ore_tools.irs_xva_utils import (
+from pythonore.compute.irs_xva_utils import (
     aggregate_exposure_profile_from_npv_paths,
     aggregate_portfolio_npv_paths,
     build_discount_curve_from_discount_pairs,
@@ -48,8 +48,8 @@ from py_ore_tools.irs_xva_utils import (
     swap_npv_from_ore_legs,
     swap_npv_from_ore_legs_dual_curve,
 )
-from py_ore_tools.lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams
-from py_ore_tools.lgm_fx_xva_utils import (
+from pythonore.compute.lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams
+from pythonore.compute.lgm_fx_xva_utils import (
     FxForwardDef,
     XccyFloatLegDef,
     aggregate_exposure_profile,
@@ -62,7 +62,7 @@ from py_ore_tools.lgm_fx_xva_utils import (
     single_ccy_irs_npv,
     xccy_float_float_swap_npv,
 )
-from py_ore_tools.lgm_ir_options import (
+from pythonore.compute.lgm_ir_options import (
     BermudanBackwardResult,
     BermudanExerciseDiagnostic,
     BermudanLsmcResult,
@@ -76,7 +76,7 @@ from py_ore_tools.lgm_ir_options import (
     capfloor_npv_paths,
     forward_rate_from_bonds,
 )
-from py_ore_tools.lgm_calibration import (
+from pythonore.compute.lgm_calibration import (
     BasketInstrument,
     CalibratedParameterBlock,
     CalibrationType,
@@ -99,7 +99,7 @@ from py_ore_tools.lgm_calibration import (
     calibrate_lgm_batch,
     calibrate_lgm_currency,
 )
-from py_ore_tools.rate_futures import (
+from pythonore.compute.rate_futures import (
     RateFutureModelParams,
     RateFutureQuote,
     future_convexity_adjustment,
@@ -196,29 +196,29 @@ __all__ = [
 ]
 
 _LAZY_EXPORTS = {
-    "CurveDFPayload": ("py_ore_tools.ore_snapshot", "CurveDFPayload"),
-    "OreSnapshot": ("py_ore_tools.ore_snapshot", "OreSnapshot"),
-    "extract_discount_factors_by_currency": ("py_ore_tools.ore_snapshot", "extract_discount_factors_by_currency"),
-    "discount_factors_to_dataframe": ("py_ore_tools.ore_snapshot", "discount_factors_to_dataframe"),
-    "dump_discount_factors_json": ("py_ore_tools.ore_snapshot", "dump_discount_factors_json"),
-    "extract_market_instruments_by_currency": ("py_ore_tools.ore_snapshot", "extract_market_instruments_by_currency"),
-    "extract_market_instruments_by_currency_from_quotes": ("py_ore_tools.ore_snapshot", "extract_market_instruments_by_currency_from_quotes"),
-    "fit_discount_curves_from_ore_market": ("py_ore_tools.ore_snapshot", "fit_discount_curves_from_ore_market"),
-    "fit_discount_curves_from_programmatic_quotes": ("py_ore_tools.ore_snapshot", "fit_discount_curves_from_programmatic_quotes"),
-    "fitted_curves_to_dataframe": ("py_ore_tools.ore_snapshot", "fitted_curves_to_dataframe"),
-    "load_from_ore_xml": ("py_ore_tools.ore_snapshot", "load_from_ore_xml"),
-    "validate_ore_input_snapshot": ("py_ore_tools.ore_snapshot", "validate_ore_input_snapshot"),
-    "ore_input_validation_dataframe": ("py_ore_tools.ore_snapshot", "ore_input_validation_dataframe"),
-    "validate_xva_snapshot_dataclasses": ("py_ore_tools.ore_snapshot", "validate_xva_snapshot_dataclasses"),
-    "xva_snapshot_validation_dataframe": ("py_ore_tools.ore_snapshot", "xva_snapshot_validation_dataframe"),
-    "quote_dicts_from_pairs": ("py_ore_tools.ore_snapshot", "quote_dicts_from_pairs"),
-    "DEFAULT_BASELINE_ROOT": ("py_ore_tools.examples_regression", "DEFAULT_BASELINE_ROOT"),
-    "DEFAULT_MANIFEST": ("py_ore_tools.examples_regression", "DEFAULT_MANIFEST"),
-    "ExampleRegressionCase": ("py_ore_tools.examples_regression", "ExampleRegressionCase"),
-    "ExampleRegressionResult": ("py_ore_tools.examples_regression", "ExampleRegressionResult"),
-    "compare_baselines": ("py_ore_tools.examples_regression", "compare_baselines"),
-    "load_manifest": ("py_ore_tools.examples_regression", "load_manifest"),
-    "refresh_baselines": ("py_ore_tools.examples_regression", "refresh_baselines"),
+    "CurveDFPayload": ("pythonore.io.ore_snapshot", "CurveDFPayload"),
+    "OreSnapshot": ("pythonore.io.ore_snapshot", "OreSnapshot"),
+    "extract_discount_factors_by_currency": ("pythonore.io.ore_snapshot", "extract_discount_factors_by_currency"),
+    "discount_factors_to_dataframe": ("pythonore.io.ore_snapshot", "discount_factors_to_dataframe"),
+    "dump_discount_factors_json": ("pythonore.io.ore_snapshot", "dump_discount_factors_json"),
+    "extract_market_instruments_by_currency": ("pythonore.io.ore_snapshot", "extract_market_instruments_by_currency"),
+    "extract_market_instruments_by_currency_from_quotes": ("pythonore.io.ore_snapshot", "extract_market_instruments_by_currency_from_quotes"),
+    "fit_discount_curves_from_ore_market": ("pythonore.io.ore_snapshot", "fit_discount_curves_from_ore_market"),
+    "fit_discount_curves_from_programmatic_quotes": ("pythonore.io.ore_snapshot", "fit_discount_curves_from_programmatic_quotes"),
+    "fitted_curves_to_dataframe": ("pythonore.io.ore_snapshot", "fitted_curves_to_dataframe"),
+    "load_from_ore_xml": ("pythonore.io.ore_snapshot", "load_from_ore_xml"),
+    "validate_ore_input_snapshot": ("pythonore.io.ore_snapshot", "validate_ore_input_snapshot"),
+    "ore_input_validation_dataframe": ("pythonore.io.ore_snapshot", "ore_input_validation_dataframe"),
+    "validate_xva_snapshot_dataclasses": ("pythonore.io.ore_snapshot", "validate_xva_snapshot_dataclasses"),
+    "xva_snapshot_validation_dataframe": ("pythonore.io.ore_snapshot", "xva_snapshot_validation_dataframe"),
+    "quote_dicts_from_pairs": ("pythonore.io.ore_snapshot", "quote_dicts_from_pairs"),
+    "DEFAULT_BASELINE_ROOT": ("pythonore.workflows.examples_regression", "DEFAULT_BASELINE_ROOT"),
+    "DEFAULT_MANIFEST": ("pythonore.workflows.examples_regression", "DEFAULT_MANIFEST"),
+    "ExampleRegressionCase": ("pythonore.workflows.examples_regression", "ExampleRegressionCase"),
+    "ExampleRegressionResult": ("pythonore.workflows.examples_regression", "ExampleRegressionResult"),
+    "compare_baselines": ("pythonore.workflows.examples_regression", "compare_baselines"),
+    "load_manifest": ("pythonore.workflows.examples_regression", "load_manifest"),
+    "refresh_baselines": ("pythonore.workflows.examples_regression", "refresh_baselines"),
 }
 
 __all__.extend(sorted(_LAZY_EXPORTS))

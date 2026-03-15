@@ -14,15 +14,16 @@ Python utilities and a native XVA interface for [Open Risk Engine (ORE)](https:/
 - **Bermudan swaptions** – exercise-date handling and pathwise NPV  
 - **Multi-currency** – LGM–FX hybrid with correlated IR and FX, aggregate exposure and CVA/FVA-style XVA terms  
 
-Use it for fast prototyping, regression tests, teaching, or as the Python leg in ORE-vs-Python parity runs. See `py_ore_tools/lgm.py`, `lgm_fx_hybrid.py`, `lgm_ir_options.py`, `irs_xva_utils.py`, and `lgm_fx_xva_utils.py` for the core logic; demos and benchmarks under `py_ore_tools/demos/` and `py_ore_tools/benchmarks/`.
+Use it for fast prototyping, regression tests, teaching, or as the Python leg in ORE-vs-Python parity runs. The maintained implementation now lives under `src/pythonore/`; `py_ore_tools/` and `native_xva_interface/` remain compatibility-facing packages and script entrypoints.
 
 ## Layout
 
 | Path | Description |
 |------|-------------|
 | `src/pythonore/` | Canonical Python package layout: shared domain types, IO, mapping, runtime, workflows, and app entrypoints |
-| `py_ore_tools/` | Standalone Python LGM (IRS, FX fwd, cap/floor, Bermudans, multi-ccy), ORE runner, XVA helpers, benchmarks, demos |
-| `native_xva_interface/` | Python dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
+| `py_ore_tools/` | Compatibility package for the standalone Python LGM, ORE runner, and thin legacy entrypoints |
+| `native_xva_interface/` | Compatibility package for dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
+| `legacy/` | Relocated legacy demos, benchmarks, notebooks, docs, and writeups from the pre-`src` package layout |
 | `example*.py` | Example scripts using `OreBasic` and snapshot tools |
 | `scripts/` | Ad hoc checks, diagnostics, dumps, plots, and parity comparison utilities; see [scripts/README.md](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md) |
 | `notebook_series/legacy/` | Older standalone demo notebooks retained for reference |
@@ -108,7 +109,7 @@ For a standalone checkout, set `ENGINE_REPO_ROOT` to your ORE `Engine` repo. The
 
 ## Benchmarks
 
-Benchmark entrypoints live under `py_ore_tools/benchmarks/`. Typical usage from this repo root:
+Benchmark implementations live under `src/pythonore/benchmarks/`; historical benchmark content now lives under [`legacy/py_ore_tools/benchmarks/`](/Users/gordonlee/Documents/PythonOreRunner/legacy/py_ore_tools/benchmarks), with `py_ore_tools.benchmarks` left as an import shim. Typical usage from this repo root:
 
 ```bash
 export ENGINE_REPO_ROOT=/path/to/Engine

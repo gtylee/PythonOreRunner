@@ -15,6 +15,7 @@ _EXPORTS = {
     "swap_npv_from_ore_legs_dual_curve": ("pythonore.compute.irs_xva_utils", "swap_npv_from_ore_legs_dual_curve"),
     "LgmFxHybrid": ("pythonore.compute.lgm_fx_hybrid", "LgmFxHybrid"),
     "MultiCcyLgmParams": ("pythonore.compute.lgm_fx_hybrid", "MultiCcyLgmParams"),
+    "TorchDiscountCurve": ("pythonore.compute.lgm_torch_xva", "TorchDiscountCurve"),
 }
 
 __all__ = sorted(_EXPORTS)
