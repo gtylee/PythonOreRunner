@@ -872,11 +872,14 @@ def _build_capfloor_defs_from_flows(
         if not txt or txt.upper() in {"#N/A", "N/A", "NAN"}:
             return 0.0
         return float(txt)
+    def _has_strike(text: str) -> bool:
+        txt = (text or "").strip()
+        return bool(txt) and txt.upper() not in {"#N/A", "N/A", "NAN"}
 
     cap_vals = [((r.get("CapStrike") or "").strip()) for r in rows]
     floor_vals = [((r.get("FloorStrike") or "").strip()) for r in rows]
     defs: list[CapFloorDef] = []
-    if any(v and v.lower() != "nan" for v in cap_vals):
+    if any(_has_strike(v) for v in cap_vals):
         defs.append(
             CapFloorDef(
                 trade_id=trade_id,
@@ -892,7 +895,7 @@ def _build_capfloor_defs_from_flows(
                 position=float(option_bias),
             )
         )
-    if any(v and v.lower() != "nan" for v in floor_vals):
+    if any(_has_strike(v) for v in floor_vals):
         defs.append(
             CapFloorDef(
                 trade_id=trade_id,
@@ -1087,6 +1090,36 @@ def _xva_csv_has_trade_row(xva_csv: Path, trade_id: str) -> bool:
             if (row.get(tid_key, "") or "").strip() == trade_id:
                 return True
     return False
+
+
+def _load_xva_reference_row(xva_csv: Path, *, trade_id: str, netting_set_id: str) -> tuple[dict[str, float], bool]:
+    def _float(row: dict[str, str], key: str) -> float:
+        val = row.get(key, "0") or "0"
+        if str(val).strip() in ("", "#N/A"):
+            return 0.0
+        try:
+            return float(val)
+        except ValueError:
+            return 0.0
+
+    with open(xva_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        for row in reader:
+            if (row.get(tid_key, "") or "").strip() != str(trade_id):
+                continue
+            return (
+                {
+                    "cva": _float(row, "CVA"),
+                    "dva": _float(row, "DVA"),
+                    "fba": _float(row, "FBA"),
+                    "fca": _float(row, "FCA"),
+                    "basel_epe": _float(row, "BaselEPE"),
+                    "basel_eepe": _float(row, "BaselEEPE"),
+                },
+                True,
+            )
+    return ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(netting_set_id)), False
 
 
 def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: str) -> tuple[float, float]:
@@ -1290,6 +1323,103 @@ def _make_ibor_index(name: str, curve_handle: Any):
     raise ValueError(f"unsupported ibor index '{name}'")
 
 
+def _ibor_family_tokens(index_name: str) -> set[str]:
+    text = str(index_name or "").strip().upper()
+    if text.endswith("1D") or "EONIA" in text or "SOFR" in text:
+        return {"1D"}
+    if text.endswith("1M"):
+        return {"1M"}
+    if text.endswith("3M"):
+        return {"1M", "3M"}
+    if text.endswith("6M"):
+        return {"1M", "3M", "6M"}
+    if text.endswith("12M"):
+        return {"1M", "3M", "6M", "12M"}
+    return set()
+
+
+def _ql_handle_from_fit_payload(asof: date, fit: dict[str, Any]) -> Any:
+    if ql is None:
+        raise ImportError("QuantLib Python bindings are required to build QuantLib term structures")
+    times = [float(x) for x in fit.get("times", ())]
+    dfs_in = [float(x) for x in fit.get("dfs", ())]
+    if not times or not dfs_in:
+        raise ValueError("curve fit payload is empty")
+    base_curve = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times, dfs_in)))
+    dates = [ql.Date(asof.day, asof.month, asof.year)]
+    dfs = [1.0]
+    max_time = max(times[-1], 61.0)
+    sample_times = sorted(
+        set(
+            [round(float(t), 8) for t in times if float(t) > 0.0]
+            + [round(0.25 * i, 8) for i in range(1, int(math.ceil(max_time / 0.25)) + 1)]
+        )
+    )
+    for tt in sample_times:
+        qd = ql.Date(asof.day, asof.month, asof.year) + int(round(tt * 365.0))
+        if qd <= dates[-1]:
+            continue
+        dates.append(qd)
+        dfs.append(float(base_curve(tt)))
+    return ql.YieldTermStructureHandle(ql.DiscountCurve(dates, dfs, ql.Actual365Fixed()))
+
+
+def _fit_market_curve_from_selector(
+    ore_xml: Path,
+    *,
+    currency: str,
+    selector: Any,
+) -> dict[str, Any]:
+    payload = ore_snapshot_mod.extract_market_instruments_by_currency(ore_xml).get(str(currency).upper())
+    if payload is None:
+        raise ValueError(f"no fitted market instruments available for currency '{currency}'")
+    instruments = [ins for ins in payload["instruments"] if bool(selector(ins))]
+    if not instruments:
+        raise ValueError(f"no market instruments selected for currency '{currency}'")
+    return ore_snapshot_mod._fit_curve_from_instruments(
+        payload["asof_date"],
+        instruments,
+        fit_method="weighted_zero_logdf_v1",
+        fit_grid_mode="instrument",
+        dense_step_years=0.25,
+        future_convexity_mode="external_adjusted_fra",
+        future_model_params=None,
+    )
+
+
+def _build_fitted_discount_and_forward_curves(
+    ore_xml: Path,
+    *,
+    asof: date,
+    currency: str,
+    float_index: str,
+) -> tuple[Any, Any, Any, Any]:
+    discount_fit = _fit_market_curve_from_selector(
+        ore_xml,
+        currency=currency,
+        selector=lambda _ins: True,
+    )
+    family_tokens = _ibor_family_tokens(float_index)
+    if family_tokens:
+        forward_fit = _fit_market_curve_from_selector(
+            ore_xml,
+            currency=currency,
+            selector=lambda ins: (
+                str(ins.get("instrument_type", "")).upper() == "IR_SWAP"
+                and str(ins.get("index", "")).upper() in family_tokens
+            ),
+        )
+    else:
+        forward_fit = discount_fit
+    p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+        list(zip([float(x) for x in discount_fit["times"]], [float(x) for x in discount_fit["dfs"]]))
+    )
+    p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+        list(zip([float(x) for x in forward_fit["times"]], [float(x) for x in forward_fit["dfs"]]))
+    )
+    return p0_disc, p0_fwd, _ql_handle_from_fit_payload(asof, discount_fit), _ql_handle_from_fit_payload(asof, forward_fit)
+
+
 def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     if ql is None:
         raise ImportError("QuantLib Python bindings are required for swaption price-only support")
@@ -1329,7 +1459,13 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     if fixed_leg is None or float_leg is None:
         raise ValueError(f"failed to identify fixed/floating legs in {portfolio_xml}")
     ccy = (fixed_leg.findtext("./Currency") or float_leg.findtext("./Currency") or "EUR").strip().upper()
-    disc_curve = bond_pricing_mod._build_ql_discount_curve(ore_xml, ccy, asof)
+    float_index = (float_leg.findtext("./FloatingLegData/Index") or "").strip()
+    _, _, disc_curve, fwd_curve = _build_fitted_discount_and_forward_curves(
+        ore_xml,
+        asof=asof,
+        currency=ccy,
+        float_index=float_index,
+    )
     spec = _load_swaption_surface_spec(todaysmarket_xml, curve_config_path, ccy)
     quotes = _load_swaption_quotes(
         market_data_path,
@@ -1384,8 +1520,7 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         ql.DateGeneration.Forward,
         False,
     )
-    forecast_handle = disc_curve
-    index = _make_ibor_index((float_leg.findtext("./FloatingLegData/Index") or "").strip(), forecast_handle)
+    index = _make_ibor_index(float_index, fwd_curve)
     swap_type = ql.VanillaSwap.Payer if (fixed_leg.findtext("./Payer") or "").strip().lower() == "true" else ql.VanillaSwap.Receiver
     underlying = ql.VanillaSwap(
         swap_type,
@@ -1422,7 +1557,7 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "ore_t0_npv": float(npv_details["npv"]) if npv_details is not None else None,
         "py_t0_npv": float(instrument.NPV()),
         "discount_column": ccy,
-        "forward_column": (float_leg.findtext("./FloatingLegData/Index") or "").strip(),
+        "forward_column": float_index,
         "reference_output_dirs": sorted({str(p.parent) for p in [npv_csv] if p is not None}),
         "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
     }
@@ -1483,12 +1618,12 @@ def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             _, curve_times_fwd, curve_dfs_fwd = curve_dates_by_col[forward_column]
             p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
     else:
-        fitted = ore_snapshot_mod.fit_discount_curves_from_ore_market(ore_xml)
-        payload_curve = fitted.get(ccy)
-        if payload_curve is None:
-            raise ValueError(f"no fitted market curve available for currency '{ccy}'")
-        p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(payload_curve["times"], payload_curve["dfs"])))
-        p0_fwd = p0_disc
+        p0_disc, p0_fwd, _, _ = _build_fitted_discount_and_forward_curves(
+            ore_xml,
+            asof=_parse_ore_date(asof_date),
+            currency=ccy,
+            float_index=float_index,
+        )
     simulation_xml = None
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
     if sim_analytic is not None:
@@ -2343,8 +2478,11 @@ def _compute_fx_option_snapshot_case(
         recovery_own=recovery_own_eff,
         exposure_discounting="discount_curve",
     )
-    has_trade_xva_reference = _xva_csv_has_trade_row(xva_csv, str(payload["trade_id"]))
-    xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(payload["netting_set_id"]))
+    xva_row, has_trade_xva_reference = _load_xva_reference_row(
+        xva_csv,
+        trade_id=str(payload["trade_id"]),
+        netting_set_id=str(payload["netting_set_id"]),
+    )
     basel_ee = epe.copy()
     basel_eee = np.maximum.accumulate(basel_ee)
     time_weighted_basel_epe = np.zeros_like(basel_ee)
@@ -2528,8 +2666,14 @@ def _compute_capfloor_snapshot_case(
         recovery_own=recovery_own_eff,
         exposure_discounting="discount_curve",
     )
-    has_trade_xva_reference = xva_csv is not None and _xva_csv_has_trade_row(xva_csv, str(payload["trade_id"]))
-    xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(payload["netting_set_id"])) if xva_csv is not None else None
+    if xva_csv is not None:
+        xva_row, has_trade_xva_reference = _load_xva_reference_row(
+            xva_csv,
+            trade_id=str(payload["trade_id"]),
+            netting_set_id=str(payload["netting_set_id"]),
+        )
+    else:
+        xva_row, has_trade_xva_reference = None, False
     basel_ee = epe.copy()
     basel_eee = np.maximum.accumulate(basel_ee)
     time_weighted_basel_epe = np.zeros_like(basel_ee)
