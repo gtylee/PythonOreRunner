@@ -94,7 +94,15 @@ class TestLgmIrOptions(unittest.TestCase):
         self.assertEqual(v_paths.shape, x.shape)
         self.assertAlmostEqual(float(np.mean(v_paths[0, :])), p, places=12)
 
-        swap_at_ex = swap_npv_from_ore_legs_dual_curve(self.model, self.p0, self.p0, legs, 1.0, np.zeros(1))[0]
+        swap_at_ex = swap_npv_from_ore_legs_dual_curve(
+            self.model,
+            self.p0,
+            self.p0,
+            legs,
+            1.0,
+            np.zeros(1),
+            exercise_into_whole_periods=True,
+        )[0]
         expected = self.p0(1.0) * max(-swap_at_ex, 0.0)
         self.assertAlmostEqual(p, expected, places=9)
 

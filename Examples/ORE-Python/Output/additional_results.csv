@@ -1,0 +1,32 @@
+#TradeId,ResultId,ResultType,ResultValue
+Swap_20y,PV01[1],double,16333.610874
+Swap_20y,PricingConfigEngine,string,DiscountingSwapEngine
+Swap_20y,PricingConfigModel,string,DiscountedCashflows
+Swap_20y,PricingConfigProductType[0],string,CapFloor_as_Swap
+Swap_20y,PricingConfigProductType[1],string,Swap
+Swap_20y,amount[1],double,200000.000000
+Swap_20y,amount[2],double,101885.706669
+Swap_20y,atmForward,double,0.019996
+Swap_20y,currentNotional[1],double,10000000.000000
+Swap_20y,currentNotional[2],double,10000000.000000
+Swap_20y,index[2],string,Euribor6M Actual/360
+Swap_20y,isPayer[1],bool,false
+Swap_20y,isPayer[2],bool,true
+Swap_20y,isdaAssetClass,string,Interest Rate
+Swap_20y,isdaBaseProduct,string,IR Swap
+Swap_20y,isdaSubProduct,string,Fixed Float
+Swap_20y,isdaTransaction,string,
+Swap_20y,legNPV[1],double,3266722.174761
+Swap_20y,legNPV[2],double,-3266119.689189
+Swap_20y,legType[1],string,Fixed
+Swap_20y,legType[2],string,Floating
+Swap_20y,notionalCurrency[1],string,EUR
+Swap_20y,notionalCurrency[2],string,EUR
+Swap_20y,originalNotional[1],double,10000000.000000
+Swap_20y,originalNotional[2],double,10000000.000000
+Swap_20y,paymentDate[1],string,2017-03-01
+Swap_20y,paymentDate[2],string,2016-09-01
+Swap_20y,rate[1],double,0.020000
+Swap_20y,rate[2],double,0.019934
+Swap_20y,spread[2],double,0.000000
+Swap_20y,startDate,string,2016-03-01

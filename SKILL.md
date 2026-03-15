@@ -1071,6 +1071,58 @@ Common examples:
 - Truncated `flows.csv` rows → concurrent process collision, not a model bug
 - Valid `#N/A` placeholders in report columns (cap/floor vol fields for non-cap/floor trades) → expected, not data corruption
 
+### EUR cap/floor parity in `benchmark_ore_ir_options.py` requires 6M alignment
+
+For the local ORE IR options benchmark:
+- the EUR cap/floor benchmark trades must use `EUR-EURIBOR-6M` and a `6M` schedule
+- the Python cap pricer must use the `EUR-EURIBOR-6M` forward curve and matching 6M coupon grid
+
+Why this matters on this repo:
+- the ORE example market configuration provides the EUR normal cap/floor surface on `6M`
+- a `3M` cap benchmark setup does not match the configured ORE optionlet surface and creates an artificial parity miss
+
+Observed effect:
+- switching the benchmark from `3M` to `6M` collapsed the worst cap PV gaps from multi-thousand-percent errors to roughly:
+  - `CAP_EUR_2Y_K00`: about `+1.4%`
+  - `CAP_EUR_2Y_K01`: about `+9.5%`
+  - `CAP_EUR_2Y`: about `+9.9%`
+
+Interpretation rule:
+- if cap/floor parity looks absurd while Bermudan parity is merely loose, check tenor/index alignment against the configured cap/floor surface before changing the model logic
+
+### EUR cap PV parity is closer with quoted normal-vol pricing than with the LGM cap helper
+
+For `benchmark_ore_ir_options.py` on this repo:
+- cap PV parity against ORE improves materially if the Python side prices the EUR caps from the quoted `CAPFLOOR/RATE_NVOL/EUR/2Y/6M/...` normal vols
+- a simple Bachelier caplet sum using the 2Y/6M strike quote is already much closer to ORE than the generic `capfloor_npv_paths()` LGM helper
+
+Observed effect after the 6M alignment was already fixed:
+- `CAP_EUR_2Y_K00`: improved from about `+1.4%` error to about `+0.9%`
+- `CAP_EUR_2Y_K01`: improved from about `+9.5%` to about `+2.3%`
+- `CAP_EUR_2Y_K05`: improved from about `-89.6%` to about `+6.2%`
+- `CAP_EUR_2Y_OTM`: improved from about `-100%` to about `+6.2%`
+
+Practical rule:
+- use the quoted normal-vol cap PV as the benchmark `t0` anchor
+- if you still want a path profile for exposure proxies, scale the existing LGM path profile to that `t0` anchor rather than trusting the raw LGM cap PV level
+
+Scope caveat:
+- this fixes the cap PV comparison
+- it does not resolve the separate ORE cap build failure in `analytic/XVA`, so cap CVA parity is still not available from this benchmark pack
+
+### Bermudan whole-period exercise needs fixed accrual start/end times in the reconstructed legs
+
+For Bermudan parity on this repo:
+- if you switch intrinsic valuation to `exercise_into_whole_periods=True`, the reconstructed leg arrays must include `fixed_start_time` and `fixed_end_time`
+- carrying only `fixed_pay_time` is not enough, because whole-period liveness drops coupons based on accrual start, not payment date
+
+Observed effect in `benchmark_ore_ir_options.py`:
+- enabling whole-period exercise without fixed accrual boundaries collapsed all Bermudan PVs to roughly `10k`
+- after restoring `fixed_start_time` / `fixed_end_time` from `flows.csv`, the main and high-strike Bermudans moved back near parity, while the low-strike case remained the real residual miss
+
+Guardrail:
+- if every Bermudan suddenly cheapens after turning on whole-period exercise, inspect the reconstructed fixed-leg start/end arrays before blaming the exercise rule itself
+
 ### Bermudan LGM parity: treat `Output/classic/calibration.xml` as the primary model source
 
 For Bermudan swaption parity against an existing ORE classic run, the main lesson is:

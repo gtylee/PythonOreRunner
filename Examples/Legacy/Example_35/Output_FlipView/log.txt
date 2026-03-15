@@ -1,0 +1,933 @@
+NOTICE   [2026-Mar-15 13:46:30.482988]    (OREAnalytics/orea/app/parameters.cpp:133) : Parameters:
+NOTICE   [2026-Mar-15 13:46:30.483155]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : active = Y
+NOTICE   [2026-Mar-15 13:46:30.483263]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : outputFileName = flows.csv
+NOTICE   [2026-Mar-15 13:46:30.483362]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : active = Y
+NOTICE   [2026-Mar-15 13:46:30.483457]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : configuration = default
+NOTICE   [2026-Mar-15 13:46:30.483552]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : grid = 240,1M
+NOTICE   [2026-Mar-15 13:46:30.483642]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : outputFileName = curves.csv
+NOTICE   [2026-Mar-15 13:46:30.483733]    (OREAnalytics/orea/app/parameters.cpp:136) : group = initialMargin : active = N
+NOTICE   [2026-Mar-15 13:46:30.483822]    (OREAnalytics/orea/app/parameters.cpp:136) : group = initialMargin : method = 
+NOTICE   [2026-Mar-15 13:46:30.483916]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : fxcalibration = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.484005]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : lgmcalibration = collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.484094]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : pricing = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.484184]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : simulation = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.484273]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : active = Y
+NOTICE   [2026-Mar-15 13:46:30.484362]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : baseCurrency = EUR
+NOTICE   [2026-Mar-15 13:46:30.484451]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : outputFileName = npv.csv
+NOTICE   [2026-Mar-15 13:46:30.484540]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : asofDate = 2016-02-05
+NOTICE   [2026-Mar-15 13:46:30.484629]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : conventionsFile = ../../../Input/conventions.xml
+NOTICE   [2026-Mar-15 13:46:30.484717]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : curveConfigFile = curveconfig.xml
+NOTICE   [2026-Mar-15 13:46:30.484805]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : fixingDataFile = ../../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.484893]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : implyTodaysFixings = N
+NOTICE   [2026-Mar-15 13:46:30.484981]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : inputPath = Input
+NOTICE   [2026-Mar-15 13:46:30.485070]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logFile = log.txt
+NOTICE   [2026-Mar-15 13:46:30.485157]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logMask = 31
+NOTICE   [2026-Mar-15 13:46:30.485244]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketConfigFile = todaysmarket.xml
+NOTICE   [2026-Mar-15 13:46:30.485332]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketDataFile = market_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.485420]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : observationModel = Disable
+NOTICE   [2026-Mar-15 13:46:30.485507]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : outputPath = Output_FlipView
+NOTICE   [2026-Mar-15 13:46:30.485595]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : portfolioFile = portfolio_swap.xml
+NOTICE   [2026-Mar-15 13:46:30.485685]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : pricingEnginesFile = ../../../Input/pricingengine.xml
+NOTICE   [2026-Mar-15 13:46:30.485775]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : active = Y
+NOTICE   [2026-Mar-15 13:46:30.485863]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : aggregationScenarioDataFileName = scenariodata.csv.gz
+NOTICE   [2026-Mar-15 13:46:30.485955]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : baseCurrency = EUR
+NOTICE   [2026-Mar-15 13:46:30.486043]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : cubeFile = cube.csv.gz
+NOTICE   [2026-Mar-15 13:46:30.486131]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : pricingEnginesFile = ../../../Input/pricingengine.xml
+NOTICE   [2026-Mar-15 13:46:30.486222]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : simulationConfigFile = simulation.xml
+NOTICE   [2026-Mar-15 13:46:30.486323]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : active = Y
+NOTICE   [2026-Mar-15 13:46:30.486411]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : allocationMethod = None
+NOTICE   [2026-Mar-15 13:46:30.486499]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : baseCurrency = EUR
+NOTICE   [2026-Mar-15 13:46:30.486587]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : calculationType = Symmetric
+NOTICE   [2026-Mar-15 13:46:30.486675]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : collateralFloor = N
+NOTICE   [2026-Mar-15 13:46:30.486761]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : colva = N
+NOTICE   [2026-Mar-15 13:46:30.486848]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : csaFile = netting.xml
+NOTICE   [2026-Mar-15 13:46:30.486936]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : cubeFile = cube.csv.gz
+NOTICE   [2026-Mar-15 13:46:30.487023]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : cva = Y
+NOTICE   [2026-Mar-15 13:46:30.487110]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : dva = N
+NOTICE   [2026-Mar-15 13:46:30.487197]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : dvaName = BANK
+NOTICE   [2026-Mar-15 13:46:30.487284]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : exerciseNextBreak = N
+NOTICE   [2026-Mar-15 13:46:30.487371]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : exposureProfiles = Y
+NOTICE   [2026-Mar-15 13:46:30.487458]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : flipViewBorrowingCurvePostfix = _BORROW
+NOTICE   [2026-Mar-15 13:46:30.487546]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : flipViewLendingCurvePostfix = _LEND
+NOTICE   [2026-Mar-15 13:46:30.487633]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : flipViewXVA = Y
+NOTICE   [2026-Mar-15 13:46:30.487722]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : fva = N
+NOTICE   [2026-Mar-15 13:46:30.487808]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : fvaBorrowingCurve = BANK_EUR_BORROW
+NOTICE   [2026-Mar-15 13:46:30.487895]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : fvaLendingCurve = BANK_EUR_LEND
+NOTICE   [2026-Mar-15 13:46:30.487982]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : marginalAllocationLimit = 1.0
+NOTICE   [2026-Mar-15 13:46:30.488069]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : netCubeOutputFile = netcube.csv
+NOTICE   [2026-Mar-15 13:46:30.488156]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : quantile = 0.95
+NOTICE   [2026-Mar-15 13:46:30.488242]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : rawCubeOutputFile = rawcube.csv
+NOTICE   [2026-Mar-15 13:46:30.488328]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : scenarioFile = scenariodata.csv.gz
+NOTICE   [2026-Mar-15 13:46:30.488479]        (OREAnalytics/orea/app/oreapp.cpp:660) : load OREAppInputParameters called
+WARNING  [2026-Mar-15 13:46:30.488571]        (OREAnalytics/orea/app/oreapp.cpp:681) : Calendar adjustments not found, using defaults
+WARNING  [2026-Mar-15 13:46:30.488659]        (OREAnalytics/orea/app/oreapp.cpp:691) : Currency configurations not found, using defaults
+NOTICE   [2026-Mar-15 13:46:30.488759]        (OREAnalytics/orea/app/oreapp.cpp:759) : Observation Mode is Disable
+WARNING  [2026-Mar-15 13:46:30.488857]        (OREAnalytics/orea/app/oreapp.cpp:804) : Reference data not found
+WARNING  [2026-Mar-15 13:46:30.488950]        (OREAnalytics/orea/app/oreapp.cpp:813) : Script library not loaded
+NOTICE   [2026-Mar-15 13:46:30.489039]        (OREAnalytics/orea/app/oreapp.cpp:818) : Loading conventions from file: "Input/../../../Input/conventions.xml"
+WARNING  [2026-Mar-15 13:46:30.489477]        (OREAnalytics/orea/app/oreapp.cpp:829) : Using default Ibor fallback config
+WARNING  [2026-Mar-15 13:46:30.489570]        (OREAnalytics/orea/app/oreapp.cpp:837) : Using default Basel Traffic Light config
+NOTICE   [2026-Mar-15 13:46:30.489664]        (OREAnalytics/orea/app/oreapp.cpp:842) : Load curve configurations from file: 
+NOTICE   [2026-Mar-15 13:46:30.490275]        (OREAnalytics/orea/app/oreapp.cpp:851) : Load pricing engine data from file: "Input/../../../Input/pricingengine.xml"
+NOTICE   [2026-Mar-15 13:46:30.490476]        (OREAnalytics/orea/app/oreapp.cpp:860) : Loading today's market parameters from file"Input/todaysmarket.xml"
+WARNING  [2026-Mar-15 13:46:30.490705]  (...rketdata/todaysmarketparameters.cpp:205) : TodaysMarketParameters: the attribute 'currency' is deprecated for 'SwaptionVolatilities', use 'key' instead.
+WARNING  [2026-Mar-15 13:46:30.490819]  (...rketdata/todaysmarketparameters.cpp:205) : TodaysMarketParameters: the attribute 'currency' is deprecated for 'CapFloorVolatilities', use 'key' instead.
+NOTICE   [2026-Mar-15 13:46:30.490940]  (...lytics/orea/app/inputparameters.cpp:279) : Loading portfolio from file: Input/portfolio_swap.xml
+NOTICE   [2026-Mar-15 13:46:30.491143]    (OREData/ored/portfolio/portfolio.cpp:100) : Finished Parsing XML doc
+WARNING  [2026-Mar-15 13:46:30.491237]        (OREAnalytics/orea/app/oreapp.cpp:881) : CounterpartyManager not found
+NOTICE   [2026-Mar-15 13:46:30.491327]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::fxcalibration = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.491418]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::lgmcalibration = collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.491506]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::pricing = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.491594]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::simulation = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.491693]       (OREAnalytics/orea/app/oreapp.cpp:1580) : SIMM
+NOTICE   [2026-Mar-15 13:46:30.491782]       (OREAnalytics/orea/app/oreapp.cpp:1683) : IM SCHEDULE
+NOTICE   [2026-Mar-15 13:46:30.491877]       (OREAnalytics/orea/app/oreapp.cpp:2021) : Loading simulation config from fileInput/simulation.xml
+WARNING  [2026-Mar-15 13:46:30.492050]  (...rio/scenariosimmarketparameters.cpp:748) : ScenarioSimMarket parameter Extrapolation should be FlatFwd or FlatZero, mapping deprecated boolean 'Y' to FlatFwd. Please change this in your configuration.
+WARNING  [2026-Mar-15 13:46:30.492154]  (...rio/scenariosimmarketparameters.cpp:820) : ScenarioSimMarketParameters: SwaptionVolatilities/Currencies is deprecated, use Keys instead.
+WARNING  [2026-Mar-15 13:46:30.492314]  (.../ored/model/crossassetmodeldata.cpp:266) : Simulation/Parameters/Discretization is deprecated, use Simulation/CrossAssetModel/Discretization instead.
+NOTICE   [2026-Mar-15 13:46:30.492413]  (.../ored/model/crossassetmodeldata.cpp:286) : CrossAssetModelData: domesticCcy EUR
+NOTICE   [2026-Mar-15 13:46:30.492503]  (.../ored/model/crossassetmodeldata.cpp:290) : CrossAssetModelData: ccy EUR
+NOTICE   [2026-Mar-15 13:46:30.492591]  (.../ored/model/crossassetmodeldata.cpp:290) : CrossAssetModelData: ccy USD
+NOTICE   [2026-Mar-15 13:46:30.492681]  (.../ored/model/crossassetmodeldata.cpp:290) : CrossAssetModelData: ccy GBP
+NOTICE   [2026-Mar-15 13:46:30.492773]  (.../ored/model/crossassetmodeldata.cpp:290) : CrossAssetModelData: ccy CHF
+NOTICE   [2026-Mar-15 13:46:30.492866]  (.../ored/model/crossassetmodeldata.cpp:290) : CrossAssetModelData: ccy JPY
+NOTICE   [2026-Mar-15 13:46:30.492967]  (.../ored/model/crossassetmodeldata.cpp:314) : CrossAssetModelData: bootstrap tolerance = 0.0001
+NOTICE   [2026-Mar-15 13:46:30.493064]  (.../ored/model/crossassetmodeldata.cpp:317) : CrossAssetModelData: measure = ''
+WARNING  [2026-Mar-15 13:46:30.493166]         (OREData/ored/model/irlgmdata.cpp:33) : IrLgmData: attribute ccy is deprecated, use key instead.
+NOTICE   [2026-Mar-15 13:46:30.493257]         (OREData/ored/model/irlgmdata.cpp:36) : LGM with attribute (key) = default
+NOTICE   [2026-Mar-15 13:46:30.493356]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493447]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493537]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493625]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493715]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493804]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493893]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.493996]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.494103]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.494195]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.494284]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.494375]          (OREData/ored/model/lgmdata.cpp:137) : LGM Volatility calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.494467]          (OREData/ored/model/lgmdata.cpp:141) : LGM Volatility type = Hagan
+NOTICE   [2026-Mar-15 13:46:30.494560]          (OREData/ored/model/lgmdata.cpp:145) : LGM Volatility param type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.494656]          (OREData/ored/model/lgmdata.cpp:148) : LGM Volatility time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.494748]          (OREData/ored/model/lgmdata.cpp:151) : LGM Volatility initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.494837]          (OREData/ored/model/lgmdata.cpp:158) : LGM Reversion calibrate = 0
+NOTICE   [2026-Mar-15 13:46:30.494932]          (OREData/ored/model/lgmdata.cpp:162) : LGM Reversion type = HullWhite
+NOTICE   [2026-Mar-15 13:46:30.495021]          (OREData/ored/model/lgmdata.cpp:166) : LGM Reversion parameter type = Constant
+NOTICE   [2026-Mar-15 13:46:30.495137]          (OREData/ored/model/lgmdata.cpp:169) : LGM Reversion time grid size = 0
+NOTICE   [2026-Mar-15 13:46:30.495239]          (OREData/ored/model/lgmdata.cpp:172) : LGM Reversion initial values size = 1
+NOTICE   [2026-Mar-15 13:46:30.495331]          (OREData/ored/model/lgmdata.cpp:178) : LGM shift horizon = 0
+NOTICE   [2026-Mar-15 13:46:30.495441]          (OREData/ored/model/lgmdata.cpp:181) : LGM scaling = 1
+NOTICE   [2026-Mar-15 13:46:30.495539]          (OREData/ored/model/lgmdata.cpp:192) : LgmData done
+NOTICE   [2026-Mar-15 13:46:30.495646]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.495737]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.495830]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.495927]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496033]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496135]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496235]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496342]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496444]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496543]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496653]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.496759]  (.../ored/model/crossassetmodeldata.cpp:343) : CrossAssetModelData: IR config built for key default
+WARNING  [2026-Mar-15 13:46:30.496883]         (OREData/ored/model/irlgmdata.cpp:33) : IrLgmData: attribute ccy is deprecated, use key instead.
+NOTICE   [2026-Mar-15 13:46:30.496986]         (OREData/ored/model/irlgmdata.cpp:36) : LGM with attribute (key) = EUR
+NOTICE   [2026-Mar-15 13:46:30.497094]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497192]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497282]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497371]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497480]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497579]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497677]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497773]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497867]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.497956]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.498045]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.498134]          (OREData/ored/model/lgmdata.cpp:137) : LGM Volatility calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.498223]          (OREData/ored/model/lgmdata.cpp:141) : LGM Volatility type = Hagan
+NOTICE   [2026-Mar-15 13:46:30.498314]          (OREData/ored/model/lgmdata.cpp:145) : LGM Volatility param type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.498409]          (OREData/ored/model/lgmdata.cpp:148) : LGM Volatility time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.498507]          (OREData/ored/model/lgmdata.cpp:151) : LGM Volatility initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.498597]          (OREData/ored/model/lgmdata.cpp:158) : LGM Reversion calibrate = 0
+NOTICE   [2026-Mar-15 13:46:30.498686]          (OREData/ored/model/lgmdata.cpp:162) : LGM Reversion type = HullWhite
+NOTICE   [2026-Mar-15 13:46:30.498776]          (OREData/ored/model/lgmdata.cpp:166) : LGM Reversion parameter type = Constant
+NOTICE   [2026-Mar-15 13:46:30.498866]          (OREData/ored/model/lgmdata.cpp:169) : LGM Reversion time grid size = 0
+NOTICE   [2026-Mar-15 13:46:30.498956]          (OREData/ored/model/lgmdata.cpp:172) : LGM Reversion initial values size = 1
+NOTICE   [2026-Mar-15 13:46:30.499050]          (OREData/ored/model/lgmdata.cpp:178) : LGM shift horizon = 0
+NOTICE   [2026-Mar-15 13:46:30.499152]          (OREData/ored/model/lgmdata.cpp:181) : LGM scaling = 1
+NOTICE   [2026-Mar-15 13:46:30.499242]          (OREData/ored/model/lgmdata.cpp:192) : LgmData done
+NOTICE   [2026-Mar-15 13:46:30.499330]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499419]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499513]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499603]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499691]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499780]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499869]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.499958]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500046]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500136]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500225]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500315]  (.../ored/model/crossassetmodeldata.cpp:343) : CrossAssetModelData: IR config built for key EUR
+WARNING  [2026-Mar-15 13:46:30.500405]         (OREData/ored/model/irlgmdata.cpp:33) : IrLgmData: attribute ccy is deprecated, use key instead.
+NOTICE   [2026-Mar-15 13:46:30.500494]         (OREData/ored/model/irlgmdata.cpp:36) : LGM with attribute (key) = CHF
+NOTICE   [2026-Mar-15 13:46:30.500589]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500686]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500786]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500876]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.500964]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501053]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501142]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501232]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501322]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501411]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501501]         (OREData/ored/model/irlgmdata.cpp:54) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.501591]          (OREData/ored/model/lgmdata.cpp:137) : LGM Volatility calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.501680]          (OREData/ored/model/lgmdata.cpp:141) : LGM Volatility type = Hagan
+NOTICE   [2026-Mar-15 13:46:30.501771]          (OREData/ored/model/lgmdata.cpp:145) : LGM Volatility param type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.501862]          (OREData/ored/model/lgmdata.cpp:148) : LGM Volatility time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.501955]          (OREData/ored/model/lgmdata.cpp:151) : LGM Volatility initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.502049]          (OREData/ored/model/lgmdata.cpp:158) : LGM Reversion calibrate = 0
+NOTICE   [2026-Mar-15 13:46:30.502148]          (OREData/ored/model/lgmdata.cpp:162) : LGM Reversion type = HullWhite
+NOTICE   [2026-Mar-15 13:46:30.502237]          (OREData/ored/model/lgmdata.cpp:166) : LGM Reversion parameter type = Constant
+NOTICE   [2026-Mar-15 13:46:30.502327]          (OREData/ored/model/lgmdata.cpp:169) : LGM Reversion time grid size = 0
+NOTICE   [2026-Mar-15 13:46:30.502417]          (OREData/ored/model/lgmdata.cpp:172) : LGM Reversion initial values size = 1
+NOTICE   [2026-Mar-15 13:46:30.502510]          (OREData/ored/model/lgmdata.cpp:178) : LGM shift horizon = 0
+NOTICE   [2026-Mar-15 13:46:30.502599]          (OREData/ored/model/lgmdata.cpp:181) : LGM scaling = 1
+NOTICE   [2026-Mar-15 13:46:30.502689]          (OREData/ored/model/lgmdata.cpp:192) : LgmData done
+NOTICE   [2026-Mar-15 13:46:30.502784]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 1Y x 19Y ATM
+NOTICE   [2026-Mar-15 13:46:30.502883]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 2Y x 18Y ATM
+NOTICE   [2026-Mar-15 13:46:30.502972]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 4Y x 16Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503061]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 6Y x 14Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503150]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 8Y x 12Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503239]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 10Y x 10Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503333]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 12Y x 8Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503432]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 14Y x 6Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503521]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 16Y x 4Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503610]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 18Y x 2Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503699]  (.../ored/model/crossassetmodeldata.cpp:338) : LGM calibration swaption 19Y x 1Y ATM
+NOTICE   [2026-Mar-15 13:46:30.503793]  (.../ored/model/crossassetmodeldata.cpp:343) : CrossAssetModelData: IR config built for key CHF
+NOTICE   [2026-Mar-15 13:46:30.503980]  (.../ored/model/crossassetmodeldata.cpp:616) : CrossAssetModelData: IR config added for ccy EUR
+NOTICE   [2026-Mar-15 13:46:30.504107]  (.../ored/model/crossassetmodeldata.cpp:591) : IR configuration missing for currency USD, using default
+NOTICE   [2026-Mar-15 13:46:30.504214]  (.../ored/model/crossassetmodeldata.cpp:616) : CrossAssetModelData: IR config added for ccy USD
+NOTICE   [2026-Mar-15 13:46:30.504337]  (.../ored/model/crossassetmodeldata.cpp:591) : IR configuration missing for currency GBP, using default
+NOTICE   [2026-Mar-15 13:46:30.504440]  (.../ored/model/crossassetmodeldata.cpp:616) : CrossAssetModelData: IR config added for ccy GBP
+NOTICE   [2026-Mar-15 13:46:30.504572]  (.../ored/model/crossassetmodeldata.cpp:616) : CrossAssetModelData: IR config added for ccy CHF
+NOTICE   [2026-Mar-15 13:46:30.504693]  (.../ored/model/crossassetmodeldata.cpp:591) : IR configuration missing for currency JPY, using default
+NOTICE   [2026-Mar-15 13:46:30.504794]  (.../ored/model/crossassetmodeldata.cpp:616) : CrossAssetModelData: IR config added for ccy JPY
+NOTICE   [2026-Mar-15 13:46:30.504895]  (.../ored/model/crossassetmodeldata.cpp:373) : CrossAssetModelData: IR config currency 0 = EUR
+NOTICE   [2026-Mar-15 13:46:30.505001]  (.../ored/model/crossassetmodeldata.cpp:373) : CrossAssetModelData: IR config currency 1 = USD
+NOTICE   [2026-Mar-15 13:46:30.505105]  (.../ored/model/crossassetmodeldata.cpp:373) : CrossAssetModelData: IR config currency 2 = GBP
+NOTICE   [2026-Mar-15 13:46:30.505207]  (.../ored/model/crossassetmodeldata.cpp:373) : CrossAssetModelData: IR config currency 3 = CHF
+NOTICE   [2026-Mar-15 13:46:30.505309]  (.../ored/model/crossassetmodeldata.cpp:373) : CrossAssetModelData: IR config currency 4 = JPY
+NOTICE   [2026-Mar-15 13:46:30.505401]          (OREData/ored/model/fxbsdata.cpp:41) : CC-LGM foreignCcy = default
+NOTICE   [2026-Mar-15 13:46:30.505496]          (OREData/ored/model/fxbsdata.cpp:44) : CC-LGM domesticCcy = EUR
+NOTICE   [2026-Mar-15 13:46:30.505588]          (OREData/ored/model/fxbsdata.cpp:48) : CC-LGM calibration type = Bootstrap
+NOTICE   [2026-Mar-15 13:46:30.505681]          (OREData/ored/model/fxbsdata.cpp:52) : CC-LGM Sigma calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.505777]          (OREData/ored/model/fxbsdata.cpp:56) : CC-LGM Sigma parameter type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.505870]          (OREData/ored/model/fxbsdata.cpp:59) : CC-LGM Sigma time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.505961]          (OREData/ored/model/fxbsdata.cpp:62) : CC-LGM Sigma initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.506051]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 1Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506142]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 2Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506232]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 3Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506325]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 4Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506426]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 5Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506516]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 10Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.506608]  (.../ored/model/crossassetmodeldata.cpp:392) : CrossAssetModelData: FX config built with key (foreign ccy) default
+NOTICE   [2026-Mar-15 13:46:30.506699]          (OREData/ored/model/fxbsdata.cpp:41) : CC-LGM foreignCcy = USD
+NOTICE   [2026-Mar-15 13:46:30.506790]          (OREData/ored/model/fxbsdata.cpp:44) : CC-LGM domesticCcy = EUR
+NOTICE   [2026-Mar-15 13:46:30.506885]          (OREData/ored/model/fxbsdata.cpp:48) : CC-LGM calibration type = Bootstrap
+NOTICE   [2026-Mar-15 13:46:30.506978]          (OREData/ored/model/fxbsdata.cpp:52) : CC-LGM Sigma calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.507069]          (OREData/ored/model/fxbsdata.cpp:56) : CC-LGM Sigma parameter type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.507168]          (OREData/ored/model/fxbsdata.cpp:59) : CC-LGM Sigma time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.507265]          (OREData/ored/model/fxbsdata.cpp:62) : CC-LGM Sigma initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.507366]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 1Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507457]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 2Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507552]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 3Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507649]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 4Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507750]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 5Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507858]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 10Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.507957]  (.../ored/model/crossassetmodeldata.cpp:392) : CrossAssetModelData: FX config built with key (foreign ccy) USD
+NOTICE   [2026-Mar-15 13:46:30.508050]          (OREData/ored/model/fxbsdata.cpp:41) : CC-LGM foreignCcy = GBP
+NOTICE   [2026-Mar-15 13:46:30.508147]          (OREData/ored/model/fxbsdata.cpp:44) : CC-LGM domesticCcy = EUR
+NOTICE   [2026-Mar-15 13:46:30.508246]          (OREData/ored/model/fxbsdata.cpp:48) : CC-LGM calibration type = Bootstrap
+NOTICE   [2026-Mar-15 13:46:30.508339]          (OREData/ored/model/fxbsdata.cpp:52) : CC-LGM Sigma calibrate = 1
+NOTICE   [2026-Mar-15 13:46:30.508431]          (OREData/ored/model/fxbsdata.cpp:56) : CC-LGM Sigma parameter type = Piecewise
+NOTICE   [2026-Mar-15 13:46:30.508529]          (OREData/ored/model/fxbsdata.cpp:59) : CC-LGM Sigma time grid size = 7
+NOTICE   [2026-Mar-15 13:46:30.508622]          (OREData/ored/model/fxbsdata.cpp:62) : CC-LGM Sigma initial values size = 8
+NOTICE   [2026-Mar-15 13:46:30.508713]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 1Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.508805]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 2Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.508897]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 3Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.508996]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 4Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.509088]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 5Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.509179]  (.../ored/model/crossassetmodeldata.cpp:387) : CC-LGM calibration option 10Y ATMF
+NOTICE   [2026-Mar-15 13:46:30.509271]  (.../ored/model/crossassetmodeldata.cpp:392) : CrossAssetModelData: FX config built with key (foreign ccy) GBP
+NOTICE   [2026-Mar-15 13:46:30.509364]  (.../ored/model/crossassetmodeldata.cpp:645) : CrossAssetModelData: FX config added for foreign ccy USD
+NOTICE   [2026-Mar-15 13:46:30.509457]  (.../ored/model/crossassetmodeldata.cpp:645) : CrossAssetModelData: FX config added for foreign ccy GBP
+NOTICE   [2026-Mar-15 13:46:30.509552]  (.../ored/model/crossassetmodeldata.cpp:633) : FX configuration missing for foreign currency CHF, using default
+NOTICE   [2026-Mar-15 13:46:30.509646]  (.../ored/model/crossassetmodeldata.cpp:645) : CrossAssetModelData: FX config added for foreign ccy CHF
+NOTICE   [2026-Mar-15 13:46:30.509743]  (.../ored/model/crossassetmodeldata.cpp:633) : FX configuration missing for foreign currency JPY, using default
+NOTICE   [2026-Mar-15 13:46:30.509842]  (.../ored/model/crossassetmodeldata.cpp:645) : CrossAssetModelData: FX config added for foreign ccy JPY
+NOTICE   [2026-Mar-15 13:46:30.509932]  (.../ored/model/crossassetmodeldata.cpp:401) : CrossAssetModelData: FX config currency 0 = USD
+NOTICE   [2026-Mar-15 13:46:30.510024]  (.../ored/model/crossassetmodeldata.cpp:401) : CrossAssetModelData: FX config currency 1 = GBP
+NOTICE   [2026-Mar-15 13:46:30.510116]  (.../ored/model/crossassetmodeldata.cpp:401) : CrossAssetModelData: FX config currency 2 = CHF
+NOTICE   [2026-Mar-15 13:46:30.510207]  (.../ored/model/crossassetmodeldata.cpp:401) : CrossAssetModelData: FX config currency 3 = JPY
+NOTICE   [2026-Mar-15 13:46:30.510300]  (.../ored/model/crossassetmodeldata.cpp:424) : No Equity Models section found
+NOTICE   [2026-Mar-15 13:46:30.510395]  (.../ored/model/crossassetmodeldata.cpp:468) : No InflationIndexModels node found so no inflation models configured.
+NOTICE   [2026-Mar-15 13:46:30.510487]  (.../ored/model/crossassetmodeldata.cpp:511) : No CR model section found
+NOTICE   [2026-Mar-15 13:46:30.510581]  (.../ored/model/crossassetmodeldata.cpp:542) : No Commodity Models section found
+NOTICE   [2026-Mar-15 13:46:30.510674]  (.../ored/model/crossassetmodeldata.cpp:559) : No credit states section found
+NOTICE   [2026-Mar-15 13:46:30.510766]  (.../ored/model/crossassetmodeldata.cpp:563) : CrossAssetModelData: adding correlations.
+NOTICE   [2026-Mar-15 13:46:30.510860]  (...a/ored/model/crossassetmodeldata.cpp:74) : CrossAssetModelData: adding correlations.
+NOTICE   [2026-Mar-15 13:46:30.511047]  (.../ored/model/crossassetmodeldata.cpp:569) : CrossAssetModelData loading from XML done
+NOTICE   [2026-Mar-15 13:46:30.511292]  (...a/scenario/scenariogeneratordata.cpp:79) : ScenarioGeneratorData grid points size = 241
+NOTICE   [2026-Mar-15 13:46:30.511393]  (...a/scenario/scenariogeneratordata.cpp:83) : ScenarioGeneratorData sequence type = SobolBrownianBridge
+NOTICE   [2026-Mar-15 13:46:30.511488]  (...a/scenario/scenariogeneratordata.cpp:86) : ScenarioGeneratorData seed = 42
+NOTICE   [2026-Mar-15 13:46:30.511586]  (...a/scenario/scenariogeneratordata.cpp:89) : ScenarioGeneratorData samples = 1000
+NOTICE   [2026-Mar-15 13:46:30.511680]  (.../scenario/scenariogeneratordata.cpp:135) : ScenarioGeneratorData done.
+NOTICE   [2026-Mar-15 13:46:30.511775]       (OREAnalytics/orea/app/oreapp.cpp:2035) : Load simulation pricing engine data from file: Input/../../../Input/pricingengine.xml
+WARNING  [2026-Mar-15 13:46:30.511960]       (OREAnalytics/orea/app/oreapp.cpp:2048) : AMC pricing engine data not found, using standard pricing engines
+NOTICE   [2026-Mar-15 13:46:30.512068]       (OREAnalytics/orea/app/oreapp.cpp:2558) : Loading netting and csa data from file Input/netting.xml
+WARNING  [2026-Mar-15 13:46:30.512205]       (OREAnalytics/orea/app/oreapp.cpp:2602) : ScenarioSimMarket parameters for sensitivity not loaded
+WARNING  [2026-Mar-15 13:46:30.512298]       (OREAnalytics/orea/app/oreapp.cpp:2610) : Sensitivity scenario data not loaded
+NOTICE   [2026-Mar-15 13:46:30.512411]       (OREAnalytics/orea/app/oreapp.cpp:3343) : analytics: 4
+NOTICE   [2026-Mar-15 13:46:30.512502]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: CASHFLOW
+NOTICE   [2026-Mar-15 13:46:30.512593]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: EXPOSURE
+NOTICE   [2026-Mar-15 13:46:30.512683]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: NPV
+NOTICE   [2026-Mar-15 13:46:30.512773]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: XVA
+NOTICE   [2026-Mar-15 13:46:30.512866]       (OREAnalytics/orea/app/oreapp.cpp:3349) : buildInputParameters done
+NOTICE   [2026-Mar-15 13:46:30.512959]  (...lytics/orea/app/inputparameters.cpp:983) : OutputFileNameMap called
+NOTICE   [2026-Mar-15 13:46:30.513062]  (...ytics/orea/app/inputparameters.cpp:1080) : OutputFileNameMap complete
+NOTICE   [2026-Mar-15 13:46:30.513161]        (OREAnalytics/orea/app/oreapp.cpp:410) : initFromParameters done, requested analytics:CASHFLOW,EXPOSURE,NPV,XVA
+NOTICE   [2026-Mar-15 13:46:30.513273]        (OREAnalytics/orea/app/oreapp.cpp:469) : Global IncludeTodaysCashFlows is set false, value: na
+NOTICE   [2026-Mar-15 13:46:30.513372]        (OREAnalytics/orea/app/oreapp.cpp:238) : ORE analytics starting
+WARNING  [2026-Mar-15 13:46:30.513468]        (OREAnalytics/orea/app/oreapp.cpp:239) : Starting OREApp::analytics(): 22659072|22659072 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+WARNING  [2026-Mar-15 13:46:30.513698]        (OREAnalytics/orea/app/oreapp.cpp:219) : dividend data file not found
+WARNING  [2026-Mar-15 13:46:30.513859]        (OREAnalytics/orea/app/oreapp.cpp:227) : fixing cutoff date not set
+NOTICE   [2026-Mar-15 13:46:30.513966]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from Input/market_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.538033]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing Input/market_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.538648]    (OREData/ored/marketdata/csvloader.cpp:80) : CSVLoader loaded 7843 market data points for February 5th, 2016
+NOTICE   [2026-Mar-15 13:46:30.538915]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from Input/../../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.546499]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing Input/../../../Input/fixings_20160205.txt
+NOTICE   [2026-Mar-15 13:46:30.546607]    (OREData/ored/marketdata/csvloader.cpp:85) : CSVLoader loaded 5454 fixings
+NOTICE   [2026-Mar-15 13:46:30.546740]    (OREData/ored/marketdata/csvloader.cpp:90) : CSVLoader loaded 0 dividends
+NOTICE   [2026-Mar-15 13:46:30.546982]    (OREData/ored/marketdata/csvloader.cpp:92) : CSVLoader complete.
+NOTICE   [2026-Mar-15 13:46:30.547106]  (...lytics/orea/app/analyticsmanager.cpp:51) : register analytic with label 'PRICING' and sub-analytics CASHFLOW,CASHFLOWNPV,NPV,SENSITIVITY
+NOTICE   [2026-Mar-15 13:46:30.547222]  (.../orea/app/analytics/xvaanalytic.cpp:144) : XvaAnalytic::setUpConfigurations() called
+NOTICE   [2026-Mar-15 13:46:30.547328]  (...lytics/orea/app/analyticsmanager.cpp:51) : register analytic with label 'XVA' and sub-analytics EXPOSURE,PFE,XVA
+NOTICE   [2026-Mar-15 13:46:30.547432]        (OREAnalytics/orea/app/oreapp.cpp:263) : Available analytics: CASHFLOW,CASHFLOWNPV,EXPOSURE,NPV,PFE,SENSITIVITY,XVA
+NOTICE   [2026-Mar-15 13:46:30.547554]        (OREAnalytics/orea/app/oreapp.cpp:266) : Requested analytics: CASHFLOW,EXPOSURE,NPV,XVA
+NOTICE   [2026-Mar-15 13:46:30.547680]  (...ytics/orea/app/analyticsmanager.cpp:123) : AnalyticsManager::runAnalytics: populate loader for dates: February 5th, 2016
+NOTICE   [2026-Mar-15 13:46:30.547802]  (...ytics/orea/app/marketdataloader.cpp:185) : Asking portfolio for its required fixings
+NOTICE   [2026-Mar-15 13:46:30.547929]  (...ytics/orea/app/marketdataloader.cpp:192) : The portfolio depends on fixings from 0 indices
+NOTICE   [2026-Mar-15 13:46:30.548024]  (...ytics/orea/app/marketdataloader.cpp:197) : Add fixings possibly required for bootstrapping TodaysMarket
+NOTICE   [2026-Mar-15 13:46:30.548128]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-15 13:46:30.549377]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-15 13:46:30.549475]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-15 13:46:30.549680]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-15 13:46:30.549782]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-15 13:46:30.549994]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-15 13:46:30.550085]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-15 13:46:30.550293]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-15 13:46:30.550394]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'collateral_eur'
+NOTICE   [2026-Mar-15 13:46:30.550654]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'collateral_eur'
+NOTICE   [2026-Mar-15 13:46:30.550742]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-15 13:46:30.551003]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-15 13:46:30.551111]  (...ytics/orea/app/marketdataloader.cpp:201) : Add fixing possibly required for equity index delta risk decomposition
+NOTICE   [2026-Mar-15 13:46:30.551214]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-15 13:46:30.552073]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'default'
+NOTICE   [2026-Mar-15 13:46:30.552182]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-15 13:46:30.552394]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'collateral_inccy'
+NOTICE   [2026-Mar-15 13:46:30.552485]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-15 13:46:30.552697]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_eur'
+NOTICE   [2026-Mar-15 13:46:30.552799]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-15 13:46:30.553009]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'xois_usd'
+NOTICE   [2026-Mar-15 13:46:30.553116]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'collateral_eur'
+NOTICE   [2026-Mar-15 13:46:30.553382]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'collateral_eur'
+NOTICE   [2026-Mar-15 13:46:30.553473]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-15 13:46:30.553723]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'libor'
+NOTICE   [2026-Mar-15 13:46:30.553835]  (...ytics/orea/app/marketdataloader.cpp:201) : Add fixing possibly required for equity index delta risk decomposition
+NOTICE   [2026-Mar-15 13:46:30.553968]  (...ics/orea/app/marketdatacsvloader.cpp:70) : MarketDataCsvLoader::retrieveFixings called: all fixings ? Y
+NOTICE   [2026-Mar-15 13:46:30.561489]      (OREData/ored/marketdata/fixings.cpp:68) : Added 5454 of 5454 fixings in 0.010000 seconds
+NOTICE   [2026-Mar-15 13:46:30.561711]  (...ytics/orea/app/marketdataloader.cpp:279) : Adding the loaded fixings to the IndexManager
+NOTICE   [2026-Mar-15 13:46:30.561821]  (...ytics/orea/app/marketdataloader.cpp:280) : Fixings size = 25
+NOTICE   [2026-Mar-15 13:46:30.561929]  (...ytics/orea/app/marketdataloader.cpp:283) : Generating market datum set
+WARNING  [2026-Mar-15 13:46:30.562372]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (EUR_CF_N): The IborIndex node is deprecated, use Index instead.
+WARNING  [2026-Mar-15 13:46:30.562538]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (GBP_CF_N): The IborIndex node is deprecated, use Index instead.
+WARNING  [2026-Mar-15 13:46:30.562702]  (...guration/capfloorvolcurveconfig.cpp:142) : CapFloorVolatilityCurveConfig (USD_CF_N): The IborIndex node is deprecated, use Index instead.
+NOTICE   [2026-Mar-15 13:46:30.565283]  (...ytics/orea/app/marketdataloader.cpp:301) : CurveConfigs require 2471 quotes
+NOTICE   [2026-Mar-15 13:46:30.568292]  (...ytics/orea/app/marketdataloader.cpp:309) : Got market data
+NOTICE   [2026-Mar-15 13:46:30.568671]  (...nalytics/orea/app/reportwriter.cpp:1176) : Writing MarketData report
+NOTICE   [2026-Mar-15 13:46:30.570022]  (...nalytics/orea/app/reportwriter.cpp:1215) : MarketData report written
+NOTICE   [2026-Mar-15 13:46:30.570251]  (...nalytics/orea/app/reportwriter.cpp:1220) : Writing Fixings report
+NOTICE   [2026-Mar-15 13:46:30.570810]  (...nalytics/orea/app/reportwriter.cpp:1229) : Fixings report written
+NOTICE   [2026-Mar-15 13:46:30.570906]  (...nalytics/orea/app/reportwriter.cpp:1234) : Writing Dividends report
+NOTICE   [2026-Mar-15 13:46:30.571000]  (...nalytics/orea/app/reportwriter.cpp:1246) : Dividends report written
+NOTICE   [2026-Mar-15 13:46:30.571093]  (...ytics/orea/app/analyticsmanager.cpp:149) : run analytic with label 'PRICING'
+WARNING  [2026-Mar-15 13:46:30.571190]       (OREAnalytics/orea/app/analytic.cpp:97) : Starting PRICING Analytic::runAnalytic(): 35225600|35225600 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-15 13:46:30.571298]      (OREAnalytics/orea/app/analytic.cpp:241) : Analytic::buildMarket called
+NOTICE   [2026-Mar-15 13:46:30.571396]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration default
+NOTICE   [2026-Mar-15 13:46:30.571569]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.571693]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_eur
+NOTICE   [2026-Mar-15 13:46:30.571801]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_usd
+NOTICE   [2026-Mar-15 13:46:30.571898]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration collateral_eur
+NOTICE   [2026-Mar-15 13:46:30.572005]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration libor
+NOTICE   [2026-Mar-15 13:46:30.572119]  (...ored/marketdata/bondspreadimply.cpp:108) : got 0 securities
+NOTICE   [2026-Mar-15 13:46:30.572382]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Mar-15 13:46:30.572497]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 8 quotes, 7 currencies.
+NOTICE   [2026-Mar-15 13:46:30.573212]  (...ta/ored/marketdata/todaysmarket.cpp:230) : Build objects in TodaysMarket lazily, i.e. when requested.
+NOTICE   [2026-Mar-15 13:46:30.573383]      (OREAnalytics/orea/app/analytic.cpp:279) : Market Build time 0.000000 sec
+NOTICE   [2026-Mar-15 13:46:30.573490]     (OREData/ored/portfolio/portfolio.cpp:48) : Reset portfolio of size 2
+NOTICE   [2026-Mar-15 13:46:30.573584]      (OREAnalytics/orea/app/analytic.cpp:296) : Build the portfolio
+NOTICE   [2026-Mar-15 13:46:30.573674]      (OREAnalytics/orea/app/analytic.cpp:197) : Analytic::engineFactory() called
+NOTICE   [2026-Mar-15 13:46:30.573813]      (OREAnalytics/orea/app/analytic.cpp:207) : MarketContext::pricing = xois_eur
+NOTICE   [2026-Mar-15 13:46:30.573931]    (OREData/ored/portfolio/portfolio.cpp:134) : Building Portfolio of size 2 for context = 'analytic/PRICING'
+NOTICE   [2026-Mar-15 13:46:30.581758]    (OREData/ored/portfolio/portfolio.cpp:162) : Built Portfolio. Initial size = 2, size now 2, built 0 failed trades, context is analytic/PRICING
+NOTICE   [2026-Mar-15 13:46:30.581942]    (OREData/ored/portfolio/portfolio.cpp:163) : Build stats:
+NOTICE   [2026-Mar-15 13:46:30.582050]    (OREData/ored/portfolio/portfolio.cpp:167) : Swap                              2             10 ms (avg = 5)
+NOTICE   [2026-Mar-15 13:46:30.582149]      (OREAnalytics/orea/app/analytic.cpp:305) : Filter trades that expire before February 5th, 2016
+NOTICE   [2026-Mar-15 13:46:30.582359]  (OREAnalytics/orea/app/reportwriter.cpp:140) : Writing cashflow report
+NOTICE   [2026-Mar-15 13:46:30.582695]  (OREAnalytics/orea/app/reportwriter.cpp:215) : Cashflow report written
+NOTICE   [2026-Mar-15 13:46:30.582798]   (OREAnalytics/orea/app/reportwriter.cpp:69) : portfolio valuation
+NOTICE   [2026-Mar-15 13:46:30.582990]  (OREAnalytics/orea/app/reportwriter.cpp:132) : NPV file written
+NOTICE   [2026-Mar-15 13:46:30.583090]  (...a/app/analytics/pricinganalytic.cpp:113) : Write curves report
+NOTICE   [2026-Mar-15 13:46:30.583226]  (OREAnalytics/orea/app/reportwriter.cpp:282) : Write curves... 
+WARNING  [2026-Mar-15 13:46:30.609984]  (.../ored/configuration/conventions.cpp:649) : receiveFrequency_ empty set to index tenor.
+WARNING  [2026-Mar-15 13:46:30.610141]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+WARNING  [2026-Mar-15 13:46:30.721748]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+NOTICE   [2026-Mar-15 13:46:30.786422]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve BANK_SR_USDand  implyDefaultFromMarket = false
+NOTICE   [2026-Mar-15 13:46:30.786591]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve BANK_SR_USD
+NOTICE   [2026-Mar-15 13:46:30.786703]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve BANK_SR_USD using 7 default quotes of 7 requested quotes.
+NOTICE   [2026-Mar-15 13:46:30.787455]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve BANK_SR_USD
+NOTICE   [2026-Mar-15 13:46:30.787600]  (...ta/ored/marketdata/defaultcurve.cpp:731) : Start building default curve of type Benchmark for curve BOND_YIELD_EUR_OVER_OIS
+NOTICE   [2026-Mar-15 13:46:30.787702]  (...ta/ored/marketdata/defaultcurve.cpp:779) : DefaultCurve: set up interpolated surv prob curve as yield over benchmark
+NOTICE   [2026-Mar-15 13:46:30.787796]  (...ta/ored/marketdata/defaultcurve.cpp:793) : Finished building default curve of type Benchmark for curve BOND_YIELD_EUR_OVER_OIS
+NOTICE   [2026-Mar-15 13:46:30.787901]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve CPTY_A_SR_USDand  implyDefaultFromMarket = false
+NOTICE   [2026-Mar-15 13:46:30.787995]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-15 13:46:30.788094]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve CPTY_A_SR_USD using 7 default quotes of 7 requested quotes.
+NOTICE   [2026-Mar-15 13:46:30.788748]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-15 13:46:30.788886]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve CPTY_C_SR_EUR
+NOTICE   [2026-Mar-15 13:46:30.788979]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve CPTY_C_SR_EUR
+NOTICE   [2026-Mar-15 13:46:30.789072]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve CPTY_C_SR_EUR using 1 default quotes of 1 requested quotes.
+NOTICE   [2026-Mar-15 13:46:30.789165]  (...ta/ored/marketdata/defaultcurve.cpp:696) : DefaultCurve: add asof (February 5th, 2016), hazard rate 0, as not given
+NOTICE   [2026-Mar-15 13:46:30.789255]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Mar-15 13:46:30.789360]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve CPTY_C_SR_EUR
+WARNING  [2026-Mar-15 13:46:30.791547]      (OREAnalytics/orea/app/analytic.cpp:102) : Finishing PRICING Analytic::runAnalytic(): 50888704|50888704 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-15 13:46:30.791705]  (...ytics/orea/app/analyticsmanager.cpp:158) : run analytic with label 'PRICING' finished.
+NOTICE   [2026-Mar-15 13:46:30.794401]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:30.797246]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve JPY6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:30.799961]  (...ytics/orea/app/analyticsmanager.cpp:149) : run analytic with label 'XVA'
+WARNING  [2026-Mar-15 13:46:30.800102]       (OREAnalytics/orea/app/analytic.cpp:97) : Starting XVA Analytic::runAnalytic(): 82345984|82345984 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-15 13:46:30.800224]  (.../orea/app/analytics/xvaanalytic.cpp:962) : XVA analytic is running with amc cg mode 'Disabled'.
+NOTICE   [2026-Mar-15 13:46:30.800321]  (.../orea/app/analytics/xvaanalytic.cpp:971) : Simulation IncludeTodaysCashFlows is defined: false
+NOTICE   [2026-Mar-15 13:46:30.800414]  (.../orea/app/analytics/xvaanalytic.cpp:978) : Simulation IncludeReferenceDateEvents is set to false
+NOTICE   [2026-Mar-15 13:46:30.800508]  (...orea/app/analytics/xvaanalytic.cpp:1007) : XVA analytic called with asof 2016-02-05
+NOTICE   [2026-Mar-15 13:46:30.800805]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:30.800602", "key": "Running XVA Analytic", "progress": 0, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:30.800904]  (...orea/app/analytics/xvaanalytic.cpp:1023) : XVA: Build Today's Market
+NOTICE   [2026-Mar-15 13:46:30.801012]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:30.801000", "key": "XVA: Build Today's Market", "progress": 0, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:30.801102]      (OREAnalytics/orea/app/analytic.cpp:241) : Analytic::buildMarket called
+NOTICE   [2026-Mar-15 13:46:30.801192]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration default
+NOTICE   [2026-Mar-15 13:46:30.801341]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.801439]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_eur
+NOTICE   [2026-Mar-15 13:46:30.801532]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration xois_usd
+NOTICE   [2026-Mar-15 13:46:30.801624]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration collateral_eur
+NOTICE   [2026-Mar-15 13:46:30.801719]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration libor
+NOTICE   [2026-Mar-15 13:46:30.801819]  (...ored/marketdata/bondspreadimply.cpp:108) : got 0 securities
+NOTICE   [2026-Mar-15 13:46:30.802086]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Mar-15 13:46:30.802182]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 8 quotes, 7 currencies.
+NOTICE   [2026-Mar-15 13:46:30.802632]  (...ta/ored/marketdata/todaysmarket.cpp:230) : Build objects in TodaysMarket lazily, i.e. when requested.
+NOTICE   [2026-Mar-15 13:46:30.802752]      (OREAnalytics/orea/app/analytic.cpp:279) : Market Build time 0.000000 sec
+NOTICE   [2026-Mar-15 13:46:30.802859]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:30.802847", "key": "XVA: Build Today's Market", "progress": 1, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:30.802956]  (...orea/app/analytics/xvaanalytic.cpp:1065) : XVA: Build simulation market
+NOTICE   [2026-Mar-15 13:46:30.803060]  (...orea/scenario/scenariosimmarket.cpp:413) : building ScenarioSimMarket...
+ALERT    [2026-Mar-15 13:46:30.805905]  (...ta/ored/marketdata/todaysmarket.cpp:997) : error while building reduced node [DiscountCurve(CHF,Yield/CHF/CHF-IN-EUR)] in configuration xois_eur: yield curve building failed for curve(s) Yield/CHF/CHF-IN-EUR on date 2016-02-05 while processing Yield/CHF/CHF-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/CHF/CHF-IN-EUR, was not found.
+ALERT    [2026-Mar-15 13:46:30.806111]          (OREData/ored/utilities/log.cpp:215) : StructuredMessage { "category": "Error", "group": "Curve", "message": "yield curve building failed for curve(s) Yield/CHF/CHF-IN-EUR on date 2016-02-05 while processing Yield/CHF/CHF-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/CHF/CHF-IN-EUR, was not found.", "sub_fields": [ { "name": "curveId", "value": "[DiscountCurve(CHF,Yield/CHF/CHF-IN-EUR)]" }, { "name": "exceptionType", "value": "Failed to Build Curve" } ] }
+ALERT    [2026-Mar-15 13:46:30.806240]  (...orea/scenario/scenariosimmarket.cpp:141) : CurveID: DiscountCurve/CHF: skipping this object in scenario sim market (scenario data was not written for this object.): did not find object CHF of type discount curve under configuration 'xois_eur' or 'default' in YieldCurves
+ALERT    [2026-Mar-15 13:46:30.806545]  (...ta/ored/marketdata/todaysmarket.cpp:997) : error while building reduced node [DiscountCurve(GBP,Yield/GBP/GBP-IN-EUR)] in configuration xois_eur: yield curve building failed for curve(s) Yield/GBP/GBP-IN-EUR on date 2016-02-05 while processing Yield/GBP/GBP-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/GBP/GBP-IN-EUR, was not found.
+ALERT    [2026-Mar-15 13:46:30.806654]          (OREData/ored/utilities/log.cpp:215) : StructuredMessage { "category": "Error", "group": "Curve", "message": "yield curve building failed for curve(s) Yield/GBP/GBP-IN-EUR on date 2016-02-05 while processing Yield/GBP/GBP-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/GBP/GBP-IN-EUR, was not found.", "sub_fields": [ { "name": "curveId", "value": "[DiscountCurve(GBP,Yield/GBP/GBP-IN-EUR)]" }, { "name": "exceptionType", "value": "Failed to Build Curve" } ] }
+ALERT    [2026-Mar-15 13:46:30.806760]  (...orea/scenario/scenariosimmarket.cpp:141) : CurveID: DiscountCurve/GBP: skipping this object in scenario sim market (scenario data was not written for this object.): did not find object GBP of type discount curve under configuration 'xois_eur' or 'default' in YieldCurves
+ALERT    [2026-Mar-15 13:46:30.806919]  (...ta/ored/marketdata/todaysmarket.cpp:997) : error while building reduced node [DiscountCurve(JPY,Yield/JPY/JPY6M)] in configuration xois_eur: yield curve building failed for curve(s)  on date 2016-02-05 while processing Yield/JPY/JPY6M: The discount curve, Yield/JPY/JPY1D, required in the building of the curve, Yield/JPY/JPY6M, was not found.
+ALERT    [2026-Mar-15 13:46:30.807031]          (OREData/ored/utilities/log.cpp:215) : StructuredMessage { "category": "Error", "group": "Curve", "message": "yield curve building failed for curve(s)  on date 2016-02-05 while processing Yield/JPY/JPY6M: The discount curve, Yield/JPY/JPY1D, required in the building of the curve, Yield/JPY/JPY6M, was not found.", "sub_fields": [ { "name": "curveId", "value": "[DiscountCurve(JPY,Yield/JPY/JPY6M)]" }, { "name": "exceptionType", "value": "Failed to Build Curve" } ] }
+ALERT    [2026-Mar-15 13:46:30.807135]  (...orea/scenario/scenariosimmarket.cpp:141) : CurveID: DiscountCurve/JPY: skipping this object in scenario sim market (scenario data was not written for this object.): did not find object JPY of type discount curve under configuration 'xois_eur' or 'default' in YieldCurves
+ALERT    [2026-Mar-15 13:46:30.807392]  (...ta/ored/marketdata/todaysmarket.cpp:997) : error while building reduced node [DiscountCurve(USD,Yield/USD/USD-IN-EUR)] in configuration xois_eur: yield curve building failed for curve(s) Yield/USD/USD-IN-EUR on date 2016-02-05 while processing Yield/USD/USD-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/USD/USD-IN-EUR, was not found.
+ALERT    [2026-Mar-15 13:46:30.807498]          (OREData/ored/utilities/log.cpp:215) : StructuredMessage { "category": "Error", "group": "Curve", "message": "yield curve building failed for curve(s) Yield/USD/USD-IN-EUR on date 2016-02-05 while processing Yield/USD/USD-IN-EUR: The foreign projection curve, Yield/EUR/EUR3M, required in the building of the curve, Yield/USD/USD-IN-EUR, was not found.", "sub_fields": [ { "name": "curveId", "value": "[DiscountCurve(USD,Yield/USD/USD-IN-EUR)]" }, { "name": "exceptionType", "value": "Failed to Build Curve" } ] }
+ALERT    [2026-Mar-15 13:46:30.807601]  (...orea/scenario/scenariosimmarket.cpp:141) : CurveID: DiscountCurve/USD: skipping this object in scenario sim market (scenario data was not written for this object.): did not find object USD of type discount curve under configuration 'xois_eur' or 'default' in YieldCurves
+NOTICE   [2026-Mar-15 13:46:30.930464]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Mar-15 13:46:30.930713]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 4 quotes, 5 currencies.
+WARNING  [2026-Mar-15 13:46:30.930858]  (OREData/ored/marketdata/fxvolcurve.cpp:920) : no fx option conventions given in fxvol curve config for EURGBP, assuming defaults
+NOTICE   [2026-Mar-15 13:46:30.930981]  (OREData/ored/marketdata/fxvolcurve.cpp:509) : FXVolCurve: read 7 ATM vols
+WARNING  [2026-Mar-15 13:46:30.931091]  (OREData/ored/marketdata/fxvolcurve.cpp:998) : no domestic / foreign yield curves given in fx vol curve config for EURGBP, skip building calibration info
+WARNING  [2026-Mar-15 13:46:30.931242]  (.../ored/marketdata/fxtriangulation.cpp:56) : FXTriangulation: could not get market discount curve 'GBP' (requested for configuration 'default') - discounted fx spot rates will be replaced by non-discounted rates in future calculations, which might lead to inaccuracies
+WARNING  [2026-Mar-15 13:46:30.931369]  (OREData/ored/marketdata/fxvolcurve.cpp:920) : no fx option conventions given in fxvol curve config for EURJPY, assuming defaults
+NOTICE   [2026-Mar-15 13:46:30.931474]  (OREData/ored/marketdata/fxvolcurve.cpp:509) : FXVolCurve: read 9 ATM vols
+WARNING  [2026-Mar-15 13:46:30.931575]  (OREData/ored/marketdata/fxvolcurve.cpp:998) : no domestic / foreign yield curves given in fx vol curve config for EURJPY, skip building calibration info
+WARNING  [2026-Mar-15 13:46:30.931702]  (.../ored/marketdata/fxtriangulation.cpp:56) : FXTriangulation: could not get market discount curve 'JPY' (requested for configuration 'default') - discounted fx spot rates will be replaced by non-discounted rates in future calculations, which might lead to inaccuracies
+WARNING  [2026-Mar-15 13:46:30.931811]  (OREData/ored/marketdata/fxvolcurve.cpp:920) : no fx option conventions given in fxvol curve config for EURUSD, assuming defaults
+NOTICE   [2026-Mar-15 13:46:30.931930]  (OREData/ored/marketdata/fxvolcurve.cpp:509) : FXVolCurve: read 7 ATM vols
+WARNING  [2026-Mar-15 13:46:30.932064]  (.../ored/marketdata/fxtriangulation.cpp:56) : FXTriangulation: could not get market discount curve 'USD' (requested for configuration 'default') - discounted fx spot rates will be replaced by non-discounted rates in future calculations, which might lead to inaccuracies
+NOTICE   [2026-Mar-15 13:46:30.932304]  (...rea/scenario/scenariosimmarket.cpp:3759) : Applying 0 curve algebra rules...
+NOTICE   [2026-Mar-15 13:46:30.932403]  (...rea/scenario/scenariosimmarket.cpp:3364) : building base scenario
+NOTICE   [2026-Mar-15 13:46:30.932528]  (...rea/scenario/scenariosimmarket.cpp:3392) : building base scenario done
+NOTICE   [2026-Mar-15 13:46:30.932640]  (...orea/app/analytics/xvaanalytic.cpp:1068) : XVA: Build Scenario Generator
+NOTICE   [2026-Mar-15 13:46:30.932744]  (.../orea/app/analytics/xvaanalytic.cpp:342) : XVA: Build Simulation Model (continueOnCalibrationError = true, allowModelFallbacks = false)
+NOTICE   [2026-Mar-15 13:46:30.932843]  (...ed/model/crossassetmodelbuilder.cpp:244) : Start building CrossAssetModel
+NOTICE   [2026-Mar-15 13:46:30.932941]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-15 13:46:30.933050]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier EUR (ccy=EUR), configuration is collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.937218]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-15 13:46:30.937333]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier USD (ccy=USD), configuration is collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.944649]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-15 13:46:30.944763]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier GBP (ccy=GBP), configuration is collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.949188]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-15 13:46:30.949329]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier CHF (ccy=CHF), configuration is collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.953485]   (OREData/ored/model/irmodelbuilder.cpp:131) : IrModelBuilder called.
+NOTICE   [2026-Mar-15 13:46:30.953601]   (OREData/ored/model/irmodelbuilder.cpp:141) : IrModelBuilder: calibration for LGM and qualifier JPY (ccy=JPY), configuration is collateral_inccy
+NOTICE   [2026-Mar-15 13:46:30.957744]       (OREData/ored/model/fxbsbuilder.cpp:57) : Start building FxBs model for USDEUR
+NOTICE   [2026-Mar-15 13:46:30.958205]       (OREData/ored/model/fxbsbuilder.cpp:57) : Start building FxBs model for GBPEUR
+NOTICE   [2026-Mar-15 13:46:30.958597]       (OREData/ored/model/fxbsbuilder.cpp:57) : Start building FxBs model for CHFEUR
+WARNING  [2026-Mar-15 13:46:30.958708]  (OREData/ored/marketdata/fxvolcurve.cpp:920) : no fx option conventions given in fxvol curve config for EURCHF, assuming defaults
+NOTICE   [2026-Mar-15 13:46:30.958812]  (OREData/ored/marketdata/fxvolcurve.cpp:509) : FXVolCurve: read 9 ATM vols
+WARNING  [2026-Mar-15 13:46:30.958910]  (OREData/ored/marketdata/fxvolcurve.cpp:998) : no domestic / foreign yield curves given in fx vol curve config for EURCHF, skip building calibration info
+NOTICE   [2026-Mar-15 13:46:30.959386]       (OREData/ored/model/fxbsbuilder.cpp:57) : Start building FxBs model for JPYEUR
+NOTICE   [2026-Mar-15 13:46:30.966631]  (...ed/model/crossassetmodelbuilder.cpp:244) : Start building CrossAssetModel
+NOTICE   [2026-Mar-15 13:46:30.968073]  (...cenario/scenariogeneratorbuilder.cpp:48) : ScenarioGeneratorBuilder::build() called
+NOTICE   [2026-Mar-15 13:46:30.969034]  (...crossassetmodelscenariogenerator.cpp:46) : CrossAssetModelScenarioGenerator ctor called
+NOTICE   [2026-Mar-15 13:46:30.969203]  (...rossassetmodelscenariogenerator.cpp:373) : CrossAssetModelScenarioGenerator ctor done
+NOTICE   [2026-Mar-15 13:46:30.969336]  (.../orea/app/analytics/xvaanalytic.cpp:327) : simulation grid size 241
+NOTICE   [2026-Mar-15 13:46:30.969448]  (.../orea/app/analytics/xvaanalytic.cpp:328) : simulation grid valuation dates 241
+NOTICE   [2026-Mar-15 13:46:30.969540]  (.../orea/app/analytics/xvaanalytic.cpp:329) : simulation grid close-out dates 0
+NOTICE   [2026-Mar-15 13:46:30.969634]  (.../orea/app/analytics/xvaanalytic.cpp:330) : simulation grid front date 2016-03-07
+NOTICE   [2026-Mar-15 13:46:30.969725]  (.../orea/app/analytics/xvaanalytic.cpp:331) : simulation grid back date 2036-03-05
+NOTICE   [2026-Mar-15 13:46:30.969818]  (...orea/app/analytics/xvaanalytic.cpp:1078) : XVA: Attach Scenario Generator to ScenarioSimMarket
+NOTICE   [2026-Mar-15 13:46:30.969916]  (.../orea/app/analytics/xvaanalytic.cpp:460) : XVA: classicRun
+NOTICE   [2026-Mar-15 13:46:30.970006]  (.../orea/app/analytics/xvaanalytic.cpp:465) : XVA: Build classic portfolio of size 2 linked to the simulation market
+NOTICE   [2026-Mar-15 13:46:30.970135]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:30.970109", "key": "XVA: Build Portfolio", "progress": 0, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:30.970233]     (OREData/ored/portfolio/portfolio.cpp:48) : Reset portfolio of size 2
+NOTICE   [2026-Mar-15 13:46:30.970370]  (.../orea/app/analytics/xvaanalytic.cpp:233) : XvaAnalytic::engineFactory() called
+NOTICE   [2026-Mar-15 13:46:30.970480]    (OREData/ored/portfolio/portfolio.cpp:134) : Building Portfolio of size 2 for context = 'analytic/XVA'
+NOTICE   [2026-Mar-15 13:46:30.971019]    (OREData/ored/portfolio/portfolio.cpp:162) : Built Portfolio. Initial size = 2, size now 2, built 0 failed trades, context is analytic/XVA
+NOTICE   [2026-Mar-15 13:46:30.971112]    (OREData/ored/portfolio/portfolio.cpp:163) : Build stats:
+NOTICE   [2026-Mar-15 13:46:30.971202]    (OREData/ored/portfolio/portfolio.cpp:167) : Swap                              2              0 ms (avg = 0)
+NOTICE   [2026-Mar-15 13:46:30.971291]  (.../orea/app/analytics/xvaanalytic.cpp:479) : Filter trades that expire before February 5th, 2016
+NOTICE   [2026-Mar-15 13:46:30.971399]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:30.971387", "key": "XVA: Build Portfolio", "progress": 1, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:30.971489]  (.../orea/app/analytics/xvaanalytic.cpp:390) : XVA: initClassicRun
+NOTICE   [2026-Mar-15 13:46:30.971581]  (.../orea/app/analytics/xvaanalytic.cpp:358) : XVA: Set cube depth
+NOTICE   [2026-Mar-15 13:46:30.971683]  (.../orea/app/analytics/xvaanalytic.cpp:360) : XVA: Cube depth set to: 1
+NOTICE   [2026-Mar-15 13:46:30.971774]  (.../orea/app/analytics/xvaanalytic.cpp:396) : XVA: Create asd 241 x 1000
+NOTICE   [2026-Mar-15 13:46:30.971868]  (.../orea/app/analytics/xvaanalytic.cpp:367) : Init cube with depth 1
+NOTICE   [2026-Mar-15 13:46:30.971983]  (.../orea/app/analytics/xvaanalytic.cpp:455) : XVA: initClassicRun completed
+NOTICE   [2026-Mar-15 13:46:30.972082]  (.../orea/app/analytics/xvaanalytic.cpp:497) : XVA::buildCube
+NOTICE   [2026-Mar-15 13:46:30.972183]  (.../orea/app/analytics/xvaanalytic.cpp:545) : XVA: Build Cube 2 x 241 x 1000
+NOTICE   [2026-Mar-15 13:46:30.972296]  (...tics/orea/engine/valuationengine.cpp:90) : Build cube with mporStickyDate=0, dryRun=false
+NOTICE   [2026-Mar-15 13:46:30.972395]  (...ics/orea/engine/valuationengine.cpp:116) : Starting ValuationEngine for 2 trades, 1000 samples and 241 dates.
+NOTICE   [2026-Mar-15 13:46:30.972483]  (...ics/orea/engine/valuationengine.cpp:128) : Initialise 1 valuation calculators
+NOTICE   [2026-Mar-15 13:46:30.972574]  (...ics/orea/engine/valuationengine.cpp:140) : Initialise state objects...
+NOTICE   [2026-Mar-15 13:46:30.972721]  (...ics/orea/engine/valuationengine.cpp:181) : Total number of trades = 2
+WARNING  [2026-Mar-15 13:46:31.072774]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/0
+WARNING  [2026-Mar-15 13:46:31.073060]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/1
+WARNING  [2026-Mar-15 13:46:31.073193]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/2
+WARNING  [2026-Mar-15 13:46:31.073322]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/3
+WARNING  [2026-Mar-15 13:46:31.073445]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/4
+WARNING  [2026-Mar-15 13:46:31.073560]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/5
+WARNING  [2026-Mar-15 13:46:31.073673]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/6
+WARNING  [2026-Mar-15 13:46:31.073781]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/7
+WARNING  [2026-Mar-15 13:46:31.073890]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/8
+WARNING  [2026-Mar-15 13:46:31.074185]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/9
+WARNING  [2026-Mar-15 13:46:31.074310]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/10
+WARNING  [2026-Mar-15 13:46:31.074510]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/USD/11
+WARNING  [2026-Mar-15 13:46:31.074649]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/0
+WARNING  [2026-Mar-15 13:46:31.074761]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/1
+WARNING  [2026-Mar-15 13:46:31.074863]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/2
+WARNING  [2026-Mar-15 13:46:31.075957]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/3
+WARNING  [2026-Mar-15 13:46:31.076772]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/4
+WARNING  [2026-Mar-15 13:46:31.076945]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/5
+WARNING  [2026-Mar-15 13:46:31.077057]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/6
+WARNING  [2026-Mar-15 13:46:31.077160]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/7
+WARNING  [2026-Mar-15 13:46:31.077262]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/8
+WARNING  [2026-Mar-15 13:46:31.077363]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/9
+WARNING  [2026-Mar-15 13:46:31.077461]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/10
+WARNING  [2026-Mar-15 13:46:31.077559]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/GBP/11
+WARNING  [2026-Mar-15 13:46:31.077657]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/0
+WARNING  [2026-Mar-15 13:46:31.077755]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/1
+WARNING  [2026-Mar-15 13:46:31.077850]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/2
+WARNING  [2026-Mar-15 13:46:31.077945]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/3
+WARNING  [2026-Mar-15 13:46:31.078225]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/4
+WARNING  [2026-Mar-15 13:46:31.078369]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/5
+WARNING  [2026-Mar-15 13:46:31.078554]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/6
+WARNING  [2026-Mar-15 13:46:31.078723]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/7
+WARNING  [2026-Mar-15 13:46:31.078838]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/8
+WARNING  [2026-Mar-15 13:46:31.078946]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/9
+WARNING  [2026-Mar-15 13:46:31.079049]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/10
+WARNING  [2026-Mar-15 13:46:31.079154]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/CHF/11
+WARNING  [2026-Mar-15 13:46:31.079264]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/0
+WARNING  [2026-Mar-15 13:46:31.079377]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/1
+WARNING  [2026-Mar-15 13:46:31.079478]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/2
+WARNING  [2026-Mar-15 13:46:31.079578]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/3
+WARNING  [2026-Mar-15 13:46:31.079679]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/4
+WARNING  [2026-Mar-15 13:46:31.079788]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/5
+WARNING  [2026-Mar-15 13:46:31.079885]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/6
+WARNING  [2026-Mar-15 13:46:31.079979]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/7
+WARNING  [2026-Mar-15 13:46:31.080212]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/8
+WARNING  [2026-Mar-15 13:46:31.080339]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/9
+WARNING  [2026-Mar-15 13:46:31.080449]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/10
+WARNING  [2026-Mar-15 13:46:31.080553]  (...rea/scenario/scenariosimmarket.cpp:3502) : simulation data point missing for key DiscountCurve/JPY/11
+NOTICE   [2026-Mar-15 13:46:31.095223]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 0 out of 2000 steps (0%) completed
+NOTICE   [2026-Mar-15 13:46:31.095443]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:31.095404", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 0, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:31.307560]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 20 out of 2000 steps (1%) completed
+NOTICE   [2026-Mar-15 13:46:31.307838]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:31.307802", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 20, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:31.513963]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 40 out of 2000 steps (2%) completed
+NOTICE   [2026-Mar-15 13:46:31.514237]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:31.514203", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 40, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:31.722131]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 60 out of 2000 steps (3%) completed
+NOTICE   [2026-Mar-15 13:46:31.722374]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:31.722341", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 60, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:31.929254]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 80 out of 2000 steps (4%) completed
+NOTICE   [2026-Mar-15 13:46:31.929531]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:31.929495", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 80, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:32.134990]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 100 out of 2000 steps (5%) completed
+NOTICE   [2026-Mar-15 13:46:32.135225]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:32.135193", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 100, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:32.340656]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 120 out of 2000 steps (6%) completed
+NOTICE   [2026-Mar-15 13:46:32.340904]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:32.340870", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 120, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:32.546729]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 140 out of 2000 steps (7%) completed
+NOTICE   [2026-Mar-15 13:46:32.547039]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:32.547001", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 140, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:32.753077]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 160 out of 2000 steps (8%) completed
+NOTICE   [2026-Mar-15 13:46:32.753326]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:32.753291", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 160, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:32.959425]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 180 out of 2000 steps (9%) completed
+NOTICE   [2026-Mar-15 13:46:32.959718]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:32.959684", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 180, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:33.165877]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 200 out of 2000 steps (10%) completed
+NOTICE   [2026-Mar-15 13:46:33.166147]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:33.166110", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 200, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:33.371566]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 220 out of 2000 steps (11%) completed
+NOTICE   [2026-Mar-15 13:46:33.371767]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:33.371740", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 220, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:33.578331]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 240 out of 2000 steps (12%) completed
+NOTICE   [2026-Mar-15 13:46:33.578621]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:33.578585", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 240, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:33.785187]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 260 out of 2000 steps (13%) completed
+NOTICE   [2026-Mar-15 13:46:33.785412]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:33.785380", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 260, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:33.991334]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 280 out of 2000 steps (14%) completed
+NOTICE   [2026-Mar-15 13:46:33.991566]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:33.991531", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 280, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:34.199370]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 300 out of 2000 steps (15%) completed
+NOTICE   [2026-Mar-15 13:46:34.199610]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:34.199575", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 300, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:34.407746]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 320 out of 2000 steps (16%) completed
+NOTICE   [2026-Mar-15 13:46:34.407991]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:34.407958", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 320, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:34.614858]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 340 out of 2000 steps (17%) completed
+NOTICE   [2026-Mar-15 13:46:34.615091]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:34.615041", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 340, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:34.822137]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 360 out of 2000 steps (18%) completed
+NOTICE   [2026-Mar-15 13:46:34.822430]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:34.822394", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 360, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:35.033411]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 380 out of 2000 steps (19%) completed
+NOTICE   [2026-Mar-15 13:46:35.033648]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:35.033614", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 380, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:35.247383]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 400 out of 2000 steps (20%) completed
+NOTICE   [2026-Mar-15 13:46:35.247669]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:35.247630", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 400, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:35.456579]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 420 out of 2000 steps (21%) completed
+NOTICE   [2026-Mar-15 13:46:35.456848]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:35.456813", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 420, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:35.664717]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 440 out of 2000 steps (22%) completed
+NOTICE   [2026-Mar-15 13:46:35.664955]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:35.664924", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 440, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:35.872437]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 460 out of 2000 steps (23%) completed
+NOTICE   [2026-Mar-15 13:46:35.872711]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:35.872673", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 460, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:36.078901]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 480 out of 2000 steps (24%) completed
+NOTICE   [2026-Mar-15 13:46:36.079118]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:36.079074", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 480, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:36.288608]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 500 out of 2000 steps (25%) completed
+NOTICE   [2026-Mar-15 13:46:36.288844]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:36.288815", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 500, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:36.495792]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 520 out of 2000 steps (26%) completed
+NOTICE   [2026-Mar-15 13:46:36.496087]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:36.496055", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 520, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:36.702592]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 540 out of 2000 steps (27%) completed
+NOTICE   [2026-Mar-15 13:46:36.702860]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:36.702826", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 540, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:36.908773]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 560 out of 2000 steps (28%) completed
+NOTICE   [2026-Mar-15 13:46:36.909015]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:36.908985", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 560, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:37.115394]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 580 out of 2000 steps (28%) completed
+NOTICE   [2026-Mar-15 13:46:37.115664]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:37.115635", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 580, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:37.322354]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 600 out of 2000 steps (30%) completed
+NOTICE   [2026-Mar-15 13:46:37.322624]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:37.322591", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 600, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:37.531910]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 620 out of 2000 steps (31%) completed
+NOTICE   [2026-Mar-15 13:46:37.532151]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:37.532122", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 620, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:37.738973]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 640 out of 2000 steps (32%) completed
+NOTICE   [2026-Mar-15 13:46:37.739256]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:37.739222", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 640, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:37.945944]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 660 out of 2000 steps (33%) completed
+NOTICE   [2026-Mar-15 13:46:37.946181]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:37.946155", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 660, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:38.157568]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 680 out of 2000 steps (34%) completed
+NOTICE   [2026-Mar-15 13:46:38.157820]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:38.157787", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 680, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:38.364881]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 700 out of 2000 steps (35%) completed
+NOTICE   [2026-Mar-15 13:46:38.365102]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:38.365074", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 700, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:38.570960]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 720 out of 2000 steps (36%) completed
+NOTICE   [2026-Mar-15 13:46:38.571171]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:38.571144", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 720, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:38.778367]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 740 out of 2000 steps (37%) completed
+NOTICE   [2026-Mar-15 13:46:38.778646]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:38.778610", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 740, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:38.984864]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 760 out of 2000 steps (38%) completed
+NOTICE   [2026-Mar-15 13:46:38.985121]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:38.985091", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 760, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:39.192283]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 780 out of 2000 steps (39%) completed
+NOTICE   [2026-Mar-15 13:46:39.192564]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:39.192533", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 780, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:39.400072]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 800 out of 2000 steps (40%) completed
+NOTICE   [2026-Mar-15 13:46:39.400353]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:39.400316", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 800, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:39.607502]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 820 out of 2000 steps (41%) completed
+NOTICE   [2026-Mar-15 13:46:39.607709]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:39.607677", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 820, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:39.815650]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 840 out of 2000 steps (42%) completed
+NOTICE   [2026-Mar-15 13:46:39.815929]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:39.815898", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 840, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:40.022268]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 860 out of 2000 steps (43%) completed
+NOTICE   [2026-Mar-15 13:46:40.022526]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:40.022495", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 860, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:40.232081]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 880 out of 2000 steps (44%) completed
+NOTICE   [2026-Mar-15 13:46:40.232355]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:40.232316", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 880, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:40.439574]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 900 out of 2000 steps (45%) completed
+NOTICE   [2026-Mar-15 13:46:40.439847]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:40.439807", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 900, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:40.649313]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 920 out of 2000 steps (46%) completed
+NOTICE   [2026-Mar-15 13:46:40.649509]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:40.649482", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 920, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:40.857007]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 940 out of 2000 steps (47%) completed
+NOTICE   [2026-Mar-15 13:46:40.857234]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:40.857204", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 940, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:41.064700]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 960 out of 2000 steps (48%) completed
+NOTICE   [2026-Mar-15 13:46:41.064908]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:41.064878", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 960, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:41.274717]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 980 out of 2000 steps (49%) completed
+NOTICE   [2026-Mar-15 13:46:41.275017]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:41.274976", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 980, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:41.482657]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1000 out of 2000 steps (50%) completed
+NOTICE   [2026-Mar-15 13:46:41.482930]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:41.482897", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1000, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:41.689393]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1020 out of 2000 steps (51%) completed
+NOTICE   [2026-Mar-15 13:46:41.689583]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:41.689558", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1020, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:41.895446]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1040 out of 2000 steps (52%) completed
+NOTICE   [2026-Mar-15 13:46:41.895664]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:41.895640", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1040, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:42.102169]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1060 out of 2000 steps (53%) completed
+NOTICE   [2026-Mar-15 13:46:42.102449]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:42.102402", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1060, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:42.308639]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1080 out of 2000 steps (54%) completed
+NOTICE   [2026-Mar-15 13:46:42.308904]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:42.308874", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1080, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:42.515351]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1100 out of 2000 steps (55%) completed
+NOTICE   [2026-Mar-15 13:46:42.515616]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:42.515584", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1100, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:42.721823]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1120 out of 2000 steps (56%) completed
+NOTICE   [2026-Mar-15 13:46:42.722047]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:42.722020", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1120, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:42.927926]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1140 out of 2000 steps (56%) completed
+NOTICE   [2026-Mar-15 13:46:42.928149]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:42.928124", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1140, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:43.134940]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1160 out of 2000 steps (57%) completed
+NOTICE   [2026-Mar-15 13:46:43.135195]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:43.135165", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1160, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:43.341160]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1180 out of 2000 steps (59%) completed
+NOTICE   [2026-Mar-15 13:46:43.341395]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:43.341366", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1180, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:43.547867]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1200 out of 2000 steps (60%) completed
+NOTICE   [2026-Mar-15 13:46:43.548144]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:43.548113", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1200, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:43.754405]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1220 out of 2000 steps (61%) completed
+NOTICE   [2026-Mar-15 13:46:43.754654]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:43.754623", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1220, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:43.961197]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1240 out of 2000 steps (62%) completed
+NOTICE   [2026-Mar-15 13:46:43.961458]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:43.961428", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1240, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:44.167236]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1260 out of 2000 steps (63%) completed
+NOTICE   [2026-Mar-15 13:46:44.167467]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:44.167434", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1260, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:44.375543]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1280 out of 2000 steps (64%) completed
+NOTICE   [2026-Mar-15 13:46:44.375798]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:44.375764", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1280, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:44.581908]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1300 out of 2000 steps (65%) completed
+NOTICE   [2026-Mar-15 13:46:44.582160]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:44.582128", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1300, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:44.788432]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1320 out of 2000 steps (66%) completed
+NOTICE   [2026-Mar-15 13:46:44.788661]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:44.788635", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1320, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:44.995287]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1340 out of 2000 steps (67%) completed
+NOTICE   [2026-Mar-15 13:46:44.995527]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:44.995499", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1340, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:45.202889]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1360 out of 2000 steps (68%) completed
+NOTICE   [2026-Mar-15 13:46:45.203146]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:45.203114", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1360, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:45.411216]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1380 out of 2000 steps (69%) completed
+NOTICE   [2026-Mar-15 13:46:45.411491]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:45.411460", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1380, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:45.619938]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1400 out of 2000 steps (70%) completed
+NOTICE   [2026-Mar-15 13:46:45.620166]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:45.620134", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1400, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:45.829443]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1420 out of 2000 steps (71%) completed
+NOTICE   [2026-Mar-15 13:46:45.829736]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:45.829685", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1420, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:46.036049]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1440 out of 2000 steps (72%) completed
+NOTICE   [2026-Mar-15 13:46:46.036310]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:46.036281", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1440, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:46.244996]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1460 out of 2000 steps (73%) completed
+NOTICE   [2026-Mar-15 13:46:46.245282]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:46.245247", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1460, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:46.453316]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1480 out of 2000 steps (74%) completed
+NOTICE   [2026-Mar-15 13:46:46.453556]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:46.453525", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1480, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:46.659892]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1500 out of 2000 steps (75%) completed
+NOTICE   [2026-Mar-15 13:46:46.660137]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:46.660106", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1500, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:46.865869]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1520 out of 2000 steps (76%) completed
+NOTICE   [2026-Mar-15 13:46:46.866089]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:46.866063", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1520, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:47.073029]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1540 out of 2000 steps (77%) completed
+NOTICE   [2026-Mar-15 13:46:47.073288]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:47.073256", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1540, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:47.279020]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1560 out of 2000 steps (78%) completed
+NOTICE   [2026-Mar-15 13:46:47.279309]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:47.279279", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1560, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:47.486147]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1580 out of 2000 steps (79%) completed
+NOTICE   [2026-Mar-15 13:46:47.486392]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:47.486361", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1580, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:47.693322]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1600 out of 2000 steps (80%) completed
+NOTICE   [2026-Mar-15 13:46:47.693571]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:47.693537", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1600, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:47.901205]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1620 out of 2000 steps (81%) completed
+NOTICE   [2026-Mar-15 13:46:47.901499]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:47.901457", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1620, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:48.108892]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1640 out of 2000 steps (82%) completed
+NOTICE   [2026-Mar-15 13:46:48.109156]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:48.109125", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1640, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:48.315040]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1660 out of 2000 steps (83%) completed
+NOTICE   [2026-Mar-15 13:46:48.315278]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:48.315251", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1660, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:48.521613]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1680 out of 2000 steps (84%) completed
+NOTICE   [2026-Mar-15 13:46:48.521848]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:48.521816", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1680, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:48.727167]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1700 out of 2000 steps (85%) completed
+NOTICE   [2026-Mar-15 13:46:48.727364]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:48.727337", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1700, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:48.933644]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1720 out of 2000 steps (86%) completed
+NOTICE   [2026-Mar-15 13:46:48.933872]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:48.933840", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1720, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:49.139795]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1740 out of 2000 steps (87%) completed
+NOTICE   [2026-Mar-15 13:46:49.140004]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:49.139976", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1740, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:49.348959]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1760 out of 2000 steps (88%) completed
+NOTICE   [2026-Mar-15 13:46:49.349217]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:49.349184", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1760, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:49.555491]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1780 out of 2000 steps (89%) completed
+NOTICE   [2026-Mar-15 13:46:49.555687]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:49.555659", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1780, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:49.762777]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1800 out of 2000 steps (90%) completed
+NOTICE   [2026-Mar-15 13:46:49.762996]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:49.762964", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1800, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:49.969378]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1820 out of 2000 steps (91%) completed
+NOTICE   [2026-Mar-15 13:46:49.969588]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:49.969561", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1820, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:50.177033]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1840 out of 2000 steps (92%) completed
+NOTICE   [2026-Mar-15 13:46:50.177270]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:50.177233", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1840, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:50.386204]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1860 out of 2000 steps (93%) completed
+NOTICE   [2026-Mar-15 13:46:50.386466]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:50.386434", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1860, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:50.594330]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1880 out of 2000 steps (94%) completed
+NOTICE   [2026-Mar-15 13:46:50.594552]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:50.594520", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1880, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:50.803812]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1900 out of 2000 steps (95%) completed
+NOTICE   [2026-Mar-15 13:46:50.804081]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:50.804049", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1900, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.010733]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1920 out of 2000 steps (96%) completed
+NOTICE   [2026-Mar-15 13:46:51.010937]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.010910", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1920, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.221204]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1940 out of 2000 steps (97%) completed
+NOTICE   [2026-Mar-15 13:46:51.221434]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.221404", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1940, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.429379]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1960 out of 2000 steps (98%) completed
+NOTICE   [2026-Mar-15 13:46:51.429624]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.429593", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1960, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.635709]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 1980 out of 2000 steps (99%) completed
+NOTICE   [2026-Mar-15 13:46:51.635950]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.635920", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 1980, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.821435]  (OREData/ored/utilities/progressbar.cpp:107) : XVA: Building cube (2 trades, 1000 samples): 2000 out of 2000 steps (100%) completed
+NOTICE   [2026-Mar-15 13:46:51.821651]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.821623", "detail": "2 trades, 1000 samples", "key": "XVA: Building cube", "progress": 2000, "total": 2000 }
+NOTICE   [2026-Mar-15 13:46:51.821770]  (...ics/orea/engine/valuationengine.cpp:324) : ValuationEngine completed: loop 20.85 sec, pricing 4.9 sec, update 15 sec, calibration 0.16 sec, fixing 0.01
+NOTICE   [2026-Mar-15 13:46:51.821957]  (.../orea/app/analytics/xvaanalytic.cpp:623) : XVA::buildCube done
+NOTICE   [2026-Mar-15 13:46:51.822058]  (.../orea/app/analytics/xvaanalytic.cpp:490) : XVA: classicRun completed
+NOTICE   [2026-Mar-15 13:46:51.822163]  (...orea/app/analytics/xvaanalytic.cpp:1134) : We have generated a classic cube only
+NOTICE   [2026-Mar-15 13:46:51.822257]  (...orea/app/analytics/xvaanalytic.cpp:1137) : NPV cube generation completed
+NOTICE   [2026-Mar-15 13:46:51.822348]  (...orea/app/analytics/xvaanalytic.cpp:1151) : Classic portfolio size 2
+NOTICE   [2026-Mar-15 13:46:51.822436]  (...orea/app/analytics/xvaanalytic.cpp:1152) : AMC portfolio size 0
+NOTICE   [2026-Mar-15 13:46:51.822526]  (...orea/app/analytics/xvaanalytic.cpp:1158) : Total portfolio size 2
+NOTICE   [2026-Mar-15 13:46:51.822623]  (...nalytics/orea/app/reportwriter.cpp:1329) : Writing cube report
+NOTICE   [2026-Mar-15 13:46:51.859180]  (...nalytics/orea/app/reportwriter.cpp:1394) : Cube report written
+NOTICE   [2026-Mar-15 13:46:51.859476]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:51.859441", "key": "XVA: Aggregation", "progress": 0, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:51.859637]  (.../portfolio/nettingsetdefinition.cpp:285) : NettingSetId='CPTY_A': Validating netting set definition
+NOTICE   [2026-Mar-15 13:46:51.859741]  (.../portfolio/nettingsetdefinition.cpp:292) : NettingSetId='CPTY_A': Validating netting set definition's CSA details
+NOTICE   [2026-Mar-15 13:46:51.859838]  (.../portfolio/nettingsetdefinition.cpp:101) : NettingSetDefinition has CSA margining frequency (2D, 1D) longer than assumed margin period of risk 0W
+NOTICE   [2026-Mar-15 13:46:51.859937]  (.../orea/app/analytics/xvaanalytic.cpp:171) : For netting-set CPTY_ACSA flag is 1
+NOTICE   [2026-Mar-15 13:46:51.860037]  (.../orea/app/analytics/xvaanalytic.cpp:190) : For netting-set CPTY_A, calculation type is Symmetric
+NOTICE   [2026-Mar-15 13:46:51.860131]  (.../orea/app/analytics/xvaanalytic.cpp:942) : baseCurrency EUR
+NOTICE   [2026-Mar-15 13:46:51.860241]  (...ics/orea/aggregation/postprocess.cpp:93) : PostProcess: started.
+NOTICE   [2026-Mar-15 13:46:51.860341]  (...cs/orea/aggregation/postprocess.cpp:110) : cube storage is regular: 1
+NOTICE   [2026-Mar-15 13:46:51.860432]  (...cs/orea/aggregation/postprocess.cpp:111) : cube dates: 241
+NOTICE   [2026-Mar-15 13:46:51.860533]  (...cs/orea/aggregation/postprocess.cpp:120) : AsOfDate = 2016-02-05
+NOTICE   [2026-Mar-15 13:46:51.860642]  (...a/aggregation/exposurecalculator.cpp:73) : Compute trade exposure profiles, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:51.860745]  (...a/aggregation/exposurecalculator.cpp:92) : Aggregate exposure for trade Swap_20
+NOTICE   [2026-Mar-15 13:46:51.877917]  (...a/aggregation/exposurecalculator.cpp:92) : Aggregate exposure for trade Swap_21
+NOTICE   [2026-Mar-15 13:46:51.893553]  (...egation/nettedexposurecalculator.cpp:91) : Compute netting set exposure profiles
+NOTICE   [2026-Mar-15 13:46:51.894260]  (...gation/nettedexposurecalculator.cpp:161) : Aggregate exposure for netting set CPTY_A
+NOTICE   [2026-Mar-15 13:46:51.894371]  (...gation/nettedexposurecalculator.cpp:482) : Build collateral account balance paths for netting set CPTY_A
+NOTICE   [2026-Mar-15 13:46:51.894471]  (...gation/nettedexposurecalculator.cpp:488) : CSA FX rate for pair EUREUR = 1
+NOTICE   [2026-Mar-15 13:46:51.894577]  (...gation/nettedexposurecalculator.cpp:498) : CSA compounding rate for index EUR-EONIA = -0.001122 as of February 5th, 2016
+NOTICE   [2026-Mar-15 13:46:54.918023]  (...gation/nettedexposurecalculator.cpp:538) : Collateral account balance paths for netting set CPTY_A done
+NOTICE   [2026-Mar-15 13:46:54.918340]  (...gation/nettedexposurecalculator.cpp:188) : ApplyInitialMargin=0 for netting set CPTY_A, CSA IM=0, CSA IM Type=Bilateral, Analytics DIM=0
+NOTICE   [2026-Mar-15 13:46:55.076002]  (.../orea/aggregation/xvacalculator.cpp:316) : Update XVA for trade Swap_20, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.076418]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve BANK_SR_USDand  implyDefaultFromMarket = false
+NOTICE   [2026-Mar-15 13:46:55.076558]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve BANK_SR_USD
+NOTICE   [2026-Mar-15 13:46:55.076678]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve BANK_SR_USD using 7 default quotes of 7 requested quotes.
+NOTICE   [2026-Mar-15 13:46:55.077401]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve BANK_SR_USD
+NOTICE   [2026-Mar-15 13:46:55.077560]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve CPTY_A_SR_USDand  implyDefaultFromMarket = false
+NOTICE   [2026-Mar-15 13:46:55.077661]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-15 13:46:55.077766]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve CPTY_A_SR_USD using 7 default quotes of 7 requested quotes.
+NOTICE   [2026-Mar-15 13:46:55.078430]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve CPTY_A_SR_USD
+NOTICE   [2026-Mar-15 13:46:55.080150]  (.../orea/aggregation/xvacalculator.cpp:316) : Update XVA for trade Swap_21, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.081936]  (.../orea/aggregation/xvacalculator.cpp:403) : Update XVA for netting set CPTY_A, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.083651]  (...ea/aggregation/exposureallocator.cpp:44) : Compute allocated trade exposures
+NOTICE   [2026-Mar-15 13:46:55.083796]  (...ea/aggregation/exposureallocator.cpp:66) : Completed calculating allocated trade exposures
+NOTICE   [2026-Mar-15 13:46:55.083906]  (.../orea/aggregation/xvacalculator.cpp:316) : Update XVA for trade Swap_20, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.085526]  (.../orea/aggregation/xvacalculator.cpp:316) : Update XVA for trade Swap_21, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.087170]  (.../orea/aggregation/xvacalculator.cpp:403) : Update XVA for netting set CPTY_A, inverted (flipViewXVA = Y)
+NOTICE   [2026-Mar-15 13:46:55.088813]  (.../orea/app/analytics/xvaanalytic.cpp:956) : post done
+NOTICE   [2026-Mar-15 13:46:55.088953]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:55.088924", "key": "XVA: Aggregation", "progress": 1, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:55.089064]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:55.089054", "key": "XVA: Reports", "progress": 0, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:55.089156]  (...orea/app/analytics/xvaanalytic.cpp:1249) : Generating XVA reports and cube outputs
+NOTICE   [2026-Mar-15 13:46:55.089392]  (...nalytics/orea/app/reportwriter.cpp:1329) : Writing cube report
+NOTICE   [2026-Mar-15 13:46:55.102220]  (...nalytics/orea/app/reportwriter.cpp:1394) : Cube report written
+NOTICE   [2026-Mar-15 13:46:55.102499]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:55.102466", "key": "XVA: Reports", "progress": 1, "total": 1 }
+NOTICE   [2026-Mar-15 13:46:55.102628]          (OREData/ored/utilities/log.cpp:127) : ProgressMessage { "@timestamp": "2026-03-15T13:46:55.102617", "key": "Running XVA Analytic", "progress": 1, "total": 1 }
+WARNING  [2026-Mar-15 13:46:55.102726]      (OREAnalytics/orea/app/analytic.cpp:102) : Finishing XVA Analytic::runAnalytic(): 427819008|427819008 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-15 13:46:55.102837]  (...ytics/orea/app/analyticsmanager.cpp:158) : run analytic with label 'XVA' finished.
+NOTICE   [2026-Mar-15 13:46:55.102943]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CHF-IN-EUR for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103050]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103145]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve GBP-IN-EUR for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103238]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve JPY6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103330]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve USD-IN-EUR for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103424]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CPTY_A_BORROW for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103516]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CPTY_A_LEND for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103610]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CHF3M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103702]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CHF6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103795]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CHF1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.103887]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123312]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR3M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123434]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123533]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve GBP3M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123632]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve GBP6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123725]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve GBP1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123819]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve JPY6M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.123912]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve JPY1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.124005]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve USD1D for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.124096]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve USD3M for label  as it has already been added
+NOTICE   [2026-Mar-15 13:46:55.187531]  (...nalytics/orea/app/reportwriter.cpp:1251) : Writing Pricing stats report
+NOTICE   [2026-Mar-15 13:46:55.187732]  (...nalytics/orea/app/reportwriter.cpp:1267) : Pricing stats report written
+NOTICE   [2026-Mar-15 13:46:55.187844]  (...nalytics/orea/app/reportwriter.cpp:1272) : Writing runtimes report
+NOTICE   [2026-Mar-15 13:46:55.187956]  (...nalytics/orea/app/reportwriter.cpp:1296) : Finished writing runtimes report
+NOTICE   [2026-Mar-15 13:46:55.188077]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name cashflow occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188175]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name colva_nettingset_CPTY_A occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188276]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name curves occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188373]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name cva_sensitivity_nettingset_CPTY_A occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188467]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name dividends occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188562]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name exposure_nettingset_CPTY_A occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188656]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name exposure_trade_Swap_20 occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188753]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name exposure_trade_Swap_21 occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188847]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name fixings occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.188940]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name marketdata occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189032]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name netcube occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189122]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name npv occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189214]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name pricingstats occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189305]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name rawcube occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189397]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name runtimes occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189488]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189579]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration_cashflows occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189671]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name xva occurs 1 times
+NOTICE   [2026-Mar-15 13:46:55.189767]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/flows.csv'
+NOTICE   [2026-Mar-15 13:46:55.190421]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/flows.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.190520]  (...ytics/orea/app/analyticsmanager.cpp:299) : report cashflow written to Output_FlipView/flows.csv
+NOTICE   [2026-Mar-15 13:46:55.190615]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/dividends.csv'
+NOTICE   [2026-Mar-15 13:46:55.190812]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/dividends.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.190907]  (...ytics/orea/app/analyticsmanager.cpp:299) : report dividends written to Output_FlipView/dividends.csv
+NOTICE   [2026-Mar-15 13:46:55.191001]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/fixings.csv'
+NOTICE   [2026-Mar-15 13:46:55.193724]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/fixings.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.193860]  (...ytics/orea/app/analyticsmanager.cpp:299) : report fixings written to Output_FlipView/fixings.csv
+NOTICE   [2026-Mar-15 13:46:55.193967]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/todaysmarketcalibration.csv'
+NOTICE   [2026-Mar-15 13:46:55.195993]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/todaysmarketcalibration.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.196103]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration written to Output_FlipView/todaysmarketcalibration.csv
+NOTICE   [2026-Mar-15 13:46:55.196203]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/todaysmarketcalibration_cashflows.csv'
+NOTICE   [2026-Mar-15 13:46:55.270983]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/todaysmarketcalibration_cashflows.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.271189]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration_cashflows written to Output_FlipView/todaysmarketcalibration_cashflows.csv
+NOTICE   [2026-Mar-15 13:46:55.271301]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/marketdata.csv'
+NOTICE   [2026-Mar-15 13:46:55.272849]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/marketdata.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.272949]  (...ytics/orea/app/analyticsmanager.cpp:299) : report marketdata written to Output_FlipView/marketdata.csv
+NOTICE   [2026-Mar-15 13:46:55.273044]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/curves.csv'
+NOTICE   [2026-Mar-15 13:46:55.276380]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/curves.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.276482]  (...ytics/orea/app/analyticsmanager.cpp:299) : report curves written to Output_FlipView/curves.csv
+NOTICE   [2026-Mar-15 13:46:55.276574]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/npv.csv'
+NOTICE   [2026-Mar-15 13:46:55.276742]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/npv.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.276841]  (...ytics/orea/app/analyticsmanager.cpp:299) : report npv written to Output_FlipView/npv.csv
+NOTICE   [2026-Mar-15 13:46:55.276932]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/pricingstats.csv'
+NOTICE   [2026-Mar-15 13:46:55.277091]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/pricingstats.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.277187]  (...ytics/orea/app/analyticsmanager.cpp:299) : report pricingstats written to Output_FlipView/pricingstats.csv
+NOTICE   [2026-Mar-15 13:46:55.277278]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/runtimes.csv'
+NOTICE   [2026-Mar-15 13:46:55.277440]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/runtimes.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.277536]  (...ytics/orea/app/analyticsmanager.cpp:299) : report runtimes written to Output_FlipView/runtimes.csv
+NOTICE   [2026-Mar-15 13:46:55.277627]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/colva_nettingset_CPTY_A.csv'
+NOTICE   [2026-Mar-15 13:46:55.278175]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/colva_nettingset_CPTY_A.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.278273]  (...ytics/orea/app/analyticsmanager.cpp:299) : report colva_nettingset_CPTY_A written to Output_FlipView/colva_nettingset_CPTY_A.csv
+NOTICE   [2026-Mar-15 13:46:55.278364]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/cva_sensitivity_nettingset_CPTY_A.csv'
+NOTICE   [2026-Mar-15 13:46:55.278521]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/cva_sensitivity_nettingset_CPTY_A.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.278617]  (...ytics/orea/app/analyticsmanager.cpp:299) : report cva_sensitivity_nettingset_CPTY_A written to Output_FlipView/cva_sensitivity_nettingset_CPTY_A.csv
+NOTICE   [2026-Mar-15 13:46:55.278709]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/exposure_nettingset_CPTY_A.csv'
+NOTICE   [2026-Mar-15 13:46:55.279388]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/exposure_nettingset_CPTY_A.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.279502]  (...ytics/orea/app/analyticsmanager.cpp:299) : report exposure_nettingset_CPTY_A written to Output_FlipView/exposure_nettingset_CPTY_A.csv
+NOTICE   [2026-Mar-15 13:46:55.279611]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/exposure_trade_Swap_20.csv'
+NOTICE   [2026-Mar-15 13:46:55.280263]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/exposure_trade_Swap_20.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.280401]  (...ytics/orea/app/analyticsmanager.cpp:299) : report exposure_trade_Swap_20 written to Output_FlipView/exposure_trade_Swap_20.csv
+NOTICE   [2026-Mar-15 13:46:55.280608]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/exposure_trade_Swap_21.csv'
+NOTICE   [2026-Mar-15 13:46:55.281235]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/exposure_trade_Swap_21.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.281337]  (...ytics/orea/app/analyticsmanager.cpp:299) : report exposure_trade_Swap_21 written to Output_FlipView/exposure_trade_Swap_21.csv
+NOTICE   [2026-Mar-15 13:46:55.281433]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/netcube.csv'
+NOTICE   [2026-Mar-15 13:46:55.434030]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/netcube.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.434294]  (...ytics/orea/app/analyticsmanager.cpp:299) : report netcube written to Output_FlipView/netcube.csv
+NOTICE   [2026-Mar-15 13:46:55.434424]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/rawcube.csv'
+NOTICE   [2026-Mar-15 13:46:55.744396]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/rawcube.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.744614]  (...ytics/orea/app/analyticsmanager.cpp:299) : report rawcube written to Output_FlipView/rawcube.csv
+NOTICE   [2026-Mar-15 13:46:55.744745]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output_FlipView/xva.csv'
+NOTICE   [2026-Mar-15 13:46:55.744990]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output_FlipView/xva.csv' closed.
+NOTICE   [2026-Mar-15 13:46:55.745100]  (...ytics/orea/app/analyticsmanager.cpp:299) : report xva written to Output_FlipView/xva.csv
+NOTICE   [2026-Mar-15 13:46:55.745231]        (OREAnalytics/orea/app/oreapp.cpp:293) : write npv cube cube
+NOTICE   [2026-Mar-15 13:46:55.745341]        (OREAnalytics/orea/app/oreapp.cpp:297) : write npv cube cube to file Output_FlipView/cube.csv.gz
+NOTICE   [2026-Mar-15 13:46:55.886420]        (OREAnalytics/orea/app/oreapp.cpp:316) : write market cube scenariodata to file Output_FlipView/scenariodata.csv.gz
+WARNING  [2026-Mar-15 13:46:56.617325]        (OREAnalytics/orea/app/oreapp.cpp:344) : Finishing OREApp::analytics(): 429260800|429260800 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Mar-15 13:46:56.617564]        (OREAnalytics/orea/app/oreapp.cpp:345) : ORE analytics done
+NOTICE   [2026-Mar-15 13:46:56.617683]        (OREAnalytics/orea/app/oreapp.cpp:489) : ORE done.

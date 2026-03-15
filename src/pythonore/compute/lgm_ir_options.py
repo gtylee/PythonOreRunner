@@ -431,6 +431,7 @@ def bermudan_npv_paths(
             bermudan.underlying_legs,
             float(t[i]),
             x_paths[i, :],
+            exercise_into_whole_periods=True,
         )
         signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
 
@@ -551,6 +552,7 @@ def bermudan_lsmc_result(
             bermudan.underlying_legs,
             float(t[i]),
             x_paths[i, :],
+            exercise_into_whole_periods=True,
         )
         signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
 

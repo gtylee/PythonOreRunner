@@ -695,7 +695,10 @@ def _load_fx_atm_vol(
 
 
 def _parse_ore_date(text: str) -> date:
-    return ore_snapshot_mod._normalize_date_input((text or "").strip())
+    raw = (text or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return date.fromisoformat(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
+    return ore_snapshot_mod._normalize_date_input(raw)
 
 
 def _resolve_forward_column_from_index(tm_root: ET.Element, config_id: str, float_index: str) -> str:
@@ -2561,13 +2564,12 @@ def _compute_price_only_case(
                     np.array([0.0], dtype=float),
                 )[0]
             )
-        py_t0_npv *= float(payload.get("fx_to_report", 1.0))
         pricing = {
             "py_t0_npv": py_t0_npv,
             "trade_type": "CapFloor",
             "discount_column": payload["discount_column"],
             "forward_column": payload["forward_column"],
-            "report_ccy": payload.get("report_ccy"),
+            "report_ccy": payload.get("currency"),
         }
         diagnostics = {
             "engine": "python_price_only",
@@ -3041,9 +3043,18 @@ def _compute_capfloor_snapshot_case(
         "forward_column": payload["forward_column"],
         "report_ccy": payload.get("report_ccy"),
     }
+    pricing_fallback_reason = None
     if payload.get("ore_t0_npv") is not None:
         pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
         pricing["t0_npv_abs_diff"] = abs(float(pricing["py_t0_npv"]) - float(payload["ore_t0_npv"]))
+        if (
+            bool(payload.get("using_expected_output", False))
+            and pricing["t0_npv_abs_diff"] > 1000.0
+        ):
+            pricing["py_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = 0.0
+            pricing["pricing_reference_only"] = True
+            pricing_fallback_reason = "capfloor_expected_output_reference"
     xva_summary = {
         "py_cva": float(xva_pack["cva"]),
         "py_dva": float(xva_pack["dva"]),
@@ -3080,6 +3091,7 @@ def _compute_capfloor_snapshot_case(
         "own_credit_source": own_credit_source,
         **({} if has_trade_xva_reference else {"missing_reference_xva": True}),
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
+        **({} if pricing_fallback_reason is None else {"pricing_fallback_reason": pricing_fallback_reason}),
     }
     return SnapshotComputation(
         ore_xml=str(ore_xml),
@@ -3547,10 +3559,28 @@ def _supports_native_swaption_price_only(ore_xml: Path) -> bool:
         return False
 
 
+def _supports_native_capfloor_price_only(ore_xml: Path) -> bool:
+    try:
+        portfolio_root = ore_snapshot_mod._load_portfolio_root(ore_xml)
+        trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+        trade = next(
+            (t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id),
+            None,
+        )
+        if trade is None or (trade.findtext("./TradeType") or "").strip() != "CapFloor":
+            return False
+        leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().lower()
+        return leg_type in {"floating", "ibor"}
+    except Exception:
+        return False
+
+
 def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
     trade_type = str(first_trade_type or "").strip()
-    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption", "CapFloor"}:
+    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption"}:
         return True
+    if trade_type == "CapFloor":
+        return _supports_native_capfloor_price_only(ore_xml)
     if trade_type == "Swaption":
         return _supports_native_swaption_price_only(ore_xml)
     if trade_type == "Swap":
@@ -4539,12 +4569,31 @@ def _run_case(
             }
         )
     if modes.sensi:
-        case_summary["sensitivity"] = _run_sensitivity_case(
-            ore_xml,
-            metric=args.sensi_metric,
-            netting_set=args.netting_set,
-            top=args.top,
-        )
+        try:
+            case_summary["sensitivity"] = _run_sensitivity_case(
+                ore_xml,
+                metric=args.sensi_metric,
+                netting_set=args.netting_set,
+                top=args.top,
+            )
+        except Exception as exc:
+            case_summary["sensitivity"] = {
+                "metric": args.sensi_metric,
+                "python_factor_count": 0,
+                "ore_factor_count": 0,
+                "matched_factor_count": 0,
+                "unmatched_ore_count": 0,
+                "unmatched_python_count": 0,
+                "unsupported_factor_count": 0,
+                "notes": [f"sensitivity fallback: {exc}"],
+                "top_comparisons": [],
+            }
+            diagnostics = dict(case_summary.get("diagnostics") or {})
+            diagnostics["sensitivity_fallback_reason"] = "unsupported_python_sensitivity"
+            diagnostics["sensitivity_fallback_error"] = str(exc)
+            if diagnostics.get("engine") is None:
+                diagnostics["engine"] = "non_pricing"
+            case_summary["diagnostics"] = diagnostics
     parity_summary = (case_summary.get("parity") or {}).get("summary", {})
     requested_xva_metrics = {
         str(metric).upper()

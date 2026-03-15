@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+from pythonore.runtime import bermudan as bermudan_runtime
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
@@ -35,8 +36,10 @@ FX_NDF_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_71" / "Input" / "
 SWAPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_flat.xml"
 SWAPTION_SMILE_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_smile.xml"
 SWAPTION_LONG_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore_swaption.xml"
+SWAPTION_MIXED_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_swap_swaptions.xml"
 BERMUDAN_CASE_XML = TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_3" / "Input" / "ore_bermudans.xml"
 CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
+INFLATION_CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore_capfloor.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -107,6 +110,22 @@ class TestOreSnapshotCli(unittest.TestCase):
                 SWAPTION_LONG_CASE_XML,
             )
         )
+        self.assertFalse(
+            ore_snapshot_cli._supports_native_price_only(
+                "CapFloor",
+                INFLATION_CAPFLOOR_CASE_XML,
+            )
+        )
+
+    def test_parse_ore_date_accepts_compact_format(self):
+        parsed = ore_snapshot_cli._parse_ore_date("20170301")
+        self.assertEqual(parsed.isoformat(), "2017-03-01")
+
+    def test_bermudan_invalid_grid_text_degrades_to_no_grid(self):
+        grid = bermudan_runtime._simulation_grid_times_from_xml_text(
+            "<Simulation><Parameters><Grid>1Y,1Y</Grid></Parameters></Simulation>"
+        )
+        self.assertIsNone(grid)
 
     def test_price_only_fx_forward_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,6 +164,23 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["fx_settlement_type"], "CASH")
             self.assertEqual(payload["pricing"]["fx_settlement_currency"], "USD")
             self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 1.0)
+
+    def test_sensitivity_failure_falls_back_instead_of_crashing_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("py_ore_tools.ore_snapshot_cli._run_sensitivity_case", side_effect=RuntimeError("boom")):
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(FX_NDF_CASE_XML),
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / "Example_71" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["sensitivity_fallback_reason"], "unsupported_python_sensitivity")
+            self.assertEqual(payload["sensitivity"]["top_comparisons"], [])
+            self.assertIn("boom", payload["sensitivity"]["notes"][0])
 
     def test_price_only_fx_option_runs_python_path_without_native_npv_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +222,22 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertGreater(float(payload["pricing"]["py_t0_npv"]), 0.0)
             self.assertTrue(payload["pass_all"])
             self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 500.0)
+
+    def test_price_only_mixed_swaption_case_accepts_compact_exercise_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(SWAPTION_MIXED_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Exposure" / "summary.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(payload.get("bucket"), "hard_error")
+            self.assertIn(payload["diagnostics"]["engine"], {"python_price_only", "ore_reference_expected_output"})
 
     def test_price_only_swaption_smile_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:

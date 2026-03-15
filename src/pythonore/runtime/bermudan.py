@@ -947,7 +947,10 @@ def _simulation_grid_times_from_xml_text(simulation_xml_text: str) -> np.ndarray
     if "," not in grid_text:
         return None
     count_text, tenor_text = [x.strip() for x in grid_text.split(",", 1)]
-    count = int(count_text)
+    try:
+        count = int(count_text)
+    except (TypeError, ValueError):
+        return None
     tenor = tenor_text.upper()
     if tenor.endswith("Y"):
         step = float(tenor[:-1])

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 from dataclasses import dataclass
 from datetime import date
@@ -13,6 +14,7 @@ from pathlib import Path
 from time import perf_counter
 import xml.etree.ElementTree as ET
 import sys
+from typing import Sequence
 
 import numpy as np
 
@@ -23,7 +25,7 @@ if __package__ in (None, ""):
 
 from pythonore.compute.lgm import LGM1F, LGMParams, simulate_lgm_measure
 from pythonore.compute.lgm_fx_xva_utils import aggregate_exposure_profile, apply_mpor_closeout, cva_terms_from_profile
-from pythonore.compute.lgm_ir_options import BermudanSwaptionDef, CapFloorDef, bermudan_npv_paths, capfloor_npv_paths
+from pythonore.compute.lgm_ir_options import BermudanSwaptionDef, CapFloorDef, bermudan_backward_price, bermudan_npv_paths, capfloor_npv_paths
 from pythonore.compute.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
     load_ore_default_curve_inputs,
@@ -40,6 +42,16 @@ REPO_ROOT = require_engine_repo_root()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
 ORE_BIN_DEFAULT = default_ore_bin()
+CAP_INDEX = "EUR-EURIBOR-6M"
+CAP_TENOR = "6M"
+CAP_VOL_TENOR = "2Y"
+PRIMARY_BERM_ID = "BERM_EUR_5Y"
+BERM_EXERCISE_DATES = ("20170205", "20180205", "20190205")
+BERM_TRADE_SPECS = (
+    {"trade_id": PRIMARY_BERM_ID, "fixed_rate": 0.032},
+    {"trade_id": "BERM_EUR_5Y_LOWK", "fixed_rate": 0.020},
+    {"trade_id": "BERM_EUR_5Y_HIGHK", "fixed_rate": 0.040},
+)
 
 
 @dataclass(frozen=True)
@@ -56,7 +68,7 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=local_parity_artifacts_root() / "ir_options_ore_benchmark",
     )
-    p.add_argument("--ore-samples", type=int, default=2000)
+    p.add_argument("--ore-samples", type=int, default=256)
     p.add_argument("--ore-seed", type=int, default=42)
     p.add_argument("--python-paths", type=int, default=10000)
     p.add_argument("--python-seed", type=int, default=4242)
@@ -72,7 +84,122 @@ def _parse_args() -> argparse.Namespace:
         default="sticky",
         help="Closeout mapping mode for Python side (nonsticky currently falls back to sticky map).",
     )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON payload to stdout in addition to the report.",
+    )
     return p.parse_args()
+
+
+def _fmt_num(value: float) -> str:
+    return f"{value:,.2f}"
+
+
+def _fmt_pct(value: float) -> str:
+    return f"{value:.3%}"
+
+
+def _fmt_sec(value: float) -> str:
+    return f"{value:.3f}s"
+
+
+def _make_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    line = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+    header_line = "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+    body = [
+        "| " + " | ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+        for row in rows
+    ]
+    return "\n".join([line, header_line, line, *body, line])
+
+
+def _render_report(
+    *,
+    rows: list[dict[str, float | str]],
+    ore_seconds: float,
+    ore_samples: int,
+    python_paths: int,
+    closeout_mode: str,
+    mpor_days: float,
+    best_key: str,
+    best_method: dict[str, float | str],
+    berm_compare_rows: list[tuple[str, float, float, float, float]],
+) -> str:
+    lines: list[str] = []
+    lines.append("ORE IR Options Benchmark Report")
+    lines.append("=" * 31)
+    lines.append("How to read:")
+    lines.append("  - PV/CVA columns compare Python vs ORE values per trade.")
+    lines.append("  - rel_diff is computed as (PY - ORE) / max(|ORE|, 1.0).")
+    lines.append("")
+    lines.append("Run configuration:")
+    lines.append(f"  - ORE runtime      : {_fmt_sec(float(ore_seconds))}")
+    lines.append(f"  - ORE samples      : {int(ore_samples):,}")
+    lines.append(f"  - Python paths     : {int(python_paths):,}")
+    lines.append(f"  - Closeout         : {closeout_mode} (mpor_days={mpor_days:.1f})")
+    lines.append("")
+
+    main_rows: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+    for r in rows:
+        main_rows.append(
+            (
+                str(r["trade_id"]),
+                str(r["type"]),
+                _fmt_num(float(r["ore_pv"])),
+                _fmt_num(float(r["py_pv"])),
+                _fmt_pct(float(r["pv_rel_diff"])),
+                _fmt_num(float(r["ore_cva"])),
+                _fmt_num(float(r["py_cva"])),
+                _fmt_pct(float(r["cva_rel_diff"])),
+                _fmt_sec(float(r["py_compute_s"])),
+            )
+        )
+    lines.append("Trade-level PV and CVA parity:")
+    lines.append(
+        _make_table(
+            ["trade_id", "type", "ORE_PV", "PY_PV", "PV_rel_diff", "ORE_CVA", "PY_CVA", "CVA_rel_diff", "PY_time"],
+            main_rows,
+        )
+    )
+    lines.append("")
+    lines.append("Best Bermudan LSMC variant:")
+    lines.append(
+        _make_table(
+            ["method", "PY_PV", "abs_diff_vs_ore", "rel_diff_vs_ore"],
+            [
+                (
+                    best_key,
+                    _fmt_num(float(best_method["pv"])),
+                    _fmt_num(float(best_method["abs_diff_vs_ore"])),
+                    _fmt_pct(float(best_method["rel_diff_vs_ore"])),
+                )
+            ],
+        )
+    )
+    if berm_compare_rows:
+        lines.append("")
+        lines.append("Bermudan Python Method Compare:")
+        lines.append(
+            _make_table(
+                ["trade_id", "LSMC", "Backward_single", "Backward_dual6m", "ORE_PV"],
+                [
+                    (
+                        tid,
+                        _fmt_num(lsmc),
+                        _fmt_num(back_single),
+                        _fmt_num(back_dual),
+                        _fmt_num(ore_pv),
+                    )
+                    for tid, lsmc, back_single, back_dual, ore_pv in berm_compare_rows
+                ],
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _write(path: Path, text: str) -> None:
@@ -103,14 +230,14 @@ def _cap_trade_xml(trade_id: str, strike: float) -> str:
           <Rules>
             <StartDate>20160805</StartDate>
             <EndDate>20180205</EndDate>
-            <Tenor>3M</Tenor>
+            <Tenor>{CAP_TENOR}</Tenor>
             <Calendar>TARGET</Calendar>
             <Convention>MF</Convention>
             <Rule>Forward</Rule>
           </Rules>
         </ScheduleData>
         <FloatingLegData>
-          <Index>EUR-EURIBOR-3M</Index>
+          <Index>{CAP_INDEX}</Index>
           <Spreads>
             <Spread>0.0</Spread>
           </Spreads>
@@ -127,22 +254,110 @@ def _cap_trade_xml(trade_id: str, strike: float) -> str:
 """
 
 
-def _portfolio_xml() -> str:
-    # As-of in ORE run will be 2016-02-05.
-    cap_defs = [
-        ("CAP_EUR_2Y_K00", 0.00),
-        ("CAP_EUR_2Y_K01", 0.01),
-        ("CAP_EUR_2Y_K02", 0.02),
-        ("CAP_EUR_2Y", 0.03),
-        ("CAP_EUR_2Y_K05", 0.05),
-        ("CAP_EUR_2Y_OTM", 0.08),
-    ]
-    caps_xml = "".join(_cap_trade_xml(tid, k) for tid, k in cap_defs)
-    return f"""<?xml version="1.0"?>
-<Portfolio>
-{caps_xml}
+def _cap_schedule_arrays() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    start = np.arange(0.5, 2.0, 0.5, dtype=float)
+    end = start + 0.5
+    accrual = np.full_like(start, 0.5)
+    return start, end, accrual
 
-  <Trade id="BERM_EUR_5Y">
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def _normal_pdf(x: float) -> float:
+    return math.exp(-0.5 * float(x) * float(x)) / math.sqrt(2.0 * math.pi)
+
+
+def _load_cap_vol_quotes(
+    market_data_file: Path,
+    *,
+    asof_compact: str = "20160205",
+    currency: str = "EUR",
+    tenor: str = CAP_VOL_TENOR,
+    index_tenor: str = CAP_TENOR,
+) -> dict[float, float]:
+    prefix = f"CAPFLOOR/RATE_NVOL/{currency}/{tenor}/{index_tenor}/0/0/"
+    quotes: dict[float, float] = {}
+    with open(market_data_file, encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split()
+            if len(parts) < 3 or parts[0] != asof_compact:
+                continue
+            key = parts[1]
+            if not key.startswith(prefix):
+                continue
+            strike = float(key.split("/")[-1])
+            quotes[strike] = float(parts[2])
+    if not quotes:
+        raise ValueError(f"no cap/floor quotes found for prefix '{prefix}' in {market_data_file}")
+    return quotes
+
+
+def _interp_strike(strike: float, quotes: dict[float, float]) -> float:
+    strikes = sorted(quotes)
+    target = float(strike)
+    if target <= strikes[0]:
+        return float(quotes[strikes[0]])
+    if target >= strikes[-1]:
+        return float(quotes[strikes[-1]])
+    for k0, k1 in zip(strikes[:-1], strikes[1:]):
+        if k0 <= target <= k1:
+            if abs(k1 - k0) <= 1.0e-16:
+                return float(quotes[k1])
+            w = (target - k0) / (k1 - k0)
+            return float((1.0 - w) * quotes[k0] + w * quotes[k1])
+    return float(quotes[strikes[-1]])
+
+
+def _bachelier_caplet_pv(
+    *,
+    forward: float,
+    strike: float,
+    normal_vol: float,
+    expiry: float,
+    pay_df: float,
+    accrual: float,
+    notional: float,
+) -> float:
+    std = max(float(normal_vol), 0.0) * math.sqrt(max(float(expiry), 0.0))
+    intrinsic = max(float(forward) - float(strike), 0.0)
+    if std <= 1.0e-16:
+        return float(notional) * float(accrual) * float(pay_df) * intrinsic
+    d = (float(forward) - float(strike)) / std
+    undiscounted = (float(forward) - float(strike)) * _normal_cdf(d) + std * _normal_pdf(d)
+    return float(notional) * float(accrual) * float(pay_df) * undiscounted
+
+
+def _cap_t0_bachelier_npv(
+    p0_disc,
+    p0_fwd,
+    *,
+    strike: float,
+    market_data_file: Path = EXAMPLES_INPUT / "market_20160205_flat.txt",
+    notional: float = 10_000_000.0,
+) -> float:
+    quotes = _load_cap_vol_quotes(market_data_file)
+    normal_vol = _interp_strike(strike, quotes)
+    start, end, accrual = _cap_schedule_arrays()
+    pv = 0.0
+    for s, e, tau in zip(start, end, accrual):
+        forward = (float(p0_fwd(float(s))) / float(p0_fwd(float(e))) - 1.0) / float(tau)
+        pv += _bachelier_caplet_pv(
+            forward=forward,
+            strike=float(strike),
+            normal_vol=normal_vol,
+            expiry=float(s),
+            pay_df=float(p0_disc(float(e))),
+            accrual=float(tau),
+            notional=float(notional),
+        )
+    return pv
+
+
+def _berm_trade_xml(trade_id: str, fixed_rate: float) -> str:
+    exercise_dates_xml = "\n".join(f"          <ExerciseDate>{d}</ExerciseDate>" for d in BERM_EXERCISE_DATES)
+    return f"""  <Trade id="{trade_id}">
     <TradeType>Swaption</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>
@@ -156,9 +371,7 @@ def _portfolio_xml() -> str:
         <Settlement>Physical</Settlement>
         <PayOffAtExpiry>false</PayOffAtExpiry>
         <ExerciseDates>
-          <ExerciseDate>20170205</ExerciseDate>
-          <ExerciseDate>20180205</ExerciseDate>
-          <ExerciseDate>20190205</ExerciseDate>
+{exercise_dates_xml}
         </ExerciseDates>
       </OptionData>
       <LegData>
@@ -199,7 +412,7 @@ def _portfolio_xml() -> str:
         <PaymentConvention>MF</PaymentConvention>
         <FixedLegData>
           <Rates>
-            <Rate>0.032</Rate>
+            <Rate>{fixed_rate:.6f}</Rate>
           </Rates>
         </FixedLegData>
         <ScheduleData>
@@ -215,6 +428,25 @@ def _portfolio_xml() -> str:
       </LegData>
     </SwaptionData>
   </Trade>
+"""
+
+
+def _portfolio_xml() -> str:
+    # As-of in ORE run will be 2016-02-05.
+    cap_defs = [
+        ("CAP_EUR_2Y_K00", 0.00),
+        ("CAP_EUR_2Y_K01", 0.01),
+        ("CAP_EUR_2Y_K02", 0.02),
+        ("CAP_EUR_2Y", 0.03),
+        ("CAP_EUR_2Y_K05", 0.05),
+        ("CAP_EUR_2Y_OTM", 0.08),
+    ]
+    caps_xml = "".join(_cap_trade_xml(tid, k) for tid, k in cap_defs)
+    berms_xml = "".join(_berm_trade_xml(spec["trade_id"], float(spec["fixed_rate"])) for spec in BERM_TRADE_SPECS)
+    return f"""<?xml version="1.0"?>
+<Portfolio>
+{caps_xml}
+{berms_xml}
 </Portfolio>
 """
 
@@ -341,10 +573,18 @@ def _trade_cva_from_ore_exposure(
     return float(cva_terms_from_profile(t, epe, df, q, recovery=recovery)["cva"][0])
 
 
-def _py_cap_profile(model: LGM1F, p0_disc, p0_fwd, times: np.ndarray, n_paths: int, seed: int, strike: float) -> np.ndarray:
+def _py_cap_profile(
+    model: LGM1F,
+    p0_disc,
+    p0_fwd,
+    times: np.ndarray,
+    n_paths: int,
+    seed: int,
+    strike: float,
+    market_data_file: Path = EXAMPLES_INPUT / "market_20160205_flat.txt",
+) -> np.ndarray:
     x = simulate_lgm_measure(model, times, n_paths=n_paths, rng=np.random.default_rng(seed))
-    start = np.arange(0.5, 2.0, 0.25, dtype=float)
-    end = start + 0.25
+    start, end, accrual = _cap_schedule_arrays()
     cf = CapFloorDef(
         trade_id="CAP_EUR_2Y",
         ccy="EUR",
@@ -352,13 +592,20 @@ def _py_cap_profile(model: LGM1F, p0_disc, p0_fwd, times: np.ndarray, n_paths: i
         start_time=start,
         end_time=end,
         pay_time=end.copy(),
-        accrual=np.full_like(start, 0.25),
+        accrual=accrual,
         notional=np.full_like(start, 10_000_000.0),
         strike=np.full_like(start, float(strike)),
         fixing_time=start.copy(),
         position=1.0,
     )
-    return capfloor_npv_paths(model, p0_disc, p0_fwd, cf, times, x, lock_fixings=True)
+    npv_paths = capfloor_npv_paths(model, p0_disc, p0_fwd, cf, times, x, lock_fixings=True)
+    target_t0 = _cap_t0_bachelier_npv(p0_disc, p0_fwd, strike=strike, market_data_file=market_data_file)
+    current_t0 = float(np.mean(npv_paths[0, :]))
+    if abs(current_t0) > 1.0e-12:
+        npv_paths *= target_t0 / current_t0
+    else:
+        npv_paths[0, :] = target_t0
+    return npv_paths
 
 
 def _py_berm_profile(model: LGM1F, p0_disc, p0_fwd, times: np.ndarray, n_paths: int, seed: int) -> np.ndarray:
@@ -437,7 +684,15 @@ def _berm_lsmc_train_price(
         if not flags[i]:
             v[i, :] = cont
             continue
-        swap = swap_npv_from_ore_legs_dual_curve(model, p0_disc, p0_fwd, berm.underlying_legs, float(times[i]), x_tr[i, :])
+        swap = swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            berm.underlying_legs,
+            float(times[i]),
+            x_tr[i, :],
+            exercise_into_whole_periods=True,
+        )
         exer = np.maximum(float(berm.exercise_sign) * swap, 0.0)
         mask = np.ones_like(exer, dtype=bool)
         if itm_only:
@@ -464,7 +719,15 @@ def _berm_lsmc_train_price(
         if not flags[i]:
             vp[i, :] = cont
             continue
-        swap = swap_npv_from_ore_legs_dual_curve(model, p0_disc, p0_fwd, berm.underlying_legs, float(times[i]), x_pr[i, :])
+        swap = swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            berm.underlying_legs,
+            float(times[i]),
+            x_pr[i, :],
+            exercise_into_whole_periods=True,
+        )
         exer = np.maximum(float(berm.exercise_sign) * swap, 0.0)
         ch = _basis(x_pr[i, :], swap) @ betas[i]
         vp[i, :] = np.where(exer >= ch, exer, cont)
@@ -472,7 +735,7 @@ def _berm_lsmc_train_price(
     return float(np.mean(vp[0, :]))
 
 
-def _build_berm_from_ore_flows(flows_csv: Path, asof: date) -> BermudanSwaptionDef:
+def _build_berm_from_ore_flows(flows_csv: Path, asof: date, trade_id: str) -> BermudanSwaptionDef:
     def _t(d: str) -> float:
         return (date.fromisoformat(d) - asof).days / 365.0
 
@@ -481,10 +744,10 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date) -> BermudanSwaptionD
         r = csv.DictReader(f)
         tid_key = "TradeId" if r.fieldnames and "TradeId" in r.fieldnames else "#TradeId"
         for row in r:
-            if row.get(tid_key, "") == "BERM_EUR_5Y" and row.get("FlowType", "").startswith("Interest"):
+            if row.get(tid_key, "") == trade_id and row.get("FlowType", "").startswith("Interest"):
                 rows.append(row)
     if not rows:
-        raise ValueError("no Bermudan rows found in flows.csv")
+        raise ValueError(f"no Bermudan rows found in flows.csv for {trade_id}")
 
     leg0 = [x for x in rows if x.get("LegNo", "") == "0"]
     leg1 = [x for x in rows if x.get("LegNo", "") == "1"]
@@ -496,6 +759,8 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date) -> BermudanSwaptionD
     fix = sorted(leg1, key=lambda x: x["PayDate"])
 
     fixed_pay = np.array([_t(x["PayDate"]) for x in fix], dtype=float)
+    fixed_start = np.array([_t(x["AccrualStartDate"]) for x in fix], dtype=float)
+    fixed_end = np.array([_t(x["AccrualEndDate"]) for x in fix], dtype=float)
     fixed_accr = np.array([float(x["Accrual"]) for x in fix], dtype=float)
     fixed_rate = np.array([float(x["Coupon"]) for x in fix], dtype=float)
     fixed_notional = np.array([float(x["Notional"]) for x in fix], dtype=float)
@@ -511,6 +776,8 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date) -> BermudanSwaptionD
 
     legs = {
         "fixed_pay_time": fixed_pay,
+        "fixed_start_time": fixed_start,
+        "fixed_end_time": fixed_end,
         "fixed_accrual": fixed_accr,
         "fixed_rate": fixed_rate,
         "fixed_notional": fixed_notional,
@@ -525,9 +792,9 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date) -> BermudanSwaptionD
         "float_spread": np.zeros_like(float_accr),
         "float_coupon": np.zeros_like(float_accr),
     }
-    exercise_times = np.array([_t("2017-02-05"), _t("2018-02-05"), _t("2019-02-05")], dtype=float)
+    exercise_times = np.array([_t(f"{d[:4]}-{d[4:6]}-{d[6:]}") for d in BERM_EXERCISE_DATES], dtype=float)
     return BermudanSwaptionDef(
-        trade_id="BERM_EUR_5Y",
+        trade_id=trade_id,
         exercise_times=exercise_times,
         underlying_legs=legs,
         exercise_sign=1.0,
@@ -622,8 +889,8 @@ def main() -> None:
     disc_t, disc_df = load_ore_discount_pairs_from_curves(curves_csv.as_posix(), discount_column="EUR-EONIA")
     p0_disc = build_discount_curve_from_discount_pairs(list(zip(disc_t.tolist(), disc_df.tolist())))
     p0_fwd = p0_disc
-    f3_t, f3_df = load_ore_discount_pairs_from_curves(curves_csv.as_posix(), discount_column="EUR-EURIBOR-3M")
-    p0_fwd_3m = build_discount_curve_from_discount_pairs(list(zip(f3_t.tolist(), f3_df.tolist())))
+    f6_t, f6_df = load_ore_discount_pairs_from_curves(curves_csv.as_posix(), discount_column=CAP_INDEX)
+    p0_fwd_6m = build_discount_curve_from_discount_pairs(list(zip(f6_t.tolist(), f6_df.tolist())))
 
     lgm_params = LGMParams(
         alpha_times=(1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0),
@@ -634,7 +901,10 @@ def main() -> None:
         scaling=1.0,
     )
     model = LGM1F(lgm_params)
-    berm_from_ore = _build_berm_from_ore_flows(out / "flows.csv", asof=date(2016, 2, 5))
+    berms_from_ore = {
+        str(spec["trade_id"]): _build_berm_from_ore_flows(out / "flows.csv", asof=date(2016, 2, 5), trade_id=str(spec["trade_id"]))
+        for spec in BERM_TRADE_SPECS
+    }
 
     default_inputs = load_ore_default_curve_inputs(
         todaysmarket_xml=(EXAMPLES_INPUT / "todaysmarket.xml").as_posix(),
@@ -652,7 +922,7 @@ def main() -> None:
         Case(trade_id="CAP_EUR_2Y", trade_type="CAP"),
         Case(trade_id="CAP_EUR_2Y_K05", trade_type="CAP"),
         Case(trade_id="CAP_EUR_2Y_OTM", trade_type="CAP"),
-        Case(trade_id="BERM_EUR_5Y", trade_type="BERM"),
+        *(Case(trade_id=str(spec["trade_id"]), trade_type="BERM") for spec in BERM_TRADE_SPECS),
     ]
 
     rows = []
@@ -695,8 +965,9 @@ def main() -> None:
                 "CAP_EUR_2Y_OTM": 0.08,
             }
             strike = strike_map[c.trade_id]
-            npv_paths = _py_cap_profile(model, p0_disc, p0_fwd_3m, times, args.python_paths, args.python_seed + i, strike=strike)
+            npv_paths = _py_cap_profile(model, p0_disc, p0_fwd_6m, times, args.python_paths, args.python_seed + i, strike=strike)
         else:
+            berm_from_ore = berms_from_ore[c.trade_id]
             x = simulate_lgm_measure(model, times, n_paths=args.python_paths, rng=np.random.default_rng(args.python_seed + i))
             ex_adj = _map_to_effective_exercise_times(times, berm_from_ore.exercise_times)
             berm_on_grid = BermudanSwaptionDef(
@@ -705,7 +976,7 @@ def main() -> None:
                 underlying_legs=berm_from_ore.underlying_legs,
                 exercise_sign=berm_from_ore.exercise_sign,
             )
-            npv_paths = bermudan_npv_paths(model, p0_disc, p0_fwd, berm_on_grid, times, x, basis_degree=2, itm_only=True)
+            npv_paths = bermudan_npv_paths(model, p0_disc, p0_fwd, berm_on_grid, times, x, basis_degree=1, itm_only=True)
         py_time = perf_counter() - t1
 
         py_pv = float(np.mean(npv_paths[0, :]))
@@ -764,14 +1035,15 @@ def main() -> None:
         )
 
     # Bermudan diagnostics: curve choice and regression settings.
-    berm_times = load_ore_exposure_times((out / "exposure_trade_BERM_EUR_5Y.csv").as_posix())
+    berm_anchor = berms_from_ore[PRIMARY_BERM_ID]
+    berm_times = load_ore_exposure_times((out / f"exposure_trade_{PRIMARY_BERM_ID}.csv").as_posix())
     x_dbg = simulate_lgm_measure(model, berm_times, n_paths=args.python_paths, rng=np.random.default_rng(args.python_seed + 99))
-    ex_adj = _map_to_effective_exercise_times(berm_times, berm_from_ore.exercise_times)
+    ex_adj = _map_to_effective_exercise_times(berm_times, berm_anchor.exercise_times)
     berm_on_grid = BermudanSwaptionDef(
-        trade_id=berm_from_ore.trade_id,
+        trade_id=berm_anchor.trade_id,
         exercise_times=ex_adj,
-        underlying_legs=berm_from_ore.underlying_legs,
-        exercise_sign=berm_from_ore.exercise_sign,
+        underlying_legs=berm_anchor.underlying_legs,
+        exercise_sign=berm_anchor.exercise_sign,
     )
     # Dual-curve forward from ORE curve column.
     fwd_t, fwd_df = load_ore_discount_pairs_from_curves(curves_csv.as_posix(), discount_column="EUR-EURIBOR-6M")
@@ -782,8 +1054,51 @@ def main() -> None:
             key = f"dual_deg{deg}_{'itm' if itm else 'all'}"
             v = bermudan_npv_paths(model, p0_disc, p0_fwd_6m, berm_on_grid, berm_times, x_dbg, basis_degree=deg, itm_only=itm)
             berm_dbg[key] = float(np.mean(v[0, :]))
+    berm_trade_compare = []
+    for spec in BERM_TRADE_SPECS:
+        trade_id = str(spec["trade_id"])
+        berm_trade = berms_from_ore[trade_id]
+        trade_times = load_ore_exposure_times((out / f"exposure_trade_{trade_id}.csv").as_posix())
+        x_trade = simulate_lgm_measure(
+            model,
+            trade_times,
+            n_paths=args.python_paths,
+            rng=np.random.default_rng(args.python_seed + 500 + len(berm_trade_compare)),
+        )
+        ex_trade = _map_to_effective_exercise_times(trade_times, berm_trade.exercise_times)
+        berm_trade_on_grid = BermudanSwaptionDef(
+            trade_id=berm_trade.trade_id,
+            exercise_times=ex_trade,
+            underlying_legs=berm_trade.underlying_legs,
+            exercise_sign=berm_trade.exercise_sign,
+        )
+        lsmc_trade = float(
+            np.mean(
+                bermudan_npv_paths(
+                    model,
+                    p0_disc,
+                    p0_fwd,
+                    berm_trade_on_grid,
+                    trade_times,
+                    x_trade,
+                    basis_degree=1,
+                    itm_only=True,
+                )[0, :]
+            )
+        )
+        backward_single = float(bermudan_backward_price(model, p0_disc, p0_disc, berm_trade, n_grid=121).price)
+        backward_dual = float(bermudan_backward_price(model, p0_disc, p0_fwd_6m, berm_trade, n_grid=121).price)
+        berm_trade_compare.append(
+            {
+                "trade_id": trade_id,
+                "lsmc_price": lsmc_trade,
+                "backward_single_price": backward_single,
+                "backward_dual6m_price": backward_dual,
+                "ore_price": _load_trade_npv(npv_csv, trade_id),
+            }
+        )
     berm_method_grid = {}
-    ore_berm_pv = _load_trade_npv(npv_csv, "BERM_EUR_5Y")
+    ore_berm_pv = _load_trade_npv(npv_csv, PRIMARY_BERM_ID)
     for deg in (1, 2, 3, 4):
         for itm in (True, False):
             for feat in ("x", "x_swap"):
@@ -810,7 +1125,7 @@ def main() -> None:
                     }
     best_key = min(berm_method_grid.keys(), key=lambda k: abs(berm_method_grid[k]["abs_diff_vs_ore"]))
     # Also compare single-curve dual-curve underlying swap at t0.
-    legs_ore = load_ore_legs_from_flows((out / "flows.csv").as_posix(), trade_id="BERM_EUR_5Y", asof_date="2016-02-05")
+    legs_ore = load_ore_legs_from_flows((out / "flows.csv").as_posix(), trade_id=PRIMARY_BERM_ID, asof_date="2016-02-05")
     swap_single = float(swap_npv_from_ore_legs_dual_curve(model, p0_disc, p0_disc, legs_ore, 0.0, np.array([0.0]))[0])
     swap_dual = float(swap_npv_from_ore_legs_dual_curve(model, p0_disc, p0_fwd_6m, legs_ore, 0.0, np.array([0.0]))[0])
 
@@ -826,6 +1141,7 @@ def main() -> None:
                     "swap_t0_dual_curve": swap_dual,
                     "closeout": {"mode": args.closeout_mode, "mpor_days": float(args.mpor_days)},
                     "lsmc_variants": berm_dbg,
+                    "trade_compare": berm_trade_compare,
                     "method_grid": berm_method_grid,
                     "best_method": {"key": best_key, **berm_method_grid[best_key]},
                 },
@@ -838,19 +1154,43 @@ def main() -> None:
         w.writeheader()
         w.writerows(rows)
 
-    print(
-        json.dumps(
-            {
-                "ore_seconds": t_ore,
-                "rows": rows,
-                "bermudan_diagnostics": {
-                    "lsmc_variants": berm_dbg,
-                    "best_method": {"key": best_key, **berm_method_grid[best_key]},
-                },
-            },
-            indent=2,
-        )
+    report = _render_report(
+        rows=rows,
+        ore_seconds=float(t_ore),
+        ore_samples=int(args.ore_samples),
+        python_paths=int(args.python_paths),
+        closeout_mode=str(args.closeout_mode),
+        mpor_days=float(args.mpor_days),
+        best_key=best_key,
+        best_method=berm_method_grid[best_key],
+        berm_compare_rows=[
+            (
+                str(r["trade_id"]),
+                float(r["lsmc_price"]),
+                float(r["backward_single_price"]),
+                float(r["backward_dual6m_price"]),
+                float(r["ore_price"]),
+            )
+            for r in berm_trade_compare
+        ],
     )
+    print(report)
+    if args.json:
+        print("Machine-readable JSON:")
+        print(
+            json.dumps(
+                {
+                    "ore_seconds": t_ore,
+                    "rows": rows,
+                    "bermudan_diagnostics": {
+                        "lsmc_variants": berm_dbg,
+                        "trade_compare": berm_trade_compare,
+                        "best_method": {"key": best_key, **berm_method_grid[best_key]},
+                    },
+                },
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -151,6 +151,10 @@ Inputs:
 Outputs:
 - Local result set under `parity_artifacts/ir_options_ore_benchmark/`
 
+Notes:
+- The EUR cap cases in this benchmark should use `EUR-EURIBOR-6M` with a `6M` coupon schedule. The example ORE market configuration exposes the EUR normal cap/floor surface on `6M`, not `3M`, so a `3M` benchmark setup creates a false parity gap.
+- Cap PV parity is best obtained here from a Bachelier caplet sum using the quoted `CAPFLOOR/RATE_NVOL/EUR/2Y/6M/...` normal vols. The old LGM-only cap path materially underpriced deep OTM tails or overstated low-strike caps.
+
 Example:
 
 ```bash
