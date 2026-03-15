@@ -32,7 +32,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -306,4 +306,3 @@ else:
 
 The next notebook moves from a hand-built snapshot to a loader-backed snapshot built from a fresh ORE run.
 """
-

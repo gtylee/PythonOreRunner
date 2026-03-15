@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _REPO_ROOT / "src"
+if _SRC_ROOT.exists():
+    src_text = str(_SRC_ROOT)
+    if src_text not in sys.path:
+        sys.path.insert(0, src_text)
 
 
 def find_engine_repo_root() -> Path | None:
@@ -10,7 +19,7 @@ def find_engine_repo_root() -> Path | None:
     if env_root:
         candidates.append(Path(env_root))
 
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = _REPO_ROOT
     candidates.extend(
         [
             repo_root,

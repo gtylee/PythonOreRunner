@@ -14,10 +14,12 @@ from pythonore.domain.dataclasses import (
     CollateralBalance,
     CollateralConfig,
     FXForward,
+    IndependentAmount,
     FixingPoint,
     FixingsData,
     GenericProduct,
     IRS,
+    MarginingFrequency,
     MarketData,
     MarketQuote,
     MporConfig,
@@ -550,7 +552,7 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
                     if (n.text or "").strip()
                 )
                 if not exercise_dates:
-                    return GenericProduct(payload={"trade_type": trade_type, "style": "Bermudan"})
+                    return GenericProduct(payload={"trade_type": trade_type, "style": "Bermudan", "xml": _product_inner_xml(trade)})
                 return BermudanSwaption(
                     ccy=ccy,
                     notional=notional,
@@ -591,7 +593,16 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
                     is_in_arrears=(_text(float_leg, "./FloatingLegData/IsInArrears") or "false").strip().lower() in {"true", "1", "y", "yes"},
                 )
 
-    return GenericProduct(payload={"trade_type": trade_type})
+    return GenericProduct(payload={"trade_type": trade_type, "xml": _product_inner_xml(trade)})
+
+
+def _product_inner_xml(trade: ET.Element) -> str:
+    parts: List[str] = []
+    for child in list(trade):
+        if child.tag in {"TradeType", "Envelope"}:
+            continue
+        parts.append(ET.tostring(child, encoding="unicode"))
+    return "\n".join(parts)
 
 
 def _parse_netting(path: Path) -> NettingConfig:
@@ -609,12 +620,45 @@ def _parse_netting(path: Path) -> NettingConfig:
         out[ns_id] = NettingSet(
             netting_set_id=ns_id,
             active_csa=csa_flag,
+            bilateral=_text(n, "./CSADetails/Bilateral"),
             csa_currency=_text(n, "./CSADetails/CSACurrency"),
+            index=_text(n, "./CSADetails/Index"),
             margin_period_of_risk=_text(n, "./CSADetails/MarginPeriodOfRisk"),
             threshold_pay=_to_float(_text(n, "./CSADetails/ThresholdPay")),
             threshold_receive=_to_float(_text(n, "./CSADetails/ThresholdReceive")),
             mta_pay=_to_float(_text(n, "./CSADetails/MinimumTransferAmountPay")),
             mta_receive=_to_float(_text(n, "./CSADetails/MinimumTransferAmountReceive")),
+            independent_amount=IndependentAmount(
+                held=_to_float(_text(n, "./CSADetails/IndependentAmount/IndependentAmountHeld")),
+                posted=_to_float(_text(n, "./CSADetails/IndependentAmount/IndependentAmountPosted")),
+                amount_type=_text(n, "./CSADetails/IndependentAmount/IndependentAmountType"),
+            ),
+            margining_frequency=MarginingFrequency(
+                call_frequency=_text(n, "./CSADetails/MarginingFrequency/CallFrequency"),
+                post_frequency=_text(n, "./CSADetails/MarginingFrequency/PostFrequency"),
+            ),
+            collateral_compounding_spread_receive=_to_float(_text(n, "./CSADetails/CollateralCompoundingSpreadReceive")),
+            collateral_compounding_spread_pay=_to_float(_text(n, "./CSADetails/CollateralCompoundingSpreadPay")),
+            eligible_collateral_currencies=tuple(
+                (c.text or "").strip()
+                for c in n.findall("./CSADetails/EligibleCollaterals/Currencies/Currency")
+                if (c.text or "").strip()
+            ),
+            raw_csa_fields=_child_text_map(n.find("./CSADetails"), exclude={
+                "Bilateral",
+                "CSACurrency",
+                "Index",
+                "ThresholdPay",
+                "ThresholdReceive",
+                "MinimumTransferAmountPay",
+                "MinimumTransferAmountReceive",
+                "IndependentAmount",
+                "MarginingFrequency",
+                "MarginPeriodOfRisk",
+                "CollateralCompoundingSpreadReceive",
+                "CollateralCompoundingSpreadPay",
+                "EligibleCollaterals",
+            }),
         )
     return NettingConfig(netting_sets=out, source_meta=SourceMeta(origin="file", path=str(path)))
 
@@ -643,6 +687,16 @@ def _parse_collateral(path: Path, required: bool) -> CollateralConfig:
                 currency=ccy,
                 initial_margin=_to_float(_text(b, "./InitialMargin")) or 0.0,
                 variation_margin=_to_float(_text(b, "./VariationMargin")) or 0.0,
+                initial_margin_type=_text(b, "./InitialMarginType"),
+                variation_margin_type=_text(b, "./VariationMarginType"),
+                raw_fields=_child_text_map(b, exclude={
+                    "NettingSetId",
+                    "Currency",
+                    "InitialMargin",
+                    "VariationMargin",
+                    "InitialMarginType",
+                    "VariationMarginType",
+                }),
             )
         )
     return CollateralConfig(balances=tuple(out), source_meta=SourceMeta(origin="file", path=str(path)))
@@ -725,6 +779,20 @@ def _to_float(v: Optional[str]) -> Optional[float]:
     if v is None or v == "":
         return None
     return float(v)
+
+
+def _child_text_map(node: ET.Element | None, exclude: set[str] | None = None) -> Dict[str, str]:
+    if node is None:
+        return {}
+    excluded = exclude or set()
+    out: Dict[str, str] = {}
+    for child in list(node):
+        if child.tag in excluded or list(child):
+            continue
+        text = (child.text or "").strip()
+        if text:
+            out[child.tag] = text
+    return out
 
 
 def _resolve_snapshot_mpor(

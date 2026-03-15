@@ -27,7 +27,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -211,4 +211,3 @@ nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python_
 - Base, market-bumped, and portfolio-patched runs are easiest to compare in one persistent session.
 - The notebook is most useful as a workflow demo when the snapshot stays small and explicit.
 """
-

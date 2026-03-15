@@ -27,7 +27,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -301,4 +301,3 @@ the runtime, while the earlier single-trade notebook examples are mostly about t
 - Repeated benchmark runs with throughput are a better performance demo than one elapsed-time printout.
 - The large 256-trade multi-currency portfolio is the right place to compare numpy and torch backends.
 """
-

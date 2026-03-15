@@ -6,11 +6,11 @@ from pathlib import Path
 
 
 _PKG_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _PKG_DIR.parent
+_REPO_ROOT = _PKG_DIR.parents[1]
 _LEGACY_DIR = _REPO_ROOT / "legacy" / "py_ore_tools"
 _SRC = _REPO_ROOT / "src" / "pythonore"
 
-_CACHE_ROOT = _PKG_DIR / ".cache"
+_CACHE_ROOT = _REPO_ROOT / ".cache" / "py_ore_tools"
 _MPL_CACHE = _CACHE_ROOT / "matplotlib"
 _FONTCONFIG_CACHE = _CACHE_ROOT / "fontconfig"
 _MPL_CACHE.mkdir(parents=True, exist_ok=True)
@@ -48,6 +48,17 @@ _EXPORTS = {
     "load_from_ore_xml": ("pythonore.io.ore_snapshot", "load_from_ore_xml"),
     "validate_ore_input_snapshot": ("pythonore.io.ore_snapshot", "validate_ore_input_snapshot"),
     "ore_input_validation_dataframe": ("pythonore.io.ore_snapshot", "ore_input_validation_dataframe"),
+    "validate_xva_snapshot_dataclasses": ("pythonore.io.ore_snapshot", "validate_xva_snapshot_dataclasses"),
+    "xva_snapshot_validation_dataframe": ("pythonore.io.ore_snapshot", "xva_snapshot_validation_dataframe"),
+    "RateFutureModelParams": ("pythonore.compute.rate_futures", "RateFutureModelParams"),
+    "extract_market_instruments_by_currency_from_quotes": (
+        "pythonore.compute.rate_futures",
+        "extract_market_instruments_by_currency_from_quotes",
+    ),
+    "fit_discount_curves_from_programmatic_quotes": (
+        "pythonore.compute.rate_futures",
+        "fit_discount_curves_from_programmatic_quotes",
+    ),
     "DEFAULT_BASELINE_ROOT": ("pythonore.workflows.examples_regression", "DEFAULT_BASELINE_ROOT"),
     "DEFAULT_MANIFEST": ("pythonore.workflows.examples_regression", "DEFAULT_MANIFEST"),
     "ExampleRegressionCase": ("pythonore.workflows.examples_regression", "ExampleRegressionCase"),

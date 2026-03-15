@@ -40,8 +40,7 @@ PALETTE = {
 def _is_pythonorerunner_root(path: Path) -> bool:
     return (
         (path / "notebook_series" / "series_helpers.py").exists()
-        and (path / "native_xva_interface").exists()
-        and (path / "py_ore_tools").exists()
+        and ((path / "pythonore").exists() or (path / "src" / "pythonore").exists())
     )
 
 
@@ -101,13 +100,14 @@ def bootstrap_notebook_env(start: Path | None = None) -> Path:
     repo = find_repo_root(start)
     py_runner = _pythonorerunner_root(repo)
     notebook_dir = Path(__file__).resolve().parent
+    src_root = py_runner / "src"
     engine_repo = _engine_repo_root(repo)
     swig_build = engine_repo / "ORE-SWIG" / "build" / "lib.macosx-10.13-universal2-cpython-313"
     os.environ.setdefault("MPLCONFIGDIR", str((py_runner / ".mplconfig").resolve()))
     os.chdir(repo)
 
     sys.path = [p for p in sys.path if not p.endswith("native_xva_interface")]
-    for path in (str(notebook_dir), str(py_runner), str(swig_build)):
+    for path in (str(src_root), str(notebook_dir), str(py_runner), str(swig_build)):
         if path and Path(path).exists() and path not in sys.path:
             sys.path.insert(0, path)
 
@@ -1590,7 +1590,7 @@ def lgm_benchmark_frame(model, times: np.ndarray, *, path_counts: tuple[int, ...
 
 def parse_parity_report() -> tuple[pd.DataFrame, str]:
     repo = find_repo_root()
-    report_path = _pythonorerunner_root(repo) / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
+    report_path = _pythonorerunner_root(repo) / "legacy" / "native_xva_interface" / "docs" / "PY_LGM_ORE_PARITY_REPORT.md"
     text = report_path.read_text(encoding="utf-8")
     rows = []
     for line in text.splitlines():

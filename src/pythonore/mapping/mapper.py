@@ -181,7 +181,7 @@ def _portfolio_to_xml(portfolio: Portfolio, asof: str, runtime: RuntimeConfig) -
         lines.append("    <Envelope>")
         lines.append(f"      <CounterParty>{t.counterparty}</CounterParty>")
         lines.append(f"      <NettingSetId>{t.netting_set}</NettingSetId>")
-        lines.append("      <AdditionalFields/>")
+        lines.extend(_additional_fields_xml(t.additional_fields))
         lines.append("    </Envelope>")
         lines.extend(_product_xml(t, asof, runtime))
         lines.append("  </Trade>")
@@ -379,7 +379,23 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             "      </LegData>",
             "    </SwaptionData>",
         ]
+    if isinstance(p, GenericProduct):
+        payload_xml = str(p.payload.get("xml", "")).strip()
+        if payload_xml:
+            return [f"    {line}" if line else "" for line in payload_xml.splitlines()]
     return ["    <Data/>", f"    <!-- Generic product payload omitted for {type(p).__name__} -->"]
+
+
+def _additional_fields_xml(fields: Dict[str, str]) -> List[str]:
+    if not fields:
+        return ["      <AdditionalFields/>"]
+    lines = ["      <AdditionalFields>"]
+    for key, value in fields.items():
+        tag = _xml_safe_tag(key)
+        escaped = _xml_escape(value)
+        lines.append(f"        <{tag}>{escaped}</{tag}>")
+    lines.append("      </AdditionalFields>")
+    return lines
 
 
 def _netting_to_xml(netting: NettingConfig) -> str:
@@ -389,12 +405,54 @@ def _netting_to_xml(netting: NettingConfig) -> str:
         lines.append(f"    <NettingSetId>{ns_id}</NettingSetId>")
         lines.append(f"    <ActiveCSAFlag>{str(ns.active_csa).lower()}</ActiveCSAFlag>")
         lines.append("    <CSADetails>")
+        if ns.bilateral is not None:
+            lines.append(f"      <Bilateral>{_xml_escape(ns.bilateral)}</Bilateral>")
         lines.append(f"      <CSACurrency>{ns.csa_currency or 'EUR'}</CSACurrency>")
+        if ns.index is not None:
+            lines.append(f"      <Index>{_xml_escape(ns.index)}</Index>")
         lines.append(f"      <ThresholdPay>{ns.threshold_pay or 0.0}</ThresholdPay>")
         lines.append(f"      <ThresholdReceive>{ns.threshold_receive or 0.0}</ThresholdReceive>")
         lines.append(f"      <MinimumTransferAmountPay>{ns.mta_pay or 0.0}</MinimumTransferAmountPay>")
         lines.append(f"      <MinimumTransferAmountReceive>{ns.mta_receive or 0.0}</MinimumTransferAmountReceive>")
+        if (
+            ns.independent_amount.held is not None
+            or ns.independent_amount.posted is not None
+            or ns.independent_amount.amount_type is not None
+        ):
+            lines.append("      <IndependentAmount>")
+            if ns.independent_amount.held is not None:
+                lines.append(f"        <IndependentAmountHeld>{ns.independent_amount.held}</IndependentAmountHeld>")
+            if ns.independent_amount.posted is not None:
+                lines.append(f"        <IndependentAmountPosted>{ns.independent_amount.posted}</IndependentAmountPosted>")
+            if ns.independent_amount.amount_type is not None:
+                lines.append(f"        <IndependentAmountType>{_xml_escape(ns.independent_amount.amount_type)}</IndependentAmountType>")
+            lines.append("      </IndependentAmount>")
+        if ns.margining_frequency.call_frequency is not None or ns.margining_frequency.post_frequency is not None:
+            lines.append("      <MarginingFrequency>")
+            if ns.margining_frequency.call_frequency is not None:
+                lines.append(f"        <CallFrequency>{_xml_escape(ns.margining_frequency.call_frequency)}</CallFrequency>")
+            if ns.margining_frequency.post_frequency is not None:
+                lines.append(f"        <PostFrequency>{_xml_escape(ns.margining_frequency.post_frequency)}</PostFrequency>")
+            lines.append("      </MarginingFrequency>")
         lines.append(f"      <MarginPeriodOfRisk>{ns.margin_period_of_risk or '0D'}</MarginPeriodOfRisk>")
+        if ns.collateral_compounding_spread_receive is not None:
+            lines.append(
+                f"      <CollateralCompoundingSpreadReceive>{ns.collateral_compounding_spread_receive}</CollateralCompoundingSpreadReceive>"
+            )
+        if ns.collateral_compounding_spread_pay is not None:
+            lines.append(
+                f"      <CollateralCompoundingSpreadPay>{ns.collateral_compounding_spread_pay}</CollateralCompoundingSpreadPay>"
+            )
+        if ns.eligible_collateral_currencies:
+            lines.append("      <EligibleCollaterals>")
+            lines.append("        <Currencies>")
+            for ccy in ns.eligible_collateral_currencies:
+                lines.append(f"          <Currency>{_xml_escape(ccy)}</Currency>")
+            lines.append("        </Currencies>")
+            lines.append("      </EligibleCollaterals>")
+        for key, value in ns.raw_csa_fields.items():
+            tag = _xml_safe_tag(key)
+            lines.append(f"      <{tag}>{_xml_escape(value)}</{tag}>")
         lines.append("    </CSADetails>")
         lines.append("  </NettingSet>")
     lines.append("</NettingSetDefinitions>")
@@ -409,6 +467,13 @@ def _collateral_to_xml(collateral: CollateralConfig) -> str:
         lines.append(f"    <Currency>{bal.currency}</Currency>")
         lines.append(f"    <InitialMargin>{bal.initial_margin}</InitialMargin>")
         lines.append(f"    <VariationMargin>{bal.variation_margin}</VariationMargin>")
+        if bal.initial_margin_type is not None:
+            lines.append(f"    <InitialMarginType>{_xml_escape(bal.initial_margin_type)}</InitialMarginType>")
+        if bal.variation_margin_type is not None:
+            lines.append(f"    <VariationMarginType>{_xml_escape(bal.variation_margin_type)}</VariationMarginType>")
+        for key, value in bal.raw_fields.items():
+            tag = _xml_safe_tag(key)
+            lines.append(f"    <{tag}>{_xml_escape(value)}</{tag}>")
         lines.append("  </CollateralBalance>")
     lines.append("</CollateralBalances>")
     return "\n".join(lines)
@@ -448,6 +513,26 @@ def _add_months_yyyymmdd(start_yyyymmdd: str, months: int) -> str:
 def _currency_from_token(value: str) -> str:
     token = str(value or "").strip().upper()
     return token[:3] if len(token) >= 3 and token[:3].isalpha() else ""
+
+
+def _xml_safe_tag(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip())
+    if not text:
+        return "Field"
+    if not re.match(r"[A-Za-z_]", text[0]):
+        text = f"Field_{text}"
+    return text
+
+
+def _xml_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
 
 
 def _currency_from_curve_id(curve_id: str) -> str:

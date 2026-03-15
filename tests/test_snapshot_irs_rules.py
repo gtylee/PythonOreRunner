@@ -11,10 +11,15 @@ from pythonore.domain.dataclasses import (
     CrossAssetModelConfig,
     FXForward,
     FixingsData,
+    GenericProduct,
+    IndependentAmount,
     IRS,
+    MarginingFrequency,
     MarketData,
     MarketQuote,
+    CollateralBalance,
     NettingConfig,
+    NettingSet,
     Portfolio,
     PricingEngineConfig,
     RuntimeConfig,
@@ -583,3 +588,163 @@ def test_custom_runtime_config_changes_generated_xml_payloads():
     assert base_sim.findtext("./Parameters/Calendar") != custom_sim.findtext("./Parameters/Calendar")
     assert base_sim.findtext("./CrossAssetModel/BootstrapTolerance") != custom_sim.findtext("./CrossAssetModel/BootstrapTolerance")
     assert base_sim.findtext("./Market/FxVolatilities/ReactionToTimeDecay") != custom_sim.findtext("./Market/FxVolatilities/ReactionToTimeDecay")
+
+
+def test_trade_additional_fields_are_preserved_in_generated_portfolio_xml():
+    snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(
+                Trade(
+                    trade_id="T1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="Swap",
+                    product=IRS(ccy="EUR", notional=1_000_000, fixed_rate=0.03, maturity_years=2.0),
+                    additional_fields={"Desk": "Rates", "Strategy-Id": "alpha<1>&beta"},
+                ),
+            )
+        ),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR"),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    root = ET.fromstring(map_snapshot(snapshot).xml_buffers["portfolio.xml"])
+    assert root.findtext("./Trade/Envelope/AdditionalFields/Desk") == "Rates"
+    assert root.findtext("./Trade/Envelope/AdditionalFields/Strategy-Id") == "alpha<1>&beta"
+
+
+def test_generic_product_xml_is_preserved_across_loader_and_mapper():
+    portfolio_xml = """
+<Portfolio>
+  <Trade id="GEN1">
+    <TradeType>CommodityForward</TradeType>
+    <Envelope>
+      <CounterParty>CP_A</CounterParty>
+      <NettingSetId>NS1</NettingSetId>
+      <AdditionalFields>
+        <Desk>Commodities</Desk>
+      </AdditionalFields>
+    </Envelope>
+    <CommodityForwardData>
+      <Name>POWER_Q1</Name>
+      <Currency>EUR</Currency>
+      <Quantity>100</Quantity>
+    </CommodityForwardData>
+  </Trade>
+</Portfolio>
+""".strip()
+    trade = ET.fromstring(portfolio_xml).find("./Trade")
+    product = _parse_product_from_trade_xml(trade, "CommodityForward")
+
+    assert isinstance(product, GenericProduct)
+    assert "CommodityForwardData" in product.payload["xml"]
+
+    snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(
+                Trade(
+                    trade_id="GEN1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="CommodityForward",
+                    product=product,
+                    additional_fields={"Desk": "Commodities"},
+                ),
+            )
+        ),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR"),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    mapped = map_snapshot(snapshot)
+    remapped_root = ET.fromstring(mapped.xml_buffers["portfolio.xml"])
+    assert remapped_root.find("./Trade/CommodityForwardData") is not None
+    assert remapped_root.findtext("./Trade/CommodityForwardData/Name") == "POWER_Q1"
+    assert remapped_root.findtext("./Trade/Envelope/AdditionalFields/Desk") == "Commodities"
+
+
+def test_rich_netting_and_collateral_fields_round_trip_and_change_generated_xml():
+    default_snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(trades=(Trade(trade_id="T1", counterparty="CP_A", netting_set="NS1", trade_type="Swap", product=IRS(ccy="EUR", notional=1_000_000, fixed_rate=0.03, maturity_years=2.0)),)),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR"),
+        netting=NettingConfig(netting_sets={"NS1": NettingSet(netting_set_id="NS1", active_csa=True, csa_currency="EUR")}),
+        collateral=CollateralConfig(balances=(CollateralBalance(netting_set_id="NS1", currency="EUR", initial_margin=0.0, variation_margin=0.0),)),
+    )
+    custom_snapshot = XVASnapshot(
+        market=default_snapshot.market,
+        fixings=default_snapshot.fixings,
+        portfolio=default_snapshot.portfolio,
+        config=default_snapshot.config,
+        netting=NettingConfig(
+            netting_sets={
+                "NS1": NettingSet(
+                    netting_set_id="NS1",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    bilateral="Bilateral",
+                    csa_currency="EUR",
+                    index="EUR-EONIA",
+                    margin_period_of_risk="2W",
+                    threshold_pay=100000.0,
+                    threshold_receive=200000.0,
+                    mta_pay=5000.0,
+                    mta_receive=6000.0,
+                    independent_amount=IndependentAmount(held=7000.0, posted=3000.0, amount_type="FIXED"),
+                    margining_frequency=MarginingFrequency(call_frequency="1D", post_frequency="2D"),
+                    collateral_compounding_spread_receive=0.01,
+                    collateral_compounding_spread_pay=0.02,
+                    eligible_collateral_currencies=("EUR", "USD"),
+                    raw_csa_fields={"OpeningBalance": "123.45"},
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(
+                CollateralBalance(
+                    netting_set_id="NS1",
+                    currency="EUR",
+                    initial_margin=1500000.0,
+                    variation_margin=75000.0,
+                    initial_margin_type="SIMM",
+                    variation_margin_type="VM",
+                    raw_fields={"Custodian": "CUST_A"},
+                ),
+            )
+        ),
+    )
+
+    restored = XVASnapshot.from_dict(custom_snapshot.to_dict())
+    restored_ns = restored.netting.netting_sets["NS1"]
+    restored_bal = restored.collateral.balances[0]
+    assert restored_ns.index == "EUR-EONIA"
+    assert restored_ns.independent_amount.amount_type == "FIXED"
+    assert restored_ns.margining_frequency.post_frequency == "2D"
+    assert restored_ns.eligible_collateral_currencies == ("EUR", "USD")
+    assert restored_ns.raw_csa_fields["OpeningBalance"] == "123.45"
+    assert restored_bal.initial_margin_type == "SIMM"
+    assert restored_bal.raw_fields["Custodian"] == "CUST_A"
+
+    default_mapped = map_snapshot(default_snapshot)
+    custom_mapped = map_snapshot(custom_snapshot)
+    assert default_mapped.xml_buffers["netting.xml"] != custom_mapped.xml_buffers["netting.xml"]
+    assert default_mapped.xml_buffers["collateralbalances.xml"] != custom_mapped.xml_buffers["collateralbalances.xml"]
+
+    netting_root = ET.fromstring(custom_mapped.xml_buffers["netting.xml"])
+    assert netting_root.findtext("./NettingSet/CSADetails/Index") == "EUR-EONIA"
+    assert netting_root.findtext("./NettingSet/CSADetails/IndependentAmount/IndependentAmountPosted") == "3000.0"
+    assert netting_root.findtext("./NettingSet/CSADetails/MarginingFrequency/PostFrequency") == "2D"
+    assert [n.text for n in netting_root.findall("./NettingSet/CSADetails/EligibleCollaterals/Currencies/Currency")] == ["EUR", "USD"]
+    assert netting_root.findtext("./NettingSet/CSADetails/OpeningBalance") == "123.45"
+
+    collateral_root = ET.fromstring(custom_mapped.xml_buffers["collateralbalances.xml"])
+    assert collateral_root.findtext("./CollateralBalance/InitialMarginType") == "SIMM"
+    assert collateral_root.findtext("./CollateralBalance/VariationMarginType") == "VM"
+    assert collateral_root.findtext("./CollateralBalance/Custodian") == "CUST_A"

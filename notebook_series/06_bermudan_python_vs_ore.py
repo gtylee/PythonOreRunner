@@ -28,7 +28,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -278,4 +278,3 @@ plt.close(fig)
 - Treat `backward` as the ORE-classic parity engine and `lsmc` as the control.
 - On these Bermudan cases, `calibration.xml` is the right model source whenever ORE has already produced it.
 """
-

@@ -258,16 +258,37 @@ class Portfolio:
 
 
 @dataclass(frozen=True)
+class IndependentAmount:
+    held: Optional[float] = None
+    posted: Optional[float] = None
+    amount_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MarginingFrequency:
+    call_frequency: Optional[str] = None
+    post_frequency: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class NettingSet:
     netting_set_id: str
     counterparty: Optional[str] = None
     active_csa: bool = False
+    bilateral: Optional[str] = None
     csa_currency: Optional[str] = None
+    index: Optional[str] = None
     margin_period_of_risk: Optional[str] = None
     threshold_pay: Optional[float] = None
     threshold_receive: Optional[float] = None
     mta_pay: Optional[float] = None
     mta_receive: Optional[float] = None
+    independent_amount: IndependentAmount = field(default_factory=IndependentAmount)
+    margining_frequency: MarginingFrequency = field(default_factory=MarginingFrequency)
+    collateral_compounding_spread_pay: Optional[float] = None
+    collateral_compounding_spread_receive: Optional[float] = None
+    eligible_collateral_currencies: Tuple[str, ...] = ()
+    raw_csa_fields: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -293,6 +314,9 @@ class CollateralBalance:
     currency: str
     initial_margin: float = 0.0
     variation_margin: float = 0.0
+    initial_margin_type: Optional[str] = None
+    variation_margin_type: Optional[str] = None
+    raw_fields: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -691,7 +715,17 @@ def _snapshot_from_dict(data: Dict[str, Any]) -> XVASnapshot:
     )
 
     ns = NettingConfig(
-        netting_sets={k: NettingSet(**v) for k, v in netting.get("netting_sets", {}).items()},
+        netting_sets={
+            k: NettingSet(
+                **{
+                    **v,
+                    "independent_amount": IndependentAmount(**v.get("independent_amount", {})),
+                    "margining_frequency": MarginingFrequency(**v.get("margining_frequency", {})),
+                    "eligible_collateral_currencies": tuple(v.get("eligible_collateral_currencies", ())),
+                }
+            )
+            for k, v in netting.get("netting_sets", {}).items()
+        },
         source_meta=SourceMeta(**netting.get("source_meta", {"origin": "dataclass"})),
     )
 

@@ -28,7 +28,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -379,4 +379,3 @@ plt.close(fig)
 - The fitting method changes the curve shape more subtly than the quote mix does.
 - The LGM parameter tables can be inspected as ordinary Python data before any larger workflow is built on top.
 """
-

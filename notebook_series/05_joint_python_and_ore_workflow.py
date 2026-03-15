@@ -28,7 +28,7 @@ import sys
 def _pythonorerunner_root(candidate: Path) -> bool:
     return (
         (candidate / "notebook_series" / "series_helpers.py").exists()
-        and (candidate / "py_ore_tools").exists()
+        and ((candidate / "pythonore").exists() or (candidate / "src" / "pythonore").exists())
     )
 
 def _engine_root(candidate: Path) -> bool:
@@ -234,4 +234,3 @@ nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python"
 These five notebooks now form one continuous story: Python snapshot construction, fresh ORE-backed loading, market
 calibration, Python LGM XVA, and a final Python-and-ORE workflow that distinguishes aligned comparisons from live demos.
 """
-
