@@ -148,8 +148,20 @@ Current Bermudan benchmark rule:
 - keep the main ORE PV/XVA run in `Output/`
 - also run a classic calibration pass in `Output/classic/`
 - build the Python Bermudan LGM model from `Output/classic/calibration.xml` when present
+- rebuild Bermudan floating legs from `flows.csv` with `time_day_counter=A365F` and `index_day_counter=A360`
+- use the larger backward grid (`n_grid=41`) for the benchmark comparison, not the earlier small-grid tuning hack
 
 On this repo that matters a lot more than the old flat simulation stub. With the classic calibration source restored, the 5Y Bermudan backward PV rows moved from about `+8.4% / +93.3% / -0.04%` to about `-0.67% / +27.8% / -2.82%` for `BERM_EUR_5Y / LOWK / HIGHK` at `--ore-samples 1024`.
+
+The last Bermudan grid parity gap was closed by fixing the floating-leg convention and grid size together:
+- `EUR-EURIBOR-6M` coupons must still project on the index basis (`A360`), even when `flows.csv` coupon accruals are reused elsewhere
+- keeping `float_index_accrual = flow Accrual` materially biases the Bermudan intrinsic
+- once `float_index_accrual` was rebuilt on `A360`, the benchmark no longer wanted the tiny empirical `n_grid=5` setting; `n_grid=41` moved both supported ORE markets close to parity
+
+Current fast-grid benchmark parity on this repo:
+- `default` market, `EUR-EONIA : EUR-EURIBOR-6M`: about `-0.172% / +0.060% / -0.179%`
+- `libor` market, `EUR-EURIBOR-6M : EUR-EURIBOR-6M`: about `-0.169% / +0.064% / -0.176%`
+- the same-curve fallback is now clearly worse on the `default` market and should be treated as a diagnostic only, not the main benchmark row
 
 Inputs:
 - ORE example market/config files from `ENGINE_REPO_ROOT/Examples/Input`

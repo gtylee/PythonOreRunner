@@ -53,7 +53,7 @@ BERM_TRADE_SPECS = (
     {"trade_id": "BERM_EUR_5Y_LOWK", "fixed_rate": 0.020},
     {"trade_id": "BERM_EUR_5Y_HIGHK", "fixed_rate": 0.040},
 )
-BERM_BACKWARD_N_GRID = 11
+BERM_BACKWARD_N_GRID = 41
 
 
 @dataclass(frozen=True)
@@ -835,67 +835,13 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date, trade_id: str) -> Be
     def _t(d: str) -> float:
         return (date.fromisoformat(d) - asof).days / 365.0
 
-    rows = []
-    with open(flows_csv, newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        tid_key = "TradeId" if r.fieldnames and "TradeId" in r.fieldnames else "#TradeId"
-        for row in r:
-            if row.get(tid_key, "") == trade_id and row.get("FlowType", "").startswith("Interest"):
-                rows.append(row)
-    if not rows:
-        raise ValueError(f"no Bermudan rows found in flows.csv for {trade_id}")
-
-    leg0 = [x for x in rows if x.get("LegNo", "") == "0"]
-    leg1 = [x for x in rows if x.get("LegNo", "") == "1"]
-    if not leg0 or not leg1:
-        raise ValueError("failed to split Bermudan legs from flows.csv")
-
-    # In this trade, leg0 is floating projected and leg1 is fixed.
-    flt = sorted(leg0, key=lambda x: x["PayDate"])
-    fix = sorted(leg1, key=lambda x: x["PayDate"])
-
-    fixed_pay = np.array([_t(x["PayDate"]) for x in fix], dtype=float)
-    fixed_start = np.array([_t(x["AccrualStartDate"]) for x in fix], dtype=float)
-    fixed_end = np.array([_t(x["AccrualEndDate"]) for x in fix], dtype=float)
-    fixed_accr = np.array([float(x["Accrual"]) for x in fix], dtype=float)
-    fixed_rate = np.array([float(x["Coupon"]) for x in fix], dtype=float)
-    fixed_notional = np.array([float(x["Notional"]) for x in fix], dtype=float)
-    fixed_sign = np.array([np.sign(float(x["Amount"])) for x in fix], dtype=float)
-    fixed_amount = np.array([float(x["Amount"]) for x in fix], dtype=float)
-
-    float_start = np.array([_t(x["AccrualStartDate"]) for x in flt], dtype=float)
-    float_end = np.array([_t(x["AccrualEndDate"]) for x in flt], dtype=float)
-    float_pay = np.array([_t(x["PayDate"]) for x in flt], dtype=float)
-    float_fix = np.array(
-        [
-            _t(x["fixingDate"]) if x.get("fixingDate", "") not in ("", "#N/A") else _t(x["AccrualStartDate"])
-            for x in flt
-        ],
-        dtype=float,
+    legs = load_ore_legs_from_flows(
+        flows_csv.as_posix(),
+        trade_id=trade_id,
+        asof_date=asof.isoformat(),
+        time_day_counter="A365F",
+        index_day_counter="A360",
     )
-    float_accr = np.array([float(x["Accrual"]) for x in flt], dtype=float)
-    float_notional = np.array([float(x["Notional"]) for x in flt], dtype=float)
-    float_sign = np.array([np.sign(float(x["Amount"])) for x in flt], dtype=float)
-
-    legs = {
-        "fixed_pay_time": fixed_pay,
-        "fixed_start_time": fixed_start,
-        "fixed_end_time": fixed_end,
-        "fixed_accrual": fixed_accr,
-        "fixed_rate": fixed_rate,
-        "fixed_notional": fixed_notional,
-        "fixed_sign": fixed_sign,
-        "fixed_amount": fixed_amount,
-        "float_pay_time": float_pay,
-        "float_start_time": float_start,
-        "float_end_time": float_end,
-        "float_fixing_time": float_fix,
-        "float_accrual": float_accr,
-        "float_notional": float_notional,
-        "float_sign": float_sign,
-        "float_spread": np.zeros_like(float_accr),
-        "float_coupon": np.zeros_like(float_accr),
-    }
     exercise_times = np.array([_t(f"{d[:4]}-{d[4:6]}-{d[6:]}") for d in BERM_EXERCISE_DATES], dtype=float)
     return BermudanSwaptionDef(
         trade_id=trade_id,

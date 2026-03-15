@@ -1158,6 +1158,23 @@ For the Python backward Bermudan pricer in `py_ore_tools/lgm_ir_options.py`:
 - intrinsic exercise values should be converted from PV to reduced value by dividing by the LGM numeraire before `max(intrinsic, continuation)`
 - the convolution rollback should mirror `LgmConvolutionSolver2` state-grid scaling (`sx/nx`, `sy/ny`) rather than using a generic Gauss-Hermite expectation step
 
+### Bermudan grid parity on this repo also depends on using the true floating index accrual
+
+For the EUR Bermudan swaption benchmarks on this repo:
+- do not reuse `flows.csv` coupon accrual as the floating index accrual
+- rebuild `float_index_accrual` on the actual index convention, which here is `A360` for `EUR-EURIBOR-6M`
+- keep the Bermudan leg times on the same `A365F` basis as the benchmark curve grid, but annualize forwards on the index basis
+
+Observed effect on `benchmark_ore_ir_grid.py` / `benchmark_ore_ir_options.py`:
+- using `flows.csv` coupon accrual as the index accrual left a residual Bermudan grid gap of roughly `-2% / +5% / -1.5%`
+- switching the floating index accrual to `A360` and using a proper rollback grid (`n_grid=41`) tightened the two supported ORE benchmark markets to about:
+  - `default` market: `-0.172% / +0.060% / -0.179%`
+  - `libor` market: `-0.169% / +0.064% / -0.176%`
+
+Guardrail:
+- if the base and high-strike Bermudans are still a couple of percent cheap while the low-strike trade is a few percent rich, inspect `float_index_accrual` first
+- if the benchmark only improves when `n_grid` is forced very small, that is often compensating for a leg-reconstruction convention bug rather than indicating the correct rollback grid
+
 Observed effect on this repo:
 - once reduced-value convolution rollback was implemented, Python backward moved from materially above Python LSMC to near-equality with it
 - after also preferring ORE `calibration.xml`, Python backward was effectively in classic ORE parity on the benchmark Bermudans

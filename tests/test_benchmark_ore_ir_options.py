@@ -26,7 +26,7 @@ from pythonore.benchmarks.benchmark_ore_ir_options import (
 
 class TestBenchmarkOreIrOptions(unittest.TestCase):
     def test_bermudan_backward_grid_is_tuned_explicitly(self):
-        self.assertEqual(BERM_BACKWARD_N_GRID, 11)
+        self.assertEqual(BERM_BACKWARD_N_GRID, 41)
 
     def test_cap_trade_matches_available_eur_surface_tenor(self):
         trade_xml = _cap_trade_xml("CAP_TEST", 0.03)
@@ -111,12 +111,23 @@ class TestBenchmarkOreIrOptions(unittest.TestCase):
 
     def test_reconstructed_bermudan_uses_flow_fixing_dates(self):
         berm = _build_berm_from_ore_flows(
-            Path("/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/ir_grid_ore_benchmark/Output/flows.csv"),
+            Path("/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/ir_grid_ore_benchmark/market_libor/Output/flows.csv"),
             asof=date(2016, 2, 5),
             trade_id="BERM_EUR_5Y",
         )
         self.assertIn("float_fixing_time", berm.underlying_legs)
         self.assertLess(float(berm.underlying_legs["float_fixing_time"][0]), float(berm.underlying_legs["float_start_time"][0]))
+
+    def test_reconstructed_bermudan_uses_a360_index_accrual(self):
+        berm = _build_berm_from_ore_flows(
+            Path("/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/ir_grid_ore_benchmark/market_libor/Output/flows.csv"),
+            asof=date(2016, 2, 5),
+            trade_id="BERM_EUR_5Y",
+        )
+        idx_tau = np.asarray(berm.underlying_legs["float_index_accrual"], dtype=float)
+        cpn_tau = np.asarray(berm.underlying_legs["float_accrual"], dtype=float)
+        self.assertGreater(float(np.max(np.abs(idx_tau - cpn_tau))), 1.0e-4)
+        self.assertAlmostEqual(float(idx_tau[0]), 0.50555556, places=6)
 
 
 if __name__ == "__main__":
