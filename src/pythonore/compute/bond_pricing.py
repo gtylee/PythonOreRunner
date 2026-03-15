@@ -397,6 +397,58 @@ class BondScenarioGrid:
 
 
 @dataclass(frozen=True)
+class TorchBondScenarioGrid:
+    device: str
+    dtype_name: str
+    discount_to_pay: object
+    survival_to_pay: object
+    recovery_discount_mid: object
+    recovery_default_prob: object
+    recovery_rate: object
+    forward_dirty_value: object | None = None
+    accrued_at_bond_settlement: object | None = None
+    payoff_discount: object | None = None
+    premium_discount: object | None = None
+
+
+@dataclass(frozen=True)
+class TorchCompiledBondTrade:
+    device: str
+    dtype_name: str
+    amounts: object
+    recovery_nominals: object
+
+
+@dataclass(frozen=True)
+class TorchBondScenarioGridBatch:
+    device: str
+    dtype_name: str
+    discount_to_pay: object
+    survival_to_pay: object
+    recovery_discount_mid: object
+    recovery_default_prob: object
+    recovery_rate: object
+    forward_dirty_value: object | None = None
+    accrued_at_bond_settlement: object | None = None
+    payoff_discount: object | None = None
+    premium_discount: object | None = None
+
+
+@dataclass(frozen=True)
+class TorchCompiledBondTradeBatch:
+    device: str
+    dtype_name: str
+    trade_type: str
+    amounts: object
+    recovery_nominals: object
+    forward_amount: object | None = None
+    settlement_dirty: object | None = None
+    long_in_forward: object | None = None
+    compensation_payment: object | None = None
+    compensation_payment_time: object | None = None
+
+
+@dataclass(frozen=True)
 class CompiledCallableCashflowState:
     amount: float
     pay_time: float
@@ -469,9 +521,74 @@ class CallableBondScenarioPack:
                 forward_dirty_value=None if self.stripped_grid.forward_dirty_value is None else np.asarray(self.stripped_grid.forward_dirty_value, dtype=float)[start:end],
                 accrued_at_bond_settlement=None if self.stripped_grid.accrued_at_bond_settlement is None else np.asarray(self.stripped_grid.accrued_at_bond_settlement, dtype=float)[start:end],
                 payoff_discount=None if self.stripped_grid.payoff_discount is None else np.asarray(self.stripped_grid.payoff_discount, dtype=float)[start:end],
-                premium_discount=None if self.stripped_grid.premium_discount is None else np.asarray(self.stripped_grid.premium_discount, dtype=float)[start:end],
+            premium_discount=None if self.stripped_grid.premium_discount is None else np.asarray(self.stripped_grid.premium_discount, dtype=float)[start:end],
             ),
         )
+
+
+@dataclass(frozen=True)
+class TorchCallableBondScenarioPack:
+    device: str
+    dtype_name: str
+    p0_grid: object
+    h_grid: object
+    zeta_grid: object
+    stripped_grid: TorchBondScenarioGrid
+
+    def n_scenarios(self) -> int:
+        return int(self.p0_grid.shape[0])
+
+    def slice(self, start: int, end: int) -> "TorchCallableBondScenarioPack":
+        return TorchCallableBondScenarioPack(
+            device=self.device,
+            dtype_name=self.dtype_name,
+            p0_grid=self.p0_grid[start:end],
+            h_grid=self.h_grid[start:end],
+            zeta_grid=self.zeta_grid[start:end],
+            stripped_grid=TorchBondScenarioGrid(
+                device=self.stripped_grid.device,
+                dtype_name=self.stripped_grid.dtype_name,
+                discount_to_pay=self.stripped_grid.discount_to_pay[start:end],
+                survival_to_pay=self.stripped_grid.survival_to_pay[start:end],
+                recovery_discount_mid=self.stripped_grid.recovery_discount_mid[start:end],
+                recovery_default_prob=self.stripped_grid.recovery_default_prob[start:end],
+                recovery_rate=self.stripped_grid.recovery_rate[start:end],
+                forward_dirty_value=None if self.stripped_grid.forward_dirty_value is None else self.stripped_grid.forward_dirty_value[start:end],
+                accrued_at_bond_settlement=None if self.stripped_grid.accrued_at_bond_settlement is None else self.stripped_grid.accrued_at_bond_settlement[start:end],
+                payoff_discount=None if self.stripped_grid.payoff_discount is None else self.stripped_grid.payoff_discount[start:end],
+                premium_discount=None if self.stripped_grid.premium_discount is None else self.stripped_grid.premium_discount[start:end],
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class TorchCompiledCallableBondTrade:
+    device: str
+    dtype_name: str
+    center_index: int
+    grid_nx: int
+    grid_times: np.ndarray
+    k_grid: object
+    y_nodes: object
+    y_weights: object
+    call_amounts: object
+    put_amounts: object
+    call_active: object
+    put_active: object
+    cf_amounts: object
+    cf_pay_indices: object
+    cf_belongs_to_underlying_max_time: object
+    cf_max_estimation_time: np.ndarray
+    cf_exact_estimation_time: np.ndarray
+    cf_coupon_start_time: np.ndarray
+    cf_coupon_end_time: np.ndarray
+    unique_pay_idx: object
+    cf_group_idx: object
+    immediate_mask: object
+    provisional_mask: object
+    release_mask: object
+    cache_mask: object
+    stripped_trade: TorchCompiledBondTrade
 
 
 def compile_bond_trade(
@@ -899,6 +1016,258 @@ def price_bond_scenarios_torch(compiled: CompiledBondTrade, grid: BondScenarioGr
             prem = float(compiled.compensation_payment) * torch.as_tensor(grid.premium_discount, dtype=dtype, device=target)
             pv = pv + (-prem if compiled.long_in_forward else prem)
     return pv
+
+
+def prepare_bond_trade_torch(compiled: CompiledBondTrade, *, device: str = "cpu") -> TorchCompiledBondTrade:
+    if torch is None:
+        raise ImportError("torch is required for prepare_bond_trade_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    return TorchCompiledBondTrade(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        amounts=torch.as_tensor(compiled.amounts, dtype=dtype, device=target),
+        recovery_nominals=torch.as_tensor(compiled.recovery_nominals, dtype=dtype, device=target),
+    )
+
+
+def prepare_bond_scenario_grid_torch(grid: BondScenarioGrid, *, device: str = "cpu") -> TorchBondScenarioGrid:
+    if torch is None:
+        raise ImportError("torch is required for prepare_bond_scenario_grid_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    prepared = TorchBondScenarioGrid(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        discount_to_pay=torch.as_tensor(grid.discount_to_pay, dtype=dtype, device=target),
+        survival_to_pay=torch.as_tensor(grid.survival_to_pay, dtype=dtype, device=target),
+        recovery_discount_mid=torch.as_tensor(grid.recovery_discount_mid, dtype=dtype, device=target),
+        recovery_default_prob=torch.as_tensor(grid.recovery_default_prob, dtype=dtype, device=target),
+        recovery_rate=torch.as_tensor(grid.recovery_rate, dtype=dtype, device=target),
+        forward_dirty_value=None if grid.forward_dirty_value is None else torch.as_tensor(grid.forward_dirty_value, dtype=dtype, device=target),
+        accrued_at_bond_settlement=None if grid.accrued_at_bond_settlement is None else torch.as_tensor(grid.accrued_at_bond_settlement, dtype=dtype, device=target),
+        payoff_discount=None if grid.payoff_discount is None else torch.as_tensor(grid.payoff_discount, dtype=dtype, device=target),
+        premium_discount=None if grid.premium_discount is None else torch.as_tensor(grid.premium_discount, dtype=dtype, device=target),
+    )
+    if target.type == "mps":
+        torch.mps.synchronize()
+    return prepared
+
+
+def price_bond_scenarios_torch_preloaded(
+    compiled: CompiledBondTrade,
+    prepared_trade: TorchCompiledBondTrade,
+    prepared_grid: TorchBondScenarioGrid,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_bond_scenarios_torch_preloaded()")
+    if prepared_trade.device != prepared_grid.device or prepared_trade.dtype_name != prepared_grid.dtype_name:
+        raise ValueError("prepared trade/grid must share device and dtype")
+    pv = torch.sum(
+        prepared_grid.discount_to_pay * prepared_grid.survival_to_pay * prepared_trade.amounts.unsqueeze(0),
+        dim=1,
+    )
+    if compiled.recovery_nominals.size:
+        pv = pv + torch.sum(
+            prepared_grid.recovery_discount_mid
+            * prepared_grid.recovery_default_prob
+            * prepared_trade.recovery_nominals.unsqueeze(0)
+            * prepared_grid.recovery_rate.unsqueeze(1),
+            dim=1,
+        )
+    if compiled.trade_type == "ForwardBond":
+        strike = torch.full_like(prepared_grid.forward_dirty_value, float(compiled.forward_amount or 0.0))
+        if not compiled.settlement_dirty:
+            strike = strike + prepared_grid.accrued_at_bond_settlement
+        raw = prepared_grid.forward_dirty_value - strike if compiled.long_in_forward else strike - prepared_grid.forward_dirty_value
+        pv = raw * prepared_grid.payoff_discount
+        if (
+            compiled.compensation_payment_time is not None
+            and compiled.compensation_payment_time > 0.0
+            and compiled.compensation_payment
+        ):
+            prem = float(compiled.compensation_payment) * prepared_grid.premium_discount
+            pv = pv + (-prem if compiled.long_in_forward else prem)
+    return pv
+
+
+def prepare_bond_trade_batch_torch(compiled_trades, *, device: str = "cpu", repeat: int | None = None) -> TorchCompiledBondTradeBatch:
+    if torch is None:
+        raise ImportError("torch is required for prepare_bond_trade_batch_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    if hasattr(compiled_trades, "amounts") and hasattr(compiled_trades, "recovery_nominals") and hasattr(compiled_trades, "trade_type"):
+        if repeat is None:
+            repeat = 1
+        seq = [compiled_trades]
+    else:
+        seq = list(compiled_trades)
+        if not seq:
+            raise ValueError("compiled_trades is empty")
+        if repeat is not None and len(seq) != 1:
+            raise ValueError("repeat is only supported with a single compiled trade")
+    if repeat is None:
+        repeat = len(seq)
+    base = seq[0]
+    if any(x.trade_type != base.trade_type for x in seq):
+        raise ValueError("all compiled trades must share the same trade_type")
+    if any(x.amounts.shape != base.amounts.shape for x in seq):
+        raise ValueError("all compiled trades must share the same cashflow shape")
+    if any(x.recovery_nominals.shape != base.recovery_nominals.shape for x in seq):
+        raise ValueError("all compiled trades must share the same recovery shape")
+    if len(seq) == 1:
+        amounts = torch.as_tensor(base.amounts, dtype=dtype, device=target).unsqueeze(0).expand(int(repeat), -1)
+        recovery_nominals = torch.as_tensor(base.recovery_nominals, dtype=dtype, device=target).unsqueeze(0).expand(int(repeat), -1)
+        if base.trade_type == "ForwardBond":
+            forward_amount = torch.full((int(repeat),), float(base.forward_amount or 0.0), dtype=dtype, device=target)
+            settlement_dirty = torch.full((int(repeat),), bool(base.settlement_dirty), dtype=torch.bool, device=target)
+            long_in_forward = torch.full((int(repeat),), bool(base.long_in_forward), dtype=torch.bool, device=target)
+            compensation_payment = torch.full((int(repeat),), float(base.compensation_payment), dtype=dtype, device=target)
+            compensation_payment_time = torch.full(
+                (int(repeat),),
+                float(base.compensation_payment_time or 0.0),
+                dtype=dtype,
+                device=target,
+            )
+        else:
+            forward_amount = settlement_dirty = long_in_forward = compensation_payment = compensation_payment_time = None
+    else:
+        amounts = torch.stack([torch.as_tensor(x.amounts, dtype=dtype, device=target) for x in seq], dim=0)
+        recovery_nominals = torch.stack([torch.as_tensor(x.recovery_nominals, dtype=dtype, device=target) for x in seq], dim=0)
+        if base.trade_type == "ForwardBond":
+            forward_amount = torch.as_tensor([float(x.forward_amount or 0.0) for x in seq], dtype=dtype, device=target)
+            settlement_dirty = torch.as_tensor([bool(x.settlement_dirty) for x in seq], dtype=torch.bool, device=target)
+            long_in_forward = torch.as_tensor([bool(x.long_in_forward) for x in seq], dtype=torch.bool, device=target)
+            compensation_payment = torch.as_tensor([float(x.compensation_payment) for x in seq], dtype=dtype, device=target)
+            compensation_payment_time = torch.as_tensor(
+                [float(x.compensation_payment_time or 0.0) for x in seq],
+                dtype=dtype,
+                device=target,
+            )
+        else:
+            forward_amount = settlement_dirty = long_in_forward = compensation_payment = compensation_payment_time = None
+    return TorchCompiledBondTradeBatch(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        trade_type=base.trade_type,
+        amounts=amounts,
+        recovery_nominals=recovery_nominals,
+        forward_amount=forward_amount,
+        settlement_dirty=settlement_dirty,
+        long_in_forward=long_in_forward,
+        compensation_payment=compensation_payment,
+        compensation_payment_time=compensation_payment_time,
+    )
+
+
+def prepare_bond_scenario_grid_batch_torch(grids, *, device: str = "cpu", repeat: int | None = None) -> TorchBondScenarioGridBatch:
+    if torch is None:
+        raise ImportError("torch is required for prepare_bond_scenario_grid_batch_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    if hasattr(grids, "discount_to_pay") and hasattr(grids, "survival_to_pay") and hasattr(grids, "recovery_rate"):
+        if repeat is None:
+            repeat = 1
+        seq = [grids]
+    else:
+        seq = list(grids)
+        if not seq:
+            raise ValueError("grids is empty")
+        if repeat is not None and len(seq) != 1:
+            raise ValueError("repeat is only supported with a single scenario grid")
+    if repeat is None:
+        repeat = len(seq)
+    base = seq[0]
+    base_shapes = (
+        np.asarray(base.discount_to_pay).shape,
+        np.asarray(base.survival_to_pay).shape,
+        np.asarray(base.recovery_discount_mid).shape,
+        np.asarray(base.recovery_default_prob).shape,
+        np.asarray(base.recovery_rate).shape,
+    )
+    for grid in seq[1:]:
+        shapes = (
+            np.asarray(grid.discount_to_pay).shape,
+            np.asarray(grid.survival_to_pay).shape,
+            np.asarray(grid.recovery_discount_mid).shape,
+            np.asarray(grid.recovery_default_prob).shape,
+            np.asarray(grid.recovery_rate).shape,
+        )
+        if shapes != base_shapes:
+            raise ValueError("all scenario grids must share the same core shapes")
+    def _stack_or_expand(name: str):
+        value = getattr(base, name)
+        if value is None:
+            return None
+        tensor = torch.as_tensor(value, dtype=dtype, device=target)
+        if len(seq) == 1:
+            return tensor.unsqueeze(0).expand(int(repeat), *tensor.shape)
+        return torch.stack([torch.as_tensor(getattr(grid, name), dtype=dtype, device=target) for grid in seq], dim=0)
+    prepared = TorchBondScenarioGridBatch(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        discount_to_pay=_stack_or_expand("discount_to_pay"),
+        survival_to_pay=_stack_or_expand("survival_to_pay"),
+        recovery_discount_mid=_stack_or_expand("recovery_discount_mid"),
+        recovery_default_prob=_stack_or_expand("recovery_default_prob"),
+        recovery_rate=_stack_or_expand("recovery_rate"),
+        forward_dirty_value=_stack_or_expand("forward_dirty_value"),
+        accrued_at_bond_settlement=_stack_or_expand("accrued_at_bond_settlement"),
+        payoff_discount=_stack_or_expand("payoff_discount"),
+        premium_discount=_stack_or_expand("premium_discount"),
+    )
+    if target.type == "mps":
+        torch.mps.synchronize()
+    return prepared
+
+
+def price_bond_scenarios_torch_batched_preloaded(
+    prepared_trade_batch: TorchCompiledBondTradeBatch,
+    prepared_grid_batch: TorchBondScenarioGridBatch,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_bond_scenarios_torch_batched_preloaded()")
+    if prepared_trade_batch.device != prepared_grid_batch.device or prepared_trade_batch.dtype_name != prepared_grid_batch.dtype_name:
+        raise ValueError("prepared trade/grid batches must share device and dtype")
+    pv = torch.sum(
+        prepared_grid_batch.discount_to_pay
+        * prepared_grid_batch.survival_to_pay
+        * prepared_trade_batch.amounts.unsqueeze(1),
+        dim=2,
+    )
+    if prepared_trade_batch.recovery_nominals.shape[1]:
+        pv = pv + torch.sum(
+            prepared_grid_batch.recovery_discount_mid
+            * prepared_grid_batch.recovery_default_prob
+            * prepared_trade_batch.recovery_nominals.unsqueeze(1)
+            * prepared_grid_batch.recovery_rate.unsqueeze(2),
+            dim=2,
+        )
+    if prepared_trade_batch.trade_type == "ForwardBond":
+        strike = prepared_trade_batch.forward_amount.unsqueeze(1)
+        strike = torch.where(
+            prepared_trade_batch.settlement_dirty.unsqueeze(1),
+            strike,
+            strike + prepared_grid_batch.accrued_at_bond_settlement,
+        )
+        raw_long = prepared_grid_batch.forward_dirty_value - strike
+        raw_short = strike - prepared_grid_batch.forward_dirty_value
+        raw = torch.where(prepared_trade_batch.long_in_forward.unsqueeze(1), raw_long, raw_short)
+        pv = raw * prepared_grid_batch.payoff_discount
+        comp_active = (prepared_trade_batch.compensation_payment != 0.0) & (prepared_trade_batch.compensation_payment_time > 0.0)
+        if bool(torch.any(comp_active)):
+            prem = prepared_trade_batch.compensation_payment.unsqueeze(1) * prepared_grid_batch.premium_discount
+            signed_prem = torch.where(prepared_trade_batch.long_in_forward.unsqueeze(1), -prem, prem)
+            pv = pv + torch.where(comp_active.unsqueeze(1), signed_prem, torch.zeros_like(signed_prem))
+    return pv
+
+
+def price_bond_scenarios_torch_batched(compiled_trades, grids, *, device: str = "cpu", repeat: int | None = None):
+    if torch is None:
+        raise ImportError("torch is required for price_bond_scenarios_torch_batched()")
+    prepared_trade_batch = prepare_bond_trade_batch_torch(compiled_trades, device=device, repeat=repeat)
+    prepared_grid_batch = prepare_bond_scenario_grid_batch_torch(grids, device=device, repeat=repeat)
+    return price_bond_scenarios_torch_batched_preloaded(prepared_trade_batch, prepared_grid_batch)
 
 
 def price_bond_single_numpy(compiled: CompiledBondTrade, grid: BondScenarioGrid) -> float:
@@ -1685,6 +2054,505 @@ def price_callable_bond_scenarios_torch(
     for start in range(0, n_scenarios, chunk_size):
         end = min(start + chunk_size, n_scenarios)
         chunks.append(_price_callable_bond_scenarios_torch_chunk(compiled, pack.slice(start, end), device=device))
+    return torch.cat(chunks, dim=0)
+
+
+def _concat_bond_scenario_grids(grids) -> BondScenarioGrid:
+    seq = list(grids)
+    if not seq:
+        raise ValueError("grids is empty")
+    def _concat(name: str):
+        values = [getattr(grid, name) for grid in seq]
+        if values[0] is None:
+            return None
+        return np.concatenate([np.asarray(v, dtype=float) for v in values], axis=0)
+    return BondScenarioGrid(
+        discount_to_pay=_concat("discount_to_pay"),
+        income_to_npv=_concat("income_to_npv"),
+        income_to_settlement=_concat("income_to_settlement"),
+        survival_to_pay=_concat("survival_to_pay"),
+        recovery_discount_mid=_concat("recovery_discount_mid"),
+        recovery_default_prob=_concat("recovery_default_prob"),
+        recovery_rate=_concat("recovery_rate"),
+        forward_dirty_value=_concat("forward_dirty_value"),
+        accrued_at_bond_settlement=_concat("accrued_at_bond_settlement"),
+        payoff_discount=_concat("payoff_discount"),
+        premium_discount=_concat("premium_discount"),
+    )
+
+
+def _repeat_callable_bond_scenario_pack(pack: CallableBondScenarioPack, repeat: int) -> CallableBondScenarioPack:
+    if int(repeat) <= 0:
+        raise ValueError("repeat must be positive")
+    repeated_stripped = _concat_bond_scenario_grids([pack.stripped_grid] * int(repeat))
+    return CallableBondScenarioPack(
+        p0_grid=np.concatenate([np.asarray(pack.p0_grid, dtype=float)] * int(repeat), axis=0),
+        h_grid=np.concatenate([np.asarray(pack.h_grid, dtype=float)] * int(repeat), axis=0),
+        zeta_grid=np.concatenate([np.asarray(pack.zeta_grid, dtype=float)] * int(repeat), axis=0),
+        stripped_grid=repeated_stripped,
+    )
+
+
+def _concat_callable_bond_scenario_packs(packs) -> tuple[CallableBondScenarioPack, int, int]:
+    seq = list(packs)
+    if not seq:
+        raise ValueError("packs is empty")
+    n_scenarios = seq[0].n_scenarios()
+    if any(pack.n_scenarios() != n_scenarios for pack in seq):
+        raise ValueError("all callable scenario packs must share the same scenario count")
+    combined = CallableBondScenarioPack(
+        p0_grid=np.concatenate([np.asarray(pack.p0_grid, dtype=float) for pack in seq], axis=0),
+        h_grid=np.concatenate([np.asarray(pack.h_grid, dtype=float) for pack in seq], axis=0),
+        zeta_grid=np.concatenate([np.asarray(pack.zeta_grid, dtype=float) for pack in seq], axis=0),
+        stripped_grid=_concat_bond_scenario_grids([pack.stripped_grid for pack in seq]),
+    )
+    return combined, len(seq), n_scenarios
+
+
+def price_callable_bond_scenarios_torch_batched(
+    compiled: CompiledCallableBondTrade,
+    packs,
+    *,
+    device: str = "cpu",
+    chunk_size: int = 512,
+    repeat: int | None = None,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_batched()")
+    if hasattr(packs, "p0_grid") and hasattr(packs, "h_grid") and hasattr(packs, "zeta_grid") and hasattr(packs, "stripped_grid"):
+        n_bonds = int(repeat) if repeat is not None else 1
+        flat_pack = _repeat_callable_bond_scenario_pack(packs, n_bonds)
+        out = price_callable_bond_scenarios_torch(compiled, flat_pack, device=device, chunk_size=chunk_size)
+        return out.reshape(n_bonds, packs.n_scenarios())
+    flat_pack, n_bonds, n_scenarios = _concat_callable_bond_scenario_packs(packs)
+    out = price_callable_bond_scenarios_torch(compiled, flat_pack, device=device, chunk_size=chunk_size)
+    return out.reshape(n_bonds, n_scenarios)
+
+
+def prepare_callable_bond_trade_torch(compiled: CompiledCallableBondTrade, *, device: str = "cpu") -> TorchCompiledCallableBondTrade:
+    if torch is None:
+        raise ImportError("torch is required for prepare_callable_bond_trade_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    unique_pay_idx, cf_group_idx = np.unique(compiled.cf_pay_indices, return_inverse=True)
+    immediate_mask_np, provisional_mask_np, release_mask_np, cache_mask_np = _build_callable_step_action_tables(compiled)
+    return TorchCompiledCallableBondTrade(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        center_index=int(compiled.center_index),
+        grid_nx=int(compiled.grid_nx),
+        grid_times=np.asarray(compiled.grid_times, dtype=float),
+        k_grid=torch.as_tensor(compiled.k_grid, dtype=dtype, device=target),
+        y_nodes=torch.as_tensor(compiled.y_nodes, dtype=dtype, device=target),
+        y_weights=torch.as_tensor(compiled.y_weights, dtype=dtype, device=target),
+        call_amounts=torch.as_tensor(compiled.call_amounts, dtype=dtype, device=target),
+        put_amounts=torch.as_tensor(compiled.put_amounts, dtype=dtype, device=target),
+        call_active=torch.as_tensor(compiled.call_active, dtype=torch.bool, device=target),
+        put_active=torch.as_tensor(compiled.put_active, dtype=torch.bool, device=target),
+        cf_amounts=torch.as_tensor(compiled.cf_amounts, dtype=dtype, device=target),
+        cf_pay_indices=torch.as_tensor(compiled.cf_pay_indices, dtype=torch.long, device=target),
+        cf_belongs_to_underlying_max_time=torch.as_tensor(compiled.cf_belongs_to_underlying_max_time, dtype=dtype, device=target),
+        cf_max_estimation_time=np.asarray(compiled.cf_max_estimation_time, dtype=float),
+        cf_exact_estimation_time=np.asarray(compiled.cf_exact_estimation_time, dtype=float),
+        cf_coupon_start_time=np.asarray(compiled.cf_coupon_start_time, dtype=float),
+        cf_coupon_end_time=np.asarray(compiled.cf_coupon_end_time, dtype=float),
+        unique_pay_idx=torch.as_tensor(unique_pay_idx, dtype=torch.long, device=target),
+        cf_group_idx=torch.as_tensor(cf_group_idx, dtype=torch.long, device=target),
+        immediate_mask=torch.as_tensor(immediate_mask_np, dtype=torch.bool, device=target),
+        provisional_mask=torch.as_tensor(provisional_mask_np, dtype=torch.bool, device=target),
+        release_mask=torch.as_tensor(release_mask_np, dtype=torch.bool, device=target),
+        cache_mask=torch.as_tensor(cache_mask_np, dtype=torch.bool, device=target),
+        stripped_trade=prepare_bond_trade_torch(compiled.stripped_bond, device=device),
+    )
+
+
+def prepare_callable_bond_scenario_pack_torch(pack: CallableBondScenarioPack, *, device: str = "cpu") -> TorchCallableBondScenarioPack:
+    if torch is None:
+        raise ImportError("torch is required for prepare_callable_bond_scenario_pack_torch()")
+    target = torch.device(device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    prepared = TorchCallableBondScenarioPack(
+        device=str(target),
+        dtype_name=str(dtype).split(".")[-1],
+        p0_grid=torch.as_tensor(pack.p0_grid, dtype=dtype, device=target),
+        h_grid=torch.as_tensor(pack.h_grid, dtype=dtype, device=target),
+        zeta_grid=torch.as_tensor(pack.zeta_grid, dtype=dtype, device=target),
+        stripped_grid=prepare_bond_scenario_grid_torch(pack.stripped_grid, device=device),
+    )
+    if target.type == "mps":
+        torch.mps.synchronize()
+    return prepared
+
+
+def _price_callable_bond_scenarios_torch_preloaded_chunk(
+    prepared_trade: TorchCompiledCallableBondTrade,
+    prepared_pack: TorchCallableBondScenarioPack,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_preloaded()")
+    target = torch.device(prepared_trade.device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    with torch.inference_mode():
+        n_scenarios = prepared_pack.n_scenarios()
+        n_states = 2 * prepared_trade.center_index + 1
+        option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        cf_cache: list[object | None] = [None] * int(prepared_trade.cf_amounts.shape[0])
+        cf_status = ["Open"] * int(prepared_trade.cf_amounts.shape[0])
+        p0_grid = prepared_pack.p0_grid
+        h_grid = prepared_pack.h_grid
+        zeta_grid = prepared_pack.zeta_grid
+        k_grid = prepared_trade.k_grid
+        y_nodes = prepared_trade.y_nodes
+        y_weights = prepared_trade.y_weights
+
+        stripped = price_bond_scenarios_torch_preloaded_from_prepared(prepared_trade.stripped_trade, prepared_pack.stripped_grid)
+
+        for i in range(p0_grid.shape[1] - 1, 0, -1):
+            t_from = float(prepared_trade.grid_times[i])
+            z_t = zeta_grid[:, i]
+            h_t = h_grid[:, i]
+            p0_t = p0_grid[:, i]
+            dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(prepared_trade.grid_nx, 1))
+            x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+            reduced_cache: dict[int, object] = {}
+            if i < p0_grid.shape[1] - 1:
+                option_values = _convolution_rollback_batch_torch(
+                    option_values,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=prepared_trade.center_index,
+                    nx=prepared_trade.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                underlying_npv = _convolution_rollback_batch_torch(
+                    underlying_npv,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=prepared_trade.center_index,
+                    nx=prepared_trade.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                if i == 1:
+                    provisional_npv = _convolution_rollback_batch_torch(
+                        provisional_npv,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=prepared_trade.center_index,
+                        nx=prepared_trade.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                for j, cached in enumerate(cf_cache):
+                    if cached is None:
+                        continue
+                    cf_cache[j] = _convolution_rollback_batch_torch(
+                        cached,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=prepared_trade.center_index,
+                        nx=prepared_trade.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+            provisional_npv.zero_()
+            for j in range(int(prepared_trade.cf_amounts.shape[0])):
+                if cf_status[j] == "Done":
+                    continue
+                belongs_to_underlying = (
+                    t_from < float(prepared_trade.cf_belongs_to_underlying_max_time[j].item())
+                    or _callable_close_enough(t_from, float(prepared_trade.cf_belongs_to_underlying_max_time[j].item()))
+                )
+                coupon_ratio = _callable_coupon_ratio_from_arrays(
+                    float(prepared_trade.cf_coupon_start_time[j]),
+                    float(prepared_trade.cf_coupon_end_time[j]),
+                    t_from,
+                )
+                if belongs_to_underlying and coupon_ratio > 0.0:
+                    if cf_status[j] == "Cached":
+                        underlying_npv.add_(cf_cache[j])
+                        cf_cache[j] = None
+                        cf_status[j] = "Done"
+                    elif (
+                        not np.isnan(prepared_trade.cf_max_estimation_time[j])
+                        and (t_from < float(prepared_trade.cf_max_estimation_time[j]) or _callable_close_enough(t_from, float(prepared_trade.cf_max_estimation_time[j])))
+                    ):
+                        pay_idx = int(prepared_trade.cf_pay_indices[j].item())
+                        reduced = reduced_cache.get(pay_idx)
+                        if reduced is None:
+                            h_pay = h_grid[:, pay_idx]
+                            p0_pay = p0_grid[:, pay_idx]
+                            reduced = p0_pay.unsqueeze(1) * torch.exp(
+                                -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                            )
+                            reduced_cache[pay_idx] = reduced
+                        underlying_npv.add_(float(prepared_trade.cf_amounts[j].item()) * reduced)
+                        cf_status[j] = "Done"
+                    else:
+                        pay_idx = int(prepared_trade.cf_pay_indices[j].item())
+                        reduced = reduced_cache.get(pay_idx)
+                        if reduced is None:
+                            h_pay = h_grid[:, pay_idx]
+                            p0_pay = p0_grid[:, pay_idx]
+                            reduced = p0_pay.unsqueeze(1) * torch.exp(
+                                -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                            )
+                            reduced_cache[pay_idx] = reduced
+                        provisional_npv.add_(float(prepared_trade.cf_amounts[j].item()) * reduced)
+                elif (
+                    np.isnan(prepared_trade.cf_max_estimation_time[j])
+                    and not np.isnan(prepared_trade.cf_exact_estimation_time[j])
+                    and (t_from < float(prepared_trade.cf_exact_estimation_time[j]) or _callable_close_enough(t_from, float(prepared_trade.cf_exact_estimation_time[j])))
+                    and cf_status[j] == "Open"
+                ):
+                    pay_idx = int(prepared_trade.cf_pay_indices[j].item())
+                    reduced = reduced_cache.get(pay_idx)
+                    if reduced is None:
+                        h_pay = h_grid[:, pay_idx]
+                        p0_pay = p0_grid[:, pay_idx]
+                        reduced = p0_pay.unsqueeze(1) * torch.exp(
+                            -h_pay.unsqueeze(1) * x_grid - 0.5 * (h_pay * h_pay * z_t).unsqueeze(1)
+                        )
+                        reduced_cache[pay_idx] = reduced
+                    cf_cache[j] = float(prepared_trade.cf_amounts[j].item()) * reduced
+                    cf_status[j] = "Cached"
+            if bool(prepared_trade.call_active[i]) or bool(prepared_trade.put_active[i]):
+                continuation = option_values
+                amount_over_num = p0_t.unsqueeze(1) * torch.exp(-h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1))
+                if bool(prepared_trade.call_active[i]):
+                    continuation = torch.minimum(continuation, prepared_trade.call_amounts[i] * amount_over_num - (underlying_npv + provisional_npv))
+                if bool(prepared_trade.put_active[i]):
+                    continuation = torch.maximum(continuation, prepared_trade.put_amounts[i] * amount_over_num - underlying_npv + provisional_npv)
+                option_values = continuation
+        if p0_grid.shape[1] > 1:
+            option_values = _convolution_rollback_batch_torch(
+                option_values,
+                zeta_t1=zeta_grid[:, 1],
+                zeta_t0=zeta_grid[:, 0],
+                mx=prepared_trade.center_index,
+                nx=prepared_trade.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+        option_value = option_values[:, prepared_trade.center_index]
+        return stripped + option_value
+
+
+def price_bond_scenarios_torch_preloaded_from_prepared(prepared_trade: TorchCompiledBondTrade, prepared_grid: TorchBondScenarioGrid):
+    if torch is None:
+        raise ImportError("torch is required for price_bond_scenarios_torch_preloaded_from_prepared()")
+    pv = torch.sum(
+        prepared_grid.discount_to_pay * prepared_grid.survival_to_pay * prepared_trade.amounts.unsqueeze(0),
+        dim=1,
+    )
+    if prepared_trade.recovery_nominals.shape[0]:
+        pv = pv + torch.sum(
+            prepared_grid.recovery_discount_mid
+            * prepared_grid.recovery_default_prob
+            * prepared_trade.recovery_nominals.unsqueeze(0)
+            * prepared_grid.recovery_rate.unsqueeze(1),
+            dim=1,
+        )
+    return pv
+
+
+def price_callable_bond_scenarios_torch_preloaded(
+    prepared_trade: TorchCompiledCallableBondTrade,
+    prepared_pack: TorchCallableBondScenarioPack,
+    *,
+    chunk_size: int = 512,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_preloaded()")
+    n_scenarios = prepared_pack.n_scenarios()
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n_scenarios <= chunk_size:
+        return _price_callable_bond_scenarios_torch_preloaded_chunk(prepared_trade, prepared_pack)
+    chunks = []
+    for start in range(0, n_scenarios, chunk_size):
+        end = min(start + chunk_size, n_scenarios)
+        chunks.append(_price_callable_bond_scenarios_torch_preloaded_chunk(prepared_trade, prepared_pack.slice(start, end)))
+    return torch.cat(chunks, dim=0)
+
+
+def _price_callable_bond_scenarios_torch_preloaded_grouped_chunk(
+    prepared_trade: TorchCompiledCallableBondTrade,
+    prepared_pack: TorchCallableBondScenarioPack,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_preloaded_grouped()")
+    target = torch.device(prepared_trade.device)
+    dtype = torch.float32 if target.type == "mps" else torch.float64
+    with torch.inference_mode():
+        n_scenarios = prepared_pack.n_scenarios()
+        n_states = 2 * prepared_trade.center_index + 1
+        n_cf = int(prepared_trade.cf_amounts.shape[0])
+        option_values = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        underlying_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        provisional_npv = torch.zeros((n_scenarios, n_states), dtype=dtype, device=target)
+        cached_values = torch.zeros((n_scenarios, n_cf, n_states), dtype=dtype, device=target)
+        cache_active = torch.zeros((n_cf,), dtype=torch.bool, device=target)
+        cf_done = torch.zeros((n_cf,), dtype=torch.bool, device=target)
+
+        p0_grid = prepared_pack.p0_grid
+        h_grid = prepared_pack.h_grid
+        zeta_grid = prepared_pack.zeta_grid
+        k_grid = prepared_trade.k_grid
+        y_nodes = prepared_trade.y_nodes
+        y_weights = prepared_trade.y_weights
+        cf_amounts = prepared_trade.cf_amounts
+        unique_pay_idx_t = prepared_trade.unique_pay_idx
+        cf_group_idx_t = prepared_trade.cf_group_idx
+        immediate_mask_t = prepared_trade.immediate_mask
+        provisional_mask_t = prepared_trade.provisional_mask
+        release_mask_t = prepared_trade.release_mask
+        cache_mask_t = prepared_trade.cache_mask
+
+        stripped = price_bond_scenarios_torch_preloaded_from_prepared(prepared_trade.stripped_trade, prepared_pack.stripped_grid)
+
+        for i in range(p0_grid.shape[1] - 1, 0, -1):
+            z_t = zeta_grid[:, i]
+            h_t = h_grid[:, i]
+            p0_t = p0_grid[:, i]
+            dx = torch.sqrt(torch.clamp(z_t, min=0.0)) / float(max(prepared_trade.grid_nx, 1))
+            x_grid = dx.unsqueeze(1) * k_grid.unsqueeze(0)
+
+            if i < p0_grid.shape[1] - 1:
+                option_values = _convolution_rollback_batch_torch(
+                    option_values,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=prepared_trade.center_index,
+                    nx=prepared_trade.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                underlying_npv = _convolution_rollback_batch_torch(
+                    underlying_npv,
+                    zeta_t1=zeta_grid[:, i + 1],
+                    zeta_t0=zeta_grid[:, i],
+                    mx=prepared_trade.center_index,
+                    nx=prepared_trade.grid_nx,
+                    y_nodes=y_nodes,
+                    y_weights=y_weights,
+                )
+                if i == 1:
+                    provisional_npv = _convolution_rollback_batch_torch(
+                        provisional_npv,
+                        zeta_t1=zeta_grid[:, i + 1],
+                        zeta_t0=zeta_grid[:, i],
+                        mx=prepared_trade.center_index,
+                        nx=prepared_trade.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                if bool(torch.any(cache_active)):
+                    active_idx = torch.nonzero(cache_active, as_tuple=False).squeeze(1)
+                    active_count = int(active_idx.numel())
+                    flat_cached = cached_values.index_select(1, active_idx).reshape(n_scenarios * active_count, n_states)
+                    zeta_t1_rep = zeta_grid[:, i + 1].repeat_interleave(active_count)
+                    zeta_t0_rep = zeta_grid[:, i].repeat_interleave(active_count)
+                    flat_cached = _convolution_rollback_batch_torch(
+                        flat_cached,
+                        zeta_t1=zeta_t1_rep,
+                        zeta_t0=zeta_t0_rep,
+                        mx=prepared_trade.center_index,
+                        nx=prepared_trade.grid_nx,
+                        y_nodes=y_nodes,
+                        y_weights=y_weights,
+                    )
+                    cached_values[:, active_idx, :] = flat_cached.reshape(n_scenarios, active_count, n_states)
+
+            provisional_npv.zero_()
+
+            h_pay = h_grid.index_select(1, unique_pay_idx_t)
+            p0_pay = p0_grid.index_select(1, unique_pay_idx_t)
+            pay_reduced = p0_pay.unsqueeze(2) * torch.exp(
+                -h_pay.unsqueeze(2) * x_grid.unsqueeze(1)
+                - 0.5 * (h_pay * h_pay * z_t.unsqueeze(1)).unsqueeze(2)
+            )
+            cf_values = pay_reduced.index_select(1, cf_group_idx_t) * cf_amounts.view(1, -1, 1)
+
+            active_open = ~cf_done
+
+            immediate = immediate_mask_t[i] & active_open
+            if bool(torch.any(immediate)):
+                underlying_npv.add_(cf_values[:, immediate, :].sum(dim=1))
+                cf_done[immediate] = True
+
+            provisional = provisional_mask_t[i] & active_open
+            if bool(torch.any(provisional)):
+                provisional_npv.add_(cf_values[:, provisional, :].sum(dim=1))
+
+            release = release_mask_t[i] & active_open
+            release_cached = release & cache_active
+            if bool(torch.any(release_cached)):
+                underlying_npv.add_(cached_values[:, release_cached, :].sum(dim=1))
+                cached_values[:, release_cached, :] = 0.0
+                cache_active[release_cached] = False
+                cf_done[release_cached] = True
+
+            release_open = release & (~cache_active)
+            if bool(torch.any(release_open)):
+                provisional_npv.add_(cf_values[:, release_open, :].sum(dim=1))
+
+            create_cache = cache_mask_t[i] & (~cache_active) & active_open
+            if bool(torch.any(create_cache)):
+                cached_values[:, create_cache, :] = cf_values[:, create_cache, :]
+                cache_active[create_cache] = True
+
+            if bool(prepared_trade.call_active[i]) or bool(prepared_trade.put_active[i]):
+                continuation = option_values
+                amount_over_num = p0_t.unsqueeze(1) * torch.exp(
+                    -h_t.unsqueeze(1) * x_grid - 0.5 * (h_t * h_t * z_t).unsqueeze(1)
+                )
+                if bool(prepared_trade.call_active[i]):
+                    continuation = torch.minimum(
+                        continuation,
+                        prepared_trade.call_amounts[i] * amount_over_num - (underlying_npv + provisional_npv),
+                    )
+                if bool(prepared_trade.put_active[i]):
+                    continuation = torch.maximum(
+                        continuation,
+                        prepared_trade.put_amounts[i] * amount_over_num - underlying_npv + provisional_npv,
+                    )
+                option_values = continuation
+
+        if p0_grid.shape[1] > 1:
+            option_values = _convolution_rollback_batch_torch(
+                option_values,
+                zeta_t1=zeta_grid[:, 1],
+                zeta_t0=zeta_grid[:, 0],
+                mx=prepared_trade.center_index,
+                nx=prepared_trade.grid_nx,
+                y_nodes=y_nodes,
+                y_weights=y_weights,
+            )
+        option_value = option_values[:, prepared_trade.center_index]
+        return stripped + option_value
+
+
+def price_callable_bond_scenarios_torch_preloaded_grouped(
+    prepared_trade: TorchCompiledCallableBondTrade,
+    prepared_pack: TorchCallableBondScenarioPack,
+    *,
+    chunk_size: int = 512,
+):
+    if torch is None:
+        raise ImportError("torch is required for price_callable_bond_scenarios_torch_preloaded_grouped()")
+    n_scenarios = prepared_pack.n_scenarios()
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n_scenarios <= chunk_size:
+        return _price_callable_bond_scenarios_torch_preloaded_grouped_chunk(prepared_trade, prepared_pack)
+    chunks = []
+    for start in range(0, n_scenarios, chunk_size):
+        end = min(start + chunk_size, n_scenarios)
+        chunks.append(_price_callable_bond_scenarios_torch_preloaded_grouped_chunk(prepared_trade, prepared_pack.slice(start, end)))
     return torch.cat(chunks, dim=0)
 
 

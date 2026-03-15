@@ -20,6 +20,7 @@ from datetime import timedelta
 from pathlib import Path
 from time import perf_counter
 import sys
+from typing import Sequence
 
 import numpy as np
 
@@ -41,9 +42,14 @@ from pythonore.compute.bond_pricing import (
     build_bond_scenario_grid_numpy,
     compile_bond_trade,
     load_bond_trade_spec,
+    prepare_bond_scenario_grid_batch_torch,
+    prepare_bond_scenario_grid_torch,
+    prepare_bond_trade_batch_torch,
+    prepare_bond_trade_torch,
     price_bond_scenarios_numpy,
     price_bond_scenarios_torch,
-    price_bond_single_numpy,
+    price_bond_scenarios_torch_batched_preloaded,
+    price_bond_scenarios_torch_preloaded,
     torch,
 )
 from pythonore.compute.irs_xva_utils import load_ore_default_curve_inputs
@@ -56,12 +62,20 @@ SHARED_IN = REPO_ROOT / "Examples" / "Input"
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--scenarios", nargs="+", type=int, default=[1000, 10000, 50000])
+    p.add_argument("--scenarios", nargs="+", type=int, default=[2000, 5000])
+    p.add_argument("--bonds", nargs="+", type=int, default=[100, 500], help="Repeat same bond this many times.")
+    p.add_argument(
+        "--scalar-max-work",
+        type=int,
+        default=1000,
+        help="Skip scalar-loop baseline when n_bonds * n_scenarios exceeds this threshold (0 disables scalar baseline).",
+    )
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--devices", nargs="+", default=["cpu", "gpu"])
     p.add_argument("--trades", nargs="+", default=["Bond_Fixed", "FwdBond_Fixed"])
+    p.add_argument("--json", action="store_true", help="Print machine-readable JSON in addition to the table report.")
     return p.parse_args(argv)
 
 
@@ -265,9 +279,10 @@ def _grid_row(grid: BondScenarioGrid, i: int) -> BondScenarioGrid:
 
 
 def _scalar_loop(compiled, grid: BondScenarioGrid) -> np.ndarray:
+    # Baseline only: call canonical NumPy scenario kernel one scenario at a time.
     out = np.empty(grid.n_scenarios(), dtype=float)
     for i in range(grid.n_scenarios()):
-        out[i] = price_bond_single_numpy(compiled, _grid_row(grid, i))
+        out[i] = float(price_bond_scenarios_numpy(compiled, _grid_row(grid, i))[0])
     return out
 
 
@@ -279,88 +294,285 @@ def _torch_run(compiled, grid: BondScenarioGrid, device: str, return_numpy: bool
         return out
 
 
+def _torch_run_preloaded(compiled, prepared_trade, prepared_grid, return_numpy: bool):
+    with torch.inference_mode():
+        pv = price_bond_scenarios_torch_preloaded(compiled, prepared_trade, prepared_grid)
+        if return_numpy:
+            return pv.detach().cpu().numpy()
+        return pv
+
+
+def _torch_run_batched_preloaded(prepared_trade_batch, prepared_grid_batch, return_numpy: bool):
+    with torch.inference_mode():
+        pv = price_bond_scenarios_torch_batched_preloaded(prepared_trade_batch, prepared_grid_batch)
+        if return_numpy:
+            return pv.detach().cpu().numpy()
+        return pv
+
+
+def _repeat_same_bond(fn, n_bonds: int):
+    out = None
+    for _ in range(int(n_bonds)):
+        out = fn()
+    return out
+
+
+def _fmt_sec(value: float) -> str:
+    return f"{value:.4f}s"
+
+
+def _fmt_speedup(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}x"
+
+
+def _fmt_sci(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3e}"
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def _make_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    line = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+    head = "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+    body = [
+        "| " + " | ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+        for row in rows
+    ]
+    return "\n".join([line, head, line, *body, line])
+
+
+def _render_report(*, rows, devices, scenarios, bonds, trades, repeats, warmup, seed):
+    lines = []
+    lines.append("Bond Pricing NumPy vs Torch Benchmark Report")
+    lines.append("=" * 42)
+    lines.append("Configuration:")
+    lines.append(f"  - Trades tested  : {', '.join(trades)}")
+    lines.append(f"  - Scenarios      : {', '.join(_fmt_int(int(n)) for n in scenarios)}")
+    lines.append(f"  - Bonds repeated : {', '.join(_fmt_int(int(n)) for n in bonds)}")
+    lines.append(f"  - Repeats/warmup : {repeats}/{warmup}")
+    lines.append(f"  - Seed           : {seed}")
+    lines.append(f"  - Devices used   : {', '.join(devices) if devices else 'cpu only'}")
+    lines.append("")
+    lines.append("How to read:")
+    lines.append("  - mean/min/std are runtimes over repeats.")
+    lines.append("  - numpy/vectorized uses the host NumPy scenario kernel.")
+    lines.append("  - torch/cpu and torch/mps reuse preloaded tensors on the target device.")
+    lines.append("  - speedup_vs_scalar compares against one-scenario-at-a-time NumPy baseline when available.")
+    lines.append("  - scalar baseline may be skipped automatically for large n_bonds*n_scenarios workloads.")
+    lines.append("  - speedup_vs_numpy compares against numpy/vectorized.")
+    lines.append("  - parity metrics are relative to NumPy outputs for that scenario.")
+    lines.append("")
+
+    grouped = {}
+    for r in rows:
+        grouped.setdefault((str(r["trade_id"]), int(r["n_scenarios"]), int(r["n_bonds"])), []).append(r)
+
+    for trade_id, n_scenarios, n_bonds in sorted(grouped.keys(), key=lambda x: (x[0], x[2], x[1])):
+        group = grouped[(trade_id, n_scenarios, n_bonds)]
+        table_rows = []
+        for r in sorted(group, key=lambda item: str(item["mode"])):
+            table_rows.append(
+                (
+                    str(r["mode"]),
+                    _fmt_sec(float(r["mean_sec"])),
+                    _fmt_sec(float(r["min_sec"])),
+                    _fmt_sec(float(r["std_sec"])),
+                    _fmt_speedup(r.get("speedup_vs_scalar_mean")),
+                    _fmt_speedup(r.get("speedup_vs_numpy_mean")),
+                    _fmt_sci(r.get("parity_max_abs")),
+                    _fmt_sci(r.get("parity_rmse")),
+                    _fmt_sci(r.get("parity_max_abs_rel_to_refmax")),
+                )
+            )
+        lines.append(
+            f"Results for trade={trade_id}, n_bonds={_fmt_int(n_bonds)}, n_scenarios={_fmt_int(n_scenarios)}"
+        )
+        lines.append(
+            _make_table(
+                [
+                    "mode",
+                    "mean",
+                    "min",
+                    "std",
+                    "speedup_vs_scalar",
+                    "speedup_vs_numpy",
+                    "parity_max_abs",
+                    "parity_rmse",
+                    "parity_max_abs_rel",
+                ],
+                table_rows,
+            )
+        )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def main(argv=None):
     args = _parse_args(argv)
     devices = _torch_devices(args.devices)
     rows = []
     for trade_id in args.trades:
         compiled, base_grid = _single_grid_from_example18(trade_id)
-        for n_scenarios in args.scenarios:
-            grid = _expand_grid(compiled, base_grid, n_scenarios, args.seed + n_scenarios)
-            scalar_ref = _scalar_loop(compiled, grid)
-            mean_sec, min_sec, std_sec = _bench(lambda: _scalar_loop(compiled, grid), args.repeats, args.warmup)
-            rows.append(
-                {
+        for n_bonds in args.bonds:
+            for n_scenarios in args.scenarios:
+                grid = _expand_grid(compiled, base_grid, n_scenarios, args.seed + n_scenarios)
+                work = int(n_bonds) * int(n_scenarios)
+                scalar_enabled = args.scalar_max_work > 0 and work <= int(args.scalar_max_work)
+                scalar_ref = _scalar_loop(compiled, grid) if scalar_enabled else None
+                scalar_mean = None
+                if scalar_enabled:
+                    mean_sec, min_sec, std_sec = _bench(
+                        lambda: _repeat_same_bond(lambda: _scalar_loop(compiled, grid), n_bonds),
+                        args.repeats,
+                        args.warmup,
+                    )
+                    scalar_mean = mean_sec
+                    rows.append(
+                        {
+                            "trade_id": trade_id,
+                            "trade_type": compiled.trade_type,
+                            "mode": "numpy/scalar_loop",
+                            "n_bonds": int(n_bonds),
+                            "n_scenarios": n_scenarios,
+                            "mean_sec": mean_sec,
+                            "min_sec": min_sec,
+                            "std_sec": std_sec,
+                            "scalar_skipped": False,
+                        }
+                    )
+                np_out = price_bond_scenarios_numpy(compiled, grid)
+                mean_sec, min_sec, std_sec = _bench(
+                    lambda: _repeat_same_bond(lambda: price_bond_scenarios_numpy(compiled, grid), n_bonds),
+                    args.repeats,
+                    args.warmup,
+                )
+                numpy_mean = mean_sec
+                row = {
                     "trade_id": trade_id,
                     "trade_type": compiled.trade_type,
-                    "mode": "numpy/scalar_loop",
+                    "mode": "numpy/vectorized",
+                    "n_bonds": int(n_bonds),
                     "n_scenarios": n_scenarios,
                     "mean_sec": mean_sec,
                     "min_sec": min_sec,
                     "std_sec": std_sec,
+                    "speedup_vs_scalar_mean": (scalar_mean / mean_sec) if (scalar_mean is not None and mean_sec > 0.0) else None,
+                    "scalar_skipped": not scalar_enabled,
                 }
-            )
-            np_out = price_bond_scenarios_numpy(compiled, grid)
-            mean_sec, min_sec, std_sec = _bench(lambda: price_bond_scenarios_numpy(compiled, grid), args.repeats, args.warmup)
-            row = {
-                "trade_id": trade_id,
-                "trade_type": compiled.trade_type,
-                "mode": "numpy/vectorized",
-                "n_scenarios": n_scenarios,
-                "mean_sec": mean_sec,
-                "min_sec": min_sec,
-                "std_sec": std_sec,
-                "speedup_vs_scalar_mean": rows[-1]["mean_sec"] / mean_sec if mean_sec > 0.0 else float("inf"),
-            }
-            row.update(_error_metrics(scalar_ref, np_out))
-            rows.append(row)
-            if torch is None:
-                continue
-            for device in devices:
-                if device == "cpu":
-                    th_out = _torch_run(compiled, grid, device, True)
-                    mean_sec, min_sec, std_sec = _bench(lambda d=device: _torch_run(compiled, grid, d, True), args.repeats, args.warmup)
-                    row = {
-                        "trade_id": trade_id,
-                        "trade_type": compiled.trade_type,
-                        "mode": "torch/cpu/vectorized",
-                        "n_scenarios": n_scenarios,
-                        "mean_sec": mean_sec,
-                        "min_sec": min_sec,
-                        "std_sec": std_sec,
-                        "speedup_vs_scalar_mean": rows[-2]["mean_sec"] / mean_sec if mean_sec > 0.0 else float("inf"),
-                        "speedup_vs_numpy_mean": rows[-1]["mean_sec"] / mean_sec if mean_sec > 0.0 else float("inf"),
-                    }
-                    row.update(_error_metrics(np_out, th_out))
-                    rows.append(row)
-                elif device == "mps":
-                    th_dev = _torch_run(compiled, grid, device, False)
-                    mean_sec, min_sec, std_sec = _bench(lambda d=device: _torch_run(compiled, grid, d, False), args.repeats, args.warmup)
-                    row = {
-                        "trade_id": trade_id,
-                        "trade_type": compiled.trade_type,
-                        "mode": "torch/mps/vectorized_device_only",
-                        "n_scenarios": n_scenarios,
-                        "mean_sec": mean_sec,
-                        "min_sec": min_sec,
-                        "std_sec": std_sec,
-                    }
-                    row.update(_error_metrics(np_out, th_dev.detach().cpu().numpy()))
-                    rows.append(row)
-                    th_host = _torch_run(compiled, grid, device, True)
-                    mean_sec, min_sec, std_sec = _bench(lambda d=device: _torch_run(compiled, grid, d, True), args.repeats, args.warmup)
-                    row = {
-                        "trade_id": trade_id,
-                        "trade_type": compiled.trade_type,
-                        "mode": "torch/mps/vectorized_host_copy",
-                        "n_scenarios": n_scenarios,
-                        "mean_sec": mean_sec,
-                        "min_sec": min_sec,
-                        "std_sec": std_sec,
-                    }
-                    row.update(_error_metrics(np_out, th_host))
-                    rows.append(row)
-    print(json.dumps({"devices": devices, "results": rows}, indent=2))
+                if scalar_ref is not None:
+                    row.update(_error_metrics(scalar_ref, np_out))
+                rows.append(row)
+                if torch is None:
+                    continue
+                for device in devices:
+                    if int(n_bonds) == 1:
+                        prepared_trade = prepare_bond_trade_torch(compiled, device=device)
+                        prepared_grid = prepare_bond_scenario_grid_torch(grid, device=device)
+                    else:
+                        prepared_trade_batch = prepare_bond_trade_batch_torch(compiled, device=device, repeat=int(n_bonds))
+                        prepared_grid_batch = prepare_bond_scenario_grid_batch_torch(grid, device=device, repeat=int(n_bonds))
+                    if device == "cpu":
+                        if int(n_bonds) == 1:
+                            th_out = _torch_run_preloaded(compiled, prepared_trade, prepared_grid, True)
+                            mean_sec, min_sec, std_sec = _bench(
+                                lambda pt=prepared_trade, pg=prepared_grid: _torch_run_preloaded(compiled, pt, pg, True),
+                                args.repeats,
+                                args.warmup,
+                            )
+                        else:
+                            th_out = _torch_run_batched_preloaded(prepared_trade_batch, prepared_grid_batch, True)
+                            mean_sec, min_sec, std_sec = _bench(
+                                lambda pt=prepared_trade_batch, pg=prepared_grid_batch: _torch_run_batched_preloaded(pt, pg, True),
+                                args.repeats,
+                                args.warmup,
+                            )
+                        row = {
+                            "trade_id": trade_id,
+                            "trade_type": compiled.trade_type,
+                            "mode": "torch/cpu",
+                            "n_bonds": int(n_bonds),
+                            "n_scenarios": n_scenarios,
+                            "mean_sec": mean_sec,
+                            "min_sec": min_sec,
+                            "std_sec": std_sec,
+                            "speedup_vs_scalar_mean": (scalar_mean / mean_sec) if (scalar_mean is not None and mean_sec > 0.0) else None,
+                            "speedup_vs_numpy_mean": numpy_mean / mean_sec if mean_sec > 0.0 else float("inf"),
+                            "scalar_skipped": not scalar_enabled,
+                        }
+                        ref = np_out if int(n_bonds) == 1 else np.broadcast_to(np_out, th_out.shape)
+                        row.update(_error_metrics(ref, th_out))
+                        rows.append(row)
+                    elif device == "mps":
+                        if int(n_bonds) == 1:
+                            th_dev = _torch_run_preloaded(compiled, prepared_trade, prepared_grid, False)
+                            mean_sec, min_sec, std_sec = _bench(
+                                lambda pt=prepared_trade, pg=prepared_grid: _torch_run_preloaded(compiled, pt, pg, False),
+                                args.repeats,
+                                args.warmup,
+                            )
+                        else:
+                            th_dev = _torch_run_batched_preloaded(prepared_trade_batch, prepared_grid_batch, False)
+                            mean_sec, min_sec, std_sec = _bench(
+                                lambda pt=prepared_trade_batch, pg=prepared_grid_batch: _torch_run_batched_preloaded(pt, pg, False),
+                                args.repeats,
+                                args.warmup,
+                            )
+                        row = {
+                            "trade_id": trade_id,
+                            "trade_type": compiled.trade_type,
+                            "mode": "torch/mps",
+                            "n_bonds": int(n_bonds),
+                            "n_scenarios": n_scenarios,
+                            "mean_sec": mean_sec,
+                            "min_sec": min_sec,
+                            "std_sec": std_sec,
+                            "speedup_vs_scalar_mean": (scalar_mean / mean_sec) if (scalar_mean is not None and mean_sec > 0.0) else None,
+                            "speedup_vs_numpy_mean": numpy_mean / mean_sec if mean_sec > 0.0 else float("inf"),
+                            "scalar_skipped": not scalar_enabled,
+                        }
+                        got = th_dev.detach().cpu().numpy()
+                        ref = np_out if int(n_bonds) == 1 else np.broadcast_to(np_out, got.shape)
+                        row.update(_error_metrics(ref, got))
+                        rows.append(row)
+    payload = {
+        "metadata": {
+            "seed": int(args.seed),
+            "scenarios": [int(n) for n in args.scenarios],
+            "bonds": [int(n) for n in args.bonds],
+            "scalar_max_work": int(args.scalar_max_work),
+            "repeats": int(args.repeats),
+            "warmup": int(args.warmup),
+            "trades": list(args.trades),
+            "devices": devices,
+        },
+        "results": rows,
+    }
+    print(
+        _render_report(
+            rows=rows,
+            devices=devices,
+            scenarios=args.scenarios,
+            bonds=args.bonds,
+            trades=args.trades,
+            repeats=args.repeats,
+            warmup=args.warmup,
+            seed=args.seed,
+        )
+    )
+    if args.json:
+        print("Machine-readable JSON:")
+        print(json.dumps(payload, indent=2))
     return 0
 
 
