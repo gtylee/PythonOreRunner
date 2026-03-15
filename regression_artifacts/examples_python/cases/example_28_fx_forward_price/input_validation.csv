@@ -1,0 +1,36 @@
+section,field,value
+market_configurations,requested,['default']
+market_configurations,available,['default']
+market_configurations,missing_requested,[]
+market_configurations,valid,True
+todaysmarket_sections,missing_references,[]
+todaysmarket_sections,valid,True
+curve_specs,active_curve_ids_by_section,"{'YieldCurves': ['EUR-IN-USD', 'EUR1D', 'EUR3M', 'GBP-IN-EUR', 'GBP-IN-USD', 'GBP1D', 'GBP3M', 'GBP6M', 'USD1D', 'USD3M']}"
+curve_specs,quote_scope_curve_ids_by_section,"{'YieldCurves': ['EUR1D', 'GBP-IN-EUR']}"
+curve_specs,invalid,[]
+curve_specs,valid,True
+conventions,used_ids,"['EUR-EONIA-CONVENTIONS', 'EUR-OIS-CONVENTIONS']"
+conventions,missing_ids,[]
+conventions,valid,True
+quotes,mandatory_required_count,32
+quotes,optional_required_count,0
+quotes,asof_quote_count,0
+quotes,missing_mandatory,"['IR_SWAP/RATE/EUR/2D/1D/10M', 'IR_SWAP/RATE/EUR/2D/1D/10Y', 'IR_SWAP/RATE/EUR/2D/1D/11M', 'IR_SWAP/RATE/EUR/2D/1D/12Y', 'IR_SWAP/RATE/EUR/2D/1D/15Y', 'IR_SWAP/RATE/EUR/2D/1D/1M', 'IR_SWAP/RATE/EUR/2D/1D/1W', 'IR_SWAP/RATE/EUR/2D/1D/1Y', 'IR_SWAP/RATE/EUR/2D/1D/1Y3M', 'IR_SWAP/RATE/EUR/2D/1D/1Y6M', 'IR_SWAP/RATE/EUR/2D/1D/1Y9M', 'IR_SWAP/RATE/EUR/2D/1D/20Y', 'IR_SWAP/RATE/EUR/2D/1D/25Y', 'IR_SWAP/RATE/EUR/2D/1D/2M', 'IR_SWAP/RATE/EUR/2D/1D/2W', 'IR_SWAP/RATE/EUR/2D/1D/2Y', 'IR_SWAP/RATE/EUR/2D/1D/30Y', 'IR_SWAP/RATE/EUR/2D/1D/3M', 'IR_SWAP/RATE/EUR/2D/1D/3Y', 'IR_SWAP/RATE/EUR/2D/1D/4M', 'IR_SWAP/RATE/EUR/2D/1D/4Y', 'IR_SWAP/RATE/EUR/2D/1D/5M', 'IR_SWAP/RATE/EUR/2D/1D/5Y', 'IR_SWAP/RATE/EUR/2D/1D/6M', 'IR_SWAP/RATE/EUR/2D/1D/6Y', 'IR_SWAP/RATE/EUR/2D/1D/7M', 'IR_SWAP/RATE/EUR/2D/1D/7Y', 'IR_SWAP/RATE/EUR/2D/1D/8M', 'IR_SWAP/RATE/EUR/2D/1D/8Y', 'IR_SWAP/RATE/EUR/2D/1D/9M', 'IR_SWAP/RATE/EUR/2D/1D/9Y', 'MM/RATE/EUR/0D/1D']"
+quotes,missing_optional,[]
+quotes,valid,False
+todaysmarket_names,yield_index_overlaps,[]
+todaysmarket_names,distinct,True
+fixings,imply_todays_fixings,False
+fixings,today_fixing_count,0
+fixings,potential_issue,False
+checks,market_configurations_exist,True
+checks,referenced_todaysmarket_sections_exist,True
+checks,curve_specs_resolve,True
+checks,conventions_exist,True
+checks,quotes_exist_for_asof,False
+checks,yield_index_names_distinct,True
+action_items,0:code,missing_mandatory_quotes
+action_items,0:severity,error
+action_items,0:what_failed,The active curve build requests mandatory quote ids that are not present in the market data on the asof date.
+action_items,0:what_to_fix,"Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml."
+action_items,0:where_to_fix,"['$REPO_ROOT/Examples/Legacy/Example_28/Input/curveconfig.xml', '$REPO_ROOT/Examples/Input/market_20160205.txt']"

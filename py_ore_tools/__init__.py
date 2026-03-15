@@ -125,6 +125,15 @@ from py_ore_tools.ore_snapshot import (
     validate_xva_snapshot_dataclasses,
     xva_snapshot_validation_dataframe,
 )
+from py_ore_tools.examples_regression import (
+    DEFAULT_BASELINE_ROOT,
+    DEFAULT_MANIFEST,
+    ExampleRegressionCase,
+    ExampleRegressionResult,
+    compare_baselines,
+    load_manifest,
+    refresh_baselines,
+)
 
 __all__ = [
     "OreBasic",
@@ -228,4 +237,11 @@ __all__ = [
     "validate_xva_snapshot_dataclasses",
     "xva_snapshot_validation_dataframe",
     "quote_dicts_from_pairs",
+    "DEFAULT_BASELINE_ROOT",
+    "DEFAULT_MANIFEST",
+    "ExampleRegressionCase",
+    "ExampleRegressionResult",
+    "compare_baselines",
+    "load_manifest",
+    "refresh_baselines",
 ]

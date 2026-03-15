@@ -1,0 +1,2 @@
+#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
+FxOption,FxOption,2026-01-01,9.912329,139479.448285,EUR,139479.448285,EUR,10000000.00,EUR,10000000.00,CPTY_A,CPTY_A

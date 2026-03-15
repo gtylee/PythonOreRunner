@@ -20,6 +20,7 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 
 | Path | Description |
 |------|-------------|
+| `src/pythonore/` | Canonical Python package layout: shared domain types, IO, mapping, runtime, workflows, and app entrypoints |
 | `py_ore_tools/` | Standalone Python LGM (IRS, FX fwd, cap/floor, Bermudans, multi-ccy), ORE runner, XVA helpers, benchmarks, demos |
 | `native_xva_interface/` | Python dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
 | `example*.py` | Example scripts using `OreBasic` and snapshot tools |
@@ -28,6 +29,16 @@ Use it for fast prototyping, regression tests, teaching, or as the Python leg in
 | `docs/` | Project notes and longer-form writeups that do not belong at the root |
 | `tests/` | Unit tests for `py_ore_tools` |
 | `parity_artifacts/` | Generated benchmark/parity outputs (optional; can be recreated) |
+| `regression_artifacts/examples_python/` | Central Python-first regression baselines generated from curated cases under `Examples/` |
+
+## Architecture
+
+The maintained Python flows now separate into two explicit paths:
+
+- Python-first: dataclasses -> loader/programmatic build -> Python compute -> snapshot/report artifacts
+- ORE integration: dataclasses -> XML mapper -> oreapp / SWIG runtime -> snapshot-compatible artifacts
+
+The canonical import surface for new code lives under [`src/pythonore/`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore), while [`py_ore_tools/`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools) and [`native_xva_interface/`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface) remain compatibility-facing packages.
 
 ## Requirements
 
@@ -76,6 +87,13 @@ python -m pytest tests/ -q
 
 # native_xva_interface tests (add project root to PYTHONPATH)
 PYTHONPATH=. python -m pytest native_xva_interface/tests/ -q
+```
+
+To refresh or compare the curated Python-first example baselines:
+
+```bash
+python -m pythonore.apps.examples_regression refresh
+python -m pythonore.apps.examples_regression compare
 ```
 
 ## Examples

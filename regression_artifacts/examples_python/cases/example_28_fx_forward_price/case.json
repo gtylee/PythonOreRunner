@@ -1,0 +1,41 @@
+{
+  "baseline_mode": "python",
+  "case": {
+    "baseline_mode": "python",
+    "case_id": "example_28_fx_forward_price",
+    "cli_args": [
+      "--price"
+    ],
+    "description": "Legacy Example 28 FX forward price-only Python regression.",
+    "files_to_compare": [
+      "curves_eur_base.csv",
+      "curves_usd_base.csv",
+      "flows_eur_base.csv",
+      "flows_usd_base.csv",
+      "npv.csv",
+      "npv_eur_base.csv",
+      "npv_usd_base.csv"
+    ],
+    "ore_xml": "Examples/Legacy/Example_28/Input/ore_eur_base.xml",
+    "secondary_parity": true,
+    "tags": [
+      "pricing",
+      "fx"
+    ],
+    "tolerances": {},
+    "workflow": "python"
+  },
+  "exit_code": 0,
+  "files": [
+    "curves_eur_base.csv",
+    "curves_usd_base.csv",
+    "flows_eur_base.csv",
+    "flows_usd_base.csv",
+    "input_validation.csv",
+    "npv.csv",
+    "npv_eur_base.csv",
+    "npv_usd_base.csv",
+    "report.md",
+    "summary.json"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "baseline_mode": "python",
+  "case": {
+    "baseline_mode": "python",
+    "case_id": "example_71_fx_ndf_price",
+    "cli_args": [
+      "--price"
+    ],
+    "description": "Legacy Example 71 FX NDF price-only Python regression.",
+    "files_to_compare": [
+      "curves.csv",
+      "flows.csv",
+      "npv.csv",
+      "parsensitivity.csv",
+      "sensitivity.csv"
+    ],
+    "ore_xml": "Examples/Legacy/Example_71/Input/ore.xml",
+    "secondary_parity": true,
+    "tags": [
+      "pricing",
+      "fx",
+      "ndf"
+    ],
+    "tolerances": {},
+    "workflow": "python"
+  },
+  "exit_code": 0,
+  "files": [
+    "curves.csv",
+    "flows.csv",
+    "input_validation.csv",
+    "npv.csv",
+    "parsensitivity.csv",
+    "report.md",
+    "sensitivity.csv",
+    "summary.json"
+  ]
+}

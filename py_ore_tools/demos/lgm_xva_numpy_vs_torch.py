@@ -19,7 +19,7 @@ from py_ore_tools.irs_xva_utils import compute_xva_from_npv_paths, survival_prob
 from py_ore_tools.lgm import LGMParams
 from py_ore_tools.lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams
 from py_ore_tools.lgm_fx_hybrid_torch import TorchLgmFxHybrid, simulate_hybrid_paths_torch
-from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, fx_forward_portfolio_npv_paths
+from py_ore_tools.lgm_fx_xva_utils import apply_mpor_closeout, FxForwardDef, fx_forward_portfolio_npv_paths
 
 try:
     import torch
@@ -91,9 +91,12 @@ FX_VOL_BY_PAIR = {
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--paths", type=int, default=10000)
-    p.add_argument("--trades", type=int, default=100)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--paths", type=int, default=20000)
+    p.add_argument("--trades", type=int, default=200)
+    p.add_argument("--seed", type=int, default=41)
+    p.add_argument("--mpor-days", type=float, default=10.0)
+    p.add_argument("--threshold", type=float, default=0.0)
+    p.add_argument("--mta", type=float, default=0.0)
     p.add_argument("--device", choices=("cpu", "mps", "all"), default="all")
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--warmup", type=int, default=0)
@@ -145,7 +148,7 @@ def _portfolio(n_trades: int) -> list[FxForwardDef]:
     for i, maturity in enumerate(maturities):
         pair = pairs[i % len(pairs)]
         spot = SPOT_BY_PAIR[pair]
-        strike_bump = 0.0005 * ((i % len(pairs)) + 1) / len(pairs)
+        strike_bump = 0.000005 * ((i % len(pairs)) + 1) / len(pairs)
         strike = spot * (1.0 + (-1.0 if i % 3 == 0 else 1.0) * strike_bump)
         trades.append(
             FxForwardDef(
@@ -193,13 +196,29 @@ def _simulate_torch(hybrid: TorchLgmFxHybrid, times: np.ndarray, n_paths: int, s
     )
 
 
-def _xva_pack(times: np.ndarray, npv_paths: np.ndarray) -> dict[str, object]:
+def _collateral_balance(npv_paths: np.ndarray, *, threshold: float, mta: float) -> np.ndarray:
+    abs_npv = np.abs(npv_paths)
+    posted = np.sign(npv_paths) * np.maximum(abs_npv - threshold, 0.0)
+    return np.where(np.abs(posted) >= mta, posted, 0.0)
+
+
+def _xva_pack(
+    times: np.ndarray,
+    npv_paths: np.ndarray,
+    *,
+    mpor_years: float,
+    threshold: float,
+    mta: float,
+) -> dict[str, object]:
+    closeout_npv = apply_mpor_closeout(npv_paths, times, mpor_years=mpor_years)
+    if mpor_years > 0.0:
+        closeout_npv = closeout_npv - _collateral_balance(npv_paths, threshold=threshold, mta=mta)
     discount = np.asarray([_curves()["USD"](float(t)) for t in times], dtype=float)
-    q_cpty = survival_probability_from_hazard(times, np.array([2.5], dtype=float), np.array([0.015], dtype=float))
-    q_own = survival_probability_from_hazard(times, np.array([2.5], dtype=float), np.array([0.010], dtype=float))
+    q_cpty = survival_probability_from_hazard(times, np.array([2.5], dtype=float), np.array([0.005], dtype=float))
+    q_own = survival_probability_from_hazard(times, np.array([2.5], dtype=float), np.array([0.003], dtype=float))
     return compute_xva_from_npv_paths(
         times=times,
-        npv_paths=npv_paths,
+        npv_paths=closeout_npv,
         discount=discount,
         survival_cpty=q_cpty,
         survival_own=q_own,
@@ -210,7 +229,17 @@ def _xva_pack(times: np.ndarray, npv_paths: np.ndarray) -> dict[str, object]:
     )
 
 
-def _numpy_pipeline(hybrid: LgmFxHybrid, trades: list[FxForwardDef], times: np.ndarray, n_paths: int, seed: int):
+def _numpy_pipeline(
+    hybrid: LgmFxHybrid,
+    trades: list[FxForwardDef],
+    times: np.ndarray,
+    n_paths: int,
+    seed: int,
+    *,
+    mpor_years: float,
+    threshold: float,
+    mta: float,
+):
     curves = _curves()
     sim = _simulate_numpy(hybrid, times, n_paths, seed)
     npv = fx_forward_portfolio_npv_paths(
@@ -223,7 +252,7 @@ def _numpy_pipeline(hybrid: LgmFxHybrid, trades: list[FxForwardDef], times: np.n
         tensor_backend="numpy",
         return_numpy=True,
     )
-    return npv, _xva_pack(times, npv)
+    return npv, _xva_pack(times, npv, mpor_years=mpor_years, threshold=threshold, mta=mta)
 
 
 def _torch_pipeline(
@@ -234,6 +263,10 @@ def _torch_pipeline(
     n_paths: int,
     seed: int,
     device: str,
+    *,
+    mpor_years: float,
+    threshold: float,
+    mta: float,
 ):
     curves = _curves()
     sim = _simulate_torch(hybrid_t, times, n_paths, seed, device)
@@ -247,7 +280,7 @@ def _torch_pipeline(
         tensor_backend="torch-mps" if device == "mps" else "torch-cpu",
         return_numpy=True,
     )
-    return npv, _xva_pack(times, npv)
+    return npv, _xva_pack(times, npv, mpor_years=mpor_years, threshold=threshold, mta=mta)
 
 
 def _summary(pack: dict[str, object]) -> dict[str, float]:
@@ -297,6 +330,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if torch is None:
         raise SystemExit("torch is required for this demo")
+    if args.mpor_days < 0.0:
+        raise SystemExit("--mpor-days must be non-negative")
+    if args.threshold < 0.0:
+        raise SystemExit("--threshold must be non-negative")
+    if args.mta < 0.0:
+        raise SystemExit("--mta must be non-negative")
     available_devices = _available_torch_devices()
     if args.device == "mps" and "mps" not in available_devices:
         raise SystemExit("requested device 'mps' is not available")
@@ -304,19 +343,60 @@ def main(argv: list[str] | None = None) -> int:
     hybrid_np, hybrid_t = _build_hybrid()
     times = _times()
     trades = _portfolio(args.trades)
+    mpor_years = args.mpor_days / 365.0
 
-    npv_numpy, xva_numpy = _numpy_pipeline(hybrid_np, trades, times, args.paths, args.seed)
+    npv_numpy, xva_numpy = _numpy_pipeline(
+        hybrid_np,
+        trades,
+        times,
+        args.paths,
+        args.seed,
+        mpor_years=mpor_years,
+        threshold=args.threshold,
+        mta=args.mta,
+    )
     numpy_timing = _bench(
-        lambda: _numpy_pipeline(hybrid_np, trades, times, args.paths, args.seed),
+        lambda: _numpy_pipeline(
+            hybrid_np,
+            trades,
+            times,
+            args.paths,
+            args.seed,
+            mpor_years=mpor_years,
+            threshold=args.threshold,
+            mta=args.mta,
+        ),
         repeats=args.repeats,
         warmup=args.warmup,
     )
     torch_devices = available_devices if args.device == "all" else [args.device]
     torch_results: dict[str, dict[str, object]] = {}
     for device in torch_devices:
-        npv_torch, xva_torch = _torch_pipeline(hybrid_np, hybrid_t, trades, times, args.paths, args.seed, device)
+        npv_torch, xva_torch = _torch_pipeline(
+            hybrid_np,
+            hybrid_t,
+            trades,
+            times,
+            args.paths,
+            args.seed,
+            device,
+            mpor_years=mpor_years,
+            threshold=args.threshold,
+            mta=args.mta,
+        )
         torch_timing = _bench(
-            lambda d=device: _torch_pipeline(hybrid_np, hybrid_t, trades, times, args.paths, args.seed, d),
+            lambda d=device: _torch_pipeline(
+                hybrid_np,
+                hybrid_t,
+                trades,
+                times,
+                args.paths,
+                args.seed,
+                d,
+                mpor_years=mpor_years,
+                threshold=args.threshold,
+                mta=args.mta,
+            ),
             repeats=args.repeats,
             warmup=args.warmup,
         )
@@ -341,6 +421,10 @@ def main(argv: list[str] | None = None) -> int:
         "paths": args.paths,
         "trades": args.trades,
         "seed": args.seed,
+        "mpor_days": args.mpor_days,
+        "mpor_years": mpor_years,
+        "threshold": args.threshold,
+        "mta": args.mta,
         "device": args.device,
         "torch_devices_tested": torch_devices,
         "numpy": _summary(xva_numpy),
@@ -361,6 +445,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'trades':<22} {args.trades:,}")
     print(f"{'paths':<22} {args.paths:,}")
     print(f"{'seed':<22} {args.seed:,}")
+    print(f"{'mpor days':<22} {args.mpor_days:g}")
+    print(f"{'threshold':<22} {args.threshold:,.3f}")
+    print(f"{'mta':<22} {args.mta:,.3f}")
     print(f"{'device':<22} {args.device}")
     print("=" * 80)
     print()

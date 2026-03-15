@@ -653,6 +653,7 @@ def simulate_lgm_measure(
     rng: Optional[np.random.Generator] = None,
     x0: float = 0.0,
     draw_order: str = "time_major",
+    antithetic: bool = False,
 ) -> np.ndarray:
     """Simulate the ORE LGM state ``x(t)`` on a time grid.
 
@@ -666,6 +667,8 @@ def simulate_lgm_measure(
         raise ValueError("draw_order must be 'time_major' or 'ore_path_major'")
     if rng is None and draw_order == "ore_path_major":
         raise ValueError("draw_order='ore_path_major' requires an explicit rng")
+    if antithetic and draw_order != "time_major":
+        raise ValueError("antithetic=True is only supported for draw_order='time_major'")
     if rng is None:
         rng = np.random.default_rng()
 
@@ -676,11 +679,15 @@ def simulate_lgm_measure(
     zeta_grid = model.zeta(times_arr)
     var_increments = np.diff(zeta_grid)
     if draw_order == "time_major":
+        half_paths = (n_paths + 1) // 2 if antithetic else n_paths
         for i, var in enumerate(var_increments):
             if var < -1.0e-14:
                 raise ValueError("encountered negative variance increment")
             var = max(var, 0.0)
-            x[i + 1, :] = x[i, :] + np.sqrt(var) * rng.standard_normal(n_paths)
+            draws = rng.standard_normal(half_paths)
+            if antithetic:
+                draws = np.concatenate((draws, -draws), axis=0)[:n_paths]
+            x[i + 1, :] = x[i, :] + np.sqrt(var) * draws
         return x
 
     if not hasattr(rng, "next_sequence"):

@@ -1,0 +1,227 @@
+{
+  "counterparty": "CP",
+  "diagnostics": {
+    "engine": "python_price_only",
+    "pricing_mode": "python_fx_forward",
+    "reference_output_dirs": [
+      "$REPO_ROOT/Examples/Legacy/Example_71/ExpectedOutput"
+    ],
+    "using_expected_output": true
+  },
+  "input_validation": {
+    "action_items": [
+      {
+        "code": "missing_mandatory_quotes",
+        "detail_count": 32,
+        "details": [
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/10Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/15Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/1Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/20Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/2Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/30Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/3Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/40Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/4Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/50Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/5Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/7Y",
+          "IR_SWAP/RATE/USD/2D/1D/10Y",
+          "IR_SWAP/RATE/USD/2D/1D/12Y",
+          "IR_SWAP/RATE/USD/2D/1D/15Y",
+          "IR_SWAP/RATE/USD/2D/1D/1M",
+          "IR_SWAP/RATE/USD/2D/1D/1Y",
+          "IR_SWAP/RATE/USD/2D/1D/1Y3M",
+          "IR_SWAP/RATE/USD/2D/1D/1Y6M",
+          "IR_SWAP/RATE/USD/2D/1D/1Y9M",
+          "IR_SWAP/RATE/USD/2D/1D/20Y",
+          "IR_SWAP/RATE/USD/2D/1D/25Y",
+          "IR_SWAP/RATE/USD/2D/1D/2Y",
+          "IR_SWAP/RATE/USD/2D/1D/30Y",
+          "IR_SWAP/RATE/USD/2D/1D/3M",
+          "IR_SWAP/RATE/USD/2D/1D/3Y",
+          "IR_SWAP/RATE/USD/2D/1D/4Y",
+          "IR_SWAP/RATE/USD/2D/1D/5Y",
+          "IR_SWAP/RATE/USD/2D/1D/6M",
+          "IR_SWAP/RATE/USD/2D/1D/7Y",
+          "IR_SWAP/RATE/USD/2D/1D/9M",
+          "MM/RATE/USD/0D/1D"
+        ],
+        "severity": "error",
+        "what_failed": "The active curve build requests mandatory quote ids that are not present in the market data on the asof date.",
+        "what_to_fix": "Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml.",
+        "where_to_fix": [
+          "$REPO_ROOT/Examples/Legacy/Example_71/Input/curveconfig.xml",
+          "$REPO_ROOT/Examples/Input/market_20160205.txt"
+        ]
+      }
+    ],
+    "checks": {
+      "conventions_exist": true,
+      "curve_specs_resolve": true,
+      "market_configurations_exist": true,
+      "quotes_exist_for_asof": false,
+      "referenced_todaysmarket_sections_exist": true,
+      "yield_index_names_distinct": true
+    },
+    "conventions": {
+      "missing_ids": [],
+      "used_ids": [
+        "USD-FED-FUNDS-CONVENTIONS",
+        "USD-GBP-XCCY-BASIS-CONVENTIONS",
+        "USD-OIS-CONVENTIONS"
+      ],
+      "valid": true
+    },
+    "curve_specs": {
+      "active_curve_ids_by_section": {
+        "YieldCurves": [
+          "EUR-IN-USD",
+          "EUR1D",
+          "EUR3M",
+          "GBP-IN-USD",
+          "GBP1D",
+          "GBP3M",
+          "GBP6M",
+          "USD1D",
+          "USD3M"
+        ]
+      },
+      "invalid": [],
+      "quote_scope_curve_ids_by_section": {
+        "YieldCurves": [
+          "GBP-IN-USD",
+          "USD1D"
+        ]
+      },
+      "valid": true
+    },
+    "files": {
+      "conventions_xml": "$REPO_ROOT/Examples/Input/conventions.xml",
+      "curveconfig_xml": "$REPO_ROOT/Examples/Legacy/Example_71/Input/curveconfig.xml",
+      "fixing_data_file": "$REPO_ROOT/Examples/Input/fixings_20160205.txt",
+      "market_data_file": "$REPO_ROOT/Examples/Input/market_20160205.txt",
+      "portfolio_xml": "$REPO_ROOT/Examples/Legacy/Example_71/Input/portfolio.xml",
+      "todaysmarket_xml": "$REPO_ROOT/Examples/Legacy/Example_71/Input/todaysmarket.xml"
+    },
+    "fixings": {
+      "imply_todays_fixings": false,
+      "potential_issue": false,
+      "today_fixing_count": 0
+    },
+    "fx_dominance": {
+      "pair_count_with_both_directions": 0,
+      "pairs_with_both_directions": []
+    },
+    "input_links_valid": false,
+    "issues": [
+      "some active mandatory curve-config quotes are missing on the asof date"
+    ],
+    "market_configurations": {
+      "available": [
+        "xois"
+      ],
+      "missing_requested": [],
+      "requested": [
+        "xois"
+      ],
+      "valid": true
+    },
+    "quotes": {
+      "asof_quote_count": 0,
+      "mandatory_required_count": 32,
+      "missing_mandatory": [
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/10Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/15Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/1Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/20Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/2Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/30Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/3Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/40Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/4Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/50Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/5Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/GBP/3M/7Y",
+        "IR_SWAP/RATE/USD/2D/1D/10Y",
+        "IR_SWAP/RATE/USD/2D/1D/12Y",
+        "IR_SWAP/RATE/USD/2D/1D/15Y",
+        "IR_SWAP/RATE/USD/2D/1D/1M",
+        "IR_SWAP/RATE/USD/2D/1D/1Y",
+        "IR_SWAP/RATE/USD/2D/1D/1Y3M",
+        "IR_SWAP/RATE/USD/2D/1D/1Y6M",
+        "IR_SWAP/RATE/USD/2D/1D/1Y9M",
+        "IR_SWAP/RATE/USD/2D/1D/20Y",
+        "IR_SWAP/RATE/USD/2D/1D/25Y",
+        "IR_SWAP/RATE/USD/2D/1D/2Y",
+        "IR_SWAP/RATE/USD/2D/1D/30Y",
+        "IR_SWAP/RATE/USD/2D/1D/3M",
+        "IR_SWAP/RATE/USD/2D/1D/3Y",
+        "IR_SWAP/RATE/USD/2D/1D/4Y",
+        "IR_SWAP/RATE/USD/2D/1D/5Y",
+        "IR_SWAP/RATE/USD/2D/1D/6M",
+        "IR_SWAP/RATE/USD/2D/1D/7Y",
+        "IR_SWAP/RATE/USD/2D/1D/9M",
+        "MM/RATE/USD/0D/1D"
+      ],
+      "missing_optional": [],
+      "optional_required_count": 0,
+      "valid": false
+    },
+    "summary": {
+      "asof_date": "2016-02-05",
+      "market_contexts": {
+        "eqcalibration": "xois",
+        "fxcalibration": "xois",
+        "lgmcalibration": "xois",
+        "pricing": "xois",
+        "simulation": "xois"
+      },
+      "ore_xml_path": "$REPO_ROOT/Examples/Legacy/Example_71/Input/ore.xml",
+      "selected_market_configs": [
+        "xois"
+      ]
+    },
+    "todaysmarket_names": {
+      "distinct": true,
+      "yield_index_overlaps": []
+    },
+    "todaysmarket_sections": {
+      "missing_references": [],
+      "valid": true
+    }
+  },
+  "maturity_date": "2021-02-09",
+  "maturity_time": 5.011221,
+  "modes": [
+    "price"
+  ],
+  "netting_set_id": "NS",
+  "ore_xml": "$REPO_ROOT/Examples/Legacy/Example_71/Input/ore.xml",
+  "parity": null,
+  "pass_all": true,
+  "pass_flags": {
+    "pricing": true,
+    "xva_cva": true,
+    "xva_dva": true,
+    "xva_fba": true,
+    "xva_fca": true
+  },
+  "pricing": {
+    "discount_column": "USD-FedFunds",
+    "forward_column": "GBP",
+    "fx_pair": "GBP/USD",
+    "fx_reference_discount_factor": 0.9540298081,
+    "fx_reference_fixing_value": 1.4384281816,
+    "fx_settlement_currency": "USD",
+    "fx_settlement_type": "CASH",
+    "fx_strike": 1.2,
+    "ore_t0_npv": 227467.592353,
+    "py_t0_npv": 227467.59233747996,
+    "spot0": 1.394610179594994,
+    "t0_npv_abs_diff": 1.5520025044679642e-05,
+    "trade_type": "FxForward"
+  },
+  "trade_id": "FXNDF",
+  "xva": null
+}

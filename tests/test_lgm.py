@@ -64,6 +64,11 @@ class TestLGM(unittest.TestCase):
             if tgt_var > 1.0e-8:
                 self.assertLess(abs(emp_var - tgt_var) / tgt_var, 0.05)
 
+    def test_lgm_measure_antithetic_pairs_cancel(self):
+        times = np.array([0.0, 0.5, 1.0, 2.0], dtype=float)
+        x = simulate_lgm_measure(self.model, times, 8, rng=np.random.default_rng(7), antithetic=True)
+        self.assertTrue(np.allclose(x[:, :4] + x[:, 4:], 0.0, atol=1.0e-12))
+
     def test_ore_mt_rng_matches_oracle_fixture(self):
         payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))
         expected = np.asarray(payload["z"], dtype=float)

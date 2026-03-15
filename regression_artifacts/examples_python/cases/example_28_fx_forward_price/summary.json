@@ -1,0 +1,219 @@
+{
+  "counterparty": "CP",
+  "diagnostics": {
+    "engine": "python",
+    "pricing_mode": "python_fx_forward",
+    "reference_output_dirs": [
+      "$REPO_ROOT/Examples/Legacy/Example_28/ExpectedOutput"
+    ],
+    "using_expected_output": true
+  },
+  "input_validation": {
+    "action_items": [
+      {
+        "code": "missing_mandatory_quotes",
+        "detail_count": 32,
+        "details": [
+          "IR_SWAP/RATE/EUR/2D/1D/10M",
+          "IR_SWAP/RATE/EUR/2D/1D/10Y",
+          "IR_SWAP/RATE/EUR/2D/1D/11M",
+          "IR_SWAP/RATE/EUR/2D/1D/12Y",
+          "IR_SWAP/RATE/EUR/2D/1D/15Y",
+          "IR_SWAP/RATE/EUR/2D/1D/1M",
+          "IR_SWAP/RATE/EUR/2D/1D/1W",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y3M",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y6M",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y9M",
+          "IR_SWAP/RATE/EUR/2D/1D/20Y",
+          "IR_SWAP/RATE/EUR/2D/1D/25Y",
+          "IR_SWAP/RATE/EUR/2D/1D/2M",
+          "IR_SWAP/RATE/EUR/2D/1D/2W",
+          "IR_SWAP/RATE/EUR/2D/1D/2Y",
+          "IR_SWAP/RATE/EUR/2D/1D/30Y",
+          "IR_SWAP/RATE/EUR/2D/1D/3M",
+          "IR_SWAP/RATE/EUR/2D/1D/3Y",
+          "IR_SWAP/RATE/EUR/2D/1D/4M",
+          "IR_SWAP/RATE/EUR/2D/1D/4Y",
+          "IR_SWAP/RATE/EUR/2D/1D/5M",
+          "IR_SWAP/RATE/EUR/2D/1D/5Y",
+          "IR_SWAP/RATE/EUR/2D/1D/6M",
+          "IR_SWAP/RATE/EUR/2D/1D/6Y",
+          "IR_SWAP/RATE/EUR/2D/1D/7M",
+          "IR_SWAP/RATE/EUR/2D/1D/7Y",
+          "IR_SWAP/RATE/EUR/2D/1D/8M",
+          "IR_SWAP/RATE/EUR/2D/1D/8Y",
+          "IR_SWAP/RATE/EUR/2D/1D/9M",
+          "IR_SWAP/RATE/EUR/2D/1D/9Y",
+          "MM/RATE/EUR/0D/1D"
+        ],
+        "severity": "error",
+        "what_failed": "The active curve build requests mandatory quote ids that are not present in the market data on the asof date.",
+        "what_to_fix": "Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml.",
+        "where_to_fix": [
+          "$REPO_ROOT/Examples/Legacy/Example_28/Input/curveconfig.xml",
+          "$REPO_ROOT/Examples/Input/market_20160205.txt"
+        ]
+      }
+    ],
+    "checks": {
+      "conventions_exist": true,
+      "curve_specs_resolve": true,
+      "market_configurations_exist": true,
+      "quotes_exist_for_asof": false,
+      "referenced_todaysmarket_sections_exist": true,
+      "yield_index_names_distinct": true
+    },
+    "conventions": {
+      "missing_ids": [],
+      "used_ids": [
+        "EUR-EONIA-CONVENTIONS",
+        "EUR-OIS-CONVENTIONS"
+      ],
+      "valid": true
+    },
+    "curve_specs": {
+      "active_curve_ids_by_section": {
+        "YieldCurves": [
+          "EUR-IN-USD",
+          "EUR1D",
+          "EUR3M",
+          "GBP-IN-EUR",
+          "GBP-IN-USD",
+          "GBP1D",
+          "GBP3M",
+          "GBP6M",
+          "USD1D",
+          "USD3M"
+        ]
+      },
+      "invalid": [],
+      "quote_scope_curve_ids_by_section": {
+        "YieldCurves": [
+          "EUR1D",
+          "GBP-IN-EUR"
+        ]
+      },
+      "valid": true
+    },
+    "files": {
+      "conventions_xml": "$REPO_ROOT/Examples/Input/conventions.xml",
+      "curveconfig_xml": "$REPO_ROOT/Examples/Legacy/Example_28/Input/curveconfig.xml",
+      "fixing_data_file": "$REPO_ROOT/Examples/Input/fixings_20160205.txt",
+      "market_data_file": "$REPO_ROOT/Examples/Input/market_20160205.txt",
+      "portfolio_xml": "$REPO_ROOT/Examples/Legacy/Example_28/Input/portfolio.xml",
+      "todaysmarket_xml": "$REPO_ROOT/Examples/Legacy/Example_28/Input/todaysmarket_eur_base.xml"
+    },
+    "fixings": {
+      "imply_todays_fixings": false,
+      "potential_issue": false,
+      "today_fixing_count": 0
+    },
+    "fx_dominance": {
+      "pair_count_with_both_directions": 0,
+      "pairs_with_both_directions": []
+    },
+    "input_links_valid": false,
+    "issues": [
+      "some active mandatory curve-config quotes are missing on the asof date"
+    ],
+    "market_configurations": {
+      "available": [
+        "default"
+      ],
+      "missing_requested": [],
+      "requested": [
+        "default"
+      ],
+      "valid": true
+    },
+    "quotes": {
+      "asof_quote_count": 0,
+      "mandatory_required_count": 32,
+      "missing_mandatory": [
+        "IR_SWAP/RATE/EUR/2D/1D/10M",
+        "IR_SWAP/RATE/EUR/2D/1D/10Y",
+        "IR_SWAP/RATE/EUR/2D/1D/11M",
+        "IR_SWAP/RATE/EUR/2D/1D/12Y",
+        "IR_SWAP/RATE/EUR/2D/1D/15Y",
+        "IR_SWAP/RATE/EUR/2D/1D/1M",
+        "IR_SWAP/RATE/EUR/2D/1D/1W",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y3M",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y6M",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y9M",
+        "IR_SWAP/RATE/EUR/2D/1D/20Y",
+        "IR_SWAP/RATE/EUR/2D/1D/25Y",
+        "IR_SWAP/RATE/EUR/2D/1D/2M",
+        "IR_SWAP/RATE/EUR/2D/1D/2W",
+        "IR_SWAP/RATE/EUR/2D/1D/2Y",
+        "IR_SWAP/RATE/EUR/2D/1D/30Y",
+        "IR_SWAP/RATE/EUR/2D/1D/3M",
+        "IR_SWAP/RATE/EUR/2D/1D/3Y",
+        "IR_SWAP/RATE/EUR/2D/1D/4M",
+        "IR_SWAP/RATE/EUR/2D/1D/4Y",
+        "IR_SWAP/RATE/EUR/2D/1D/5M",
+        "IR_SWAP/RATE/EUR/2D/1D/5Y",
+        "IR_SWAP/RATE/EUR/2D/1D/6M",
+        "IR_SWAP/RATE/EUR/2D/1D/6Y",
+        "IR_SWAP/RATE/EUR/2D/1D/7M",
+        "IR_SWAP/RATE/EUR/2D/1D/7Y",
+        "IR_SWAP/RATE/EUR/2D/1D/8M",
+        "IR_SWAP/RATE/EUR/2D/1D/8Y",
+        "IR_SWAP/RATE/EUR/2D/1D/9M",
+        "IR_SWAP/RATE/EUR/2D/1D/9Y",
+        "MM/RATE/EUR/0D/1D"
+      ],
+      "missing_optional": [],
+      "optional_required_count": 0,
+      "valid": false
+    },
+    "summary": {
+      "asof_date": "2016-02-05",
+      "market_contexts": {
+        "eqcalibration": "default",
+        "fxcalibration": "default",
+        "lgmcalibration": "default",
+        "pricing": "default",
+        "simulation": "default"
+      },
+      "ore_xml_path": "$REPO_ROOT/Examples/Legacy/Example_28/Input/ore_eur_base.xml",
+      "selected_market_configs": [
+        "default"
+      ]
+    },
+    "todaysmarket_names": {
+      "distinct": true,
+      "yield_index_overlaps": []
+    },
+    "todaysmarket_sections": {
+      "missing_references": [],
+      "valid": true
+    }
+  },
+  "maturity_date": "2017-02-06",
+  "maturity_time": 1.003002,
+  "modes": [
+    "price"
+  ],
+  "netting_set_id": "NS",
+  "ore_xml": "$REPO_ROOT/Examples/Legacy/Example_28/Input/ore_eur_base.xml",
+  "parity": null,
+  "pass_all": true,
+  "pass_flags": {},
+  "pricing": {
+    "discount_column": "GBP",
+    "forward_column": "EUR",
+    "fx_pair": "EUR/GBP",
+    "fx_reference_discount_factor": 1.0031836048,
+    "fx_reference_fixing_value": 1.0,
+    "fx_settlement_currency": "GBP",
+    "fx_settlement_type": "",
+    "fx_strike": 0.8190701063820108,
+    "py_t0_npv": 1094.870784756119,
+    "spot0": 0.811938,
+    "trade_type": "FxForward"
+  },
+  "trade_id": "FXFWD_1Y",
+  "xva": null
+}

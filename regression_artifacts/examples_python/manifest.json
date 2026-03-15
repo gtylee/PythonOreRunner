@@ -1,0 +1,107 @@
+{
+  "cases": [
+    {
+      "baseline_mode": "python",
+      "case_id": "example_28_fx_forward_price",
+      "cli_args": [
+        "--price"
+      ],
+      "description": "Legacy Example 28 FX forward price-only Python regression.",
+      "files_to_compare": [
+        "curves_eur_base.csv",
+        "curves_usd_base.csv",
+        "flows_eur_base.csv",
+        "flows_usd_base.csv",
+        "npv.csv",
+        "npv_eur_base.csv",
+        "npv_usd_base.csv"
+      ],
+      "ore_xml": "Examples/Legacy/Example_28/Input/ore_eur_base.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "fx"
+      ],
+      "workflow": "python"
+    },
+    {
+      "baseline_mode": "python",
+      "case_id": "example_71_fx_ndf_price",
+      "cli_args": [
+        "--price"
+      ],
+      "description": "Legacy Example 71 FX NDF price-only Python regression.",
+      "files_to_compare": [
+        "curves.csv",
+        "flows.csv",
+        "npv.csv",
+        "parsensitivity.csv",
+        "sensitivity.csv"
+      ],
+      "ore_xml": "Examples/Legacy/Example_71/Input/ore.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "fx",
+        "ndf"
+      ],
+      "workflow": "python"
+    },
+    {
+      "baseline_mode": "python",
+      "case_id": "example_13_fx_option_xva",
+      "cli_args": [
+        "--price",
+        "--xva",
+        "--paths",
+        "32"
+      ],
+      "description": "Legacy Example 13 FX option pricing plus XVA Python regression.",
+      "files_to_compare": [
+        "curves.csv",
+        "exposure_nettingset_CPTY_A.csv",
+        "exposure_trade_FxOption.csv",
+        "flows.csv",
+        "npv.csv",
+        "xva.csv"
+      ],
+      "ore_xml": "Examples/Legacy/Example_13/Input/ore_E0.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "xva",
+        "fx-option"
+      ],
+      "workflow": "python"
+    },
+    {
+      "baseline_mode": "python",
+      "case_id": "exposure_measure_lgm_xva",
+      "cli_args": [
+        "--price",
+        "--xva",
+        "--paths",
+        "32"
+      ],
+      "description": "Exposure measure LGM pricing plus XVA Python regression.",
+      "files_to_compare": [
+        "calibration.csv",
+        "calibration.xml",
+        "curves.csv",
+        "exposure_nettingset_CPTY_A.csv",
+        "exposure_trade_Swap_20.csv",
+        "flows.csv",
+        "npv.csv",
+        "xva.csv"
+      ],
+      "ore_xml": "Examples/Exposure/Input/ore_measure_lgm.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "xva",
+        "ore-snapshot"
+      ],
+      "workflow": "python"
+    }
+  ]
+}

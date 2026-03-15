@@ -299,6 +299,7 @@ def simulate_lgm_measure_torch(
     dtype=None,
     normal_draws: Optional[np.ndarray] = None,
     return_numpy: bool = True,
+    antithetic: bool = False,
 ):
     """Simulate the LGM state with torch as the accumulation backend.
 
@@ -314,6 +315,10 @@ def simulate_lgm_measure_torch(
         raise ValueError("draw_order must be 'time_major' or 'ore_path_major'")
     if rng is None and normal_draws is None and draw_order == "ore_path_major":
         raise ValueError("draw_order='ore_path_major' requires an explicit rng or normal_draws")
+    if antithetic and draw_order != "time_major":
+        raise ValueError("antithetic=True is only supported for draw_order='time_major'")
+    if antithetic and normal_draws is not None:
+        raise ValueError("antithetic=True cannot be combined with explicit normal_draws")
 
     device_obj = torch_mod.device(device) if device is not None else torch_mod.device("cpu")
     if dtype is None:
@@ -331,11 +336,16 @@ def simulate_lgm_measure_torch(
         x[0].fill_(float(x0))
 
         if draw_order == "time_major":
+            half_paths = (n_paths + 1) // 2 if antithetic else n_paths
             if normal_draws is None:
                 if rng is None:
-                    draws_t = torch_mod.randn((step_scales_t.numel(), n_paths), dtype=dtype, device=device_obj)
+                    draws_t = torch_mod.randn((step_scales_t.numel(), half_paths), dtype=dtype, device=device_obj)
+                    if antithetic:
+                        draws_t = torch_mod.cat((draws_t, -draws_t), dim=1)[:, :n_paths]
                 else:
-                    draws = rng.standard_normal((step_scales_t.numel(), n_paths))
+                    draws = rng.standard_normal((step_scales_t.numel(), half_paths))
+                    if antithetic:
+                        draws = np.concatenate((draws, -draws), axis=1)[:, :n_paths]
                     draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
             else:
                 draws = np.asarray(normal_draws, dtype=float)

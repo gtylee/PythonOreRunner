@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Compatibility-only prototype engine.
+
+The maintained runtime path lives under `native_xva_interface.runtime` and the
+canonical `pythonore.runtime` package. This module remains for older toy-engine
+examples, but new code should use the snapshot/session runtime APIs instead.
+"""
+
 import hashlib
 import json
 from dataclasses import asdict, replace

@@ -155,6 +155,7 @@ def simulate_hybrid_paths_torch(
     dtype=None,
     normal_draws: Optional[np.ndarray] = None,
     return_numpy: bool = True,
+    antithetic: bool = False,
 ) -> Dict[str, object]:
     torch_mod = _require_torch()
     if n_paths <= 0:
@@ -171,12 +172,19 @@ def simulate_hybrid_paths_torch(
     x0 = {k.upper(): float(v) for k, v in (x0 or {}).items()}
     log_s0 = {k.upper().replace("-", "/"): float(v) for k, v in (log_s0 or {}).items()}
     rd_minus_rf = {k.upper().replace("-", "/"): float(v) for k, v in (rd_minus_rf or {}).items()}
+    if antithetic and normal_draws is not None:
+        raise ValueError("antithetic=True cannot be combined with explicit normal_draws")
 
     if normal_draws is None:
+        half_paths = (n_paths + 1) // 2 if antithetic else n_paths
         if rng is None:
-            draws_t = torch_mod.randn((times_t.numel() - 1, model.n_factors, n_paths), dtype=dtype, device=device_obj)
+            draws_t = torch_mod.randn((times_t.numel() - 1, model.n_factors, half_paths), dtype=dtype, device=device_obj)
+            if antithetic:
+                draws_t = torch_mod.cat((draws_t, -draws_t), dim=2)[:, :, :n_paths]
         else:
-            draws = rng.standard_normal(size=(times_t.numel() - 1, model.n_factors, n_paths))
+            draws = rng.standard_normal(size=(times_t.numel() - 1, model.n_factors, half_paths))
+            if antithetic:
+                draws = np.concatenate((draws, -draws), axis=2)[:, :, :n_paths]
             draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
     else:
         draws = np.asarray(normal_draws, dtype=float)

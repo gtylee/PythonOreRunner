@@ -44,6 +44,13 @@ class TestLgmFxHybrid(unittest.TestCase):
         self.assertEqual(out["s"]["EUR/USD"].shape, (4, 256))
         self.assertTrue(np.all(out["s"]["EUR/USD"] > 0.0))
 
+    def test_simulation_antithetic_ir_pairs_cancel(self):
+        m = self._make_model(0.1)
+        t = np.array([0.0, 0.25, 1.0, 2.0])
+        out = m.simulate_paths(t, 8, rng=np.random.default_rng(7), log_s0={"EUR/USD": np.log(1.1)}, antithetic=True)
+        self.assertTrue(np.allclose(out["x"]["EUR"][:, :4] + out["x"]["EUR"][:, 4:], 0.0, atol=1.0e-12))
+        self.assertTrue(np.allclose(out["x"]["USD"][:, :4] + out["x"]["USD"][:, 4:], 0.0, atol=1.0e-12))
+
     def test_fx_forward_identity(self):
         m = self._make_model(0.0)
         s = np.array([1.20, 1.30])

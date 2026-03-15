@@ -171,6 +171,7 @@ class LgmFxHybrid:
         x0: Mapping[str, float] | None = None,
         log_s0: Mapping[str, float] | None = None,
         rd_minus_rf: Mapping[str, float] | None = None,
+        antithetic: bool = False,
     ) -> Dict[str, np.ndarray]:
         """Simulate correlated IR factors and FX log-spot states.
 
@@ -205,6 +206,7 @@ class LgmFxHybrid:
             ls_out[p][0, :] = log_s0.get(p, 0.0)
 
         ir_count = len(self.ir_ccys)
+        half_paths = (n_paths + 1) // 2 if antithetic else n_paths
         for i in range(t.size - 1):
             t0 = t[i]
             t1 = t[i + 1]
@@ -212,7 +214,9 @@ class LgmFxHybrid:
 
             # Draw all factor shocks together so the supplied CAM-style correlation
             # is respected pathwise across currencies and FX pairs.
-            z = rng.standard_normal(size=(self.n_factors, n_paths))
+            z = rng.standard_normal(size=(self.n_factors, half_paths))
+            if antithetic:
+                z = np.concatenate((z, -z), axis=1)[:, :n_paths]
             zc = self._chol @ z
 
             for j, c in enumerate(self.ir_ccys):

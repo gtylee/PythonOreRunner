@@ -91,6 +91,20 @@ class TestTorchLgmFxHybrid(unittest.TestCase):
         self.assertEqual(tuple(out["x"]["EUR"].shape), (4, 32))
         self.assertEqual(tuple(out["s"]["EUR/USD"].shape), (4, 32))
 
+    def test_torch_antithetic_ir_pairs_cancel(self):
+        times = np.array([0.0, 0.25, 1.0, 2.0], dtype=float)
+        out = simulate_hybrid_paths_torch(
+            self.torch_model,
+            times,
+            8,
+            rng=np.random.default_rng(7),
+            log_s0={"EUR/USD": np.log(1.1), "GBP/USD": np.log(1.27)},
+            antithetic=True,
+            return_numpy=True,
+        )
+        self.assertTrue(np.allclose(out["x"]["EUR"][:, :4] + out["x"]["EUR"][:, 4:], 0.0, atol=1.0e-12))
+        self.assertTrue(np.allclose(out["x"]["USD"][:, :4] + out["x"]["USD"][:, 4:], 0.0, atol=1.0e-12))
+
 
 if __name__ == "__main__":
     unittest.main()

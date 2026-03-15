@@ -62,6 +62,18 @@ class TestTorchLGM(unittest.TestCase):
         )
         self.assertTrue(np.allclose(actual, expected))
 
+    def test_simulate_lgm_measure_torch_antithetic_pairs_cancel(self):
+        times = np.array([0.0, 0.5, 1.0, 2.0], dtype=float)
+        actual = simulate_lgm_measure_torch(
+            self.torch_model,
+            times,
+            8,
+            rng=np.random.default_rng(7),
+            return_numpy=True,
+            antithetic=True,
+        )
+        self.assertTrue(np.allclose(actual[:, :4] + actual[:, 4:], 0.0, atol=1.0e-12))
+
 
 if __name__ == "__main__":
     unittest.main()

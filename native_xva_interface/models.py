@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""Compatibility-only prototype models.
+
+The maintained snapshot model now lives behind the shared dataclass surface used by
+`native_xva_interface.dataclasses` and the canonical `pythonore.domain` package.
+This module remains importable for older toy-engine callers, but it is no longer
+the source of truth for new work.
+"""
+
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Literal, Mapping, Optional
 
