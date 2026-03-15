@@ -33,6 +33,8 @@ FX_FORWARD_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_28" / "Input"
 FX_OPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_E0.xml"
 FX_NDF_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_71" / "Input" / "ore.xml"
 SWAPTION_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "Input" / "ore_flat.xml"
+SWAPTION_LONG_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore_swaption.xml"
+BERMUDAN_CASE_XML = TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_3" / "Input" / "ore_bermudans.xml"
 CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
 
 
@@ -96,6 +98,12 @@ class TestOreSnapshotCli(unittest.TestCase):
             ore_snapshot_cli._supports_native_price_only(
                 "FxOption",
                 FX_OPTION_CASE_XML,
+            )
+        )
+        self.assertFalse(
+            ore_snapshot_cli._supports_native_price_only(
+                "Swaption",
+                SWAPTION_LONG_CASE_XML,
             )
         )
 
@@ -175,6 +183,28 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "Swaption")
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertGreater(float(payload["pricing"]["py_t0_npv"]), 0.0)
+
+    def test_price_only_bermudan_swaption_runs_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(BERMUDAN_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_3" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_bermudan_swaption_backward")
+            self.assertEqual(payload["diagnostics"]["bermudan_method"], "backward")
+            self.assertEqual(payload["pricing"]["trade_type"], "Swaption")
+            self.assertIn("py_t0_npv", payload["pricing"])
+            self.assertGreater(float(payload["pricing"]["py_t0_npv"]), 0.0)
+            self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 1000.0)
+            self.assertTrue(payload["pass_all"])
 
     def test_capfloor_xva_runs_native_compare_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1252,6 +1282,29 @@ class TestOreSnapshotCli(unittest.TestCase):
             "input_validation": {"input_links_valid": True},
         }
         self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "python_only_no_reference")
+
+    def test_bucket_case_keeps_missing_reference_xva_passes_clean(self):
+        case_summary = {
+            "pass_all": True,
+            "ore_xml": str(FX_OPTION_CASE_XML),
+            "diagnostics": {
+                "engine": "compare",
+                "missing_reference_xva": True,
+                "reference_output_dirs": [str(FX_OPTION_CASE_XML.parents[1] / "ExpectedOutput")],
+            },
+            "input_validation": {"input_links_valid": True},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "clean_pass")
+
+    def test_bucket_case_prefers_parity_fail_over_validation_noise(self):
+        case_summary = {
+            "pass_all": False,
+            "ore_xml": str(SWAPTION_CASE_XML),
+            "pricing": {"t0_npv_abs_diff": 123.0},
+            "diagnostics": {"engine": "python_price_only"},
+            "input_validation": {"input_links_valid": False},
+        }
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "parity_threshold_fail")
 
     def test_write_live_report_artifacts_includes_next_fix_hint(self):
         with tempfile.TemporaryDirectory() as tmp:

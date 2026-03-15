@@ -4,9 +4,9 @@
     <DiscountingCurvesId>default</DiscountingCurvesId>
     <YieldCurvesId>default</YieldCurvesId>
   </Configuration>
-  <YieldCurves>
+  <YieldCurves id="default">
   </YieldCurves>
-  <DiscountingCurves>
+  <DiscountingCurves id="default">
     <DiscountingCurve currency="EUR">Yield/EUR/EUR1D</DiscountingCurve>
   </DiscountingCurves>
   <!-- index forwarding curve definition -->

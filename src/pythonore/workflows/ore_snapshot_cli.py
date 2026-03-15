@@ -8,6 +8,7 @@ import json
 import math
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -58,7 +59,8 @@ from pythonore.io.ore_snapshot import (
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
 )
-from pythonore.repo_paths import find_engine_repo_root, local_parity_artifacts_root
+from pythonore.repo_paths import default_ore_bin, find_engine_repo_root, local_parity_artifacts_root
+from pythonore.runtime.bermudan import price_bermudan_from_ore_case
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
@@ -431,6 +433,14 @@ def _build_minimal_pricing_payload(
     if trade_type == "FxOption":
         return _build_fx_option_pricing_payload(ore_xml)
     if trade_type == "Swaption":
+        trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+        style = (
+            (trade.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
+            if trade is not None
+            else ""
+        )
+        if style == "bermudan":
+            return _build_bermudan_swaption_pricing_payload(ore_xml)
         return _build_swaption_pricing_payload(ore_xml)
     if trade_type == "CapFloor":
         return _build_capfloor_pricing_payload(ore_xml)
@@ -1467,34 +1477,6 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         float_index=float_index,
     )
     spec = _load_swaption_surface_spec(todaysmarket_xml, curve_config_path, ccy)
-    quotes = _load_swaption_quotes(
-        market_data_path,
-        asof_date=asof_date,
-        currency=ccy,
-        option_tenors=list(spec["option_tenors"]),
-        swap_tenors=list(spec["swap_tenors"]),
-        volatility_type=str(spec["volatility_type"]),
-    )
-    option_periods = ql.PeriodVector()
-    for tenor in spec["option_tenors"]:
-        option_periods.push_back(ql.Period(str(tenor)))
-    swap_periods = ql.PeriodVector()
-    for tenor in spec["swap_tenors"]:
-        swap_periods.push_back(ql.Period(str(tenor)))
-    vols = ql.Matrix(quotes.shape[0], quotes.shape[1])
-    for i in range(quotes.shape[0]):
-        for j in range(quotes.shape[1]):
-            vols[i][j] = float(quotes[i, j])
-    vol_surface = ql.SwaptionVolatilityMatrix(
-        bond_pricing_mod._ql_calendar(str(spec["calendar"])),
-        bond_pricing_mod._ql_bdc(str(spec["business_day_convention"])),
-        option_periods,
-        swap_periods,
-        vols,
-        bond_pricing_mod._ql_day_counter(str(spec["day_counter"])),
-        False,
-        ql.Normal if str(spec["volatility_type"]).strip().lower() == "normal" else ql.ShiftedLognormal,
-    )
     fixed_rules = fixed_leg.find("./ScheduleData/Rules")
     float_rules = float_leg.find("./ScheduleData/Rules")
     if fixed_rules is None or float_rules is None:
@@ -1535,16 +1517,26 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     )
     underlying.setPricingEngine(ql.DiscountingSwapEngine(disc_curve))
     exercise = ql.EuropeanExercise(ql.DateParser.parseFormatted((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip(), "%Y%m%d"))
+    exercise_date = ql.DateParser.parseFormatted((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip(), "%Y%m%d")
     settlement = (swd.findtext("./OptionData/Settlement") or "Physical").strip().lower()
     if settlement == "cash":
         instrument = ql.Swaption(underlying, exercise, ql.Settlement.Cash, ql.Settlement.ParYieldCurve)
     else:
         instrument = ql.Swaption(underlying, exercise)
-    vol_handle = ql.SwaptionVolatilityStructureHandle(vol_surface)
-    if str(spec["volatility_type"]).strip().lower() == "normal":
-        instrument.setPricingEngine(ql.BachelierSwaptionEngine(disc_curve, vol_handle))
+    vol_type = str(spec["volatility_type"]).strip().lower()
+    swaption_vol = _lookup_swaption_market_vol(
+        market_data_path,
+        asof_date=asof_date,
+        currency=ccy,
+        exercise_date=exercise_date,
+        maturity_date=underlying.maturityDate(),
+        volatility_type=vol_type,
+    )
+    vol_quote = ql.QuoteHandle(ql.SimpleQuote(float(swaption_vol)))
+    if vol_type == "normal":
+        instrument.setPricingEngine(ql.BachelierSwaptionEngine(disc_curve, vol_quote))
     else:
-        instrument.setPricingEngine(ql.BlackSwaptionEngine(disc_curve, vol_handle))
+        instrument.setPricingEngine(ql.BlackSwaptionEngine(disc_curve, vol_quote))
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
     npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id) if npv_csv is not None else None
     return {
@@ -1561,6 +1553,188 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "reference_output_dirs": sorted({str(p.parent) for p in [npv_csv] if p is not None}),
         "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
     }
+
+
+def _lookup_swaption_market_vol(
+    market_data_path: Path,
+    *,
+    asof_date: str,
+    currency: str,
+    exercise_date,
+    maturity_date,
+    volatility_type: str,
+) -> float:
+    quote_kind = "SWAPTION/RATE_NVOL" if str(volatility_type).lower() == "normal" else "SWAPTION/RATE_LNVOL"
+    asof_compact = str(asof_date).replace("-", "")
+    asof_dash = str(asof_date)
+    target_e = float(ql.Actual365Fixed().yearFraction(ql.Settings.instance().evaluationDate, exercise_date))
+    target_t = float(ql.Actual365Fixed().yearFraction(exercise_date, maturity_date))
+    best_val = None
+    best_dist = None
+    with open(market_data_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                continue
+            key = parts[1].strip().upper()
+            if not key.startswith(f"{quote_kind}/{currency.upper()}/"):
+                continue
+            toks = key.split("/")
+            if len(toks) != 6 or toks[-1] != "ATM":
+                continue
+            exp_y = _ore_tenor_years(toks[3])
+            term_y = _ore_tenor_years(toks[4])
+            if exp_y is None or term_y is None:
+                continue
+            dist = (exp_y - target_e) ** 2 + (term_y - target_t) ** 2
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_val = float(parts[2])
+    if best_val is None:
+        raise ValueError(f"missing swaption ATM quote for {currency} near expiry={target_e:.4f}y term={target_t:.4f}y")
+    return float(best_val)
+
+
+def _ore_tenor_years(text: str) -> float | None:
+    s = str(text).strip().upper()
+    if not s:
+        return None
+    if s.endswith("Y"):
+        return float(s[:-1])
+    if s.endswith("M"):
+        return float(s[:-1]) / 12.0
+    if s.endswith("W"):
+        return float(s[:-1]) / 52.0
+    if s.endswith("D"):
+        return float(s[:-1]) / 365.0
+    return None
+
+
+
+
+def _build_bermudan_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+    ore_xml_path = ore_xml.resolve()
+    ore_root = ET.parse(ore_xml_path).getroot()
+    setup_params = {n.attrib.get("name", ""): (n.text or "").strip() for n in ore_root.findall("./Setup/Parameter")}
+    asof_date = setup_params.get("asofDate", "")
+    if not asof_date:
+        raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
+    base = ore_xml_path.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+    if trade is None:
+        raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
+    if (trade.findtext("./TradeType") or "").strip() != "Swaption":
+        raise ValueError(f"Unsupported Bermudan trade type in {portfolio_xml}")
+    style = (trade.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
+    if style != "bermudan":
+        raise ValueError(f"Unsupported Bermudan swaption style '{style}' in {portfolio_xml}")
+    classic_result = _try_price_bermudan_via_classic_calibrated_case(ore_xml_path, trade_id=trade_id)
+    result = classic_result or price_bermudan_from_ore_case(
+        input_dir,
+        ore_file=ore_xml_path.name,
+        trade_id=trade_id,
+        method="backward",
+        curve_mode="auto",
+    )
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id) if npv_csv is not None else None
+    first_exercise = (trade.findtext("./SwaptionData/OptionData/ExerciseDates/ExerciseDate") or "").strip()
+    maturity_date = str(npv_details["maturity_date"]) if npv_details is not None else first_exercise
+    maturity_time = (
+        float(npv_details["maturity_time"])
+        if npv_details is not None
+        else ore_snapshot_mod._year_fraction_from_day_counter(
+            asof_date,
+            _parse_ore_date(first_exercise),
+            "A365F",
+        )
+    )
+    return {
+        "trade_id": trade_id,
+        "trade_type": "Swaption",
+        "counterparty": ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id),
+        "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id),
+        "maturity_date": maturity_date,
+        "maturity_time": maturity_time,
+        "ore_t0_npv": float(npv_details["npv"]) if npv_details is not None else None,
+        "py_t0_npv": float(result.price),
+        "discount_column": str(result.discount_column),
+        "forward_column": str(result.forward_column),
+        "reference_output_dirs": sorted({str(p.parent) for p in [npv_csv] if p is not None}),
+        "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
+        "pricing_mode": "python_bermudan_swaption_backward",
+        "bermudan_method": str(result.method),
+        "bermudan_curve_source": str(result.curve_source),
+        "bermudan_model_param_source": str(result.model_param_source),
+    }
+
+
+def _try_price_bermudan_via_classic_calibrated_case(
+    ore_xml: Path,
+    *,
+    trade_id: str,
+):
+    sibling_classic = ore_xml.with_name("ore_classic.xml")
+    sibling_sim = ore_xml.with_name("simulation_classic.xml")
+    if not sibling_classic.exists() or not sibling_sim.exists():
+        return None
+    ore_bin = default_ore_bin()
+    if not ore_bin.exists():
+        return None
+    base = ore_xml.parent
+    run_dir = base.parent
+    with tempfile.TemporaryDirectory(prefix="bermudan_classic_cal_") as td:
+        temp_root = Path(td)
+        shutil.copytree(base, temp_root / "Input")
+        source = temp_root / "Input" / "ore_classic.xml"
+        target = temp_root / "Input" / "ore_classic_calibration.xml"
+        tree = ET.parse(source)
+        root = tree.getroot()
+        analytics = root.find("./Analytics")
+        if analytics is None:
+            return None
+        calibration = analytics.find("./Analytic[@type='calibration']")
+        if calibration is None:
+            calibration = ET.SubElement(analytics, "Analytic", {"type": "calibration"})
+            ET.SubElement(calibration, "Parameter", {"name": "active"}).text = "Y"
+            ET.SubElement(calibration, "Parameter", {"name": "configFile"}).text = "simulation_classic.xml"
+            ET.SubElement(calibration, "Parameter", {"name": "outputFile"}).text = "calibration.csv"
+        else:
+            active = calibration.find("./Parameter[@name='active']")
+            if active is None:
+                active = ET.SubElement(calibration, "Parameter", {"name": "active"})
+            active.text = "Y"
+        tree.write(target, encoding="utf-8", xml_declaration=True)
+        cp = subprocess.run(
+            [str(ore_bin), str(target)],
+            cwd=str(temp_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if cp.returncode != 0 or not (temp_root / "Output" / "calibration.xml").exists():
+            return None
+        classic_trade_id = _first_trade_id_from_portfolio(temp_root / "Input" / "portfolio.xml")
+        return price_bermudan_from_ore_case(
+            temp_root / "Input",
+            ore_file="ore_classic_calibration.xml",
+            trade_id=classic_trade_id,
+            method="backward",
+            curve_mode="auto",
+        )
+
+
+def _first_trade_id_from_portfolio(portfolio_xml: Path) -> str:
+    root = ET.parse(portfolio_xml).getroot()
+    return ore_snapshot_mod._get_first_trade_id(root)
 
 
 def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
@@ -2205,7 +2379,10 @@ def _compute_price_only_case(
             "pricing": pricing,
             "diagnostics": {
                 "engine": "python_price_only",
-                "pricing_mode": "python_swaption_static",
+                "pricing_mode": str(payload.get("pricing_mode") or "python_swaption_static"),
+                "bermudan_method": payload.get("bermudan_method"),
+                "bermudan_curve_source": payload.get("bermudan_curve_source"),
+                "bermudan_model_param_source": payload.get("bermudan_model_param_source"),
                 "reference_output_dirs": payload.get("reference_output_dirs", []),
                 "using_expected_output": bool(payload.get("using_expected_output", False)),
             },
@@ -3156,10 +3333,65 @@ def _is_plain_vanilla_swap_trade(ore_xml: Path) -> bool:
         return False
 
 
+def _supports_native_swaption_price_only(ore_xml: Path) -> bool:
+    try:
+        portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+        if portfolio_xml is None or not portfolio_xml.exists():
+            return False
+        root = ET.parse(portfolio_xml).getroot()
+        trade_id = ore_snapshot_mod._get_first_trade_id(root)
+        trade = next((t for t in root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+        if trade is None:
+            trade = root.find("./Trade") or root.find(".//Trade")
+        if trade is None or (trade.findtext("./TradeType") or "").strip() != "Swaption":
+            return False
+        style = (trade.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
+        if style in {"bermudan", "american"}:
+            return True
+        if style != "european":
+            return False
+        ore_root = ET.parse(ore_xml).getroot()
+        setup = {n.attrib.get("name", ""): (n.text or "").strip() for n in ore_root.findall("./Setup/Parameter")}
+        asof_text = setup.get("asofDate", "")
+        if not asof_text:
+            return False
+        asof = _parse_ore_date(asof_text)
+        base = ore_xml.parent
+        run_dir = base.parent
+        input_dir = (run_dir / setup.get("inputPath", base.name or "Input")).resolve()
+        curve_config_path = (input_dir / setup.get("curveConfigFile", "")).resolve()
+        todaysmarket_xml = (input_dir / setup.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+        legs = trade.findall("./SwaptionData/LegData")
+        fixed_leg = next((l for l in legs if (l.findtext("./LegType") or "").strip().lower() == "fixed"), None)
+        if fixed_leg is None:
+            return False
+        ccy = (fixed_leg.findtext("./Currency") or "EUR").strip().upper()
+        spec = _load_swaption_surface_spec(todaysmarket_xml, curve_config_path, ccy)
+        max_swap_term = max((_ore_tenor_years(x) or 0.0) for x in spec.get("swap_tenors", []))
+        if max_swap_term <= 0.0:
+            return False
+        start_text = (fixed_leg.findtext("./ScheduleData/Rules/StartDate") or "").strip()
+        end_text = (fixed_leg.findtext("./ScheduleData/Rules/EndDate") or "").strip()
+        if not start_text or not end_text:
+            return False
+        start_date = _parse_ore_date(start_text) if "-" in start_text else date.fromisoformat(f"{start_text[:4]}-{start_text[4:6]}-{start_text[6:8]}")
+        end_date = _parse_ore_date(end_text) if "-" in end_text else date.fromisoformat(f"{end_text[:4]}-{end_text[4:6]}-{end_text[6:8]}")
+        swap_term = ore_snapshot_mod._year_fraction_from_day_counter(
+            start_date,
+            end_date,
+            "A365F",
+        )
+        return float(swap_term) <= float(max_swap_term) + 0.5
+    except Exception:
+        return False
+
+
 def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
     trade_type = str(first_trade_type or "").strip()
-    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption", "Swaption", "CapFloor"}:
+    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption", "CapFloor"}:
         return True
+    if trade_type == "Swaption":
+        return _supports_native_swaption_price_only(ore_xml)
     if trade_type == "Swap":
         return _is_plain_vanilla_swap_trade(ore_xml)
     return False
@@ -3241,7 +3473,7 @@ def _ore_reference_summary(
     *,
     allow_partial_reference: bool = False,
 ) -> dict[str, Any]:
-    validation = validate_ore_input_snapshot(ore_xml)
+    validation = validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
     output_dir = _resolve_case_output_dir(ore_xml)
     trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
     reference_dirs = _reference_output_dirs(ore_xml)
@@ -3775,11 +4007,18 @@ def _bucket_case(case_summary: dict[str, Any]) -> str:
         return "unsupported_python_snapshot_fallback"
     if diagnostics.get("missing_reference_pricing"):
         return "missing_reference_pricing"
-    if diagnostics.get("missing_reference_xva"):
+    if diagnostics.get("missing_reference_xva") and not pass_all:
         return "missing_reference_xva"
     if not pass_all and diagnostics.get("sample_count_mismatch"):
         return "sample_count_mismatch"
-    if not pass_all and input_validation.get("input_links_valid") is False:
+    pricing = case_summary.get("pricing") or {}
+    xva = case_summary.get("xva") or {}
+    has_explicit_parity_signal = any(
+        pricing.get(key) is not None for key in ("t0_npv_abs_diff",)
+    ) or any(
+        xva.get(key) is not None for key in ("cva_rel_diff", "dva_rel_diff", "fba_rel_diff", "fca_rel_diff")
+    )
+    if not pass_all and input_validation.get("input_links_valid") is False and not has_explicit_parity_signal:
         return "input_validation_issue"
     if not pass_all:
         return "parity_threshold_fail"
@@ -3996,7 +4235,7 @@ def _run_case(
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
     }
-    validation = validate_ore_input_snapshot(ore_xml)
+    validation = validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
     case_summary["input_validation"] = validation
 
     if modes.xva:

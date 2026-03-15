@@ -29,7 +29,22 @@ REPO_ROOT = require_engine_repo_root()
 EXAMPLES_INPUT = REPO_ROOT / "Examples" / "Input"
 EXPOSURE_INPUT = REPO_ROOT / "Examples" / "Exposure" / "Input"
 ORE_BIN_DEFAULT = default_ore_bin()
-COMPARE_SCRIPT = pythonorerunner_root() / "py_ore_tools" / "demos" / "compare_ore_python_lgm_fx.py"
+
+
+def _resolve_compare_script(name: str) -> Path:
+    root = pythonorerunner_root()
+    candidates = [
+        root / "src" / "pythonore" / "demos" / name,
+        root / "legacy" / "py_ore_tools" / "demos" / name,
+        root / "py_ore_tools" / "demos" / name,
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+COMPARE_SCRIPT_DEFAULT = _resolve_compare_script("compare_ore_python_lgm_fx.py")
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--run-modes", default="fixed,calibrated")
     p.add_argument("--execute", action="store_true", default=False)
     p.add_argument("--max-cases", type=int, default=0)
+    p.add_argument(
+        "--compare-script",
+        type=Path,
+        default=COMPARE_SCRIPT_DEFAULT,
+        help="Path to compare_ore_python_lgm_fx.py",
+    )
     return p.parse_args()
 
 
@@ -241,6 +262,11 @@ def _run(cmd: list[str], cwd: Path) -> tuple[int, str, str, float]:
 
 def main() -> None:
     args = _parse_args()
+    if not args.ore_bin.exists():
+        raise FileNotFoundError(f"ore binary not found: {args.ore_bin}")
+    if args.execute and not args.compare_script.exists():
+        raise FileNotFoundError(f"compare script not found: {args.compare_script}")
+
     modes = [x.strip() for x in args.run_modes.split(",") if x.strip()]
     if not modes:
         raise ValueError("--run-modes must not be empty")
@@ -349,7 +375,7 @@ def main() -> None:
             ore_cmd = [str(args.ore_bin), str(ore_xml)]
             py_cmd = [
                 "python3",
-                str(COMPARE_SCRIPT),
+                str(args.compare_script),
                 "--product",
                 {"IRS": "irs_single", "FXFWD": "fx_forward", "XCCY": "xccy_float_float"}[product],
                 "--ore-output-dir",

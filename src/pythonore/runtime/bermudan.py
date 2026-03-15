@@ -377,7 +377,13 @@ def _build_bermudan_context(
     mapped = map_snapshot(snapshot)
     curve_bundle = _build_curves(snapshot, mapped, trade, curve_mode)
     model, model_source = _build_lgm_model(snapshot, mapped, trade, curve_bundle)
-    exercise_times = _exercise_times(snapshot.config.asof, trade.product.exercise_dates, curve_bundle["model_day_counter"], curve_bundle["ore_snapshot_mod"])
+    exercise_times = _exercise_times(
+        snapshot.config.asof,
+        trade.product.exercise_dates,
+        curve_bundle["model_day_counter"],
+        curve_bundle["ore_snapshot_mod"],
+        simulation_xml_text=mapped.xml_buffers.get("simulation.xml", ""),
+    )
     legs = curve_bundle["irs_utils"].load_swap_legs_from_portfolio(
         curve_bundle["portfolio_xml_path"],
         trade.trade_id,
@@ -832,6 +838,7 @@ def _build_curves(snapshot: XVASnapshot, mapped, trade: Trade, curve_mode: str) 
     fwd_fit = None
     disc_quotes = None
     fwd_quotes = None
+    fit_method = "bootstrap_mm_irs_v1"
     if curve_mode in ("auto", "ore_output") and curves_csv.exists():
         try:
             curve_payload = ore_snapshot._load_ore_discount_pairs_by_columns_with_day_counter(
@@ -850,7 +857,6 @@ def _build_curves(snapshot: XVASnapshot, mapped, trade: Trade, curve_mode: str) 
                 raise EngineRunError(f"Failed to load Bermudan curves from ORE output: {exc}") from exc
 
     if p0_disc is None or p0_fwd is None:
-        fit_method = "bootstrap_mm_irs_v1"
         quote_dicts = [{"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes]
         disc_quotes = [
             q for q in quote_dicts if _quote_matches_discount_curve(str(q["key"]), trade.product.ccy.upper(), discount_column)
@@ -909,14 +915,51 @@ def _pricing_grid(legs: Dict[str, np.ndarray], exercise_times: np.ndarray) -> np
     return np.unique(np.concatenate(parts))
 
 
-def _exercise_times(asof: str, exercise_dates: Sequence[str], model_day_counter: str, ore_snapshot_mod) -> np.ndarray:
-    return np.asarray(
+def _exercise_times(
+    asof: str,
+    exercise_dates: Sequence[str],
+    model_day_counter: str,
+    ore_snapshot_mod,
+    *,
+    simulation_xml_text: str = "",
+) -> np.ndarray:
+    raw = np.asarray(
         [
             ore_snapshot_mod._year_fraction_from_day_counter(asof, _normalize_date(d), model_day_counter)
             for d in exercise_dates
         ],
         dtype=float,
     )
+    sim_grid = _simulation_grid_times_from_xml_text(simulation_xml_text)
+    if sim_grid is None or sim_grid.size == 0:
+        return raw
+    idx = np.searchsorted(sim_grid, raw, side="left")
+    idx = np.clip(idx, 0, sim_grid.size - 1)
+    return np.asarray(sim_grid[idx], dtype=float)
+
+
+def _simulation_grid_times_from_xml_text(simulation_xml_text: str) -> np.ndarray | None:
+    text = str(simulation_xml_text or "").strip()
+    if not text:
+        return None
+    root = ET.fromstring(text)
+    grid_text = (root.findtext("./Parameters/Grid") or "").strip()
+    if "," not in grid_text:
+        return None
+    count_text, tenor_text = [x.strip() for x in grid_text.split(",", 1)]
+    count = int(count_text)
+    tenor = tenor_text.upper()
+    if tenor.endswith("Y"):
+        step = float(tenor[:-1])
+    elif tenor.endswith("M"):
+        step = float(tenor[:-1]) / 12.0
+    elif tenor.endswith("W"):
+        step = float(tenor[:-1]) / 52.0
+    elif tenor.endswith("D"):
+        step = float(tenor[:-1]) / 365.0
+    else:
+        return None
+    return np.asarray([i * step for i in range(count + 1)], dtype=float)
 
 
 def _exercise_sign(product: BermudanSwaption) -> float:

@@ -731,6 +731,7 @@ def validate_ore_input_snapshot(
     ore_xml_path: str | Path,
     *,
     include_all_market_configs: bool = False,
+    requested_modes: Iterable[str] | None = None,
 ) -> Dict[str, object]:
     """Preflight validation of ORE input linkages for ore_snapshot-style runs.
 
@@ -796,8 +797,20 @@ def validate_ore_input_snapshot(
     if not available_market_configs:
         available_market_configs = sorted(_legacy_todaysmarket_section_ids(tm_root))
     requested_market_configs = []
-    for value in markets_params.values():
-        value = value.strip()
+    requested_mode_set = {str(x).strip().lower() for x in (requested_modes or []) if str(x).strip()}
+    market_param_keys: list[str]
+    if requested_mode_set:
+        market_param_keys = []
+        if "price" in requested_mode_set or "sensi" in requested_mode_set:
+            market_param_keys.append("pricing")
+        if "xva" in requested_mode_set:
+            for key in ("pricing", "simulation"):
+                if key not in market_param_keys:
+                    market_param_keys.append(key)
+    else:
+        market_param_keys = list(markets_params.keys())
+    for key in market_param_keys:
+        value = markets_params.get(key, "").strip()
         if value and value not in requested_market_configs:
             requested_market_configs.append(value)
     curves_cfg = analytics_params.get("curves", {}).get("configuration", "").strip()

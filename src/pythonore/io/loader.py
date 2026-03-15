@@ -361,6 +361,9 @@ def _load_market_csv(path: Path) -> Tuple[MarketQuote, ...]:
         for row in reader:
             if len(row) <= max(date_i, key_i, val_i):
                 continue
+            date_text = str(row[date_i]).strip()
+            if not date_text or date_text.startswith("#"):
+                continue
             quotes.append(MarketQuote(date=_normalize_date(row[date_i]), key=row[key_i].strip(), value=float(row[val_i])))
     return tuple(quotes)
 

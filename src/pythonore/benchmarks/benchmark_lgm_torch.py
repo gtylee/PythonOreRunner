@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 import sys
+from typing import Sequence
 
 import numpy as np
 
@@ -41,6 +42,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Explicit device groups to benchmark: cpu, gpu. 'gpu' expands to cuda and/or mps when available.",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON payload in addition to the human-readable report.",
+    )
     return parser.parse_args(argv)
 
 
@@ -169,6 +175,114 @@ def _bench_torch_mode(
         "min_sec": float(arr.min()),
         "std_sec": float(arr.std(ddof=0)),
     }
+
+
+def _fmt_sec(value: float) -> str:
+    return f"{value:.4f}s"
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def _fmt_rate(value: float) -> str:
+    return f"{value:,.0f}"
+
+
+def _fmt_sci(value: float) -> str:
+    return f"{value:.3e}"
+
+
+def _fmt_speedup(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}x"
+
+
+def _make_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    line = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+    header_line = "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+    body = [
+        "| " + " | ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+        for row in rows
+    ]
+    return "\n".join([line, header_line, line, *body, line])
+
+
+def _render_report(*, payload: dict[str, object]) -> str:
+    metadata = payload["metadata"]
+    rows = payload["results"]
+    assert isinstance(metadata, dict)
+    assert isinstance(rows, list)
+
+    lines: list[str] = []
+    lines.append("LGM 1F Torch Benchmark Report")
+    lines.append("=" * 29)
+    lines.append("Configuration:")
+    lines.append(f"  - Paths tested      : {', '.join(_fmt_int(int(p)) for p in metadata['paths'])}")
+    lines.append(f"  - Time grid         : {metadata['steps']} steps over {float(metadata['horizon_years']):.2f} years")
+    lines.append(f"  - Repeats / warmup  : {metadata['repeats']} / {metadata['warmup']}")
+    lines.append(f"  - Seed              : {metadata['seed']}")
+    lines.append(f"  - Requested devices : {', '.join(str(d) for d in metadata['requested_devices'])}")
+    lines.append(f"  - Expanded devices  : {', '.join(str(d) for d in metadata['expanded_devices'])}")
+    lines.append("")
+    lines.append("How to read this report:")
+    lines.append("  - speedup_vs_numpy compares mean runtime against NumPy/CPU for the same path count.")
+    lines.append("  - path_steps_per_sec is throughput (higher is better).")
+    lines.append("  - parity_max_abs is max absolute difference vs NumPy using shared random draws.")
+    lines.append("  - mode '*to_numpy' includes device-to-host transfer; '*device_only' excludes it.")
+    lines.append("")
+
+    grouped: dict[int, list[dict[str, object]]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            grouped.setdefault(int(row["n_paths"]), []).append(row)
+
+    for n_paths in sorted(grouped):
+        group = grouped[n_paths]
+        numpy_cpu = next((r for r in group if r.get("mode") == "numpy/cpu"), None)
+        numpy_mean = float(numpy_cpu["mean_sec"]) if isinstance(numpy_cpu, dict) else None
+        table_rows: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+        for row in sorted(group, key=lambda r: str(r["mode"])):
+            mean_sec = float(row["mean_sec"])
+            speedup = (numpy_mean / mean_sec) if numpy_mean is not None and mean_sec > 0.0 else None
+            table_rows.append(
+                (
+                    str(row["mode"]),
+                    str(row["device"]),
+                    _fmt_sec(mean_sec),
+                    _fmt_sec(float(row["min_sec"])),
+                    _fmt_sec(float(row["std_sec"])),
+                    _fmt_speedup(speedup),
+                    _fmt_rate(float(row["path_steps_per_sec"])),
+                    _fmt_sci(float(row["parity_max_abs"])),
+                    "yes" if bool(row["includes_host_transfer"]) else "no",
+                )
+            )
+        lines.append(f"Results for n_paths = {_fmt_int(n_paths)}")
+        lines.append(
+            _make_table(
+                [
+                    "mode",
+                    "device",
+                    "mean",
+                    "min",
+                    "std",
+                    "speedup_vs_numpy",
+                    "path_steps_per_sec",
+                    "parity_max_abs",
+                    "host_transfer",
+                ],
+                table_rows,
+            )
+        )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -302,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "metadata": {
             "seed": args.seed,
+            "paths": [int(p) for p in args.paths],
             "steps": times.size - 1,
             "horizon_years": float(args.horizon),
             "repeats": args.repeats,
@@ -317,7 +432,10 @@ def main(argv: list[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    print(json.dumps(payload, indent=2))
+    print(_render_report(payload=payload))
+    if args.json:
+        print("Machine-readable JSON:")
+        print(json.dumps(payload, indent=2))
     return 0
 
 
