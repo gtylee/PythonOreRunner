@@ -853,6 +853,7 @@ def swap_npv_from_ore_legs_dual_curve(
     realized_float_coupon: Optional[np.ndarray] = None,
     use_node_interpolation: bool = False,
     exercise_into_whole_periods: bool = False,
+    deterministic_fixings_cutoff: Optional[float] = None,
 ) -> np.ndarray:
     """Pathwise swap NPV with discounting on p0_disc and forwarding on p0_fwd.
 
@@ -964,7 +965,10 @@ def swap_npv_from_ore_legs_dual_curve(
         n = legs["float_notional"][live]
         sign = legs["float_sign"][live]
         spread = legs["float_spread"][live]
-        fixed = fix_t[live] <= t + 1.0e-12
+        if deterministic_fixings_cutoff is None:
+            fixed = fix_t[live] <= t + 1.0e-12
+        else:
+            fixed = fix_t[live] <= float(deterministic_fixings_cutoff) + 1.0e-12
 
         p_tp_d = interp_from_nodes_batch(pay)
         amount = np.zeros((pay.size, x.size), dtype=float)

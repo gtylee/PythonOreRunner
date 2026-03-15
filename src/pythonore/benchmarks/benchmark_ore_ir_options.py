@@ -33,6 +33,7 @@ from pythonore.compute.irs_xva_utils import (
     load_ore_legs_from_flows,
     load_ore_exposure_profile,
     load_ore_exposure_times,
+    parse_lgm_params_from_calibration_xml,
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
@@ -52,6 +53,7 @@ BERM_TRADE_SPECS = (
     {"trade_id": "BERM_EUR_5Y_LOWK", "fixed_rate": 0.020},
     {"trade_id": "BERM_EUR_5Y_HIGHK", "fixed_rate": 0.040},
 )
+BERM_BACKWARD_N_GRID = 11
 
 
 @dataclass(frozen=True)
@@ -144,12 +146,13 @@ def _render_report(
     lines.append(f"  - Closeout         : {closeout_mode} (mpor_days={mpor_days:.1f})")
     lines.append("")
 
-    main_rows: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+    main_rows: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
     for r in rows:
         main_rows.append(
             (
                 str(r["trade_id"]),
                 str(r["type"]),
+                str(r.get("py_pv_method", "")),
                 _fmt_num(float(r["ore_pv"])),
                 _fmt_num(float(r["py_pv"])),
                 _fmt_pct(float(r["pv_rel_diff"])),
@@ -162,7 +165,7 @@ def _render_report(
     lines.append("Trade-level PV and CVA parity:")
     lines.append(
         _make_table(
-            ["trade_id", "type", "ORE_PV", "PY_PV", "PV_rel_diff", "ORE_CVA", "PY_CVA", "CVA_rel_diff", "PY_time"],
+            ["trade_id", "type", "PY_PV_src", "ORE_PV", "PY_PV", "PV_rel_diff", "ORE_CVA", "PY_CVA", "CVA_rel_diff", "PY_time"],
             main_rows,
         )
     )
@@ -468,6 +471,23 @@ def _simulation_xml(samples: int, seed: int) -> str:
     return ET.tostring(root, encoding="unicode")
 
 
+def _simulation_classic_xml(samples: int, seed: int) -> str:
+    src = REPO_ROOT / "Examples" / "AmericanMonteCarlo" / "Input" / "simulation_classic.xml"
+    root = ET.parse(src).getroot()
+    params = root.find("./Parameters")
+    if params is None:
+        raise ValueError("simulation_classic.xml missing Parameters")
+    node = params.find("./Samples")
+    if node is None:
+        node = ET.SubElement(params, "Samples")
+    node.text = str(int(samples))
+    node = params.find("./Seed")
+    if node is None:
+        node = ET.SubElement(params, "Seed")
+    node.text = str(int(seed))
+    return ET.tostring(root, encoding="unicode")
+
+
 def _ore_xml(output_dir: Path, input_dir: Path, simulation_file: Path) -> str:
     return f"""<?xml version="1.0"?>
 <ORE>
@@ -524,6 +544,82 @@ def _ore_xml(output_dir: Path, input_dir: Path, simulation_file: Path) -> str:
   </Analytics>
 </ORE>
 """
+
+
+def _ore_classic_calibration_xml(output_dir: Path, input_dir: Path, simulation_file: Path) -> str:
+    classic_dir = output_dir / "classic"
+    return f"""<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2016-02-05</Parameter>
+    <Parameter name="inputPath">{input_dir.as_posix()}</Parameter>
+    <Parameter name="outputPath">{classic_dir.as_posix()}</Parameter>
+    <Parameter name="logFile">log.txt</Parameter>
+    <Parameter name="logMask">31</Parameter>
+    <Parameter name="marketDataFile">{(EXAMPLES_INPUT / "market_20160205_flat.txt").as_posix()}</Parameter>
+    <Parameter name="fixingDataFile">{(EXAMPLES_INPUT / "fixings_20160205.txt").as_posix()}</Parameter>
+    <Parameter name="implyTodaysFixings">Y</Parameter>
+    <Parameter name="curveConfigFile">{(EXAMPLES_INPUT / "curveconfig.xml").as_posix()}</Parameter>
+    <Parameter name="conventionsFile">{(EXAMPLES_INPUT / "conventions.xml").as_posix()}</Parameter>
+    <Parameter name="marketConfigFile">{(EXAMPLES_INPUT / "todaysmarket.xml").as_posix()}</Parameter>
+    <Parameter name="pricingEnginesFile">{(EXAMPLES_INPUT / "pricingengine.xml").as_posix()}</Parameter>
+    <Parameter name="portfolioFile">{(input_dir / "portfolio.xml").as_posix()}</Parameter>
+    <Parameter name="observationModel">None</Parameter>
+    <Parameter name="continueOnError">false</Parameter>
+    <Parameter name="calendarAdjustment">{(EXAMPLES_INPUT / "calendaradjustment.xml").as_posix()}</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="lgmcalibration">libor</Parameter>
+    <Parameter name="pricing">libor</Parameter>
+    <Parameter name="simulation">libor</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="npv"><Parameter name="active">Y</Parameter><Parameter name="baseCurrency">EUR</Parameter><Parameter name="outputFileName">npv.csv</Parameter></Analytic>
+    <Analytic type="cashflow"><Parameter name="active">Y</Parameter><Parameter name="outputFileName">flows.csv</Parameter></Analytic>
+    <Analytic type="simulation">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="amc">N</Parameter>
+      <Parameter name="simulationConfigFile">{simulation_file.as_posix()}</Parameter>
+      <Parameter name="pricingEnginesFile">{(EXAMPLES_INPUT / "pricingengine.xml").as_posix()}</Parameter>
+      <Parameter name="amcPricingEnginesFile">{(EXAMPLES_INPUT / "pricingengine.xml").as_posix()}</Parameter>
+      <Parameter name="baseCurrency">EUR</Parameter>
+      <Parameter name="storeScenarios">N</Parameter>
+    </Analytic>
+    <Analytic type="calibration">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="configFile">{simulation_file.as_posix()}</Parameter>
+      <Parameter name="outputFile">calibration.csv</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+"""
+
+
+def _build_model_from_ore_calibration(calibration_xml: Path, ccy_key: str = "EUR") -> LGM1F:
+    params = parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy_key)
+    return LGM1F(
+        LGMParams(
+            alpha_times=tuple(float(x) for x in params["alpha_times"]),
+            alpha_values=tuple(float(x) for x in params["alpha_values"]),
+            kappa_times=tuple(float(x) for x in params["kappa_times"]),
+            kappa_values=tuple(float(x) for x in params["kappa_values"]),
+            shift=float(params["shift"]),
+            scaling=float(params["scaling"]),
+        )
+    )
+
+
+def _build_simulation_stub_model() -> LGM1F:
+    return LGM1F(
+        LGMParams(
+            alpha_times=(1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0),
+            alpha_values=(0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01),
+            kappa_times=(),
+            kappa_values=(0.03,),
+            shift=0.0,
+            scaling=1.0,
+        )
+    )
 
 
 def _load_trade_npv(npv_csv: Path, trade_id: str) -> float:
@@ -770,6 +866,13 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date, trade_id: str) -> Be
     float_start = np.array([_t(x["AccrualStartDate"]) for x in flt], dtype=float)
     float_end = np.array([_t(x["AccrualEndDate"]) for x in flt], dtype=float)
     float_pay = np.array([_t(x["PayDate"]) for x in flt], dtype=float)
+    float_fix = np.array(
+        [
+            _t(x["fixingDate"]) if x.get("fixingDate", "") not in ("", "#N/A") else _t(x["AccrualStartDate"])
+            for x in flt
+        ],
+        dtype=float,
+    )
     float_accr = np.array([float(x["Accrual"]) for x in flt], dtype=float)
     float_notional = np.array([float(x["Notional"]) for x in flt], dtype=float)
     float_sign = np.array([np.sign(float(x["Amount"])) for x in flt], dtype=float)
@@ -786,6 +889,7 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date, trade_id: str) -> Be
         "float_pay_time": float_pay,
         "float_start_time": float_start,
         "float_end_time": float_end,
+        "float_fixing_time": float_fix,
         "float_accrual": float_accr,
         "float_notional": float_notional,
         "float_sign": float_sign,
@@ -870,8 +974,10 @@ def main() -> None:
 
     _write(inp / "portfolio.xml", _portfolio_xml())
     _write(inp / "simulation.xml", _simulation_xml(args.ore_samples, args.ore_seed))
+    _write(inp / "simulation_classic.xml", _simulation_classic_xml(args.ore_samples, args.ore_seed))
     _write(inp / "netting.xml", (EXPOSURE_INPUT / "netting.xml").read_text(encoding="utf-8"))
     _write(inp / "ore.xml", _ore_xml(out, inp, inp / "simulation.xml"))
+    _write(inp / "ore_classic_calibration.xml", _ore_classic_calibration_xml(out, inp, inp / "simulation_classic.xml"))
 
     t0 = perf_counter()
     cmd = [args.ore_bin.as_posix(), (inp / "ore.xml").as_posix()]
@@ -879,6 +985,11 @@ def main() -> None:
     t_ore = perf_counter() - t0
     if proc.returncode != 0:
         raise RuntimeError(f"ORE run failed:\n{proc.stdout}\n{proc.stderr}")
+
+    classic_cmd = [args.ore_bin.as_posix(), (inp / "ore_classic_calibration.xml").as_posix()]
+    classic_proc = subprocess.run(classic_cmd, capture_output=True, text=True)
+    if classic_proc.returncode != 0:
+        raise RuntimeError(f"ORE classic calibration run failed:\n{classic_proc.stdout}\n{classic_proc.stderr}")
 
     curves_csv = out / "curves.csv"
     npv_csv = out / "npv.csv"
@@ -892,15 +1003,11 @@ def main() -> None:
     f6_t, f6_df = load_ore_discount_pairs_from_curves(curves_csv.as_posix(), discount_column=CAP_INDEX)
     p0_fwd_6m = build_discount_curve_from_discount_pairs(list(zip(f6_t.tolist(), f6_df.tolist())))
 
-    lgm_params = LGMParams(
-        alpha_times=(1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0),
-        alpha_values=(0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01),
-        kappa_times=(),
-        kappa_values=(0.03,),
-        shift=0.0,
-        scaling=1.0,
-    )
-    model = LGM1F(lgm_params)
+    calibration_xml = out / "classic" / "calibration.xml"
+    if not calibration_xml.exists():
+        raise FileNotFoundError(f"expected classic calibration output missing: {calibration_xml}")
+    model = _build_model_from_ore_calibration(calibration_xml, ccy_key="EUR")
+    model_source = "classic_calibration"
     berms_from_ore = {
         str(spec["trade_id"]): _build_berm_from_ore_flows(out / "flows.csv", asof=date(2016, 2, 5), trade_id=str(spec["trade_id"]))
         for spec in BERM_TRADE_SPECS
@@ -977,9 +1084,14 @@ def main() -> None:
                 exercise_sign=berm_from_ore.exercise_sign,
             )
             npv_paths = bermudan_npv_paths(model, p0_disc, p0_fwd, berm_on_grid, times, x, basis_degree=1, itm_only=True)
+            backward_single_price = float(bermudan_backward_price(model, p0_disc, p0_disc, berm_from_ore, n_grid=BERM_BACKWARD_N_GRID).price)
         py_time = perf_counter() - t1
 
         py_pv = float(np.mean(npv_paths[0, :]))
+        py_pv_method = "pathwise_profile_mean"
+        if c.trade_type == "BERM":
+            py_pv = backward_single_price
+            py_pv_method = "backward_single"
         cpty_ht = hazard_times
         cpty_hr = hazard_rates
         cpty_rec = recovery
@@ -1018,6 +1130,8 @@ def main() -> None:
                 "type": c.trade_type,
                 "ore_pv": ore_pv,
                 "py_pv": py_pv,
+                "py_pv_method": py_pv_method,
+                "py_model_source": model_source,
                 "pv_abs_diff": py_pv - ore_pv,
                 "pv_rel_diff": (py_pv - ore_pv) / max(abs(ore_pv), 1.0),
                 "ore_cva": ore_cva,
@@ -1086,8 +1200,8 @@ def main() -> None:
                 )[0, :]
             )
         )
-        backward_single = float(bermudan_backward_price(model, p0_disc, p0_disc, berm_trade, n_grid=121).price)
-        backward_dual = float(bermudan_backward_price(model, p0_disc, p0_fwd_6m, berm_trade, n_grid=121).price)
+        backward_single = float(bermudan_backward_price(model, p0_disc, p0_disc, berm_trade, n_grid=BERM_BACKWARD_N_GRID).price)
+        backward_dual = float(bermudan_backward_price(model, p0_disc, p0_fwd_6m, berm_trade, n_grid=BERM_BACKWARD_N_GRID).price)
         berm_trade_compare.append(
             {
                 "trade_id": trade_id,

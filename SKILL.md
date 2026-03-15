@@ -1145,6 +1145,12 @@ Practical rule:
 
 Do not assume that "more ORE-like builder logic in Python" is automatically more accurate than consuming the calibration ORE already produced.
 
+For `benchmark_ore_ir_options.py` specifically:
+- the main ORE run writes `Output/` for PV/XVA, but the benchmark should also run a small classic calibration pass into `Output/classic/`
+- using the flat `simulation_lgm_fixed.xml` stub (`alpha=1%`, `kappa=3%`) overstated Bermudan backward PV materially
+- restoring the classic calibration source moved the 5Y Bermudan rows from roughly `+8.4% / +93.3% / -0.04%` to about `-0.67% / +27.8% / -2.82%` for `base / lowk / highk`
+- if backward/grid Bermudan parity suddenly degrades while ORE is still using `Engine=Grid`, check whether the benchmark silently fell back to the simulation stub instead of `Output/classic/calibration.xml`
+
 ### Bermudan backward parity depends on reduced-value rollback, not plain PV rollback
 
 For the Python backward Bermudan pricer in `py_ore_tools/lgm_ir_options.py`:

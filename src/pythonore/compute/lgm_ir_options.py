@@ -432,6 +432,7 @@ def bermudan_npv_paths(
             float(t[i]),
             x_paths[i, :],
             exercise_into_whole_periods=True,
+            deterministic_fixings_cutoff=0.0,
         )
         signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
 
@@ -553,6 +554,7 @@ def bermudan_lsmc_result(
             float(t[i]),
             x_paths[i, :],
             exercise_into_whole_periods=True,
+            deterministic_fixings_cutoff=0.0,
         )
         signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
 
@@ -749,6 +751,7 @@ def bermudan_backward_price(
             float(times[last]),
             last_grid,
             exercise_into_whole_periods=True,
+            deterministic_fixings_cutoff=0.0,
         ),
         0.0,
     )
@@ -797,6 +800,7 @@ def bermudan_backward_price(
                 t_i,
                 grid_i,
                 exercise_into_whole_periods=True,
+                deterministic_fixings_cutoff=0.0,
             ),
             0.0,
         )
@@ -847,6 +851,7 @@ def _backward_diagnostic(
             float(t),
             x_eval,
             exercise_into_whole_periods=True,
+            deterministic_fixings_cutoff=0.0,
         ),
         0.0,
     )

@@ -144,6 +144,13 @@ python py_ore_tools/benchmarks/benchmark_bond_pricing_numpy_torch.py --scenarios
 Purpose:
 Benchmark cap/floor and Bermudan swaption PV and XVA against ORE.
 
+Current Bermudan benchmark rule:
+- keep the main ORE PV/XVA run in `Output/`
+- also run a classic calibration pass in `Output/classic/`
+- build the Python Bermudan LGM model from `Output/classic/calibration.xml` when present
+
+On this repo that matters a lot more than the old flat simulation stub. With the classic calibration source restored, the 5Y Bermudan backward PV rows moved from about `+8.4% / +93.3% / -0.04%` to about `-0.67% / +27.8% / -2.82%` for `BERM_EUR_5Y / LOWK / HIGHK` at `--ore-samples 1024`.
+
 Inputs:
 - ORE example market/config files from `ENGINE_REPO_ROOT/Examples/Input`
 - Exposure support files from `ENGINE_REPO_ROOT/Examples/Exposure/Input`
