@@ -152,6 +152,29 @@ class TestInflationSupport(unittest.TestCase):
         self.assertGreaterEqual(result.xva_by_metric["CVA"], 0.0)
         self.assertIn("CPTY_A", result.exposure_by_netting_set)
 
+    def test_cli_xva_handles_inflation_capfloor_case(self):
+        capfloor_case = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore_capfloor.xml"
+        result = ore_snapshot_cli._compute_inflation_capfloor_snapshot_case(
+            capfloor_case,
+            paths=None,
+            seed=42,
+            rng_mode="numpy",
+            anchor_t0_npv=False,
+            own_hazard=0.02,
+            own_recovery=0.4,
+            xva_mode="ore",
+        )
+        self.assertEqual(result.diagnostics["engine"], "python_inflation_native")
+        self.assertGreater(len(result.exposure_times), 1)
+        self.assertGreaterEqual(result.xva["py_cva"], 0.0)
+
+    def test_python_lgm_runtime_handles_inflation_capfloor_portfolio(self):
+        snap = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input"), ore_file="ore_capfloor.xml")
+        result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snap).run(return_cubes=False)
+        self.assertIn("CVA", result.xva_by_metric)
+        self.assertGreaterEqual(result.xva_by_metric["CVA"], 0.0)
+        self.assertIn("CPTY_B", result.exposure_by_netting_set)
+
 
 if __name__ == "__main__":
     unittest.main()

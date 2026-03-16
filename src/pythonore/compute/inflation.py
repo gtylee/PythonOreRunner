@@ -405,6 +405,29 @@ def price_inflation_capfloor(
     return sign * float(definition.notional) * float(discount_curve(maturity)) * payoff
 
 
+def price_inflation_capfloor_at_time(
+    definition: InflationCapFloorDefinition,
+    inflation_curve: InflationCurve,
+    discount_curve: Callable[[float], float],
+    valuation_time: float,
+    *,
+    market_surface_price: float | None = None,
+) -> float:
+    maturity = float(definition.maturity_years)
+    val_t = float(valuation_time)
+    if val_t >= maturity - 1.0e-12:
+        return 0.0
+    sign = 1.0 if str(definition.long_short).upper() != "SHORT" else -1.0
+    if market_surface_price is not None:
+        return sign * float(definition.notional) * float(market_surface_price) * _forward_discount(discount_curve, val_t, maturity)
+    forward = inflation_curve.rate(maturity) if definition.inflation_type.upper() == "YY" else inflation_curve.growth(maturity) - 1.0
+    if definition.option_type.lower() == "cap":
+        payoff = max(forward - float(definition.strike), 0.0)
+    else:
+        payoff = max(float(definition.strike) - forward, 0.0)
+    return sign * float(definition.notional) * _forward_discount(discount_curve, val_t, maturity) * payoff
+
+
 def simulate_inflation_index_paths(
     base_cpi: float,
     curve: InflationCurve,
@@ -429,6 +452,7 @@ __all__ = [
     "load_zero_inflation_surface_quote",
     "parse_inflation_models_from_simulation_xml",
     "price_inflation_capfloor",
+    "price_inflation_capfloor_at_time",
     "price_yoy_swap",
     "price_yoy_swap_at_time",
     "price_zero_coupon_cpi_swap",

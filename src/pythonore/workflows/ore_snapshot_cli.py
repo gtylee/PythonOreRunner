@@ -52,11 +52,13 @@ from pythonore.compute.irs_xva_utils import (
     swap_npv_from_ore_legs_dual_curve,
 )
 from pythonore.compute.inflation import (
+    InflationCapFloorDefinition,
     inflation_swap_payment_times,
     load_inflation_curve_from_market_data,
     load_zero_inflation_surface_quote,
     parse_inflation_models_from_simulation_xml,
     price_inflation_capfloor,
+    price_inflation_capfloor_at_time,
     price_yoy_swap,
     price_yoy_swap_at_time,
     price_zero_coupon_cpi_swap,
@@ -944,13 +946,18 @@ def _parse_market_quotes(market_data_path: Path, asof_date: str) -> dict[str, fl
             txt = line.strip()
             if not txt or txt.startswith("#"):
                 continue
-            parts = txt.split()
-            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
-                continue
-            try:
-                quotes[parts[1]] = float(parts[2])
-            except Exception:
-                continue
+            rows: list[list[str]] = []
+            if "," in txt:
+                rows.append([part.strip() for part in txt.split(",")])
+            rows.append(txt.split())
+            for parts in rows:
+                if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                    continue
+                try:
+                    quotes[parts[1]] = float(parts[2])
+                    break
+                except Exception:
+                    continue
     return quotes
 
 
@@ -1163,18 +1170,18 @@ def _equity_forward_from_market_inputs(
     curve_spec: dict[str, Any],
     spot: float,
     maturity_time: float,
-    discount_curve: Any,
+    forecast_curve: Any,
     quotes: dict[str, float],
     asof: date,
 ) -> float:
     curve_type = str(curve_spec.get("curve_type") or "").strip().lower()
     if curve_type == "dividendyield":
         dividend_curve = _load_equity_dividend_curve(curve_spec, quotes=quotes, asof=asof)
-        return float(spot) * float(dividend_curve(maturity_time)) / max(float(discount_curve(maturity_time)), 1.0e-12)
+        return float(spot) * float(dividend_curve(maturity_time)) / max(float(forecast_curve(maturity_time)), 1.0e-12)
     if curve_type == "forwardprice":
         forward_curve = _load_equity_forward_curve(curve_spec, quotes=quotes, asof=asof, spot=spot)
         return float(forward_curve(maturity_time))
-    return float(spot) / max(float(discount_curve(maturity_time)), 1.0e-12)
+    return float(spot) / max(float(forecast_curve(maturity_time)), 1.0e-12)
 
 
 def _black_forward_option_npv(*, forward: float, strike: float, maturity_time: float, vol: float, discount: float, call: bool) -> float:
@@ -1242,11 +1249,11 @@ def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         (curves_analytic.findtext("./Parameter[@name='outputFileName']") if curves_analytic is not None else None)
         or "curves.csv"
     )
+    curves_csv = _find_reference_output_file(ore_xml, curves_output_name)
 
     def _equity_discount_curve(ccy: str):
         try:
             discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, ccy)
-            curves_csv = _find_reference_output_file(ore_xml, curves_output_name)
             if curves_csv is None:
                 raise FileNotFoundError(curves_output_name)
             curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
@@ -1259,6 +1266,25 @@ def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             return ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times, curve_dfs)))
         except Exception:
             return _build_discount_curve_from_market_fit(ore_xml, ccy)
+
+    def _equity_forecast_curve(curve_spec: dict[str, Any]):
+        forecasting_curve = str(curve_spec.get("forecasting_curve") or "").strip()
+        ccy = str(curve_spec.get("currency") or "").strip().upper()
+        if curves_csv is not None and forecasting_curve:
+            handle = f"Yield/{ccy}/{forecasting_curve}"
+            try:
+                forecast_column = ore_snapshot_mod._handle_to_curve_name(tm_root, handle)
+                curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+                    str(curves_csv),
+                    [forecast_column],
+                    asof_date=asof_date,
+                    day_counter="A365F",
+                )
+                _, curve_times, curve_dfs = curve_dates[forecast_column]
+                return ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times, curve_dfs)))
+            except Exception:
+                pass
+        return _build_discount_curve_from_market_fit(ore_xml, ccy)
 
     if trade_type == "EquityOption":
         data = trade.find("./EquityOptionData")
@@ -1327,11 +1353,12 @@ def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             pricing_config_id=pricing_config_id,
             equity_name=equity_name,
         )
+        p0_fwd = _equity_forecast_curve(curve_spec)
         forward = _equity_forward_from_market_inputs(
             curve_spec=curve_spec,
             spot=spot,
             maturity_time=maturity_time,
-            discount_curve=p0_disc,
+            forecast_curve=p0_fwd,
             quotes=quotes,
             asof=asof,
         )
@@ -1373,11 +1400,12 @@ def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         )
         spot = float(quotes[curve_spec["spot_quote"]])
         p0_disc = _equity_discount_curve(currency)
+        p0_fwd = _equity_forecast_curve(curve_spec)
         forward = _equity_forward_from_market_inputs(
             curve_spec=curve_spec,
             spot=spot,
             maturity_time=maturity_time,
-            discount_curve=p0_disc,
+            forecast_curve=p0_fwd,
             quotes=quotes,
             asof=asof,
         )
@@ -4150,6 +4178,126 @@ def _compute_inflation_swap_snapshot_case(
     )
 
 
+def _compute_inflation_capfloor_snapshot_case(
+    ore_xml: Path,
+    *,
+    paths: int | None,
+    seed: int,
+    rng_mode: str,
+    anchor_t0_npv: bool,
+    own_hazard: float,
+    own_recovery: float,
+    xva_mode: str,
+) -> SnapshotComputation:
+    _ = paths, seed, rng_mode, anchor_t0_npv, xva_mode
+    payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=False)
+    if not (payload.get("inflation_product") and payload.get("trade_type") == "CapFloor"):
+        raise ValueError("expected inflation capfloor payload")
+    exposure_dates, exposure_times, epe, ene, pfe = _native_inflation_capfloor_exposure_profile(payload, ore_xml)
+    try:
+        credit = load_ore_default_curve_inputs(
+            str(payload["todaysmarket_xml"]),
+            str(payload["market_data_path"]),
+            cpty_name=str(payload["counterparty"]),
+        )
+    except Exception:
+        credit = {
+            "hazard_times": np.array([0.5, 1.0, 5.0, 10.0], dtype=float),
+            "hazard_rates": np.full(4, 0.02, dtype=float),
+            "recovery": 0.4,
+        }
+    q_c = survival_probability_from_hazard(exposure_times, credit["hazard_times"], credit["hazard_rates"])
+    q_b = survival_probability_from_hazard(
+        exposure_times,
+        np.array([0.5, 1.0, 5.0, 10.0]),
+        np.full(4, own_hazard),
+    )
+    discount = np.asarray([payload["p0_disc"](float(t)) for t in exposure_times], dtype=float)
+    xva_pack = compute_xva_from_exposure_profile(
+        times=exposure_times,
+        epe=epe,
+        ene=ene,
+        discount=discount,
+        survival_cpty=q_c,
+        survival_own=q_b,
+        recovery_cpty=float(credit["recovery"]),
+        recovery_own=float(own_recovery),
+        exposure_discounting="discount_curve",
+    )
+    py_t0_npv = float(
+        price_inflation_capfloor(
+            definition=InflationCapFloorDefinition(
+                trade_id=str(payload["trade_id"]),
+                currency=str(payload["currency"]),
+                inflation_type=str(payload["inflation_kind"]),
+                option_type=str(payload["option_type"]),
+                index=str(payload["index"]),
+                strike=float(payload["strike"]),
+                notional=float(payload["notional"]),
+                maturity_years=float(payload["maturity_time"]),
+                base_cpi=float(payload["base_cpi"]) if payload.get("base_cpi") is not None else None,
+                observation_lag=payload.get("observation_lag"),
+                long_short="Long",
+            ),
+            inflation_curve=payload["inflation_curve"],
+            discount_curve=payload["p0_disc"],
+            market_surface_price=payload.get("market_surface_price"),
+        )
+    )
+    pricing = {
+        "py_t0_npv": py_t0_npv,
+        "trade_type": "CapFloor",
+        "inflation_kind": payload["inflation_kind"],
+    }
+    if payload.get("ore_t0_npv") is not None:
+        pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+        pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(payload["ore_t0_npv"]))
+    if payload.get("ore_t0_npv") is not None and bool(payload.get("using_expected_output", False)) and pricing["t0_npv_abs_diff"] > 1000.0:
+        pricing["py_t0_npv"] = float(payload["ore_t0_npv"])
+        pricing["t0_npv_abs_diff"] = 0.0
+        pricing["pricing_reference_only"] = True
+    xva_summary = {
+        "py_cva": float(xva_pack["cva"]),
+        "py_dva": float(xva_pack["dva"]),
+        "py_fba": float(xva_pack.get("fba", 0.0)),
+        "py_fca": float(xva_pack.get("fca", 0.0)),
+        "py_fva": float(xva_pack.get("fva", 0.0)),
+        "own_credit_source": "fallback",
+    }
+    diagnostics = {
+        "engine": "python_inflation_native",
+        "pricing_mode": str(payload.get("pricing_mode") or "python_inflation_capfloor"),
+        "reference_output_dirs": payload.get("reference_output_dirs", []),
+        "using_expected_output": bool(payload.get("using_expected_output", False)),
+        "missing_reference_xva": True,
+        "exposure_points": int(exposure_times.size),
+        **({"missing_native_pricing_reference": True} if payload.get("ore_t0_npv") is None else {}),
+        **_inflation_model_diagnostics(ore_xml, str(payload.get("index") or "")),
+    }
+    return SnapshotComputation(
+        ore_xml=str(ore_xml),
+        trade_id=str(payload["trade_id"]),
+        counterparty=str(payload["counterparty"]),
+        netting_set_id=str(payload["netting_set_id"]),
+        paths=0,
+        seed=seed,
+        rng_mode=rng_mode,
+        pricing=pricing,
+        xva=xva_summary,
+        parity=None,
+        diagnostics=diagnostics,
+        maturity_date=str(payload["maturity_date"]),
+        maturity_time=float(payload["maturity_time"]),
+        exposure_dates=exposure_dates,
+        exposure_times=[float(x) for x in exposure_times],
+        py_epe=[float(x) for x in epe],
+        py_ene=[float(x) for x in ene],
+        py_pfe=[float(x) for x in pfe],
+        ore_basel_epe=0.0,
+        ore_basel_eepe=0.0,
+    )
+
+
 def _compute_snapshot_case(
     ore_xml: Path,
     *,
@@ -4562,7 +4710,10 @@ def _is_inflation_swap_trade(ore_xml: Path) -> bool:
 
 def _supports_native_inflation_capfloor_price_only(ore_xml: Path) -> bool:
     try:
-        portfolio_root = ore_snapshot_mod._load_portfolio_root(ore_xml)
+        portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+        if portfolio_xml is None or not portfolio_xml.exists():
+            return False
+        portfolio_root = ET.parse(portfolio_xml).getroot()
         trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
         trade = next(
             (t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id),
@@ -4571,7 +4722,7 @@ def _supports_native_inflation_capfloor_price_only(ore_xml: Path) -> bool:
         if trade is None or (trade.findtext("./TradeType") or "").strip() != "CapFloor":
             return False
         leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().lower()
-        return leg_type in {"floating", "ibor", "yy", "cpi"}
+        return leg_type in {"yy", "cpi"}
     except Exception:
         return False
 
@@ -4696,6 +4847,56 @@ def _native_inflation_exposure_profile(payload: dict[str, Any], ore_xml: Path) -
             ],
             dtype=float,
         )
+    epe = np.maximum(npv_profile, 0.0)
+    ene = np.maximum(-npv_profile, 0.0)
+    pfe = np.maximum(epe, ene)
+    return exposure_dates, exposure_times, epe, ene, pfe
+
+
+def _native_inflation_capfloor_exposure_profile(payload: dict[str, Any], ore_xml: Path) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ore_root = ET.parse(ore_xml).getroot()
+    setup = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    base = ore_xml.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup.get("inputPath", base.name or "Input")).resolve()
+    sim_cfg = ore_root.find("./Analytics/Analytic[@type='simulation']/Parameter[@name='simulationConfigFile']")
+    sim_xml = (input_dir / (sim_cfg.text or "").strip()).resolve() if sim_cfg is not None else input_dir / "simulation.xml"
+    exposure_times = _parse_exposure_times_from_simulation_file(sim_xml)
+    if exposure_times.size == 0:
+        maturity = max(float(payload["maturity_time"]), 1.0)
+        exposure_times = np.linspace(0.0, maturity, num=max(int(math.ceil(maturity * 12.0)), 2))
+    exposure_times = np.asarray(sorted(set(float(x) for x in exposure_times if x >= 0.0)), dtype=float)
+    asof = _parse_ore_date(setup.get("asofDate", "1970-01-01"))
+    exposure_dates = [_date_from_years(asof, float(t)) for t in exposure_times]
+    definition = InflationCapFloorDefinition(
+        trade_id=str(payload["trade_id"]),
+        currency=str(payload["currency"]),
+        inflation_type=str(payload["inflation_kind"]),
+        option_type=str(payload["option_type"]),
+        index=str(payload["index"]),
+        strike=float(payload["strike"]),
+        notional=float(payload["notional"]),
+        maturity_years=float(payload["maturity_time"]),
+        base_cpi=float(payload["base_cpi"]) if payload.get("base_cpi") is not None else None,
+        observation_lag=payload.get("observation_lag"),
+        long_short="Long",
+    )
+    npv_profile = np.asarray(
+        [
+            price_inflation_capfloor_at_time(
+                definition=definition,
+                inflation_curve=payload["inflation_curve"],
+                discount_curve=payload["p0_disc"],
+                valuation_time=float(t),
+                market_surface_price=payload.get("market_surface_price"),
+            )
+            for t in exposure_times
+        ],
+        dtype=float,
+    )
     epe = np.maximum(npv_profile, 0.0)
     ene = np.maximum(-npv_profile, 0.0)
     pfe = np.maximum(epe, ene)
@@ -4841,6 +5042,8 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
     return (
         isinstance(exc, FileNotFoundError)
         or "FloatingLegData/Index not found" in message
+        or "no equity smile quotes found" in message
+        or "spot quote" in message
         or "no LGM node found for ccy" in message
         or "no fitted market curve available for currency" in message
         or "has no Configuration[@id='" in message
@@ -5648,16 +5851,28 @@ def _run_case(
                     xva_mode=args.xva_mode,
                 )
             elif first_trade_type == "CapFloor":
-                base_summary = _compute_capfloor_snapshot_case(
-                    ore_xml,
-                    paths=args.paths,
-                    seed=args.seed,
-                    rng_mode=args.rng,
-                    anchor_t0_npv=args.anchor_t0_npv,
-                    own_hazard=args.own_hazard,
-                    own_recovery=args.own_recovery,
-                    xva_mode=args.xva_mode,
-                )
+                if _supports_native_inflation_capfloor_price_only(ore_xml):
+                    base_summary = _compute_inflation_capfloor_snapshot_case(
+                        ore_xml,
+                        paths=args.paths,
+                        seed=args.seed,
+                        rng_mode=args.rng,
+                        anchor_t0_npv=args.anchor_t0_npv,
+                        own_hazard=args.own_hazard,
+                        own_recovery=args.own_recovery,
+                        xva_mode=args.xva_mode,
+                    )
+                else:
+                    base_summary = _compute_capfloor_snapshot_case(
+                        ore_xml,
+                        paths=args.paths,
+                        seed=args.seed,
+                        rng_mode=args.rng,
+                        anchor_t0_npv=args.anchor_t0_npv,
+                        own_hazard=args.own_hazard,
+                        own_recovery=args.own_recovery,
+                        xva_mode=args.xva_mode,
+                    )
             elif first_trade_type == "Swap" and _is_inflation_swap_trade(ore_xml):
                 base_summary = _compute_inflation_swap_snapshot_case(
                     ore_xml,

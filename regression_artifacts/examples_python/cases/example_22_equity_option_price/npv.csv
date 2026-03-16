@@ -1,0 +1,2 @@
+#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
+EQ_CALL_SP5,EquityOption,2018-02-05,2.000262,132103.238437,EUR,132103.238437,EUR,10000000.00,EUR,10000000.00,CPTY_A,CPTY_A

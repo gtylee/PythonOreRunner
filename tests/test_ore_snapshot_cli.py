@@ -42,6 +42,7 @@ CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / 
 INFLATION_CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore_capfloor.xml"
 TA001_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Academy" / "TA001_Equity_Option" / "Input" / "ore.xml"
 EXAMPLE22_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml"
+SCRIPTED_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "ScriptedTrade" / "Input" / "ore.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -130,10 +131,26 @@ class TestOreSnapshotCli(unittest.TestCase):
                 INFLATION_CAPFLOOR_CASE_XML,
             )
         )
+        self.assertTrue(
+            ore_snapshot_cli._supports_native_price_only(
+                "CapFloor",
+                CAPFLOOR_CASE_XML,
+            )
+        )
 
     def test_parse_ore_date_accepts_compact_format(self):
         parsed = ore_snapshot_cli._parse_ore_date("20170301")
         self.assertEqual(parsed.isoformat(), "2017-03-01")
+
+    def test_parse_market_quotes_accepts_csv_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market = Path(tmp) / "market.csv"
+            market.write_text(
+                "2023-06-05,EQUITY/PRICE/RIC:.STOXX50E/EUR,4337.5\n",
+                encoding="utf-8",
+            )
+            quotes = ore_snapshot_cli._parse_market_quotes(market, "2023-06-05")
+        self.assertEqual(quotes["EQUITY/PRICE/RIC:.STOXX50E/EUR"], 4337.5)
 
     def test_bermudan_invalid_grid_text_degrades_to_no_grid(self):
         grid = bermudan_runtime._simulation_grid_times_from_xml_text(
@@ -215,6 +232,22 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "FxOption")
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertNotIn("ore_t0_npv", payload["pricing"])
+
+    def test_price_only_scripted_equity_option_runs_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(SCRIPTED_EQUITY_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "ScriptedTrade" / "summary.json").read_text(encoding="utf-8"))
+            self.assertIn(payload["diagnostics"]["engine"], {"python_price_only", "ore_reference_expected_output"})
+            self.assertTrue(payload["pricing"])
 
     def test_price_only_swaption_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1262,6 +1295,7 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(payload["pricing"]["pricing_mode"], "python_equity_option_black")
         self.assertIn("py_t0_npv", payload["pricing"])
         self.assertGreater(payload["pricing"]["py_t0_npv"], 0.0)
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 100.0)
 
     def test_unique_report_case_slug_avoids_collisions(self):
         first = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"

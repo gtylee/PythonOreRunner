@@ -1,0 +1,276 @@
+{
+  "counterparty": "CPTY_A",
+  "diagnostics": {
+    "engine": "python_price_only",
+    "pricing_mode": "python_equity_option_black",
+    "reference_output_dirs": [
+      "$REPO_ROOT/Examples/Legacy/Example_22/ExpectedOutput"
+    ],
+    "using_expected_output": true
+  },
+  "input_validation": {
+    "action_items": [
+      {
+        "code": "missing_market_configurations",
+        "details": [
+          "xois_eur"
+        ],
+        "severity": "error",
+        "what_failed": "Some market configurations requested by ore.xml are not defined in todaysmarket.xml.",
+        "what_to_fix": "Add the missing <Configuration id=\"...\"> blocks to todaysmarket.xml or change the Markets/Parameter values in ore.xml to an existing configuration id.",
+        "where_to_fix": [
+          "$REPO_ROOT/Examples/Legacy/Example_22/Input/ore_atmOnly.xml",
+          "$REPO_ROOT/Examples/Legacy/Example_22/Input/todaysmarket.xml"
+        ]
+      },
+      {
+        "code": "missing_mandatory_quotes",
+        "detail_count": 47,
+        "details": [
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/10Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/15Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/20Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/2Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/30Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/3Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/40Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/4Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/50Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/5Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/7Y",
+          "FXFWD/RATE/EUR/USD/12M",
+          "FXFWD/RATE/EUR/USD/3M",
+          "FXFWD/RATE/EUR/USD/6M",
+          "FXFWD/RATE/EUR/USD/9M",
+          "IR_SWAP/RATE/EUR/2D/1D/10M",
+          "IR_SWAP/RATE/EUR/2D/1D/10Y",
+          "IR_SWAP/RATE/EUR/2D/1D/11M",
+          "IR_SWAP/RATE/EUR/2D/1D/12Y",
+          "IR_SWAP/RATE/EUR/2D/1D/15Y",
+          "IR_SWAP/RATE/EUR/2D/1D/1M",
+          "IR_SWAP/RATE/EUR/2D/1D/1W",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y3M",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y6M",
+          "IR_SWAP/RATE/EUR/2D/1D/1Y9M",
+          "IR_SWAP/RATE/EUR/2D/1D/20Y",
+          "IR_SWAP/RATE/EUR/2D/1D/25Y",
+          "IR_SWAP/RATE/EUR/2D/1D/2M",
+          "IR_SWAP/RATE/EUR/2D/1D/2W",
+          "IR_SWAP/RATE/EUR/2D/1D/2Y",
+          "IR_SWAP/RATE/EUR/2D/1D/30Y",
+          "IR_SWAP/RATE/EUR/2D/1D/3M",
+          "IR_SWAP/RATE/EUR/2D/1D/3Y",
+          "IR_SWAP/RATE/EUR/2D/1D/4M",
+          "IR_SWAP/RATE/EUR/2D/1D/4Y",
+          "IR_SWAP/RATE/EUR/2D/1D/5M",
+          "IR_SWAP/RATE/EUR/2D/1D/5Y",
+          "IR_SWAP/RATE/EUR/2D/1D/6M",
+          "IR_SWAP/RATE/EUR/2D/1D/6Y",
+          "IR_SWAP/RATE/EUR/2D/1D/7M",
+          "IR_SWAP/RATE/EUR/2D/1D/7Y",
+          "IR_SWAP/RATE/EUR/2D/1D/8M",
+          "IR_SWAP/RATE/EUR/2D/1D/8Y",
+          "IR_SWAP/RATE/EUR/2D/1D/9M",
+          "IR_SWAP/RATE/EUR/2D/1D/9Y",
+          "MM/RATE/EUR/0D/1D"
+        ],
+        "severity": "error",
+        "what_failed": "The active curve build requests mandatory quote ids that are not present in the market data on the asof date.",
+        "what_to_fix": "Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml.",
+        "where_to_fix": [
+          "$REPO_ROOT/Examples/Legacy/Example_22/Input/curveconfig.xml",
+          "$REPO_ROOT/Examples/Input/market_20160205.txt"
+        ]
+      }
+    ],
+    "checks": {
+      "conventions_exist": true,
+      "curve_specs_resolve": true,
+      "market_configurations_exist": false,
+      "quotes_exist_for_asof": false,
+      "referenced_todaysmarket_sections_exist": true,
+      "yield_index_names_distinct": true
+    },
+    "conventions": {
+      "missing_ids": [],
+      "used_ids": [
+        "EUR-EONIA-CONVENTIONS",
+        "EUR-OIS-CONVENTIONS",
+        "EUR-USD-FX-CONVENTIONS",
+        "EUR-USD-XCCY-BASIS-CONVENTIONS"
+      ],
+      "valid": true
+    },
+    "curve_specs": {
+      "active_curve_ids_by_section": {
+        "YieldCurves": [
+          "BANK_EUR_BORROW",
+          "BANK_EUR_LEND",
+          "BENCHMARK_EUR",
+          "EUR1D",
+          "USD-IN-EUR"
+        ]
+      },
+      "invalid": [],
+      "quote_scope_curve_ids_by_section": {
+        "YieldCurves": [
+          "EUR1D",
+          "USD-IN-EUR"
+        ]
+      },
+      "valid": true
+    },
+    "files": {
+      "conventions_xml": "$REPO_ROOT/Examples/Input/conventions.xml",
+      "curveconfig_xml": "$REPO_ROOT/Examples/Legacy/Example_22/Input/curveconfig.xml",
+      "fixing_data_file": "$REPO_ROOT/Examples/Input/fixings_20160205.txt",
+      "market_data_file": "$REPO_ROOT/Examples/Input/market_20160205.txt",
+      "portfolio_xml": "$REPO_ROOT/Examples/Legacy/Example_22/Input/portfolio.xml",
+      "todaysmarket_xml": "$REPO_ROOT/Examples/Legacy/Example_22/Input/todaysmarket.xml"
+    },
+    "fixings": {
+      "imply_todays_fixings": false,
+      "potential_issue": false,
+      "today_fixing_count": 0
+    },
+    "fx_dominance": {
+      "pair_count_with_both_directions": 0,
+      "pairs_with_both_directions": []
+    },
+    "input_links_valid": false,
+    "issues": [
+      "missing todaysmarket configurations: ['xois_eur']",
+      "some active mandatory curve-config quotes are missing on the asof date"
+    ],
+    "market_configurations": {
+      "available": [
+        "collateral_eur",
+        "collateral_inccy",
+        "default",
+        "libor"
+      ],
+      "missing_requested": [
+        "xois_eur"
+      ],
+      "requested": [
+        "xois_eur",
+        "default"
+      ],
+      "valid": false
+    },
+    "quotes": {
+      "asof_quote_count": 0,
+      "mandatory_required_count": 47,
+      "missing_mandatory": [
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/10Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/15Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/20Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/2Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/30Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/3Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/40Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/4Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/50Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/5Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/7Y",
+        "FXFWD/RATE/EUR/USD/12M",
+        "FXFWD/RATE/EUR/USD/3M",
+        "FXFWD/RATE/EUR/USD/6M",
+        "FXFWD/RATE/EUR/USD/9M",
+        "IR_SWAP/RATE/EUR/2D/1D/10M",
+        "IR_SWAP/RATE/EUR/2D/1D/10Y",
+        "IR_SWAP/RATE/EUR/2D/1D/11M",
+        "IR_SWAP/RATE/EUR/2D/1D/12Y",
+        "IR_SWAP/RATE/EUR/2D/1D/15Y",
+        "IR_SWAP/RATE/EUR/2D/1D/1M",
+        "IR_SWAP/RATE/EUR/2D/1D/1W",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y3M",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y6M",
+        "IR_SWAP/RATE/EUR/2D/1D/1Y9M",
+        "IR_SWAP/RATE/EUR/2D/1D/20Y",
+        "IR_SWAP/RATE/EUR/2D/1D/25Y",
+        "IR_SWAP/RATE/EUR/2D/1D/2M",
+        "IR_SWAP/RATE/EUR/2D/1D/2W",
+        "IR_SWAP/RATE/EUR/2D/1D/2Y",
+        "IR_SWAP/RATE/EUR/2D/1D/30Y",
+        "IR_SWAP/RATE/EUR/2D/1D/3M",
+        "IR_SWAP/RATE/EUR/2D/1D/3Y",
+        "IR_SWAP/RATE/EUR/2D/1D/4M",
+        "IR_SWAP/RATE/EUR/2D/1D/4Y",
+        "IR_SWAP/RATE/EUR/2D/1D/5M",
+        "IR_SWAP/RATE/EUR/2D/1D/5Y",
+        "IR_SWAP/RATE/EUR/2D/1D/6M",
+        "IR_SWAP/RATE/EUR/2D/1D/6Y",
+        "IR_SWAP/RATE/EUR/2D/1D/7M",
+        "IR_SWAP/RATE/EUR/2D/1D/7Y",
+        "IR_SWAP/RATE/EUR/2D/1D/8M",
+        "IR_SWAP/RATE/EUR/2D/1D/8Y",
+        "IR_SWAP/RATE/EUR/2D/1D/9M",
+        "IR_SWAP/RATE/EUR/2D/1D/9Y",
+        "MM/RATE/EUR/0D/1D"
+      ],
+      "missing_optional": [],
+      "optional_required_count": 0,
+      "valid": false
+    },
+    "summary": {
+      "asof_date": "2016-02-05",
+      "market_contexts": {
+        "fxcalibration": "xois_eur",
+        "lgmcalibration": "collateral_inccy",
+        "pricing": "xois_eur",
+        "sensitivity": "xois_eur",
+        "simulation": "xois_eur"
+      },
+      "ore_xml_path": "$REPO_ROOT/Examples/Legacy/Example_22/Input/ore_atmOnly.xml",
+      "selected_market_configs": [
+        "default"
+      ]
+    },
+    "todaysmarket_names": {
+      "distinct": true,
+      "yield_index_overlaps": []
+    },
+    "todaysmarket_sections": {
+      "missing_references": [],
+      "valid": true
+    }
+  },
+  "maturity_date": "2018-02-05",
+  "maturity_time": 2.000262,
+  "modes": [
+    "price"
+  ],
+  "netting_set_id": "CPTY_A",
+  "ore_xml": "$REPO_ROOT/Examples/Legacy/Example_22/Input/ore_atmOnly.xml",
+  "parity": null,
+  "pass_all": true,
+  "pass_flags": {
+    "pricing": true,
+    "xva_cva": true,
+    "xva_dva": true,
+    "xva_fba": true,
+    "xva_fca": true
+  },
+  "pricing": {
+    "currency": "USD",
+    "discount_factor": 0.973876465105328,
+    "equity_name": "SP5",
+    "forward0": 2090.1891193933984,
+    "long_short": "Long",
+    "option_type": "Call",
+    "ore_t0_npv": 132179.29212,
+    "pricing_mode": "python_equity_option_black",
+    "py_t0_npv": 132103.23843732217,
+    "quantity": 775.0,
+    "spot0": 2147.56,
+    "strike": 2147.56,
+    "t0_npv_abs_diff": 76.05368267782615,
+    "trade_type": "EquityOption",
+    "volatility": 0.1697325510963265
+  },
+  "trade_id": "EQ_CALL_SP5",
+  "xva": null
+}

@@ -21,6 +21,27 @@
     },
     {
       "baseline_mode": "python",
+      "case_id": "example_22_equity_option_price",
+      "cli_args": [
+        "--price"
+      ],
+      "description": "Legacy Example 22 ATM-only equity option price-only Python regression.",
+      "files_to_compare": [
+        "npv.csv",
+        "curves.csv",
+        "flows.csv"
+      ],
+      "ore_xml": "Examples/Legacy/Example_22/Input/ore_atmOnly.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "equity",
+        "legacy"
+      ],
+      "workflow": "python"
+    },
+    {
+      "baseline_mode": "python",
       "case_id": "example_28_fx_forward_price",
       "cli_args": [
         "--price"

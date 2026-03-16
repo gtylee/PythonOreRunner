@@ -57,6 +57,7 @@ import numpy as np
 
 from pythonore.domain.dataclasses import (
     FXForward,
+    InflationCapFloor,
     InflationSwap,
     IRS,
     MporConfig,
@@ -511,6 +512,46 @@ class PythonLgmAdapter:
                     )
                 vals[:, :] = profile[:, None]
                 npv_by_trade[spec.trade.trade_id] = vals
+            elif spec.kind == "InflationCapFloor":
+                trade_product = spec.trade.product
+                assert isinstance(trade_product, InflationCapFloor)
+                curve_key = (
+                    str(trade_product.index).upper(),
+                    "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
+                )
+                inflation_curve = inputs.inflation_curves.get(curve_key)
+                if inflation_curve is None:
+                    unsupported.append(spec.trade)
+                    continue
+                p_disc = inputs.discount_curves[spec.ccy]
+                definition = self._inflation_mod.InflationCapFloorDefinition(
+                    trade_id=spec.trade.trade_id,
+                    currency=spec.ccy,
+                    inflation_type=str(trade_product.inflation_type),
+                    option_type=str(trade_product.option_type),
+                    index=str(trade_product.index),
+                    strike=float(trade_product.strike),
+                    notional=float(trade_product.notional),
+                    maturity_years=float(trade_product.maturity_years),
+                    base_cpi=float(trade_product.base_cpi) if trade_product.base_cpi is not None else None,
+                    observation_lag=trade_product.observation_lag,
+                    long_short=str(trade_product.long_short),
+                )
+                profile = np.asarray(
+                    [
+                        self._inflation_mod.price_inflation_capfloor_at_time(
+                            definition=definition,
+                            inflation_curve=inflation_curve,
+                            discount_curve=p_disc,
+                            valuation_time=float(t),
+                        )
+                        for t in inputs.times
+                    ],
+                    dtype=float,
+                )
+                vals = np.zeros((n_times, n_paths), dtype=float)
+                vals[:, :] = profile[:, None]
+                npv_by_trade[spec.trade.trade_id] = vals
             else:
                 unsupported.append(spec.trade)
 
@@ -713,6 +754,15 @@ class PythonLgmAdapter:
                         ccy=t.product.ccy.upper(),
                     )
                 )
+            elif isinstance(t.product, InflationCapFloor):
+                trade_specs.append(
+                    _TradeSpec(
+                        trade=t,
+                        kind="InflationCapFloor",
+                        notional=float(t.product.notional),
+                        ccy=t.product.ccy.upper(),
+                    )
+                )
             else:
                 unsupported.append(t)
         ccy_set: set[str] = {snapshot.config.base_currency.upper()}
@@ -723,6 +773,8 @@ class PythonLgmAdapter:
                 ccy_set.add(t.product.pair[:3].upper())
                 ccy_set.add(t.product.pair[3:].upper())
             if isinstance(t.product, InflationSwap):
+                ccy_set.add(t.product.ccy.upper())
+            if isinstance(t.product, InflationCapFloor):
                 ccy_set.add(t.product.ccy.upper())
         return trade_specs, unsupported, ccy_set
 
@@ -803,7 +855,8 @@ class PythonLgmAdapter:
                 "YY" if str(spec.trade.product.inflation_type).upper() == "YY" else "ZC",
             )
             for spec in trade_specs
-            if spec.kind == "InflationSwap" and isinstance(spec.trade.product, InflationSwap)
+            if spec.kind in {"InflationSwap", "InflationCapFloor"}
+            and isinstance(spec.trade.product, (InflationSwap, InflationCapFloor))
         }
         if not needed:
             return {}
@@ -1407,6 +1460,8 @@ class PythonLgmAdapter:
                         extras.append(np.asarray(pay_times, dtype=float))
                 else:
                     extras.append(np.asarray([max(float(product.maturity_years), 0.0)], dtype=float))
+            elif spec.kind == "InflationCapFloor" and isinstance(spec.trade.product, InflationCapFloor):
+                extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
             elif spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward):
                 extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
         if extras:
