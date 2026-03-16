@@ -40,6 +40,8 @@ SWAPTION_MIXED_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_s
 BERMUDAN_CASE_XML = TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_3" / "Input" / "ore_bermudans.xml"
 CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
 INFLATION_CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore_capfloor.xml"
+TA001_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Academy" / "TA001_Equity_Option" / "Input" / "ore.xml"
+EXAMPLE22_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml"
 
 
 class TestOreSnapshotCli(unittest.TestCase):
@@ -92,10 +94,22 @@ class TestOreSnapshotCli(unittest.TestCase):
                 TOOLS_DIR / "Examples" / "Legacy" / "Example_24" / "Input" / "ore.xml",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             ore_snapshot_cli._supports_native_price_only(
                 "EquityOption",
                 TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml",
+            )
+        )
+        self.assertTrue(
+            ore_snapshot_cli._supports_native_price_only(
+                "EquityForward",
+                TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_equity.xml",
+            )
+        )
+        self.assertTrue(
+            ore_snapshot_cli._supports_native_price_only(
+                "EquitySwap",
+                TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_equity.xml",
             )
         )
         self.assertTrue(
@@ -110,7 +124,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                 SWAPTION_LONG_CASE_XML,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             ore_snapshot_cli._supports_native_price_only(
                 "CapFloor",
                 INFLATION_CAPFLOOR_CASE_XML,
@@ -1232,6 +1246,23 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["call_schedule_count"], 3)
         self.assertEqual(payload["diagnostics"]["callable_model_family"], "LGM")
 
+    def test_ta001_equity_option_price_only_case_uses_native_premium_surface(self):
+        payload = ore_snapshot_cli._compute_price_only_case(TA001_EQUITY_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "EQ_CALL_STOXX50E")
+        self.assertEqual(payload["pricing"]["trade_type"], "EquityOption")
+        self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+        self.assertEqual(payload["pricing"]["pricing_mode"], "python_equity_option_premium_surface")
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 0.1)
+
+    def test_example22_equity_option_price_only_case_uses_native_black_path(self):
+        payload = ore_snapshot_cli._compute_price_only_case(EXAMPLE22_EQUITY_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "EQ_CALL_SP5")
+        self.assertEqual(payload["pricing"]["trade_type"], "EquityOption")
+        self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+        self.assertEqual(payload["pricing"]["pricing_mode"], "python_equity_option_black")
+        self.assertIn("py_t0_npv", payload["pricing"])
+        self.assertGreater(payload["pricing"]["py_t0_npv"], 0.0)
+
     def test_unique_report_case_slug_avoids_collisions(self):
         first = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
         second = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
@@ -1319,7 +1350,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             },
             "input_validation": {"input_links_valid": True},
         }
-        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "unsupported_python_snapshot_fallback")
+        self.assertEqual(ore_snapshot_cli._bucket_case(case_summary), "price_only_reference_fallback")
 
     def test_bucket_case_reclassifies_unsupported_missing_output_passes(self):
         case_summary = {

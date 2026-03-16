@@ -17,6 +17,8 @@ if __package__ in (None, ""):
     if str(REPO_BOOTSTRAP) not in sys.path:
         sys.path.insert(0, str(REPO_BOOTSTRAP))
 
+from pythonore.repo_paths import local_parity_artifacts_root
+
 
 def _parse_list(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
@@ -61,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--spread-calibration-options", default="false,true")
     p.add_argument("--alpha-scales", default="1.0,1.05")
     p.add_argument("--alpha-source", choices=["auto", "simulation", "calibration"], default="calibration")
-    p.add_argument("--artifact-root", type=Path, default=repo_root / "Tools/PythonOreRunner/parity_artifacts")
+    p.add_argument("--artifact-root", type=Path, default=local_parity_artifacts_root())
     p.add_argument("--out-prefix", default="sweep")
     p.add_argument("--max-cases", type=int, default=0, help="0 means no limit")
     return p.parse_args()

@@ -2,6 +2,25 @@
   "cases": [
     {
       "baseline_mode": "python",
+      "case_id": "ta001_equity_option_price",
+      "cli_args": [
+        "--price"
+      ],
+      "description": "Academy TA001 equity option price-only Python regression.",
+      "files_to_compare": [
+        "npv.csv"
+      ],
+      "ore_xml": "Examples/Academy/TA001_Equity_Option/Input/ore.xml",
+      "secondary_parity": true,
+      "tags": [
+        "pricing",
+        "equity",
+        "academy"
+      ],
+      "workflow": "python"
+    },
+    {
+      "baseline_mode": "python",
       "case_id": "example_28_fx_forward_price",
       "cli_args": [
         "--price"

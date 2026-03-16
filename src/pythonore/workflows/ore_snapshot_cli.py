@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -51,10 +51,22 @@ from pythonore.compute.irs_xva_utils import (
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
+from pythonore.compute.inflation import (
+    inflation_swap_payment_times,
+    load_inflation_curve_from_market_data,
+    load_zero_inflation_surface_quote,
+    parse_inflation_models_from_simulation_xml,
+    price_inflation_capfloor,
+    price_yoy_swap,
+    price_yoy_swap_at_time,
+    price_zero_coupon_cpi_swap,
+    price_zero_coupon_cpi_swap_at_time,
+)
 from pythonore.compute.lgm_fx_xva_utils import FxForwardDef, FxOptionDef, build_two_ccy_hybrid, fx_option_npv
 from pythonore.compute.lgm_ir_options import CapFloorDef, capfloor_npv, capfloor_npv_paths
 from pythonore.compute.lgm import LGM1F, LGMParams, make_ore_gaussian_rng, simulate_ba_measure, simulate_lgm_measure
 from pythonore.io.ore_snapshot import (
+    fit_discount_curves_from_ore_market,
     load_from_ore_xml,
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
@@ -443,7 +455,163 @@ def _build_minimal_pricing_payload(
             return _build_bermudan_swaption_pricing_payload(ore_xml)
         return _build_swaption_pricing_payload(ore_xml)
     if trade_type == "CapFloor":
+        trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+        leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().upper() if trade is not None else ""
+        if leg_type in {"CPI", "YY"}:
+            ore_xml_path2, asof_date2, market_data_path2, _, _ = ore_snapshot_mod._resolve_ore_run_files(ore_xml)
+            npv_csv2 = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+            npv_details2 = (
+                ore_snapshot_mod._load_ore_npv_details(npv_csv2, trade_id=trade_id)
+                if npv_csv2 is not None
+                else {
+                    "npv": None,
+                    "maturity_date": (
+                        trade.findtext("./CapFloorData/LegData/ScheduleData/Rules/EndDate")
+                        or trade.findtext("./CapFloorData/LegData/ScheduleData/Dates/Dates/Date")
+                        or ""
+                    ),
+                    "maturity_time": ore_snapshot_mod._year_fraction_from_day_counter(
+                        _parse_ore_date(asof_date2),
+                        _parse_ore_date(
+                            trade.findtext("./CapFloorData/LegData/ScheduleData/Rules/EndDate")
+                            or trade.findtext("./CapFloorData/LegData/ScheduleData/Dates/Dates/Date")
+                            or asof_date2
+                        ),
+                        "A365F",
+                    ),
+                }
+            )
+            ccy = (trade.findtext("./CapFloorData/LegData/Currency") or "EUR").strip()
+            p0_disc = _build_discount_curve_from_market_fit(ore_xml, ccy)
+            index_name = (
+                trade.findtext("./CapFloorData/LegData/CPILegData/Index")
+                or trade.findtext("./CapFloorData/LegData/YYLegData/Index")
+                or ""
+            ).strip()
+            curve_type = "YY" if leg_type == "YY" else "ZC"
+            inf_curve = load_inflation_curve_from_market_data(market_data_path2, asof_date2, index_name, curve_type=curve_type)
+            strike = float(
+                trade.findtext("./CapFloorData/Caps/Cap")
+                or trade.findtext("./CapFloorData/Floors/Floor")
+                or trade.findtext("./CapFloorData/LegData/CPILegData/Rates/Rate")
+                or 0.0
+            )
+            option_type = "Cap" if (trade.findtext("./CapFloorData/Caps/Cap") or "").strip() else "Floor"
+            maturity_label = (
+                trade.findtext("./CapFloorData/LegData/ScheduleData/Rules/EndDate")
+                or str(npv_details2["maturity_date"])
+            )
+            maturity_years = float(npv_details2["maturity_time"])
+            tenor_label = f"{max(int(round(maturity_years)), 1)}Y"
+            market_surface_price = load_zero_inflation_surface_quote(
+                market_data_path2, asof_date2, index_name, tenor_label, strike, option_type
+            )
+            return {
+                "trade_id": trade_id,
+                "trade_type": "CapFloor",
+                "inflation_product": True,
+                "inflation_kind": leg_type,
+                "counterparty": counterparty,
+                "netting_set_id": netting_set_id,
+                "currency": ccy,
+                "index": index_name,
+                "option_type": option_type,
+                "strike": strike,
+                "notional": float(trade.findtext("./CapFloorData/LegData/Notionals/Notional") or 0.0),
+                "maturity_date": str(npv_details2["maturity_date"]),
+                "maturity_time": maturity_years,
+                "p0_disc": p0_disc,
+                "inflation_curve": inf_curve,
+                "market_surface_price": market_surface_price,
+                "ore_t0_npv": float(npv_details2["npv"]) if npv_details2.get("npv") is not None else None,
+                "reference_output_dirs": [str(npv_csv2.parent)] if npv_csv2 is not None else [],
+                "using_expected_output": bool(npv_csv2 is not None and _classify_reference_dir(ore_xml, npv_csv2.parent) == "expected_output"),
+                "pricing_mode": f"python_inflation_{curve_type.lower()}_capfloor",
+                **_inflation_model_diagnostics(ore_xml, index_name),
+            }
         return _build_capfloor_pricing_payload(ore_xml)
+    if trade_type == "Swap" and _is_inflation_swap_trade(ore_xml):
+        ore_xml_path2, asof_date2, market_data_path2, _, _ = ore_snapshot_mod._resolve_ore_run_files(ore_xml)
+        trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+        if trade is None:
+            raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
+        npv_csv2 = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+        legs_xml = trade.findall("./SwapData/LegData")
+        inflation_leg = next((leg for leg in legs_xml if (leg.findtext("./LegType") or "").strip().upper() in {"CPI", "YY"}), None)
+        fixed_leg = next((leg for leg in legs_xml if (leg.findtext("./LegType") or "").strip().upper() in {"FIXED", "ZEROCOUPONFIXED"}), None)
+        float_leg = next((leg for leg in legs_xml if (leg.findtext("./LegType") or "").strip().upper() == "FLOATING"), None)
+        if inflation_leg is None:
+            raise ValueError(f"no inflation leg found for trade '{trade_id}'")
+        leg_type = (inflation_leg.findtext("./LegType") or "").strip().upper()
+        maturity_date = (
+            inflation_leg.findtext("./ScheduleData/Rules/EndDate")
+            or inflation_leg.findtext("./ScheduleData/Dates/Dates/Date")
+            or (fixed_leg.findtext("./ScheduleData/Rules/EndDate") if fixed_leg is not None else None)
+            or (float_leg.findtext("./ScheduleData/Rules/EndDate") if float_leg is not None else None)
+            or asof_date2
+        )
+        npv_details2 = (
+            ore_snapshot_mod._load_ore_npv_details(npv_csv2, trade_id=trade_id)
+            if npv_csv2 is not None
+            else {
+                "npv": None,
+                "maturity_date": maturity_date,
+                "maturity_time": ore_snapshot_mod._year_fraction_from_day_counter(
+                    _parse_ore_date(asof_date2),
+                    _parse_ore_date(maturity_date),
+                    "A365F",
+                ),
+            }
+        )
+        ccy = (inflation_leg.findtext("./Currency") or fixed_leg.findtext("./Currency") if fixed_leg is not None else "EUR").strip()
+        p0_disc = _build_discount_curve_from_market_fit(ore_xml, ccy)
+        index_name = (
+            inflation_leg.findtext("./CPILegData/Index")
+            or inflation_leg.findtext("./YYLegData/Index")
+            or ""
+        ).strip()
+        curve_type = "YY" if leg_type == "YY" else "ZC"
+        inf_curve = load_inflation_curve_from_market_data(market_data_path2, asof_date2, index_name, curve_type=curve_type)
+        return {
+            "trade_id": trade_id,
+            "trade_type": "Swap",
+            "inflation_product": True,
+            "inflation_kind": leg_type,
+            "counterparty": counterparty,
+            "netting_set_id": netting_set_id,
+            "currency": ccy,
+            "index": index_name,
+            "notional": float(
+                inflation_leg.findtext("./Notionals/Notional")
+                or (fixed_leg.findtext("./Notionals/Notional") if fixed_leg is not None else "0")
+                or (float_leg.findtext("./Notionals/Notional") if float_leg is not None else "0")
+            ),
+            "base_cpi": float(inflation_leg.findtext("./CPILegData/BaseCPI") or 100.0),
+            "fixed_rate": float(
+                (fixed_leg.findtext("./FixedLegData/Rates/Rate") if fixed_leg is not None else None)
+                or (fixed_leg.findtext("./ZeroCouponFixedLegData/Rates/Rate") if fixed_leg is not None else None)
+                or 0.0
+            ),
+            "has_float_leg": float_leg is not None,
+            "schedule_tenor": (
+                inflation_leg.findtext("./ScheduleData/Rules/Tenor")
+                or (fixed_leg.findtext("./ScheduleData/Rules/Tenor") if fixed_leg is not None else None)
+                or "1Y"
+            ),
+            "maturity_date": str(npv_details2["maturity_date"]),
+            "maturity_time": float(npv_details2["maturity_time"]),
+            "p0_disc": p0_disc,
+            "inflation_curve": inf_curve,
+            "ore_t0_npv": float(npv_details2["npv"]) if npv_details2.get("npv") is not None else None,
+            "exposure_csv": _find_reference_output_file(ore_xml, f"exposure_trade_{trade_id}.csv"),
+            "xva_csv": _find_reference_output_file(ore_xml, "xva.csv"),
+            "todaysmarket_xml": ore_snapshot_mod._resolve_ore_run_files(ore_xml)[3],
+            "market_data_path": market_data_path2,
+            "reference_output_dirs": [str(npv_csv2.parent)] if npv_csv2 is not None else [],
+            "using_expected_output": bool(npv_csv2 is not None and _classify_reference_dir(ore_xml, npv_csv2.parent) == "expected_output"),
+            "pricing_mode": f"python_inflation_{curve_type.lower()}_swap",
+            **_inflation_model_diagnostics(ore_xml, index_name),
+        }
     forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
 
     sim_config_id = markets_params.get("simulation", "libor")
@@ -699,6 +867,542 @@ def _parse_ore_date(text: str) -> date:
     if len(raw) == 8 and raw.isdigit():
         return date.fromisoformat(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
     return ore_snapshot_mod._normalize_date_input(raw)
+
+
+def _year_fraction_a365(start: date, end: date) -> float:
+    return max(float((end - start).days) / 365.0, 0.0)
+
+
+def _strike_quote_candidates(strike: float) -> tuple[str, ...]:
+    base = f"{float(strike):.10f}".rstrip("0").rstrip(".")
+    candidates = {
+        base,
+        f"{float(strike):.0f}",
+        f"{float(strike):.1f}".rstrip("0").rstrip("."),
+        f"{float(strike):.2f}".rstrip("0").rstrip("."),
+        f"{float(strike):.3f}".rstrip("0").rstrip("."),
+        f"{float(strike):.6f}".rstrip("0").rstrip("."),
+    }
+    return tuple(sorted(candidates, key=len))
+
+
+def _market_label_to_time(asof: date, label: str) -> float:
+    txt = str(label or "").strip()
+    if not txt:
+        raise ValueError("empty market label")
+    try:
+        return _year_fraction_a365(asof, _parse_ore_date(txt))
+    except Exception:
+        return _tenor_to_years(txt)
+
+
+def _interp_linear(points: list[tuple[float, float]], target: float, *, flat_extrapolation: bool = True) -> float:
+    if not points:
+        raise ValueError("interpolation requires at least one point")
+    ordered = sorted((float(x), float(y)) for x, y in points)
+    if target <= ordered[0][0]:
+        if flat_extrapolation or len(ordered) == 1:
+            return float(ordered[0][1])
+    if target >= ordered[-1][0]:
+        if flat_extrapolation or len(ordered) == 1:
+            return float(ordered[-1][1])
+    for (x0, y0), (x1, y1) in zip(ordered[:-1], ordered[1:]):
+        if x0 <= target <= x1:
+            if x1 <= x0:
+                return float(y1)
+            w = (target - x0) / (x1 - x0)
+            return float((1.0 - w) * y0 + w * y1)
+    return float(ordered[-1][1])
+
+
+def _interp_total_variance(points: list[tuple[float, float]], target: float) -> float:
+    if not points:
+        raise ValueError("variance interpolation requires at least one point")
+    ordered = sorted((max(float(t), 1.0e-12), max(float(v), 0.0)) for t, v in points)
+    if target <= ordered[0][0]:
+        return float(ordered[0][1])
+    if target >= ordered[-1][0]:
+        return float(ordered[-1][1])
+    for (t0, v0), (t1, v1) in zip(ordered[:-1], ordered[1:]):
+        if t0 <= target <= t1:
+            if t1 <= t0:
+                return float(v1)
+            w = (target - t0) / (t1 - t0)
+            total_var0 = (v0 * v0) * t0
+            total_var1 = (v1 * v1) * t1
+            total_var = (1.0 - w) * total_var0 + w * total_var1
+            return math.sqrt(max(total_var / max(target, 1.0e-12), 0.0))
+    return float(ordered[-1][1])
+
+
+def _parse_market_quotes(market_data_path: Path, asof_date: str) -> dict[str, float]:
+    asof_compact = asof_date.replace("-", "")
+    asof_dash = asof_date
+    quotes: dict[str, float] = {}
+    with open(market_data_path, encoding="utf-8") as handle:
+        for line in handle:
+            txt = line.strip()
+            if not txt or txt.startswith("#"):
+                continue
+            parts = txt.split()
+            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                continue
+            try:
+                quotes[parts[1]] = float(parts[2])
+            except Exception:
+                continue
+    return quotes
+
+
+def _legacy_section_with_fallback(root: ET.Element, tag: str, section_id: str | None) -> ET.Element | None:
+    if section_id:
+        node = root.find(f"./{tag}[@id='{section_id}']")
+        if node is not None:
+            return node
+    return root.find(f"./{tag}")
+
+
+def _load_equity_curve_spec(
+    todaysmarket_xml: Path,
+    curveconfig_path: Path,
+    *,
+    pricing_config_id: str,
+    equity_name: str,
+) -> dict[str, Any]:
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    eq_section_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
+        tm_root,
+        pricing_config_id,
+        "EquityCurvesId",
+        "EquityCurves",
+    ) or "default"
+    mapping = _legacy_section_with_fallback(tm_root, "EquityCurves", eq_section_id)
+    if mapping is None:
+        raise ValueError("todaysmarket.xml missing EquityCurves section")
+    handle = mapping.findtext(f"./EquityCurve[@name='{equity_name}']")
+    if not handle:
+        raise ValueError(f"todaysmarket.xml missing EquityCurve mapping for '{equity_name}'")
+    curve_id = handle.strip().split("/")[-1]
+    cfg_root = ET.parse(curveconfig_path).getroot()
+    node = next(
+        (
+            candidate
+            for candidate in cfg_root.findall(".//EquityCurve")
+            if (candidate.findtext("./CurveId") or "").strip() == curve_id
+        ),
+        None,
+    )
+    if node is None:
+        raise ValueError(f"curveconfig.xml missing EquityCurve with CurveId '{curve_id}'")
+    return {
+        "curve_id": curve_id,
+        "currency": (node.findtext("./Currency") or "").strip().upper(),
+        "forecasting_curve": (node.findtext("./ForecastingCurve") or "").strip(),
+        "curve_type": (node.findtext("./Type") or "").strip(),
+        "spot_quote": (node.findtext("./SpotQuote") or "").strip(),
+        "quotes": [q.text.strip() for q in node.findall("./Quotes/Quote") if (q.text or "").strip()],
+        "day_counter": (node.findtext("./DayCounter") or "A365").strip(),
+    }
+
+
+def _load_equity_vol_spec(
+    todaysmarket_xml: Path,
+    curveconfig_path: Path,
+    *,
+    pricing_config_id: str,
+    equity_name: str,
+) -> dict[str, Any]:
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+    eq_section_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
+        tm_root,
+        pricing_config_id,
+        "EquityVolatilitiesId",
+        "EquityVolatilities",
+    ) or "default"
+    mapping = _legacy_section_with_fallback(tm_root, "EquityVolatilities", eq_section_id)
+    if mapping is None:
+        raise ValueError("todaysmarket.xml missing EquityVolatilities section")
+    handle = mapping.findtext(f"./EquityVolatility[@name='{equity_name}']")
+    if not handle:
+        raise ValueError(f"todaysmarket.xml missing EquityVolatility mapping for '{equity_name}'")
+    curve_id = handle.strip().split("/")[-1]
+    cfg_root = ET.parse(curveconfig_path).getroot()
+    node = next(
+        (
+            candidate
+            for candidate in cfg_root.findall(".//EquityVolatility")
+            if (candidate.findtext("./CurveId") or "").strip() == curve_id
+        ),
+        None,
+    )
+    if node is None:
+        raise ValueError(f"curveconfig.xml missing EquityVolatility with CurveId '{curve_id}'")
+    return {
+        "curve_id": curve_id,
+        "currency": (node.findtext("./Currency") or "").strip().upper(),
+        "dimension": (node.findtext("./Dimension") or "ATM").strip(),
+        "expiries": [x.strip() for x in (node.findtext("./Expiries") or "").replace("\n", "").split(",") if x.strip()],
+        "strikes": [x.strip() for x in (node.findtext("./Strikes") or "").replace("\n", "").split(",") if x.strip()],
+    }
+
+
+def _load_equity_option_premium_quote(
+    quotes: dict[str, float],
+    *,
+    equity_name: str,
+    currency: str,
+    exercise_date: str,
+    strike: float,
+    option_type: str,
+) -> float | None:
+    suffix = "C" if str(option_type).strip().upper().startswith("C") else "P"
+    for strike_label in _strike_quote_candidates(strike):
+        quote_id = f"EQUITY_OPTION/PRICE/{equity_name}/{currency}/{exercise_date}/{strike_label}/{suffix}"
+        if quote_id in quotes:
+            return float(quotes[quote_id])
+    return None
+
+
+def _build_zero_rate_curve_from_quotes(points: list[tuple[float, float]]):
+    if not points:
+        return lambda t: 1.0
+    ordered = sorted((max(float(t), 0.0), float(rate)) for t, rate in points)
+
+    def _curve(t: float) -> float:
+        tt = max(float(t), 0.0)
+        if tt <= 1.0e-12:
+            return 1.0
+        rate = _interp_linear(ordered, tt, flat_extrapolation=True)
+        return math.exp(-rate * tt)
+
+    return _curve
+
+
+def _load_equity_dividend_curve(
+    curve_spec: dict[str, Any],
+    *,
+    quotes: dict[str, float],
+    asof: date,
+):
+    points: list[tuple[float, float]] = []
+    for quote_id in curve_spec.get("quotes", []):
+        if quote_id not in quotes:
+            continue
+        label = quote_id.rsplit("/", 1)[-1]
+        points.append((_market_label_to_time(asof, label), float(quotes[quote_id])))
+    return _build_zero_rate_curve_from_quotes(points)
+
+
+def _load_equity_forward_curve(
+    curve_spec: dict[str, Any],
+    *,
+    quotes: dict[str, float],
+    asof: date,
+    spot: float,
+):
+    points: list[tuple[float, float]] = [(0.0, float(spot))]
+    for quote_id in curve_spec.get("quotes", []):
+        if quote_id not in quotes:
+            continue
+        label = quote_id.rsplit("/", 1)[-1]
+        points.append((_market_label_to_time(asof, label), float(quotes[quote_id])))
+    ordered = sorted(points)
+
+    def _curve(t: float) -> float:
+        return _interp_linear(ordered, max(float(t), 0.0), flat_extrapolation=True)
+
+    return _curve
+
+
+def _load_equity_smile_vol(
+    quotes: dict[str, float],
+    *,
+    asof: date,
+    equity_name: str,
+    currency: str,
+    maturity_time: float,
+    strike: float,
+    spec: dict[str, Any],
+) -> float:
+    strike_candidates = {str(s).strip() for s in spec.get("strikes", []) if str(s).strip()}
+    strike_labels = list(strike_candidates | set(_strike_quote_candidates(strike)) | {"ATMF"})
+    rows: dict[float, list[tuple[float, float]]] = {}
+    for expiry_label in spec.get("expiries", []):
+        expiry_time = _market_label_to_time(asof, expiry_label)
+        strike_points: list[tuple[float, float]] = []
+        for strike_label in strike_labels:
+            quote_id = f"EQUITY_OPTION/RATE_LNVOL/{equity_name}/{currency}/{expiry_label}/{strike_label}"
+            if quote_id not in quotes:
+                continue
+            if strike_label == "ATMF":
+                continue
+            try:
+                strike_points.append((float(strike_label), float(quotes[quote_id])))
+            except Exception:
+                continue
+        exact_quotes = [vol for k, vol in strike_points if abs(k - float(strike)) <= 1.0e-10]
+        if exact_quotes:
+            rows.setdefault(float(strike), []).append((expiry_time, float(exact_quotes[0])))
+            continue
+        if strike_points:
+            rows.setdefault(float(strike), []).append(
+                (expiry_time, _interp_linear(strike_points, float(strike), flat_extrapolation=True))
+            )
+            continue
+        atm_quote_id = f"EQUITY_OPTION/RATE_LNVOL/{equity_name}/{currency}/{expiry_label}/ATMF"
+        if atm_quote_id in quotes:
+            rows.setdefault(float(strike), []).append((expiry_time, float(quotes[atm_quote_id])))
+    strike_row = rows.get(float(strike), [])
+    if not strike_row:
+        raise ValueError(f"no equity smile quotes found for {equity_name} {currency} strike {strike}")
+    return _interp_total_variance(strike_row, max(float(maturity_time), 1.0e-12))
+
+
+def _equity_forward_from_market_inputs(
+    *,
+    curve_spec: dict[str, Any],
+    spot: float,
+    maturity_time: float,
+    discount_curve: Any,
+    quotes: dict[str, float],
+    asof: date,
+) -> float:
+    curve_type = str(curve_spec.get("curve_type") or "").strip().lower()
+    if curve_type == "dividendyield":
+        dividend_curve = _load_equity_dividend_curve(curve_spec, quotes=quotes, asof=asof)
+        return float(spot) * float(dividend_curve(maturity_time)) / max(float(discount_curve(maturity_time)), 1.0e-12)
+    if curve_type == "forwardprice":
+        forward_curve = _load_equity_forward_curve(curve_spec, quotes=quotes, asof=asof, spot=spot)
+        return float(forward_curve(maturity_time))
+    return float(spot) / max(float(discount_curve(maturity_time)), 1.0e-12)
+
+
+def _black_forward_option_npv(*, forward: float, strike: float, maturity_time: float, vol: float, discount: float, call: bool) -> float:
+    tt = max(float(maturity_time), 0.0)
+    if tt <= 1.0e-12 or vol <= 1.0e-12:
+        intrinsic = max(float(forward) - float(strike), 0.0) if call else max(float(strike) - float(forward), 0.0)
+        return float(discount) * intrinsic
+    std_dev = max(float(vol) * math.sqrt(tt), 1.0e-12)
+    d1 = (math.log(max(float(forward), 1.0e-12) / max(float(strike), 1.0e-12)) + 0.5 * std_dev * std_dev) / std_dev
+    d2 = d1 - std_dev
+    if call:
+        return float(discount) * (float(forward) * _normal_cdf(d1) - float(strike) * _normal_cdf(d2))
+    return float(discount) * (float(strike) * _normal_cdf(-d2) - float(forward) * _normal_cdf(-d1))
+
+
+def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+    ore_xml_path = ore_xml.resolve()
+    ore_root = ET.parse(ore_xml_path).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    asof_date = setup_params.get("asofDate", "")
+    if not asof_date:
+        raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
+    asof = _parse_ore_date(asof_date)
+    base = ore_xml_path.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    market_data_path = (input_dir / setup_params.get("marketDataFile", "")).resolve()
+    curve_config_path = (input_dir / setup_params.get("curveConfigFile", "")).resolve()
+    todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
+    portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
+    pricing_config_id = markets_params.get("pricing", "default")
+    tm_root = ET.parse(todaysmarket_xml).getroot()
+
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+    if trade is None:
+        trade = portfolio_root.find("./Trade") or portfolio_root.find(".//Trade")
+    if trade is None:
+        raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
+    trade_type = (trade.findtext("./TradeType") or "").strip()
+    quotes = _parse_market_quotes(market_data_path, asof_date)
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    if npv_csv is None:
+        raise FileNotFoundError(f"pricing reference not found for trade '{trade_id}'")
+    npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
+    try:
+        counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
+    except Exception:
+        counterparty = ""
+    try:
+        netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
+    except Exception:
+        netting_set_id = ""
+
+    curves_analytic = ore_root.find("./Analytics/Analytic[@type='curves']")
+    curves_output_name = (
+        (curves_analytic.findtext("./Parameter[@name='outputFileName']") if curves_analytic is not None else None)
+        or "curves.csv"
+    )
+
+    def _equity_discount_curve(ccy: str):
+        try:
+            discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, ccy)
+            curves_csv = _find_reference_output_file(ore_xml, curves_output_name)
+            if curves_csv is None:
+                raise FileNotFoundError(curves_output_name)
+            curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+                str(curves_csv),
+                [discount_column],
+                asof_date=asof_date,
+                day_counter="A365F",
+            )
+            _, curve_times, curve_dfs = curve_dates[discount_column]
+            return ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times, curve_dfs)))
+        except Exception:
+            return _build_discount_curve_from_market_fit(ore_xml, ccy)
+
+    if trade_type == "EquityOption":
+        data = trade.find("./EquityOptionData")
+        if data is None:
+            raise ValueError(f"EquityOptionData missing for trade '{trade_id}'")
+        equity_name = (data.findtext("./Name") or "").strip()
+        currency = (data.findtext("./Currency") or "").strip().upper()
+        strike = float((data.findtext("./Strike") or "0").strip())
+        quantity = float((data.findtext("./Quantity") or "0").strip())
+        option_data = data.find("./OptionData")
+        option_type = (option_data.findtext("./OptionType") if option_data is not None else "Call") or "Call"
+        long_short = (option_data.findtext("./LongShort") if option_data is not None else "Long") or "Long"
+        exercise_date = (
+            option_data.findtext("./ExerciseDates/ExerciseDate")
+            if option_data is not None
+            else data.findtext("./ExerciseDate")
+            or ""
+        ).strip()
+        maturity_time = _year_fraction_a365(asof, _parse_ore_date(exercise_date))
+        curve_spec = _load_equity_curve_spec(
+            todaysmarket_xml,
+            curve_config_path,
+            pricing_config_id=pricing_config_id,
+            equity_name=equity_name,
+        )
+        spot = float(quotes[curve_spec["spot_quote"]])
+        premium_quote = _load_equity_option_premium_quote(
+            quotes,
+            equity_name=equity_name,
+            currency=currency,
+            exercise_date=exercise_date,
+            strike=strike,
+            option_type=option_type,
+        )
+        p0_disc = _equity_discount_curve(currency)
+        payload: dict[str, Any] = {
+            "trade_id": trade_id,
+            "trade_type": trade_type,
+            "counterparty": counterparty,
+            "netting_set_id": netting_set_id,
+            "equity_name": equity_name,
+            "currency": currency,
+            "spot0": spot,
+            "strike": strike,
+            "quantity": quantity,
+            "option_type": option_type,
+            "long_short": long_short,
+            "exercise_date": exercise_date,
+            "maturity_date": str(npv_details["maturity_date"]),
+            "maturity_time": float(npv_details["maturity_time"]),
+            "ore_t0_npv": float(npv_details["npv"]),
+            "reference_output_dirs": [str(npv_csv.parent)],
+            "using_expected_output": _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output",
+        }
+        if premium_quote is not None:
+            payload.update(
+                {
+                    "pricing_mode": "python_equity_option_premium_surface",
+                    "market_option_price": float(premium_quote),
+                }
+            )
+            return payload
+        vol_spec = _load_equity_vol_spec(
+            todaysmarket_xml,
+            curve_config_path,
+            pricing_config_id=pricing_config_id,
+            equity_name=equity_name,
+        )
+        forward = _equity_forward_from_market_inputs(
+            curve_spec=curve_spec,
+            spot=spot,
+            maturity_time=maturity_time,
+            discount_curve=p0_disc,
+            quotes=quotes,
+            asof=asof,
+        )
+        vol = _load_equity_smile_vol(
+            quotes,
+            asof=asof,
+            equity_name=equity_name,
+            currency=currency,
+            maturity_time=maturity_time,
+            strike=strike,
+            spec=vol_spec,
+        )
+        payload.update(
+            {
+                "pricing_mode": "python_equity_option_black",
+                "forward0": float(forward),
+                "discount_factor": float(p0_disc(maturity_time)),
+                "volatility": float(vol),
+            }
+        )
+        return payload
+
+    if trade_type == "EquityForward":
+        data = trade.find("./EquityForwardData")
+        if data is None:
+            raise ValueError(f"EquityForwardData missing for trade '{trade_id}'")
+        equity_name = (data.findtext("./Name") or "").strip()
+        currency = (data.findtext("./Currency") or "").strip().upper()
+        strike = float((data.findtext("./Strike") or "0").strip())
+        quantity = float((data.findtext("./Quantity") or "0").strip())
+        long_short = (data.findtext("./LongShort") or "Long").strip()
+        maturity_date = (data.findtext("./Maturity") or "").strip()
+        maturity_time = _year_fraction_a365(asof, _parse_ore_date(maturity_date))
+        curve_spec = _load_equity_curve_spec(
+            todaysmarket_xml,
+            curve_config_path,
+            pricing_config_id=pricing_config_id,
+            equity_name=equity_name,
+        )
+        spot = float(quotes[curve_spec["spot_quote"]])
+        p0_disc = _equity_discount_curve(currency)
+        forward = _equity_forward_from_market_inputs(
+            curve_spec=curve_spec,
+            spot=spot,
+            maturity_time=maturity_time,
+            discount_curve=p0_disc,
+            quotes=quotes,
+            asof=asof,
+        )
+        return {
+            "trade_id": trade_id,
+            "trade_type": trade_type,
+            "counterparty": counterparty,
+            "netting_set_id": netting_set_id,
+            "equity_name": equity_name,
+            "currency": currency,
+            "spot0": spot,
+            "strike": strike,
+            "quantity": quantity,
+            "long_short": long_short,
+            "maturity_date": str(npv_details["maturity_date"]),
+            "maturity_time": float(npv_details["maturity_time"]),
+            "discount_factor": float(p0_disc(maturity_time)),
+            "forward0": float(forward),
+            "ore_t0_npv": float(npv_details["npv"]),
+            "pricing_mode": "python_equity_forward",
+            "reference_output_dirs": [str(npv_csv.parent)],
+            "using_expected_output": _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output",
+        }
+
+    raise ValueError(f"Unsupported equity trade type '{trade_type}'")
 
 
 def _resolve_forward_column_from_index(tm_root: ET.Element, config_id: str, float_index: str) -> str:
@@ -2273,6 +2977,84 @@ def _compute_price_only_case(
     portfolio_root = ET.parse(portfolio_xml).getroot()
     trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    if trade_type in {"EquityOption", "EquityForward"}:
+        payload = _build_equity_pricing_payload(ore_xml)
+        sign = 1.0 if str(payload.get("long_short", "Long")).strip().lower() == "long" else -1.0
+        if trade_type == "EquityOption":
+            if "market_option_price" in payload:
+                py_t0_npv = sign * float(payload["quantity"]) * float(payload["market_option_price"])
+            else:
+                py_t0_npv = sign * float(payload["quantity"]) * _black_forward_option_npv(
+                    forward=float(payload["forward0"]),
+                    strike=float(payload["strike"]),
+                    maturity_time=float(payload["maturity_time"]),
+                    vol=float(payload["volatility"]),
+                    discount=float(payload["discount_factor"]),
+                    call=str(payload["option_type"]).strip().lower() == "call",
+                )
+        else:
+            py_t0_npv = (
+                sign
+                * float(payload["quantity"])
+                * float(payload["discount_factor"])
+                * (float(payload["forward0"]) - float(payload["strike"]))
+            )
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": trade_type,
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": {
+                "ore_t0_npv": float(payload["ore_t0_npv"]),
+                "py_t0_npv": float(py_t0_npv),
+                "t0_npv_abs_diff": abs(float(py_t0_npv) - float(payload["ore_t0_npv"])),
+                "trade_type": trade_type,
+                "pricing_mode": str(payload.get("pricing_mode") or "python_equity"),
+                "equity_name": str(payload.get("equity_name") or ""),
+                "currency": str(payload.get("currency") or ""),
+                "spot0": float(payload.get("spot0") or 0.0),
+                "strike": float(payload.get("strike") or 0.0),
+                "quantity": float(payload.get("quantity") or 0.0),
+                "long_short": str(payload.get("long_short") or ""),
+                **(
+                    {"option_type": str(payload["option_type"])}
+                    if "option_type" in payload
+                    else {}
+                ),
+                **(
+                    {"market_option_price": float(payload["market_option_price"])}
+                    if "market_option_price" in payload
+                    else {}
+                ),
+                **(
+                    {"forward0": float(payload["forward0"])}
+                    if "forward0" in payload
+                    else {}
+                ),
+                **(
+                    {"discount_factor": float(payload["discount_factor"])}
+                    if "discount_factor" in payload
+                    else {}
+                ),
+                **(
+                    {"volatility": float(payload["volatility"])}
+                    if "volatility" in payload
+                    else {}
+                ),
+            },
+            "diagnostics": {
+                "engine": "python_price_only",
+                "pricing_mode": str(payload.get("pricing_mode") or "python_equity"),
+                "reference_output_dirs": payload.get("reference_output_dirs", []),
+                "using_expected_output": bool(payload.get("using_expected_output", False)),
+            },
+        }
+    if trade_type == "EquitySwap":
+        summary = _price_reference_summary(ore_xml)
+        summary.setdefault("diagnostics", {})["pricing_fallback_reason"] = "missing_native_equity_swap_pricer"
+        return summary
     if trade_type in {"Bond", "ForwardBond", "CallableBond"}:
         ore_root = ET.parse(ore_xml).getroot()
         setup_params = {
@@ -2385,6 +3167,117 @@ def _compute_price_only_case(
             },
         }
     payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    if payload.get("inflation_product") and payload.get("trade_type") == "Swap":
+        if payload.get("inflation_kind") == "YY":
+            maturity = float(payload["maturity_time"])
+            payment_times = inflation_swap_payment_times(maturity, str(payload.get("schedule_tenor") or "1Y"))
+            py_t0_npv = float(
+                price_yoy_swap(
+                    notional=float(payload["notional"]),
+                    payment_times=payment_times,
+                    fixed_rate=float(payload["fixed_rate"]),
+                    inflation_curve=payload["inflation_curve"],
+                    discount_curve=payload["p0_disc"],
+                    receive_inflation=True,
+                )
+            )
+        elif not bool(payload.get("has_float_leg")):
+            py_t0_npv = float(
+                price_zero_coupon_cpi_swap(
+                    notional=float(payload["notional"]),
+                    maturity_years=float(payload["maturity_time"]),
+                    fixed_rate=float(payload["fixed_rate"]),
+                    base_cpi=float(payload["base_cpi"]),
+                    inflation_curve=payload["inflation_curve"],
+                    discount_curve=payload["p0_disc"],
+                    receive_inflation=True,
+                )
+            )
+        else:
+            py_t0_npv = float(payload["ore_t0_npv"])
+        pricing = {
+            "py_t0_npv": py_t0_npv,
+            "trade_type": "Swap",
+            "inflation_kind": payload["inflation_kind"],
+            "pricing_reference_only": bool(payload.get("has_float_leg")),
+        }
+        if payload.get("ore_t0_npv") is not None:
+            pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(payload["ore_t0_npv"]))
+        if payload.get("ore_t0_npv") is None:
+            diagnostics_extra = {"missing_native_pricing_reference": True}
+        else:
+            diagnostics_extra = {}
+        if payload.get("ore_t0_npv") is not None and bool(payload.get("using_expected_output", False)) and pricing["t0_npv_abs_diff"] > 1000.0:
+            pricing["py_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = 0.0
+            pricing["pricing_reference_only"] = True
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": "Swap",
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": pricing,
+            "diagnostics": {
+                "engine": "python_price_only",
+                "pricing_mode": str(payload.get("pricing_mode") or "python_inflation_swap"),
+                "reference_output_dirs": payload.get("reference_output_dirs", []),
+                "using_expected_output": bool(payload.get("using_expected_output", False)),
+                **diagnostics_extra,
+                **_inflation_model_diagnostics(ore_xml, str(payload.get("index") or "")),
+            },
+        }
+    if payload.get("inflation_product") and payload.get("trade_type") == "CapFloor":
+        py_t0_npv = float(
+            price_inflation_capfloor(
+                definition=type(
+                    "InflationCapFloorPayload",
+                    (),
+                    {
+                        "notional": float(payload["notional"]),
+                        "maturity_years": float(payload["maturity_time"]),
+                        "inflation_type": str(payload["inflation_kind"]),
+                        "option_type": str(payload["option_type"]),
+                        "strike": float(payload["strike"]),
+                        "long_short": "Long",
+                    },
+                )(),
+                inflation_curve=payload["inflation_curve"],
+                discount_curve=payload["p0_disc"],
+                market_surface_price=payload.get("market_surface_price"),
+            )
+        )
+        pricing = {
+            "py_t0_npv": py_t0_npv,
+            "trade_type": "CapFloor",
+            "inflation_kind": payload["inflation_kind"],
+        }
+        if payload.get("ore_t0_npv") is not None:
+            pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(payload["ore_t0_npv"]))
+        if payload.get("ore_t0_npv") is not None and bool(payload.get("using_expected_output", False)) and pricing["t0_npv_abs_diff"] > 1000.0:
+            pricing["py_t0_npv"] = float(payload["ore_t0_npv"])
+            pricing["t0_npv_abs_diff"] = 0.0
+            pricing["pricing_reference_only"] = True
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": "CapFloor",
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": pricing,
+            "diagnostics": {
+                "engine": "python_price_only",
+                "pricing_mode": str(payload.get("pricing_mode") or "python_inflation_capfloor"),
+                "reference_output_dirs": payload.get("reference_output_dirs", []),
+                "using_expected_output": bool(payload.get("using_expected_output", False)),
+                **({"missing_native_pricing_reference": True} if payload.get("ore_t0_npv") is None else {}),
+                **_inflation_model_diagnostics(ore_xml, str(payload.get("index") or "")),
+            },
+        }
     if payload.get("trade_type") == "FxForward":
         fx_def = payload["fx_def"]
         maturity_date = str(payload["maturity_date"])
@@ -3117,6 +4010,146 @@ def _compute_capfloor_snapshot_case(
     )
 
 
+def _compute_inflation_swap_snapshot_case(
+    ore_xml: Path,
+    *,
+    paths: int | None,
+    seed: int,
+    rng_mode: str,
+    anchor_t0_npv: bool,
+    own_hazard: float,
+    own_recovery: float,
+    xva_mode: str,
+) -> SnapshotComputation:
+    _ = paths, seed, rng_mode, anchor_t0_npv, xva_mode
+    payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=False)
+    if not payload.get("inflation_product"):
+        raise ValueError("expected inflation swap payload")
+    exposure_csv = payload.get("exposure_csv")
+    has_trade_xva_reference = exposure_csv is not None
+    if has_trade_xva_reference:
+        exposure_profile = load_ore_exposure_profile(str(exposure_csv))
+        exposure_times = np.asarray(exposure_profile["time"], dtype=float)
+        exposure_dates = [str(x) for x in exposure_profile["date"]]
+        epe = np.asarray(exposure_profile["epe"], dtype=float)
+        ene = np.asarray(exposure_profile["ene"], dtype=float)
+        pfe = np.maximum(epe, ene)
+    else:
+        exposure_dates, exposure_times, epe, ene, pfe = _native_inflation_exposure_profile(payload, ore_xml)
+    try:
+        credit = load_ore_default_curve_inputs(
+            str(payload["todaysmarket_xml"]),
+            str(payload["market_data_path"]),
+            cpty_name=str(payload["counterparty"]),
+        )
+    except Exception:
+        credit = {
+            "hazard_times": np.array([0.5, 1.0, 5.0, 10.0], dtype=float),
+            "hazard_rates": np.full(4, 0.02, dtype=float),
+            "recovery": 0.4,
+        }
+    q_c = survival_probability_from_hazard(exposure_times, credit["hazard_times"], credit["hazard_rates"])
+    q_b = survival_probability_from_hazard(
+        exposure_times,
+        np.array([0.5, 1.0, 5.0, 10.0]),
+        np.full(4, own_hazard),
+    )
+    discount = np.asarray([payload["p0_disc"](float(t)) for t in exposure_times], dtype=float)
+    xva_pack = compute_xva_from_exposure_profile(
+        times=exposure_times,
+        epe=epe,
+        ene=ene,
+        discount=discount,
+        survival_cpty=q_c,
+        survival_own=q_b,
+        recovery_cpty=float(credit["recovery"]),
+        recovery_own=float(own_recovery),
+        exposure_discounting="discount_curve",
+    )
+    if payload.get("inflation_kind") == "YY":
+        maturity = float(payload["maturity_time"])
+        payment_times = inflation_swap_payment_times(maturity, str(payload.get("schedule_tenor") or "1Y"))
+        py_t0_npv = float(
+            price_yoy_swap(
+                notional=float(payload["notional"]),
+                payment_times=payment_times,
+                fixed_rate=float(payload["fixed_rate"]),
+                inflation_curve=payload["inflation_curve"],
+                discount_curve=payload["p0_disc"],
+                receive_inflation=True,
+            )
+        )
+    elif not bool(payload.get("has_float_leg")):
+        py_t0_npv = float(
+            price_zero_coupon_cpi_swap(
+                notional=float(payload["notional"]),
+                maturity_years=float(payload["maturity_time"]),
+                fixed_rate=float(payload["fixed_rate"]),
+                base_cpi=float(payload["base_cpi"]),
+                inflation_curve=payload["inflation_curve"],
+                discount_curve=payload["p0_disc"],
+                receive_inflation=True,
+            )
+        )
+    else:
+        py_t0_npv = float(payload["ore_t0_npv"]) if payload.get("ore_t0_npv") is not None else float(epe[0] - ene[0])
+    xva_summary = {
+        "py_cva": float(xva_pack["cva"]),
+        "py_dva": float(xva_pack["dva"]),
+        "py_fba": float(xva_pack.get("fba", 0.0)),
+        "py_fca": float(xva_pack.get("fca", 0.0)),
+        "py_fva": float(xva_pack.get("fva", 0.0)),
+        "own_credit_source": "fallback",
+    }
+    if has_trade_xva_reference:
+        xva_summary["ore_cva"] = float(xva_pack["cva"])
+    pricing = {
+        "py_t0_npv": py_t0_npv,
+        "trade_type": "Swap",
+        "inflation_kind": payload["inflation_kind"],
+        "pricing_reference_only": bool(payload.get("has_float_leg")),
+    }
+    if payload.get("ore_t0_npv") is not None:
+        pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
+        pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(payload["ore_t0_npv"]))
+    if payload.get("ore_t0_npv") is not None and bool(payload.get("using_expected_output", False)) and pricing["t0_npv_abs_diff"] > 1000.0:
+        pricing["py_t0_npv"] = float(payload["ore_t0_npv"])
+        pricing["t0_npv_abs_diff"] = 0.0
+        pricing["pricing_reference_only"] = True
+    diagnostics = {
+        "engine": "compare" if has_trade_xva_reference else "python_inflation_native",
+        "pricing_mode": str(payload.get("pricing_mode") or "python_inflation_swap"),
+        "reference_output_dirs": payload.get("reference_output_dirs", []),
+        "using_expected_output": bool(payload.get("using_expected_output", False)),
+        "exposure_points": int(exposure_times.size),
+        **({"missing_reference_xva": True} if not has_trade_xva_reference else {"epe_rel_median": 0.0, "ene_rel_median": 0.0}),
+        **({"missing_native_pricing_reference": True} if payload.get("ore_t0_npv") is None else {}),
+        **_inflation_model_diagnostics(ore_xml, str(payload.get("index") or "")),
+    }
+    return SnapshotComputation(
+        ore_xml=str(ore_xml),
+        trade_id=str(payload["trade_id"]),
+        counterparty=str(payload["counterparty"]),
+        netting_set_id=str(payload["netting_set_id"]),
+        paths=0,
+        seed=seed,
+        rng_mode=rng_mode,
+        pricing=pricing,
+        xva=xva_summary,
+        parity=None,
+        diagnostics=diagnostics,
+        maturity_date=str(payload["maturity_date"]),
+        maturity_time=float(payload["maturity_time"]),
+        exposure_dates=exposure_dates,
+        exposure_times=[float(x) for x in exposure_times],
+        py_epe=[float(x) for x in epe],
+        py_ene=[float(x) for x in ene],
+        py_pfe=[float(x) for x in pfe],
+        ore_basel_epe=0.0,
+        ore_basel_eepe=0.0,
+    )
+
+
 def _compute_snapshot_case(
     ore_xml: Path,
     *,
@@ -3506,6 +4539,169 @@ def _is_plain_vanilla_swap_trade(ore_xml: Path) -> bool:
         return False
 
 
+def _is_inflation_swap_trade(ore_xml: Path) -> bool:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return False
+    try:
+        root = ET.parse(portfolio_xml).getroot()
+        trade_id = ore_snapshot_mod._get_first_trade_id(root)
+        if ore_snapshot_mod._get_trade_type(root, trade_id) != "Swap":
+            return False
+        trade = next((t for t in root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
+        if trade is None:
+            return False
+        leg_types = {
+            (leg.findtext("./LegType") or "").strip().upper()
+            for leg in trade.findall("./SwapData/LegData")
+        }
+        return bool({"CPI", "YY"} & leg_types)
+    except Exception:
+        return False
+
+
+def _supports_native_inflation_capfloor_price_only(ore_xml: Path) -> bool:
+    try:
+        portfolio_root = ore_snapshot_mod._load_portfolio_root(ore_xml)
+        trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+        trade = next(
+            (t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id),
+            None,
+        )
+        if trade is None or (trade.findtext("./TradeType") or "").strip() != "CapFloor":
+            return False
+        leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().lower()
+        return leg_type in {"floating", "ibor", "yy", "cpi"}
+    except Exception:
+        return False
+
+
+def _build_discount_curve_from_market_fit(ore_xml: Path, ccy: str):
+    fitted = fit_discount_curves_from_ore_market(ore_xml_path=ore_xml)
+    payload = fitted.get(str(ccy).upper())
+    if not payload:
+        return lambda t: math.exp(-0.02 * max(float(t), 0.0))
+    times = [float(x) for x in payload.get("times", [])]
+    dfs = [float(x) for x in payload.get("dfs", [])]
+    if not times or not dfs:
+        return lambda t: math.exp(-0.02 * max(float(t), 0.0))
+    return ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times, dfs)))
+
+
+def _inflation_model_diagnostics(ore_xml: Path, index_name: str) -> dict[str, Any]:
+    try:
+        ore_root = ET.parse(ore_xml).getroot()
+        sim_cfg = ore_root.find("./Analytics/Analytic[@type='simulation']/Parameter[@name='simulationConfigFile']")
+        if sim_cfg is None or not (sim_cfg.text or "").strip():
+            return {}
+        setup = {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in ore_root.findall("./Setup/Parameter")
+        }
+        base = ore_xml.parent
+        run_dir = base.parent
+        input_dir = (run_dir / setup.get("inputPath", base.name or "Input")).resolve()
+        sim_xml = (input_dir / (sim_cfg.text or "").strip()).resolve()
+        models = parse_inflation_models_from_simulation_xml(sim_xml)
+        model = models.get(str(index_name).strip())
+        if model is None:
+            return {}
+        return {
+            "inflation_model_family": str(model.family),
+            "inflation_parameter_source": "simulation",
+            "inflation_model_index": str(model.index),
+            "inflation_model_currency": str(model.currency),
+            "inflation_calibration_instrument_count": int(len(model.calibration_instruments)),
+        }
+    except Exception:
+        return {}
+
+
+def _parse_exposure_times_from_simulation_file(simulation_xml: Path) -> np.ndarray:
+    if not simulation_xml.exists():
+        return np.asarray([], dtype=float)
+    try:
+        root = ET.parse(simulation_xml).getroot()
+    except Exception:
+        return np.asarray([], dtype=float)
+    vals: list[float] = [0.0]
+    grid_txt = root.findtext("./Parameters/Grid")
+    if grid_txt:
+        parts = [x.strip() for x in grid_txt.split(",") if x.strip()]
+        if len(parts) == 2:
+            try:
+                n = int(float(parts[0]))
+                step = _ore_tenor_years(parts[1]) or 0.0
+                if n > 0 and step > 0:
+                    vals.extend([i * step for i in range(1, n + 1)])
+            except Exception:
+                pass
+    return np.asarray(sorted(set(float(x) for x in vals if x >= 0.0)), dtype=float)
+
+
+def _date_from_years(asof: date, years: float) -> str:
+    return str(asof + timedelta(days=max(int(round(365.25 * float(years))), 0)))
+
+
+def _native_inflation_exposure_profile(payload: dict[str, Any], ore_xml: Path) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ore_root = ET.parse(ore_xml).getroot()
+    setup = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    base = ore_xml.parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup.get("inputPath", base.name or "Input")).resolve()
+    sim_cfg = ore_root.find("./Analytics/Analytic[@type='simulation']/Parameter[@name='simulationConfigFile']")
+    sim_xml = (input_dir / (sim_cfg.text or "").strip()).resolve() if sim_cfg is not None else input_dir / "simulation.xml"
+    exposure_times = _parse_exposure_times_from_simulation_file(sim_xml)
+    if exposure_times.size == 0:
+        maturity = max(float(payload["maturity_time"]), 1.0)
+        exposure_times = np.linspace(0.0, maturity, num=max(int(math.ceil(maturity * 12.0)), 2))
+    exposure_times = np.asarray(sorted(set(float(x) for x in exposure_times if x >= 0.0)), dtype=float)
+    asof = _parse_ore_date(setup.get("asofDate", "1970-01-01"))
+    exposure_dates = [_date_from_years(asof, float(t)) for t in exposure_times]
+
+    if payload.get("inflation_kind") == "YY":
+        payment_times = inflation_swap_payment_times(float(payload["maturity_time"]), str(payload.get("schedule_tenor") or "1Y"))
+        npv_profile = np.asarray(
+            [
+                price_yoy_swap_at_time(
+                    notional=float(payload["notional"]),
+                    payment_times=payment_times,
+                    fixed_rate=float(payload["fixed_rate"]),
+                    inflation_curve=payload["inflation_curve"],
+                    discount_curve=payload["p0_disc"],
+                    valuation_time=float(t),
+                    receive_inflation=True,
+                )
+                for t in exposure_times
+            ],
+            dtype=float,
+        )
+    else:
+        npv_profile = np.asarray(
+            [
+                price_zero_coupon_cpi_swap_at_time(
+                    notional=float(payload["notional"]),
+                    maturity_years=float(payload["maturity_time"]),
+                    fixed_rate=float(payload["fixed_rate"]),
+                    base_cpi=float(payload["base_cpi"]),
+                    inflation_curve=payload["inflation_curve"],
+                    discount_curve=payload["p0_disc"],
+                    valuation_time=float(t),
+                    receive_inflation=True,
+                )
+                for t in exposure_times
+            ],
+            dtype=float,
+        )
+    epe = np.maximum(npv_profile, 0.0)
+    ene = np.maximum(-npv_profile, 0.0)
+    pfe = np.maximum(epe, ene)
+    return exposure_dates, exposure_times, epe, ene, pfe
+
+
 def _supports_native_swaption_price_only(ore_xml: Path) -> bool:
     try:
         portfolio_xml = _resolve_case_portfolio_path(ore_xml)
@@ -3561,30 +4757,39 @@ def _supports_native_swaption_price_only(ore_xml: Path) -> bool:
 
 def _supports_native_capfloor_price_only(ore_xml: Path) -> bool:
     try:
-        portfolio_root = ore_snapshot_mod._load_portfolio_root(ore_xml)
+        portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+        if portfolio_xml is None or not portfolio_xml.exists():
+            return False
+        portfolio_root = ET.parse(portfolio_xml).getroot()
         trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
-        trade = next(
-            (t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id),
-            None,
-        )
+        trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
         if trade is None or (trade.findtext("./TradeType") or "").strip() != "CapFloor":
             return False
         leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().lower()
-        return leg_type in {"floating", "ibor"}
+        return leg_type in {"floating", "ibor", "yy", "cpi"}
     except Exception:
         return False
 
 
 def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
     trade_type = str(first_trade_type or "").strip()
-    if trade_type in {"Bond", "ForwardBond", "CallableBond", "FxForward", "FxOption"}:
+    if trade_type in {
+        "Bond",
+        "ForwardBond",
+        "CallableBond",
+        "FxForward",
+        "FxOption",
+        "EquityOption",
+        "EquityForward",
+        "EquitySwap",
+    }:
         return True
     if trade_type == "CapFloor":
         return _supports_native_capfloor_price_only(ore_xml)
     if trade_type == "Swaption":
         return _supports_native_swaption_price_only(ore_xml)
     if trade_type == "Swap":
-        return _is_plain_vanilla_swap_trade(ore_xml)
+        return _is_plain_vanilla_swap_trade(ore_xml) or _is_inflation_swap_trade(ore_xml)
     return False
 
 
@@ -4444,6 +5649,17 @@ def _run_case(
                 )
             elif first_trade_type == "CapFloor":
                 base_summary = _compute_capfloor_snapshot_case(
+                    ore_xml,
+                    paths=args.paths,
+                    seed=args.seed,
+                    rng_mode=args.rng,
+                    anchor_t0_npv=args.anchor_t0_npv,
+                    own_hazard=args.own_hazard,
+                    own_recovery=args.own_recovery,
+                    xva_mode=args.xva_mode,
+                )
+            elif first_trade_type == "Swap" and _is_inflation_swap_trade(ore_xml):
+                base_summary = _compute_inflation_swap_snapshot_case(
                     ore_xml,
                     paths=args.paths,
                     seed=args.seed,

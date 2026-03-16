@@ -1,2 +1,0 @@
-#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
-SWAP_EUR_5Y_A_flat,Swap,2021-03-01,5.066015,823.561662,EUR,823.561662,EUR,10000000.00,EUR,10000000.00,CPTY_A,CPTY_A

@@ -16,6 +16,17 @@ _EXPORTS = {
     "LgmFxHybrid": ("pythonore.compute.lgm_fx_hybrid", "LgmFxHybrid"),
     "MultiCcyLgmParams": ("pythonore.compute.lgm_fx_hybrid", "MultiCcyLgmParams"),
     "TorchDiscountCurve": ("pythonore.compute.lgm_torch_xva", "TorchDiscountCurve"),
+    "InflationCurve": ("pythonore.compute.inflation", "InflationCurve"),
+    "InflationLgmParams": ("pythonore.compute.inflation", "InflationLgmParams"),
+    "JarrowYildirimParams": ("pythonore.compute.inflation", "JarrowYildirimParams"),
+    "InflationModelSpec": ("pythonore.compute.inflation", "InflationModelSpec"),
+    "parse_inflation_models_from_simulation_xml": ("pythonore.compute.inflation", "parse_inflation_models_from_simulation_xml"),
+    "load_inflation_curve_from_market_data": ("pythonore.compute.inflation", "load_inflation_curve_from_market_data"),
+    "load_zero_inflation_surface_quote": ("pythonore.compute.inflation", "load_zero_inflation_surface_quote"),
+    "price_zero_coupon_cpi_swap": ("pythonore.compute.inflation", "price_zero_coupon_cpi_swap"),
+    "price_yoy_swap": ("pythonore.compute.inflation", "price_yoy_swap"),
+    "price_inflation_capfloor": ("pythonore.compute.inflation", "price_inflation_capfloor"),
+    "simulate_inflation_index_paths": ("pythonore.compute.inflation", "simulate_inflation_index_paths"),
 }
 
 __all__ = sorted(_EXPORTS)

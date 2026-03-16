@@ -1,0 +1,31 @@
+section,field,value
+market_configurations,requested,['default']
+market_configurations,available,['default']
+market_configurations,missing_requested,[]
+market_configurations,valid,True
+todaysmarket_sections,missing_references,[]
+todaysmarket_sections,valid,True
+curve_specs,active_curve_ids_by_section,"{'EquityCurves': ['RIC:.STOXX50E'], 'EquityVolatilities': ['RIC:.STOXX50E'], 'YieldCurves': ['EUR-EONIA', 'EUR-ESTER']}"
+curve_specs,quote_scope_curve_ids_by_section,{'YieldCurves': ['EUR-EONIA']}
+curve_specs,invalid,[]
+curve_specs,valid,True
+conventions,used_ids,['EUR-ZERO-TENOR-BASED']
+conventions,missing_ids,[]
+conventions,valid,True
+quotes,mandatory_required_count,2
+quotes,optional_required_count,0
+quotes,asof_quote_count,3368
+quotes,missing_mandatory,[]
+quotes,missing_optional,[]
+quotes,valid,True
+todaysmarket_names,yield_index_overlaps,[]
+todaysmarket_names,distinct,True
+fixings,imply_todays_fixings,False
+fixings,today_fixing_count,0
+fixings,potential_issue,False
+checks,market_configurations_exist,True
+checks,referenced_todaysmarket_sections_exist,True
+checks,curve_specs_resolve,True
+checks,conventions_exist,True
+checks,quotes_exist_for_asof,True
+checks,yield_index_names_distinct,True

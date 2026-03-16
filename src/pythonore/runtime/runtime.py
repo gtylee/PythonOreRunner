@@ -57,6 +57,7 @@ import numpy as np
 
 from pythonore.domain.dataclasses import (
     FXForward,
+    InflationSwap,
     IRS,
     MporConfig,
     Trade,
@@ -334,6 +335,7 @@ class _PythonLgmInputs:
     discount_curves: Dict[str, Callable[[float], float]]   # Risk-free discount curves keyed by ISO currency.
     forward_curves: Dict[str, Callable[[float], float]]    # Composite forward/index curves keyed by ISO currency.
     forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]  # Forward curves keyed by (ccy, tenor string).
+    inflation_curves: Dict[Tuple[str, str], Any]  # Inflation curves keyed by (index, curve_type) where curve_type is ZC or YY.
     xva_discount_curve: Optional[Callable[[float], float]]  # Simulation-market discount curve used for XVA deflation; falls back to discount_curves[base_ccy].
     funding_borrow_curve: Optional[Callable[[float], float]]  # Own-name borrowing curve used in FCA calculation; None when not configured.
     funding_lend_curve: Optional[Callable[[float], float]]    # Own-name lending curve used in FBA calculation; None when not configured.
@@ -370,6 +372,7 @@ class PythonLgmAdapter:
         self._lgm_mod = None
         self._irs_utils = None
         self._fx_utils = None
+        self._inflation_mod = None
         self._ore_snapshot_mod = None
 
     def run(self, snapshot: XVASnapshot, mapped: MappedInputs, run_id: str) -> XVAResult:
@@ -456,6 +459,58 @@ class PythonLgmAdapter:
             elif spec.kind == "FXForward":
                 vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths, shared_sim=shared_fx_sim)
                 npv_by_trade[spec.trade.trade_id] = vals
+            elif spec.kind == "InflationSwap":
+                trade_product = spec.trade.product
+                assert isinstance(trade_product, InflationSwap)
+                curve_key = (
+                    str(trade_product.index).upper(),
+                    "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
+                )
+                inflation_curve = inputs.inflation_curves.get(curve_key)
+                if inflation_curve is None or str(trade_product.pay_leg).lower() == "float":
+                    unsupported.append(spec.trade)
+                    continue
+                p_disc = inputs.discount_curves[spec.ccy]
+                vals = np.zeros((n_times, n_paths), dtype=float)
+                if str(trade_product.inflation_type).upper() == "YY":
+                    payment_times = self._inflation_mod.inflation_swap_payment_times(
+                        float(trade_product.maturity_years),
+                        str(trade_product.schedule_tenor or "1Y"),
+                    )
+                    profile = np.asarray(
+                        [
+                            self._inflation_mod.price_yoy_swap_at_time(
+                                notional=float(trade_product.notional),
+                                payment_times=payment_times,
+                                fixed_rate=float(trade_product.fixed_rate),
+                                inflation_curve=inflation_curve,
+                                discount_curve=p_disc,
+                                valuation_time=float(t),
+                                receive_inflation=True,
+                            )
+                            for t in inputs.times
+                        ],
+                        dtype=float,
+                    )
+                else:
+                    profile = np.asarray(
+                        [
+                            self._inflation_mod.price_zero_coupon_cpi_swap_at_time(
+                                notional=float(trade_product.notional),
+                                maturity_years=float(trade_product.maturity_years),
+                                fixed_rate=float(trade_product.fixed_rate),
+                                base_cpi=float(trade_product.base_cpi or 100.0),
+                                inflation_curve=inflation_curve,
+                                discount_curve=p_disc,
+                                valuation_time=float(t),
+                                receive_inflation=True,
+                            )
+                            for t in inputs.times
+                        ],
+                        dtype=float,
+                    )
+                vals[:, :] = profile[:, None]
+                npv_by_trade[spec.trade.trade_id] = vals
             else:
                 unsupported.append(spec.trade)
 
@@ -540,15 +595,16 @@ class PythonLgmAdapter:
 
         Tries the installed ``py_ore_tools`` package first, then falls back to
         importing directly from the relative path within the Engine repository
-        (``Tools/PythonOreRunner/py_ore_tools``).  Raises :class:`EngineRunError`
+        (``legacy/py_ore_tools``).  Raises :class:`EngineRunError`
         if neither path succeeds.
         """
         if self._loaded:
             return
         try:
-            from pythonore.compute import irs_xva_utils, lgm, lgm_fx_xva_utils
+            from pythonore.compute import inflation, irs_xva_utils, lgm, lgm_fx_xva_utils
             from pythonore.io import ore_snapshot
 
+            self._inflation_mod = inflation
             self._lgm_mod = lgm
             self._irs_utils = irs_xva_utils
             self._fx_utils = lgm_fx_xva_utils
@@ -559,16 +615,18 @@ class PythonLgmAdapter:
             pass
 
         repo_root = Path(__file__).resolve().parents[3]
-        tools_dir = repo_root / "Tools" / "PythonOreRunner" / "py_ore_tools"
+        tools_dir = repo_root / "legacy" / "py_ore_tools"
         if str(tools_dir) not in sys.path:
             sys.path.insert(0, str(tools_dir))
 
         try:
             import irs_xva_utils as irs_xva_utils_local
+            import inflation as inflation_local
             import lgm as lgm_local
             import lgm_fx_xva_utils as lgm_fx_xva_utils_local
             import ore_snapshot as ore_snapshot_local
 
+            self._inflation_mod = inflation_local
             self._lgm_mod = lgm_local
             self._irs_utils = irs_xva_utils_local
             self._fx_utils = lgm_fx_xva_utils_local
@@ -646,6 +704,15 @@ class PythonLgmAdapter:
                         ccy=t.product.pair[3:].upper(),
                     )
                 )
+            elif isinstance(t.product, InflationSwap):
+                trade_specs.append(
+                    _TradeSpec(
+                        trade=t,
+                        kind="InflationSwap",
+                        notional=float(t.product.notional),
+                        ccy=t.product.ccy.upper(),
+                    )
+                )
             else:
                 unsupported.append(t)
         ccy_set: set[str] = {snapshot.config.base_currency.upper()}
@@ -655,6 +722,8 @@ class PythonLgmAdapter:
             if isinstance(t.product, FXForward):
                 ccy_set.add(t.product.pair[:3].upper())
                 ccy_set.add(t.product.pair[3:].upper())
+            if isinstance(t.product, InflationSwap):
+                ccy_set.add(t.product.ccy.upper())
         return trade_specs, unsupported, ccy_set
 
     def _build_hazard_rates(
@@ -723,6 +792,41 @@ class PythonLgmAdapter:
             )
         return curves
 
+    def _load_inflation_curves(
+        self,
+        snapshot: XVASnapshot,
+        trade_specs: Sequence[_TradeSpec],
+    ) -> Dict[Tuple[str, str], Any]:
+        needed = {
+            (
+                str(spec.trade.product.index).upper(),
+                "YY" if str(spec.trade.product.inflation_type).upper() == "YY" else "ZC",
+            )
+            for spec in trade_specs
+            if spec.kind == "InflationSwap" and isinstance(spec.trade.product, InflationSwap)
+        }
+        if not needed:
+            return {}
+        market_file: Path | None = None
+        ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
+        if ore_path_txt:
+            try:
+                ore_path = Path(ore_path_txt).resolve()
+                _, _, market_data_file, _, _ = self._ore_snapshot_mod._resolve_ore_run_files(ore_path)
+                market_file = Path(market_data_file)
+            except Exception:
+                market_file = None
+        curves: Dict[Tuple[str, str], Any] = {}
+        if market_file is not None and market_file.exists():
+            for index_name, curve_type in sorted(needed):
+                curves[(index_name, curve_type)] = self._inflation_mod.load_inflation_curve_from_market_data(
+                    market_file,
+                    snapshot.config.asof,
+                    index_name,
+                    curve_type=curve_type,
+                )
+        return curves
+
     def _extract_inputs(self, snapshot: XVASnapshot, mapped: MappedInputs) -> _PythonLgmInputs:
         """Resolve all model inputs from the snapshot and mapped inputs.
 
@@ -766,6 +870,7 @@ class PythonLgmAdapter:
         recoveries = overlay["recovery"]
 
         trade_specs, unsupported, ccy_set = self._classify_portfolio_trades(snapshot, mapped)
+        inflation_curves = self._load_inflation_curves(snapshot, trade_specs)
         stochastic_fx_pairs = _parse_stochastic_fx_pairs_from_simulation_xml_text(
             xml.get("simulation.xml", ""),
             model_ccy=model_ccy,
@@ -958,8 +1063,6 @@ class PythonLgmAdapter:
         hazard_times, hazard_rates, recovery_rates = self._build_hazard_rates(snapshot, hazards, recoveries)
         survival_curves = self._build_survival_curves(snapshot, hazard_times, hazard_rates)
         own_name = _own_name_from_runtime(snapshot).upper()
-        if own_name not in hazards and own_name not in overlay.get("cds_spreads", {}):
-            input_fallbacks.append(f"missing_own_credit_curve:{own_name}")
         if runtime := snapshot.config.runtime:
             xva = runtime.xva_analytic
             if xva.fva_borrowing_curve and _market_yield_spread(snapshot, model_ccy, xva.fva_borrowing_curve) is None:
@@ -980,6 +1083,7 @@ class PythonLgmAdapter:
             discount_curves=discount_curves,
             forward_curves=forward_curves,
             forward_curves_by_tenor=forward_curves_by_tenor,
+            inflation_curves=inflation_curves,
             xva_discount_curve=xva_discount_curve,
             funding_borrow_curve=funding_borrow_curve,
             funding_lend_curve=funding_lend_curve,
@@ -1292,6 +1396,17 @@ class PythonLgmAdapter:
                     if vals.size == 0:
                         continue
                     extras.append(vals[vals >= 0.0])
+            elif spec.kind == "InflationSwap" and isinstance(spec.trade.product, InflationSwap):
+                product = spec.trade.product
+                if str(product.inflation_type).upper() == "YY":
+                    pay_times = self._inflation_mod.inflation_swap_payment_times(
+                        float(product.maturity_years),
+                        str(product.schedule_tenor or "1Y"),
+                    )
+                    if pay_times:
+                        extras.append(np.asarray(pay_times, dtype=float))
+                else:
+                    extras.append(np.asarray([max(float(product.maturity_years), 0.0)], dtype=float))
             elif spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward):
                 extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
         if extras:

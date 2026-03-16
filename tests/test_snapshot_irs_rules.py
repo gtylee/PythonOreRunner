@@ -9,6 +9,10 @@ from pythonore.domain.dataclasses import (
     CollateralConfig,
     ConventionsConfig,
     CrossAssetModelConfig,
+    EquityFactorConfig,
+    EquityForward,
+    EquityOption,
+    EquitySwap,
     FXForward,
     FixingsData,
     GenericProduct,
@@ -748,3 +752,225 @@ def test_rich_netting_and_collateral_fields_round_trip_and_change_generated_xml(
     assert collateral_root.findtext("./CollateralBalance/InitialMarginType") == "SIMM"
     assert collateral_root.findtext("./CollateralBalance/VariationMarginType") == "VM"
     assert collateral_root.findtext("./CollateralBalance/Custodian") == "CUST_A"
+
+
+def test_equity_products_round_trip_through_snapshot_dict():
+    snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(
+                Trade(
+                    trade_id="EQO1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="EquityOption",
+                    product=EquityOption(
+                        name="RIC:.STOXX50E",
+                        currency="EUR",
+                        strike=4000.0,
+                        quantity=1.0,
+                        option_type="Call",
+                        exercise_date="2021-12-17",
+                    ),
+                ),
+                Trade(
+                    trade_id="EQF1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="EquityForward",
+                    product=EquityForward(
+                        name="SP5",
+                        currency="USD",
+                        strike=2147.56,
+                        quantity=775.0,
+                        maturity_date="2018-02-05",
+                        long_short="Short",
+                        strike_currency="USD",
+                        maturity_years=2.0,
+                    ),
+                ),
+                Trade(
+                    trade_id="EQS1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="EquitySwap",
+                    product=EquitySwap(
+                        name="SP5",
+                        currency="USD",
+                        notional=100_000_000.0,
+                        initial_price=2196.5,
+                        quantity=100_000_000.0 / 2196.5,
+                        start_date="2016-02-05",
+                        end_date="2026-02-05",
+                        maturity_years=10.0,
+                        float_index="USD-LIBOR-3M",
+                    ),
+                ),
+            )
+        ),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR"),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    restored = XVASnapshot.from_dict(snapshot.to_dict())
+
+    assert isinstance(restored.portfolio.trades[0].product, EquityOption)
+    assert restored.portfolio.trades[0].product.exercise_date == "2021-12-17"
+    assert isinstance(restored.portfolio.trades[1].product, EquityForward)
+    assert restored.portfolio.trades[1].product.long_short == "Short"
+    assert isinstance(restored.portfolio.trades[2].product, EquitySwap)
+    assert restored.portfolio.trades[2].product.float_index == "USD-LIBOR-3M"
+
+
+def test_loader_and_mapper_round_trip_example_equity_products():
+    portfolio_xml = """
+<Portfolio>
+  <Trade id="EQO1">
+    <TradeType>EquityOption</TradeType>
+    <Envelope><CounterParty>CP_A</CounterParty><NettingSetId>NS1</NettingSetId></Envelope>
+    <EquityOptionData>
+      <OptionData>
+        <LongShort>Long</LongShort>
+        <OptionType>Call</OptionType>
+        <Style>European</Style>
+        <Settlement>Cash</Settlement>
+        <PayOffAtExpiry>false</PayOffAtExpiry>
+        <ExerciseDates><ExerciseDate>2021-12-17</ExerciseDate></ExerciseDates>
+      </OptionData>
+      <Name>RIC:.STOXX50E</Name>
+      <Currency>EUR</Currency>
+      <Strike>4000</Strike>
+      <Quantity>1</Quantity>
+    </EquityOptionData>
+  </Trade>
+  <Trade id="EQF1">
+    <TradeType>EquityForward</TradeType>
+    <Envelope><CounterParty>CP_A</CounterParty><NettingSetId>NS1</NettingSetId></Envelope>
+    <EquityForwardData>
+      <LongShort>Short</LongShort>
+      <Maturity>2018-02-05</Maturity>
+      <Name>SP5</Name>
+      <Currency>USD</Currency>
+      <Strike>2147.56</Strike>
+      <StrikeCurrency>USD</StrikeCurrency>
+      <Quantity>775</Quantity>
+    </EquityForwardData>
+  </Trade>
+  <Trade id="EQS1">
+    <TradeType>EquitySwap</TradeType>
+    <Envelope><CounterParty>CP_A</CounterParty><NettingSetId>NS1</NettingSetId></Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Equity</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>100000000</Notional></Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>F</PaymentConvention>
+        <EquityLegData><ReturnType>Price</ReturnType><Name>SP5</Name><InitialPrice>2196.5</InitialPrice></EquityLegData>
+        <ScheduleData><Rules><StartDate>20160205</StartDate><EndDate>20260205</EndDate><Tenor>3M</Tenor><Calendar>USD</Calendar><Convention>F</Convention><TermConvention>F</TermConvention><Rule>Forward</Rule><EndOfMonth>false</EndOfMonth></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>100000000</Notional></Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData><Index>USD-LIBOR-3M</Index><Spreads><Spread>0.0</Spread></Spreads><FixingDays>2</FixingDays></FloatingLegData>
+        <ScheduleData><Rules><StartDate>20160205</StartDate><EndDate>20260205</EndDate><Tenor>3M</Tenor><Calendar>USD</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule><EndOfMonth>false</EndOfMonth></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+""".strip()
+    root = ET.fromstring(portfolio_xml)
+
+    eq_option = _parse_product_from_trade_xml(root.find("./Trade[@id='EQO1']"), "EquityOption")
+    eq_forward = _parse_product_from_trade_xml(root.find("./Trade[@id='EQF1']"), "EquityForward")
+    eq_swap = _parse_product_from_trade_xml(root.find("./Trade[@id='EQS1']"), "EquitySwap")
+
+    assert isinstance(eq_option, EquityOption)
+    assert isinstance(eq_forward, EquityForward)
+    assert isinstance(eq_swap, EquitySwap)
+
+    snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(
+                Trade("EQO1", "CP_A", "NS1", "EquityOption", eq_option),
+                Trade("EQF1", "CP_A", "NS1", "EquityForward", eq_forward),
+                Trade("EQS1", "CP_A", "NS1", "EquitySwap", eq_swap),
+            )
+        ),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR"),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    mapped = map_snapshot(snapshot)
+    remapped_root = ET.fromstring(mapped.xml_buffers["portfolio.xml"])
+    assert remapped_root.findtext("./Trade[@id='EQO1']/EquityOptionData/Name") == "RIC:.STOXX50E"
+    assert remapped_root.findtext("./Trade[@id='EQF1']/EquityForwardData/LongShort") == "Short"
+    assert remapped_root.findtext("./Trade[@id='EQS1']//EquityLegData/Name") == "SP5"
+    assert remapped_root.findtext("./Trade[@id='EQS1']//FloatingLegData/Index") == "USD-LIBOR-3M"
+
+
+def test_runtime_config_generates_equity_pricing_and_simulation_model_xml():
+    runtime = RuntimeConfig(
+        pricing_engine=PricingEngineConfig(
+            equity_option_model="BlackScholesMerton",
+            equity_option_engine="AnalyticEuropeanEngine",
+            equity_forward_model="DiscountedCashflows",
+            equity_forward_engine="DiscountingEquityForwardEngine",
+            equity_swap_model="DiscountedCashflows",
+            equity_swap_engine="DiscountingSwapEngine",
+        ),
+        cross_asset_model=CrossAssetModelConfig(
+            domestic_ccy="EUR",
+            currencies=("EUR", "USD"),
+            ir_model_ccys=("EUR", "USD"),
+            fx_model_ccys=("USD",),
+            equity_factors=(
+                EquityFactorConfig(
+                    name="default",
+                    currency="EUR",
+                    sigma=0.1,
+                    time_grid=("1.0", "2.0", "3.0"),
+                    expiries=("1Y", "2Y"),
+                    strikes=(),
+                ),
+                EquityFactorConfig(
+                    name="SP5",
+                    currency="USD",
+                    sigma=0.2,
+                    time_grid=("1.0", "2.0"),
+                    expiries=("1Y",),
+                    strikes=(),
+                ),
+            ),
+        ),
+    )
+    snapshot = XVASnapshot(
+        market=MarketData(asof="2026-03-08", raw_quotes=(MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),)),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(Trade(trade_id="T1", counterparty="CP_A", netting_set="NS1", trade_type="EquityOption", product=EquityOption(name="RIC:.STOXX50E", currency="EUR", strike=4000.0, quantity=1.0, option_type="Call", exercise_date="2021-12-17")),)
+        ),
+        config=XVAConfig(asof="2026-03-08", base_currency="EUR", runtime=runtime),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    mapped = map_snapshot(snapshot)
+    pricing = ET.fromstring(mapped.xml_buffers["pricingengine.xml"])
+    simulation = ET.fromstring(mapped.xml_buffers["simulation.xml"])
+
+    assert pricing.findtext("./Product[@type='EquityOption']/Engine") == "AnalyticEuropeanEngine"
+    assert pricing.findtext("./Product[@type='EquityForward']/Engine") == "DiscountingEquityForwardEngine"
+    assert pricing.findtext("./Product[@type='EquitySwap']/Engine") == "DiscountingSwapEngine"
+    assert simulation.findtext("./CrossAssetModel/EquityModels/CrossAssetLGM[@name='default']/Currency") == "EUR"
+    assert simulation.findtext("./CrossAssetModel/EquityModels/CrossAssetLGM[@name='SP5']/Currency") == "USD"

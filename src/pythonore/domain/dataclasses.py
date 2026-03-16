@@ -8,7 +8,18 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 Metric = Literal["CVA", "DVA", "FVA", "MVA"]
 DimModel = Literal["Regression", "DeltaVaR", "DeltaGammaNormalVaR", "DeltaGammaVaR", "DynamicIM", "SimmAnalytic"]
-ProductType = Literal["IRS", "FXForward", "EuropeanOption", "BermudanSwaption", "Generic"]
+ProductType = Literal[
+    "IRS",
+    "FXForward",
+    "EuropeanOption",
+    "EquityOption",
+    "EquityForward",
+    "EquitySwap",
+    "BermudanSwaption",
+    "InflationSwap",
+    "InflationCapFloor",
+    "Generic",
+]
 
 
 @dataclass(frozen=True)
@@ -153,6 +164,69 @@ class FXForward(Product):
 
 
 @dataclass(frozen=True)
+class InflationSwap(Product):
+    ccy: str
+    notional: float
+    maturity_years: float
+    index: str
+    inflation_type: Literal["CPI", "YY"]
+    pay_leg: str
+    fixed_rate: float = 0.0
+    base_cpi: Optional[float] = None
+    observation_lag: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    schedule_tenor: str = "1Y"
+    product_type: ProductType = field(init=False, default="InflationSwap")
+
+    def __post_init__(self) -> None:
+        if self.notional <= 0:
+            raise ValueError("InflationSwap.notional must be > 0")
+        if self.maturity_years <= 0:
+            raise ValueError("InflationSwap.maturity_years must be > 0")
+        if self.inflation_type not in {"CPI", "YY"}:
+            raise ValueError("InflationSwap.inflation_type must be 'CPI' or 'YY'")
+        if self.pay_leg not in {"fixed", "float", "inflation"}:
+            raise ValueError("InflationSwap.pay_leg must be one of 'fixed', 'float', 'inflation'")
+        if self.start_date is not None:
+            _validate_date_like(self.start_date, "InflationSwap.start_date")
+        if self.end_date is not None:
+            _validate_date_like(self.end_date, "InflationSwap.end_date")
+
+
+@dataclass(frozen=True)
+class InflationCapFloor(Product):
+    ccy: str
+    notional: float
+    maturity_years: float
+    index: str
+    inflation_type: Literal["CPI", "YY"]
+    option_type: Literal["Cap", "Floor"]
+    strike: float
+    long_short: str = "Long"
+    base_cpi: Optional[float] = None
+    observation_lag: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    schedule_tenor: str = "1Y"
+    product_type: ProductType = field(init=False, default="InflationCapFloor")
+
+    def __post_init__(self) -> None:
+        if self.notional <= 0:
+            raise ValueError("InflationCapFloor.notional must be > 0")
+        if self.maturity_years <= 0:
+            raise ValueError("InflationCapFloor.maturity_years must be > 0")
+        if self.inflation_type not in {"CPI", "YY"}:
+            raise ValueError("InflationCapFloor.inflation_type must be 'CPI' or 'YY'")
+        if self.option_type not in {"Cap", "Floor"}:
+            raise ValueError("InflationCapFloor.option_type must be 'Cap' or 'Floor'")
+        if self.start_date is not None:
+            _validate_date_like(self.start_date, "InflationCapFloor.start_date")
+        if self.end_date is not None:
+            _validate_date_like(self.end_date, "InflationCapFloor.end_date")
+
+
+@dataclass(frozen=True)
 class EuropeanOption(Product):
     underlying: str
     kind: Literal["call", "put"]
@@ -166,6 +240,114 @@ class EuropeanOption(Product):
             raise ValueError("EuropeanOption.notional must be > 0")
         if self.maturity_years <= 0:
             raise ValueError("EuropeanOption.maturity_years must be > 0")
+
+
+@dataclass(frozen=True)
+class EquityOption(Product):
+    name: str
+    currency: str
+    strike: float
+    quantity: float
+    option_type: Literal["Call", "Put"]
+    long_short: Literal["Long", "Short"] = "Long"
+    style: str = "European"
+    settlement: str = "Cash"
+    exercise_date: Optional[str] = None
+    payoff_at_expiry: bool = False
+    product_type: ProductType = field(init=False, default="EquityOption")
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("EquityOption.name is required")
+        if not self.currency:
+            raise ValueError("EquityOption.currency is required")
+        if self.quantity <= 0:
+            raise ValueError("EquityOption.quantity must be > 0")
+        if self.option_type not in {"Call", "Put"}:
+            raise ValueError("EquityOption.option_type must be 'Call' or 'Put'")
+        if self.long_short not in {"Long", "Short"}:
+            raise ValueError("EquityOption.long_short must be 'Long' or 'Short'")
+        if self.exercise_date is not None:
+            _validate_date_like(self.exercise_date, "EquityOption.exercise_date")
+
+
+@dataclass(frozen=True)
+class EquityForward(Product):
+    name: str
+    currency: str
+    strike: float
+    quantity: float
+    maturity_date: Optional[str] = None
+    long_short: Literal["Long", "Short"] = "Long"
+    strike_currency: Optional[str] = None
+    maturity_years: float = 1.0
+    product_type: ProductType = field(init=False, default="EquityForward")
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("EquityForward.name is required")
+        if not self.currency:
+            raise ValueError("EquityForward.currency is required")
+        if self.quantity <= 0:
+            raise ValueError("EquityForward.quantity must be > 0")
+        if self.long_short not in {"Long", "Short"}:
+            raise ValueError("EquityForward.long_short must be 'Long' or 'Short'")
+        if self.maturity_years <= 0:
+            raise ValueError("EquityForward.maturity_years must be > 0")
+        if self.maturity_date is not None:
+            _validate_date_like(self.maturity_date, "EquityForward.maturity_date")
+
+
+@dataclass(frozen=True)
+class EquitySwap(Product):
+    name: str
+    currency: str
+    notional: float
+    initial_price: float
+    quantity: float
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    maturity_years: float = 1.0
+    equity_leg_tenor: str = "3M"
+    equity_day_counter: str = "A360"
+    equity_payment_convention: str = "F"
+    equity_schedule_convention: str = "F"
+    equity_term_convention: str = "F"
+    equity_schedule_rule: str = "Forward"
+    float_leg_tenor: str = "3M"
+    float_day_counter: str = "A360"
+    float_payment_convention: str = "MF"
+    float_schedule_convention: str = "MF"
+    float_term_convention: str = "MF"
+    float_schedule_rule: str = "Forward"
+    float_index: str = ""
+    fixing_days: int = 2
+    float_spread: float = 0.0
+    equity_payer: bool = True
+    return_type: str = "Price"
+    calendar: Optional[str] = None
+    end_of_month: bool = False
+    product_type: ProductType = field(init=False, default="EquitySwap")
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("EquitySwap.name is required")
+        if not self.currency:
+            raise ValueError("EquitySwap.currency is required")
+        if self.notional <= 0:
+            raise ValueError("EquitySwap.notional must be > 0")
+        if self.initial_price <= 0:
+            raise ValueError("EquitySwap.initial_price must be > 0")
+        if self.quantity <= 0:
+            raise ValueError("EquitySwap.quantity must be > 0")
+        if self.maturity_years <= 0:
+            raise ValueError("EquitySwap.maturity_years must be > 0")
+        if self.fixing_days < 0:
+            raise ValueError("EquitySwap.fixing_days must be >= 0")
+        if self.start_date is not None:
+            _validate_date_like(self.start_date, "EquitySwap.start_date")
+        if self.end_date is not None:
+            _validate_date_like(self.end_date, "EquitySwap.end_date")
 
 
 @dataclass(frozen=True)
@@ -225,7 +407,18 @@ class BermudanSwaption(Product):
             raise ValueError("BermudanSwaption.fixing_days must be >= 0")
 
 
-ProductSpec = Union[IRS, FXForward, EuropeanOption, BermudanSwaption, GenericProduct]
+ProductSpec = Union[
+    IRS,
+    FXForward,
+    EuropeanOption,
+    EquityOption,
+    EquityForward,
+    EquitySwap,
+    BermudanSwaption,
+    InflationSwap,
+    InflationCapFloor,
+    GenericProduct,
+]
 
 
 @dataclass(frozen=True)
@@ -331,6 +524,12 @@ class PricingEngineConfig:
     npv_engine: str = "DiscountedCashflows"
     fx_model: Optional[str] = None
     fx_engine: Optional[str] = None
+    equity_option_model: str = "BlackScholesMerton"
+    equity_option_engine: str = "AnalyticEuropeanEngine"
+    equity_forward_model: str = "DiscountedCashflows"
+    equity_forward_engine: str = "DiscountingEquityForwardEngine"
+    equity_swap_model: str = "DiscountedCashflows"
+    equity_swap_engine: str = "DiscountingSwapEngine"
     swap_model: str = "DiscountedCashflows"
     swap_engine: str = "DiscountingSwapEngine"
     bermudan_model: str = "LGM"
@@ -415,11 +614,23 @@ class SimulationMarketConfig:
 
 
 @dataclass(frozen=True)
+class EquityFactorConfig:
+    name: str
+    currency: str
+    calibration_type: str = "Bootstrap"
+    sigma: float = 0.1
+    time_grid: Tuple[str, ...] = ()
+    expiries: Tuple[str, ...] = ("1Y",)
+    strikes: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CrossAssetModelConfig:
     domestic_ccy: str = "EUR"
     currencies: Tuple[str, ...] = ("EUR", "USD")
     ir_model_ccys: Tuple[str, ...] = ("EUR", "USD")
     fx_model_ccys: Tuple[str, ...] = ("USD",)
+    equity_factors: Tuple[EquityFactorConfig, ...] = ()
     bootstrap_tolerance: float = 0.0001
     ir_calibration_type: str = "Bootstrap"
     ir_volatility: float = 0.01
@@ -620,6 +831,78 @@ def _parse_product(data: Dict[str, Any]) -> ProductSpec:
         return FXForward(**{k: data[k] for k in ("pair", "notional", "strike", "maturity_years", "buy_base", "value_date") if k in data})
     if t == "EuropeanOption":
         return EuropeanOption(**{k: data[k] for k in ("underlying", "kind", "strike", "notional", "maturity_years") if k in data})
+    if t == "EquityOption":
+        return EquityOption(
+            **{
+                k: data[k]
+                for k in (
+                    "name",
+                    "currency",
+                    "strike",
+                    "quantity",
+                    "option_type",
+                    "long_short",
+                    "style",
+                    "settlement",
+                    "exercise_date",
+                    "payoff_at_expiry",
+                )
+                if k in data
+            }
+        )
+    if t == "EquityForward":
+        return EquityForward(
+            **{
+                k: data[k]
+                for k in (
+                    "name",
+                    "currency",
+                    "strike",
+                    "quantity",
+                    "maturity_date",
+                    "long_short",
+                    "strike_currency",
+                    "maturity_years",
+                )
+                if k in data
+            }
+        )
+    if t == "EquitySwap":
+        return EquitySwap(
+            **{
+                k: data[k]
+                for k in (
+                    "name",
+                    "currency",
+                    "notional",
+                    "initial_price",
+                    "quantity",
+                    "start_date",
+                    "end_date",
+                    "maturity_years",
+                    "equity_leg_tenor",
+                    "equity_day_counter",
+                    "equity_payment_convention",
+                    "equity_schedule_convention",
+                    "equity_term_convention",
+                    "equity_schedule_rule",
+                    "float_leg_tenor",
+                    "float_day_counter",
+                    "float_payment_convention",
+                    "float_schedule_convention",
+                    "float_term_convention",
+                    "float_schedule_rule",
+                    "float_index",
+                    "fixing_days",
+                    "float_spread",
+                    "equity_payer",
+                    "return_type",
+                    "calendar",
+                    "end_of_month",
+                )
+                if k in data
+            }
+        )
     if t == "BermudanSwaption":
         return BermudanSwaption(
             **{
@@ -776,6 +1059,12 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             npv_engine=pe.get("npv_engine", "DiscountedCashflows"),
             fx_model=pe.get("fx_model"),
             fx_engine=pe.get("fx_engine"),
+            equity_option_model=pe.get("equity_option_model", "BlackScholesMerton"),
+            equity_option_engine=pe.get("equity_option_engine", "AnalyticEuropeanEngine"),
+            equity_forward_model=pe.get("equity_forward_model", "DiscountedCashflows"),
+            equity_forward_engine=pe.get("equity_forward_engine", "DiscountingEquityForwardEngine"),
+            equity_swap_model=pe.get("equity_swap_model", "DiscountedCashflows"),
+            equity_swap_engine=pe.get("equity_swap_engine", "DiscountingSwapEngine"),
             swap_model=pe.get("swap_model", "DiscountedCashflows"),
             swap_engine=pe.get("swap_engine", "DiscountingSwapEngine"),
             bermudan_model=pe.get("bermudan_model", "LGM"),
@@ -851,6 +1140,18 @@ def _runtime_from_dict(data: Dict[str, Any]) -> RuntimeConfig:
             currencies=tuple(cam.get("currencies", ("EUR", "USD"))),
             ir_model_ccys=tuple(cam.get("ir_model_ccys", ("EUR", "USD"))),
             fx_model_ccys=tuple(cam.get("fx_model_ccys", ("USD",))),
+            equity_factors=tuple(
+                EquityFactorConfig(
+                    name=f["name"],
+                    currency=f["currency"],
+                    calibration_type=f.get("calibration_type", "Bootstrap"),
+                    sigma=float(f.get("sigma", 0.1)),
+                    time_grid=tuple(f.get("time_grid", ())),
+                    expiries=tuple(f.get("expiries", ("1Y",))),
+                    strikes=tuple(f.get("strikes", ())),
+                )
+                for f in cam.get("equity_factors", ())
+            ),
             bootstrap_tolerance=float(cam.get("bootstrap_tolerance", 0.0001)),
             ir_calibration_type=cam.get("ir_calibration_type", "Bootstrap"),
             ir_volatility=float(cam.get("ir_volatility", 0.01)),

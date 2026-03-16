@@ -35,6 +35,7 @@ from pythonore.compute.irs_xva_utils import (
     swap_npv_from_ore_legs,
     swap_npv_from_ore_legs_dual_curve,
 )
+from pythonore.repo_paths import local_parity_artifacts_root
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,7 +69,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--pathwise-fixing-lock", action="store_true", default=False)
     p.add_argument("--no-node-tenor-interp", action="store_true", default=False)
     p.add_argument("--no-coupon-spread-calibration", action="store_true", default=False)
-    p.add_argument("--artifact-root", type=Path, default=repo_root / "Tools/PythonOreRunner/parity_artifacts")
+    p.add_argument("--artifact-root", type=Path, default=local_parity_artifacts_root())
     p.add_argument("--out-prefix", default="compare")
 
     ns = p.parse_args()

@@ -1,0 +1,30 @@
+{
+  "baseline_mode": "python",
+  "case": {
+    "baseline_mode": "python",
+    "case_id": "ta001_equity_option_price",
+    "cli_args": [
+      "--price"
+    ],
+    "description": "Academy TA001 equity option price-only Python regression.",
+    "files_to_compare": [
+      "npv.csv"
+    ],
+    "ore_xml": "Examples/Academy/TA001_Equity_Option/Input/ore.xml",
+    "secondary_parity": true,
+    "tags": [
+      "pricing",
+      "equity",
+      "academy"
+    ],
+    "tolerances": {},
+    "workflow": "python"
+  },
+  "exit_code": 0,
+  "files": [
+    "input_validation.csv",
+    "npv.csv",
+    "report.md",
+    "summary.json"
+  ]
+}

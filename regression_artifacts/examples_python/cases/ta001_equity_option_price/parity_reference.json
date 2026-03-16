@@ -1,0 +1,142 @@
+{
+  "counterparty": "",
+  "diagnostics": {
+    "engine": "python_price_only",
+    "pricing_mode": "python_equity_option_premium_surface",
+    "reference_output_dirs": [
+      "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/ExpectedOutput"
+    ],
+    "using_expected_output": true
+  },
+  "input_validation": {
+    "action_items": [],
+    "checks": {
+      "conventions_exist": true,
+      "curve_specs_resolve": true,
+      "market_configurations_exist": true,
+      "quotes_exist_for_asof": true,
+      "referenced_todaysmarket_sections_exist": true,
+      "yield_index_names_distinct": true
+    },
+    "conventions": {
+      "missing_ids": [],
+      "used_ids": [
+        "EUR-ZERO-TENOR-BASED"
+      ],
+      "valid": true
+    },
+    "curve_specs": {
+      "active_curve_ids_by_section": {
+        "EquityCurves": [
+          "RIC:.STOXX50E"
+        ],
+        "EquityVolatilities": [
+          "RIC:.STOXX50E"
+        ],
+        "YieldCurves": [
+          "EUR-EONIA",
+          "EUR-ESTER"
+        ]
+      },
+      "invalid": [],
+      "quote_scope_curve_ids_by_section": {
+        "YieldCurves": [
+          "EUR-EONIA"
+        ]
+      },
+      "valid": true
+    },
+    "files": {
+      "conventions_xml": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/conventions.xml",
+      "curveconfig_xml": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/curveconfig.xml",
+      "fixing_data_file": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/fixings.txt",
+      "market_data_file": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/marketdata.txt",
+      "portfolio_xml": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/eqoption.xml",
+      "todaysmarket_xml": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/todaysmarket.xml"
+    },
+    "fixings": {
+      "imply_todays_fixings": false,
+      "potential_issue": false,
+      "today_fixing_count": 0
+    },
+    "fx_dominance": {
+      "pair_count_with_both_directions": 0,
+      "pairs_with_both_directions": []
+    },
+    "input_links_valid": true,
+    "issues": [],
+    "market_configurations": {
+      "available": [
+        "default"
+      ],
+      "missing_requested": [],
+      "requested": [
+        "default"
+      ],
+      "valid": true
+    },
+    "quotes": {
+      "asof_quote_count": 3368,
+      "mandatory_required_count": 2,
+      "missing_mandatory": [],
+      "missing_optional": [],
+      "optional_required_count": 0,
+      "valid": true
+    },
+    "summary": {
+      "asof_date": "2021-06-24",
+      "market_contexts": {
+        "eqcalibration": "default",
+        "fxcalibration": "default",
+        "lgmcalibration": "default",
+        "pricing": "default",
+        "simulation": "default"
+      },
+      "ore_xml_path": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/ore.xml",
+      "selected_market_configs": [
+        "default"
+      ]
+    },
+    "todaysmarket_names": {
+      "distinct": true,
+      "yield_index_overlaps": []
+    },
+    "todaysmarket_sections": {
+      "missing_references": [],
+      "valid": true
+    }
+  },
+  "maturity_date": "2021-12-17",
+  "maturity_time": 0.482192,
+  "modes": [
+    "price"
+  ],
+  "netting_set_id": "",
+  "ore_xml": "$REPO_ROOT/Examples/Academy/TA001_Equity_Option/Input/ore.xml",
+  "parity": null,
+  "pass_all": true,
+  "pass_flags": {
+    "pricing": true,
+    "xva_cva": true,
+    "xva_dva": true,
+    "xva_fba": true,
+    "xva_fca": true
+  },
+  "pricing": {
+    "currency": "EUR",
+    "equity_name": "RIC:.STOXX50E",
+    "long_short": "Long",
+    "market_option_price": 236.7,
+    "option_type": "Call",
+    "ore_t0_npv": 236.649138,
+    "pricing_mode": "python_equity_option_premium_surface",
+    "py_t0_npv": 236.7,
+    "quantity": 1.0,
+    "spot0": 4122.43,
+    "strike": 4000.0,
+    "t0_npv_abs_diff": 0.05086199999999508,
+    "trade_type": "EquityOption"
+  },
+  "trade_id": "EQ_CALL_STOXX50E",
+  "xva": null
+}

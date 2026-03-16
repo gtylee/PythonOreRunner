@@ -13,11 +13,16 @@ from pythonore.domain.dataclasses import (
     BermudanSwaption,
     CollateralBalance,
     CollateralConfig,
+    EquityForward,
+    EquityOption,
+    EquitySwap,
     FXForward,
     IndependentAmount,
     FixingPoint,
     FixingsData,
     GenericProduct,
+    InflationCapFloor,
+    InflationSwap,
     IRS,
     MarginingFrequency,
     MarketData,
@@ -446,12 +451,64 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
     if trade_type == "Swap":
         fixed_leg = None
         float_leg = None
+        inflation_leg = None
         for leg in trade.findall(".//SwapData/LegData"):
             leg_type = (_text(leg, "./LegType") or "").lower()
-            if leg_type == "fixed":
+            if leg_type in {"fixed", "zerocouponfixed"}:
                 fixed_leg = leg
             elif leg_type == "floating":
                 float_leg = leg
+            elif leg_type in {"cpi", "yy"}:
+                inflation_leg = leg
+        if inflation_leg is not None:
+            ccy = _text(inflation_leg, "./Currency") or _text(fixed_leg, "./Currency") or _text(float_leg, "./Currency") or "EUR"
+            notional = float(
+                _text(inflation_leg, "./Notionals/Notional")
+                or _text(fixed_leg, "./Notionals/Notional")
+                or _text(float_leg, "./Notionals/Notional")
+                or 0.0
+            )
+            start = (
+                _text(inflation_leg, "./CPILegData/StartDate")
+                or _text(inflation_leg, "./ScheduleData/Rules/StartDate")
+                or _text(fixed_leg, "./ScheduleData/Rules/StartDate")
+                or _text(float_leg, "./ScheduleData/Rules/StartDate")
+            )
+            end = (
+                _text(inflation_leg, "./ScheduleData/Rules/EndDate")
+                or _text(inflation_leg, "./ScheduleData/Dates/Dates/Date")
+                or _text(fixed_leg, "./ScheduleData/Rules/EndDate")
+                or _text(float_leg, "./ScheduleData/Rules/EndDate")
+            )
+            maturity = _maturity_years(start, end)
+            infl_type = (_text(inflation_leg, "./LegType") or "CPI").upper()
+            pay_leg = "inflation" if (_text(inflation_leg, "./Payer") or "false").lower() == "true" else (
+                "fixed" if fixed_leg is not None and (_text(fixed_leg, "./Payer") or "false").lower() == "true" else "float"
+            )
+            fixed_rate = float(
+                (_text(fixed_leg, "./FixedLegData/Rates/Rate") if fixed_leg is not None else None)
+                or (_text(fixed_leg, "./ZeroCouponFixedLegData/Rates/Rate") if fixed_leg is not None else None)
+                or (_text(float_leg, "./FloatingLegData/Spreads/Spread") if float_leg is not None else None)
+                or 0.0
+            )
+            return InflationSwap(
+                ccy=ccy,
+                notional=notional,
+                maturity_years=max(maturity, 1.0 / 365.25),
+                index=_text(inflation_leg, "./CPILegData/Index") or _text(inflation_leg, "./YYLegData/Index") or "",
+                inflation_type="CPI" if infl_type == "CPI" else "YY",
+                pay_leg=pay_leg,
+                fixed_rate=fixed_rate,
+                base_cpi=(
+                    float(_text(inflation_leg, "./CPILegData/BaseCPI"))
+                    if _text(inflation_leg, "./CPILegData/BaseCPI")
+                    else None
+                ),
+                observation_lag=_text(inflation_leg, "./CPILegData/ObservationLag") or _text(inflation_leg, "./YYLegData/ObservationLag"),
+                start_date=_normalize_date(start) if start else None,
+                end_date=_normalize_date(end) if end else None,
+                schedule_tenor=_text(inflation_leg, "./ScheduleData/Rules/Tenor") or "1Y",
+            )
         if fixed_leg is not None:
             ccy = _text(fixed_leg, "./Currency") or "EUR"
             notional = float(_text(fixed_leg, "./Notionals/Notional") or 0.0)
@@ -512,6 +569,49 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
             value_date=_normalize_date(_text(trade, ".//FxForwardData/ValueDate") or "") if _text(trade, ".//FxForwardData/ValueDate") else None,
         )
 
+    if trade_type == "CapFloor":
+        leg = trade.find("./CapFloorData/LegData")
+        if leg is not None:
+            leg_type = (_text(leg, "./LegType") or "").strip().upper()
+            if leg_type in {"CPI", "YY"}:
+                ccy = _text(leg, "./Currency") or "EUR"
+                notional = float(_text(leg, "./Notionals/Notional") or 0.0)
+                start = (
+                    _text(leg, "./CPILegData/StartDate")
+                    or _text(leg, "./ScheduleData/Rules/StartDate")
+                )
+                end = (
+                    _text(leg, "./ScheduleData/Rules/EndDate")
+                    or _text(leg, "./ScheduleData/Dates/Dates/Date")
+                )
+                maturity = _maturity_years(start, end)
+                option_type = (_text(trade, "./CapFloorData/OptionData/Type") or "Cap").strip().title()
+                strike = float(
+                    _text(leg, "./CPILegData/Rates/Rate")
+                    or _text(leg, "./YYLegData/Caps/Cap")
+                    or _text(leg, "./YYLegData/Floors/Floor")
+                    or 0.0
+                )
+                return InflationCapFloor(
+                    ccy=ccy,
+                    notional=notional,
+                    maturity_years=max(maturity, 1.0 / 365.25),
+                    index=_text(leg, "./CPILegData/Index") or _text(leg, "./YYLegData/Index") or "",
+                    inflation_type="CPI" if leg_type == "CPI" else "YY",
+                    option_type="Cap" if option_type != "Floor" else "Floor",
+                    strike=strike,
+                    long_short=(_text(trade, "./CapFloorData/LongShort") or "Long").strip().title(),
+                    base_cpi=(
+                        float(_text(leg, "./CPILegData/BaseCPI"))
+                        if _text(leg, "./CPILegData/BaseCPI")
+                        else None
+                    ),
+                    observation_lag=_text(leg, "./CPILegData/ObservationLag") or _text(leg, "./YYLegData/ObservationLag"),
+                    start_date=_normalize_date(start) if start else None,
+                    end_date=_normalize_date(end) if end else None,
+                    schedule_tenor=_text(leg, "./ScheduleData/Rules/Tenor") or "1Y",
+                )
+
     if trade_type == "FxOption":
         bought_ccy = _text(trade, ".//FxOptionData/BoughtCurrency") or "EUR"
         sold_ccy = _text(trade, ".//FxOptionData/SoldCurrency") or "USD"
@@ -529,6 +629,91 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
             notional=abs(bought_amt),
             maturity_years=max(maturity, 1.0),
         )
+
+    if trade_type == "EquityOption":
+        option_data = trade.find("./EquityOptionData")
+        if option_data is not None:
+            exercise_date = _text(option_data, "./OptionData/ExerciseDates/ExerciseDate")
+            maturity = _maturity_years(None, exercise_date)
+            return EquityOption(
+                name=_text(option_data, "./Name") or "",
+                currency=_text(option_data, "./Currency") or "EUR",
+                strike=float(_text(option_data, "./Strike") or 0.0),
+                quantity=abs(float(_text(option_data, "./Quantity") or 0.0)),
+                option_type=_text(option_data, "./OptionData/OptionType") or "Call",
+                long_short=_text(option_data, "./OptionData/LongShort") or "Long",
+                style=_text(option_data, "./OptionData/Style") or "European",
+                settlement=_text(option_data, "./OptionData/Settlement") or "Cash",
+                exercise_date=_normalize_date(exercise_date) if exercise_date else None,
+                payoff_at_expiry=(_text(option_data, "./OptionData/PayOffAtExpiry") or "false").strip().lower() in {"true", "1", "y", "yes"},
+            )
+
+    if trade_type == "EquityForward":
+        forward_data = trade.find("./EquityForwardData")
+        if forward_data is not None:
+            maturity_date = _text(forward_data, "./Maturity")
+            maturity = _maturity_years(None, maturity_date)
+            return EquityForward(
+                name=_text(forward_data, "./Name") or "",
+                currency=_text(forward_data, "./Currency") or "EUR",
+                strike=float(_text(forward_data, "./Strike") or 0.0),
+                quantity=abs(float(_text(forward_data, "./Quantity") or 0.0)),
+                maturity_date=_normalize_date(maturity_date) if maturity_date else None,
+                long_short=_text(forward_data, "./LongShort") or "Long",
+                strike_currency=_text(forward_data, "./StrikeCurrency") or None,
+                maturity_years=max(maturity, 1.0),
+            )
+
+    if trade_type == "EquitySwap":
+        equity_leg = None
+        float_leg = None
+        for leg in trade.findall(".//SwapData/LegData"):
+            leg_type = (_text(leg, "./LegType") or "").strip().lower()
+            if leg_type == "equity":
+                equity_leg = leg
+            elif leg_type == "floating":
+                float_leg = leg
+        if equity_leg is not None and float_leg is not None:
+            start = _text(equity_leg, "./ScheduleData/Rules/StartDate") or _text(float_leg, "./ScheduleData/Rules/StartDate")
+            end = _text(equity_leg, "./ScheduleData/Rules/EndDate") or _text(float_leg, "./ScheduleData/Rules/EndDate")
+            maturity = _maturity_years(start, end)
+            notional = float(_text(equity_leg, "./Notionals/Notional") or _text(float_leg, "./Notionals/Notional") or 0.0)
+            initial_price = float(_text(equity_leg, "./EquityLegData/InitialPrice") or 0.0)
+            quantity = abs(notional / initial_price) if initial_price else 0.0
+            return EquitySwap(
+                name=_text(equity_leg, "./EquityLegData/Name") or "",
+                currency=_text(equity_leg, "./Currency") or _text(float_leg, "./Currency") or "EUR",
+                notional=abs(notional),
+                initial_price=initial_price,
+                quantity=quantity,
+                start_date=_normalize_date(start) if start else None,
+                end_date=_normalize_date(end) if end else None,
+                maturity_years=max(maturity, 1.0),
+                equity_leg_tenor=_text(equity_leg, "./ScheduleData/Rules/Tenor") or "3M",
+                equity_day_counter=_text(equity_leg, "./DayCounter") or "A360",
+                equity_payment_convention=_text(equity_leg, "./PaymentConvention") or "F",
+                equity_schedule_convention=_text(equity_leg, "./ScheduleData/Rules/Convention") or "F",
+                equity_term_convention=_text(equity_leg, "./ScheduleData/Rules/TermConvention") or "F",
+                equity_schedule_rule=_text(equity_leg, "./ScheduleData/Rules/Rule") or "Forward",
+                float_leg_tenor=_text(float_leg, "./ScheduleData/Rules/Tenor") or "3M",
+                float_day_counter=_text(float_leg, "./DayCounter") or "A360",
+                float_payment_convention=_text(float_leg, "./PaymentConvention") or "MF",
+                float_schedule_convention=_text(float_leg, "./ScheduleData/Rules/Convention") or "MF",
+                float_term_convention=_text(float_leg, "./ScheduleData/Rules/TermConvention") or "MF",
+                float_schedule_rule=_text(float_leg, "./ScheduleData/Rules/Rule") or "Forward",
+                float_index=_text(float_leg, "./FloatingLegData/Index") or "",
+                fixing_days=int(_text(float_leg, "./FloatingLegData/FixingDays") or 2),
+                float_spread=float(_text(float_leg, "./FloatingLegData/Spreads/Spread") or 0.0),
+                equity_payer=(_text(equity_leg, "./Payer") or "true").strip().lower() == "true",
+                return_type=_text(equity_leg, "./EquityLegData/ReturnType") or "Price",
+                calendar=_text(equity_leg, "./ScheduleData/Rules/Calendar")
+                or _text(float_leg, "./ScheduleData/Rules/Calendar")
+                or None,
+                end_of_month=(
+                    (_text(equity_leg, "./ScheduleData/Rules/EndOfMonth") or "").strip().lower() in {"true", "1", "y", "yes"}
+                    or (_text(float_leg, "./ScheduleData/Rules/EndOfMonth") or "").strip().lower() in {"true", "1", "y", "yes"}
+                ),
+            )
 
     if trade_type == "Swaption":
         style = (_text(trade, ".//SwaptionData/OptionData/Style") or "").strip().lower()

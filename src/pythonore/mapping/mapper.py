@@ -14,6 +14,9 @@ from pythonore.domain.dataclasses import (
     CounterpartyConfig,
     CreditSimulationConfig,
     CrossAssetModelConfig,
+    EquityForward,
+    EquityOption,
+    EquitySwap,
     FXForward,
     GenericProduct,
     IRS,
@@ -291,6 +294,107 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
             f"      <SoldAmount>{sold}</SoldAmount>",
             f"      <ValueDate>{value_date[:4]}-{value_date[4:6]}-{value_date[6:]}</ValueDate>",
             "    </FxForwardData>",
+        ]
+    if isinstance(p, EquityOption):
+        return [
+            "    <EquityOptionData>",
+            "      <OptionData>",
+            f"        <LongShort>{p.long_short}</LongShort>",
+            f"        <OptionType>{p.option_type}</OptionType>",
+            f"        <Style>{p.style}</Style>",
+            f"        <Settlement>{p.settlement}</Settlement>",
+            f"        <PayOffAtExpiry>{str(p.payoff_at_expiry).lower()}</PayOffAtExpiry>",
+            "        <ExerciseDates>",
+            f"          <ExerciseDate>{_fmt_yyyymmdd(p.exercise_date) if p.exercise_date else _fmt_yyyymmdd(asof)}</ExerciseDate>",
+            "        </ExerciseDates>",
+            "      </OptionData>",
+            f"      <Name>{_xml_escape(p.name)}</Name>",
+            f"      <Currency>{p.currency}</Currency>",
+            f"      <Strike>{p.strike}</Strike>",
+            f"      <Quantity>{p.quantity}</Quantity>",
+            "    </EquityOptionData>",
+        ]
+    if isinstance(p, EquityForward):
+        maturity_date = _fmt_yyyymmdd(p.maturity_date) if p.maturity_date else _add_months_yyyymmdd(
+            _fmt_yyyymmdd(asof), int(round(p.maturity_years * 12.0))
+        )
+        return [
+            "    <EquityForwardData>",
+            f"      <LongShort>{p.long_short}</LongShort>",
+            f"      <Maturity>{maturity_date[:4]}-{maturity_date[4:6]}-{maturity_date[6:]}</Maturity>",
+            f"      <Name>{_xml_escape(p.name)}</Name>",
+            f"      <Currency>{p.currency}</Currency>",
+            f"      <Strike>{p.strike}</Strike>",
+            f"      <StrikeCurrency>{p.strike_currency or p.currency}</StrikeCurrency>",
+            f"      <Quantity>{p.quantity}</Quantity>",
+            "    </EquityForwardData>",
+        ]
+    if isinstance(p, EquitySwap):
+        start_date = _fmt_yyyymmdd(p.start_date or asof)
+        end_date = _fmt_yyyymmdd(p.end_date) if p.end_date else _add_months_yyyymmdd(
+            start_date, int(round(p.maturity_years * 12.0))
+        )
+        calendar = p.calendar or p.currency
+        return [
+            "    <SwapData>",
+            "      <LegData>",
+            "        <LegType>Equity</LegType>",
+            f"        <Payer>{str(p.equity_payer).lower()}</Payer>",
+            f"        <Currency>{p.currency}</Currency>",
+            "        <Notionals>",
+            f"          <Notional>{p.notional}</Notional>",
+            "        </Notionals>",
+            f"        <DayCounter>{p.equity_day_counter}</DayCounter>",
+            f"        <PaymentConvention>{p.equity_payment_convention}</PaymentConvention>",
+            "        <EquityLegData>",
+            f"          <ReturnType>{p.return_type}</ReturnType>",
+            f"          <Name>{_xml_escape(p.name)}</Name>",
+            f"          <InitialPrice>{p.initial_price}</InitialPrice>",
+            "        </EquityLegData>",
+            "        <ScheduleData>",
+            "          <Rules>",
+            f"            <StartDate>{start_date}</StartDate>",
+            f"            <EndDate>{end_date}</EndDate>",
+            f"            <Tenor>{p.equity_leg_tenor}</Tenor>",
+            f"            <Calendar>{calendar}</Calendar>",
+            f"            <Convention>{p.equity_schedule_convention}</Convention>",
+            f"            <TermConvention>{p.equity_term_convention}</TermConvention>",
+            f"            <Rule>{p.equity_schedule_rule}</Rule>",
+            f"            <EndOfMonth>{str(p.end_of_month).lower()}</EndOfMonth>",
+            "          </Rules>",
+            "        </ScheduleData>",
+            "      </LegData>",
+            "      <LegData>",
+            "        <LegType>Floating</LegType>",
+            f"        <Payer>{str(not p.equity_payer).lower()}</Payer>",
+            f"        <Currency>{p.currency}</Currency>",
+            "        <Notionals>",
+            f"          <Notional>{p.notional}</Notional>",
+            "        </Notionals>",
+            f"        <DayCounter>{p.float_day_counter}</DayCounter>",
+            f"        <PaymentConvention>{p.float_payment_convention}</PaymentConvention>",
+            "        <FloatingLegData>",
+            f"          <Index>{p.float_index}</Index>",
+            "          <Spreads>",
+            f"            <Spread>{p.float_spread}</Spread>",
+            "          </Spreads>",
+            "          <IsInArrears>false</IsInArrears>",
+            f"          <FixingDays>{p.fixing_days}</FixingDays>",
+            "        </FloatingLegData>",
+            "        <ScheduleData>",
+            "          <Rules>",
+            f"            <StartDate>{start_date}</StartDate>",
+            f"            <EndDate>{end_date}</EndDate>",
+            f"            <Tenor>{p.float_leg_tenor}</Tenor>",
+            f"            <Calendar>{calendar}</Calendar>",
+            f"            <Convention>{p.float_schedule_convention}</Convention>",
+            f"            <TermConvention>{p.float_term_convention}</TermConvention>",
+            f"            <Rule>{p.float_schedule_rule}</Rule>",
+            f"            <EndOfMonth>{str(p.end_of_month).lower()}</EndOfMonth>",
+            "          </Rules>",
+            "        </ScheduleData>",
+            "      </LegData>",
+            "    </SwapData>",
         ]
     if isinstance(p, BermudanSwaption):
         start_date = _fmt_yyyymmdd(p.start_date or asof)
@@ -705,6 +809,24 @@ def _pricing_engine_xml(cfg: PricingEngineConfig) -> str:
             f"    <Engine>{cfg.fx_engine or cfg.npv_engine}</Engine>",
             "    <EngineParameters/>",
             "  </Product>",
+            "  <Product type=\"EquityForward\">",
+            f"    <Model>{cfg.equity_forward_model}</Model>",
+            "    <ModelParameters/>",
+            f"    <Engine>{cfg.equity_forward_engine}</Engine>",
+            "    <EngineParameters/>",
+            "  </Product>",
+            "  <Product type=\"EquityOption\">",
+            f"    <Model>{cfg.equity_option_model}</Model>",
+            "    <ModelParameters/>",
+            f"    <Engine>{cfg.equity_option_engine}</Engine>",
+            "    <EngineParameters/>",
+            "  </Product>",
+            "  <Product type=\"EquitySwap\">",
+            f"    <Model>{cfg.equity_swap_model}</Model>",
+            "    <ModelParameters/>",
+            f"    <Engine>{cfg.equity_swap_engine}</Engine>",
+            "    <EngineParameters/>",
+            "  </Product>",
             "  <Product type=\"Swap\">",
             f"    <Model>{cfg.swap_model}</Model>",
             "    <ModelParameters/>",
@@ -980,6 +1102,30 @@ def _cross_asset_model_xml(cfg: CrossAssetModelConfig) -> str:
                 "    </CrossCcyLGM>",
             ]
         )
+    equity_models = []
+    for eq in cfg.equity_factors:
+        time_grid = ",".join(eq.time_grid)
+        expiries = ",".join(eq.expiries)
+        strikes = ",".join(eq.strikes)
+        initial_values = ",".join([str(eq.sigma)] * (len(eq.time_grid) + 1 if eq.time_grid else 1))
+        equity_models.extend(
+            [
+                f"    <CrossAssetLGM name=\"{_xml_escape(eq.name)}\">",
+                f"      <Currency>{eq.currency}</Currency>",
+                f"      <CalibrationType>{eq.calibration_type}</CalibrationType>",
+                "      <Sigma>",
+                "        <Calibrate>N</Calibrate>",
+                "        <ParamType>Piecewise</ParamType>",
+                f"        <TimeGrid>{time_grid}</TimeGrid>",
+                f"        <InitialValue>{initial_values}</InitialValue>",
+                "      </Sigma>",
+                "      <CalibrationOptions>",
+                f"        <Expiries>{expiries}</Expiries>",
+                f"        <Strikes>{strikes}</Strikes>",
+                "      </CalibrationOptions>",
+                "    </CrossAssetLGM>",
+            ]
+        )
     corrs = "\n".join(
         f"    <Correlation factor1=\"{f1}\" factor2=\"{f2}\">{v}</Correlation>"
         for f1, f2, v in cfg.correlations
@@ -998,6 +1144,9 @@ def _cross_asset_model_xml(cfg: CrossAssetModelConfig) -> str:
             "    <ForeignExchangeModels>",
             *fx_models,
             "    </ForeignExchangeModels>",
+            "    <EquityModels>",
+            *equity_models,
+            "    </EquityModels>",
             "    <InstantaneousCorrelations>",
             corrs,
             "    </InstantaneousCorrelations>",

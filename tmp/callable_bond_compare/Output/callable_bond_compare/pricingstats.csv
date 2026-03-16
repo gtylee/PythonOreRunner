@@ -1,6 +1,0 @@
-#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
-CallableBondCertainCall,CallableBond,1,0,0
-CallableBondNoCall,CallableBond,1,0,0
-CallableBondTrade,CallableBond,1,0,0
-PutCallBondTrade,CallableBond,1,0,0
-UnderlyingBondTrade,Bond,1,0,0
