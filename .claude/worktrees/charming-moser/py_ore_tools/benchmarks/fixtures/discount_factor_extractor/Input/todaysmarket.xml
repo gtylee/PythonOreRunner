@@ -1,0 +1,14 @@
+<TodaysMarket>
+  <Configuration id="default">
+    <DiscountingCurvesId>disc_set</DiscountingCurvesId>
+  </Configuration>
+  <DiscountingCurves id="disc_set">
+    <DiscountingCurve currency="USD">Yield/USD/USD-OIS</DiscountingCurve>
+    <DiscountingCurve currency="EUR">Yield/EUR/EONIA</DiscountingCurve>
+    <DiscountingCurve currency="GBP">Yield/USD/USD-OIS</DiscountingCurve>
+  </DiscountingCurves>
+  <YieldCurves>
+    <YieldCurve name="USD-OIS">Yield/USD/USD-OIS</YieldCurve>
+    <YieldCurve name="EUR-EONIA">Yield/EUR/EONIA</YieldCurve>
+  </YieldCurves>
+</TodaysMarket>

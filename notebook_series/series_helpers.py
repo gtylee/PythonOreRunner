@@ -9,7 +9,7 @@ import csv
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _DEFAULT_MPLCONFIGDIR = Path("/tmp/codex-mplconfig")
 _DEFAULT_MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
@@ -371,14 +371,21 @@ def load_case_buffers(ore_xml: str | Path, *, include_output: bool = True) -> tu
     return input_files, output_files, meta
 
 
-def load_case_snapshots(ore_xml: str | Path):
+def load_case_snapshots(ore_xml: str | Path, *, num_paths: int | None = None):
     bootstrap_notebook_env()
+    from dataclasses import replace
+
     from native_xva_interface import XVALoader
     from py_ore_tools.ore_snapshot import load_from_ore_xml
 
     ore_xml = Path(ore_xml).resolve()
     input_dir, output_dir = resolve_case_dirs(ore_xml)
     runtime_snapshot = XVALoader.from_files(str(input_dir), ore_file=ore_xml.name)
+    if num_paths is not None:
+        runtime_snapshot = replace(
+            runtime_snapshot,
+            config=replace(runtime_snapshot.config, num_paths=int(num_paths)),
+        )
     ore_snapshot = load_from_ore_xml(ore_xml)
     meta = {
         "ore_xml": str(ore_xml),
@@ -386,6 +393,7 @@ def load_case_snapshots(ore_xml: str | Path):
         "output_dir": str(output_dir),
         "trade_ids": [t.trade_id for t in runtime_snapshot.portfolio.trades],
         "base_currency": runtime_snapshot.config.base_currency,
+        "num_paths": int(runtime_snapshot.config.num_paths),
     }
     return runtime_snapshot, ore_snapshot, meta
 
@@ -781,6 +789,48 @@ def compare_results_frame(lhs_name: str, lhs_result, rhs_name: str, rhs_result) 
                 rhs_name: rhs,
                 "delta": rhs - lhs,
                 "abs_delta": abs(rhs - lhs),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def joint_workflow_compare_frame(
+    app_metrics: pd.DataFrame,
+    live_compare: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """One table for notebook 05: OreSnapshotApp compare vs native snapshot dual-engine.
+
+    Columns
+    -------
+    compare_py / compare_ore_csv
+        From ``ore_snapshot_app_metric_frame`` (Python LGM in compare mode vs ORE **output CSVs**).
+    native_py / native_ore_swig
+        From ``compare_results_frame`` on the same case's ``XVASnapshot`` (Python LGM vs **live OREApp**).
+        NaN when ``live_compare`` is missing (e.g. SWIG unavailable).
+    """
+    live_by: dict[str, dict[str, float]] = {}
+    if live_compare is not None and not live_compare.empty:
+        py_col = "python_lgm" if "python_lgm" in live_compare.columns else None
+        ore_col = "ore_swig" if "ore_swig" in live_compare.columns else None
+        if py_col and ore_col:
+            for _, row in live_compare.iterrows():
+                m = str(row["metric"])
+                live_by[m] = {
+                    "native_py": float(row[py_col]),
+                    "native_ore_swig": float(row[ore_col]),
+                }
+
+    rows: list[dict[str, Any]] = []
+    for _, r in app_metrics.iterrows():
+        m = str(r["metric"])
+        native = live_by.get(m, {})
+        rows.append(
+            {
+                "metric": m,
+                "compare_py": float(r["python_lgm"]),
+                "compare_ore_csv": float(r["ore_output"]),
+                "native_py": native["native_py"] if native else np.nan,
+                "native_ore_swig": native["native_ore_swig"] if native else np.nan,
             }
         )
     return pd.DataFrame(rows)
@@ -1833,12 +1883,50 @@ def _read_ore_npv_row(path: Path) -> float:
     return 0.0
 
 
-def run_adapter(snapshot, adapter) -> tuple[Any, float]:
+def run_adapter(
+    snapshot,
+    adapter: Any | None = None,
+    *,
+    build_adapter: Callable[[], Any] | None = None,
+    warm: bool = False,
+) -> tuple[Any, float]:
+    """Run one XVA pass and return wall time (``time.perf_counter``).
+
+    ``bootstrap_notebook_env`` always runs before any timer.
+
+    **Default (``warm=False``)** — pass exactly one of ``adapter=`` or ``build_adapter=``.
+    Timed region: optional ``build_adapter()`` (if used), ``XVAEngine``, ``create_session``
+    (includes ``map_snapshot``), and ``session.run``. Use ``build_adapter=`` to include
+    adapter ``__init__`` (e.g. ORE module import) inside the measurement.
+
+    **``warm=True``** — reuse adapters across a batch: pass only ``adapter=`` (no
+    ``build_adapter``). Timed region is **only** ``session.run`` (pricing). ``XVAEngine``,
+    ``create_session`` / ``map_snapshot``, and adapter construction must happen **outside**
+    the timed section, so construct the adapter once per batch, then call ``warm=True`` for
+    each valuation you want to time.
+    """
+    if warm:
+        if adapter is None or build_adapter is not None:
+            raise TypeError("warm=True requires adapter= and no build_adapter=")
+        bootstrap_notebook_env()
+        from native_xva_interface import XVAEngine
+
+        engine = XVAEngine(adapter=adapter)
+        session = engine.create_session(snapshot)
+        start = time.perf_counter()
+        result = session.run(return_cubes=False)
+        elapsed = time.perf_counter() - start
+        return result, elapsed
+
+    if (adapter is None) == (build_adapter is None):
+        raise TypeError("run_adapter: pass exactly one of adapter= or build_adapter=")
+
     bootstrap_notebook_env()
     from native_xva_interface import XVAEngine
 
     start = time.perf_counter()
-    result = XVAEngine(adapter=adapter).create_session(snapshot).run(return_cubes=False)
+    resolved = build_adapter() if build_adapter is not None else adapter
+    result = XVAEngine(adapter=resolved).create_session(snapshot).run(return_cubes=False)
     elapsed = time.perf_counter() - start
     return result, elapsed
 
