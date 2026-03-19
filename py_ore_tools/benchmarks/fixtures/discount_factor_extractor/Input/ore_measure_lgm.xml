@@ -1,0 +1,12 @@
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2024-01-01</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+  </Setup>
+  <Analytics>
+    <Analytic type="curves">
+      <Parameter name="configuration">default</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
