@@ -1694,6 +1694,8 @@ def _build_capfloor_defs_from_flows(
     pay = np.asarray([_time(r["PayDate"]) for r in rows], dtype=float)
     accr = np.asarray([float((r.get("Accrual") or "0").strip() or "0") for r in rows], dtype=float)
     notional = np.asarray([abs(float((r.get("Notional") or "0").strip() or "0")) for r in rows], dtype=float)
+    gearing = np.asarray([float((r.get("Gearing") or "1").strip() or "1") for r in rows], dtype=float)
+    spread = np.asarray([float((r.get("Spread") or "0").strip() or "0") for r in rows], dtype=float)
     fixing_time = np.asarray(
         [
             max(
@@ -1729,6 +1731,8 @@ def _build_capfloor_defs_from_flows(
                 accrual=accr,
                 notional=notional,
                 strike=np.asarray([_strike_value(v) for v in cap_vals], dtype=float),
+                gearing=gearing,
+                spread=spread,
                 fixing_time=fixing_time,
                 position=float(option_bias),
             )
@@ -1745,6 +1749,8 @@ def _build_capfloor_defs_from_flows(
                 accrual=accr,
                 notional=notional,
                 strike=np.asarray([_strike_value(v) for v in floor_vals], dtype=float),
+                gearing=gearing,
+                spread=spread,
                 fixing_time=fixing_time,
                 position=float(-option_bias if defs else option_bias),
             )

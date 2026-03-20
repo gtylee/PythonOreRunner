@@ -46,6 +46,8 @@ class CapFloorDef:
     accrual: np.ndarray
     notional: np.ndarray
     strike: np.ndarray
+    gearing: np.ndarray | None = None
+    spread: np.ndarray | None = None
     fixing_time: np.ndarray | None = None
     position: float = 1.0  # +1 long, -1 short
 
@@ -56,10 +58,12 @@ class CapFloorDef:
         tau = np.asarray(self.accrual, dtype=float)
         n = np.asarray(self.notional, dtype=float)
         k = np.asarray(self.strike, dtype=float)
+        g = np.ones_like(k) if self.gearing is None else np.asarray(self.gearing, dtype=float)
+        s = np.zeros_like(k) if self.spread is None else np.asarray(self.spread, dtype=float)
         if not (t0.ndim == t1.ndim == tp.ndim == tau.ndim == n.ndim == k.ndim == 1):
             raise ValueError("cap/floor arrays must be one-dimensional")
         m = t0.size
-        if not (t1.size == tp.size == tau.size == n.size == k.size == m):
+        if not (t1.size == tp.size == tau.size == n.size == k.size == g.size == s.size == m):
             raise ValueError("cap/floor arrays must have equal length")
         if m == 0:
             raise ValueError("cap/floor must contain at least one coupon")
@@ -227,6 +231,8 @@ def capfloor_npv(
     a = tau[live]
     n = notional[live]
     k = strike[live]
+    g = np.asarray(capfloor.gearing if capfloor.gearing is not None else np.ones_like(strike), dtype=float)[live]
+    sread = np.asarray(capfloor.spread if capfloor.spread is not None else np.zeros_like(strike), dtype=float)[live]
     f = fixing[live]
     fixed_mask = f <= t + 1.0e-12
 
@@ -245,10 +251,11 @@ def capfloor_npv(
     # Once the fixing date has passed, the caplet/floorlet is just a known coupon
     # amount that still needs discounting to the valuation time.
     if np.any(fixed_mask):
+        effective_rate = g[fixed_mask, None] * l[fixed_mask, :] + sread[fixed_mask, None]
         if capfloor.option_type.strip().lower() == "cap":
-            payoff_fix = np.maximum(l[fixed_mask, :] - k[fixed_mask, None], 0.0)
+            payoff_fix = np.maximum(effective_rate - k[fixed_mask, None], 0.0)
         else:
-            payoff_fix = np.maximum(k[fixed_mask, None] - l[fixed_mask, :], 0.0)
+            payoff_fix = np.maximum(k[fixed_mask, None] - effective_rate, 0.0)
         amount_fix = float(capfloor.position) * n[fixed_mask, None] * a[fixed_mask, None] * payoff_fix
         p_t = float(p0_disc(t))
         disc_fix = model.discount_bond_paths(t, p[fixed_mask], x, p_t, lambda u: float(p0_disc(float(u))))
@@ -266,6 +273,8 @@ def capfloor_npv(
         a2 = a[~fixed_mask]
         n2 = n[~fixed_mask]
         k2 = k[~fixed_mask]
+        g2 = g[~fixed_mask]
+        s2_spread = sread[~fixed_mask]
 
         p_t = float(p0_disc(t))
         p_ts_d = model.discount_bond_paths(t, s2, x, p_t, lambda u: float(p0_disc(float(u))))
@@ -278,9 +287,10 @@ def capfloor_npv(
         be = np.array([float(p0_fwd(float(u)) / p0_disc(float(u))) for u in e2], dtype=float)
         c = be / bs  # P_f(T0,T1) = c * P_d(T0,T1)
 
-        # Rewrite the caplet/floorlet in terms of a bond option under LGM.  This is
-        # the key step that turns the coupon option into a Gaussian closed form.
-        kbar_d = (1.0 + k2 * a2) * c
+        # Rewrite g*L+s-K as an option on the forwarding bond.
+        # Using L = (1/Pf(T0,T1)-1)/tau, the payoff becomes linear in 1/Pf(T0,T1).
+        strike_adj = k2 - s2_spread
+        kbar_d = (1.0 + ((strike_adj * a2) / np.clip(g2, 1.0e-18, None))) * c
         strike_bond = 1.0 / np.clip(kbar_d, 1.0e-18, None)
 
         h_s = np.asarray(model.H(s2), dtype=float)
@@ -305,7 +315,7 @@ def capfloor_npv(
             call[tiny, :] = np.maximum(p_te_d[tiny, :] - k_mat[tiny, :] * p_ts_d[tiny, :], 0.0)
             put[tiny, :] = np.maximum(k_mat[tiny, :] * p_ts_d[tiny, :] - p_te_d[tiny, :], 0.0)
 
-        scale = float(capfloor.position) * (n2 * kbar_d)[:, None]
+        scale = float(capfloor.position) * (n2 * g2 * kbar_d)[:, None]
         if capfloor.option_type.strip().lower() == "cap":
             pv_unfixed = np.sum(scale * put, axis=0)
         else:

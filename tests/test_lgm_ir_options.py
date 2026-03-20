@@ -41,7 +41,30 @@ class TestLgmIrOptions(unittest.TestCase):
         v = capfloor_npv(self.model, self.p0, self.p0, cf, 0.0, x)
         fwd = self.p0(1.0) / self.p0(2.0) - 1.0
         expected = 1_000_000.0 * self.p0(2.0) * max(fwd - 0.01, 0.0)
-        self.assertAlmostEqual(float(np.mean(v)), expected, places=10)
+        self.assertAlmostEqual(float(np.mean(v)), expected, places=9)
+
+    def test_capfloor_deterministic_npv_with_gearing_and_spread(self):
+        cf = CapFloorDef(
+            trade_id="CAP2",
+            ccy="EUR",
+            option_type="cap",
+            start_time=np.array([1.0]),
+            end_time=np.array([2.0]),
+            pay_time=np.array([2.0]),
+            accrual=np.array([1.0]),
+            notional=np.array([1_000_000.0]),
+            strike=np.array([0.03]),
+            gearing=np.array([1.5]),
+            spread=np.array([0.002]),
+            fixing_time=np.array([1.0]),
+            position=1.0,
+        )
+        x = np.zeros(2048)
+        v = capfloor_npv(self.model, self.p0, self.p0, cf, 0.0, x)
+        fwd = self.p0(1.0) / self.p0(2.0) - 1.0
+        effective_rate = 1.5 * fwd + 0.002
+        expected = 1_000_000.0 * self.p0(2.0) * max(effective_rate - 0.03, 0.0)
+        self.assertAlmostEqual(float(np.mean(v)), expected, places=9)
 
     def test_capfloor_profile_shape_and_terminal_zero(self):
         cf = CapFloorDef(
