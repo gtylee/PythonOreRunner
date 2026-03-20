@@ -329,6 +329,67 @@ class TestIrsXvaUtils(unittest.TestCase):
             np.allclose(out["hazard_rates"], np.array([0.012 / 0.6, 0.018 / 0.6]))
         )
 
+    def test_load_ore_default_curve_inputs_accepts_production_style_handle_without_legacy_suffix(self):
+        todaysmarket_xml = """\
+<TodaysMarket>
+  <DefaultCurves id="default">
+    <DefaultCurve name="BANK">Default/USD/financials-North-Anerica-8</DefaultCurve>
+  </DefaultCurves>
+</TodaysMarket>
+"""
+        market_data = """\
+20260101 RECOVERY_RATE/RATE/financials-North-Anerica-8/USD 0.4
+20260101 HAZARD_RATE/RATE/financials-North-Anerica-8/USD/1Y 0.012
+20260101 HAZARD_RATE/RATE/financials-North-Anerica-8/USD/5Y 0.018
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tm = f"{tmp}/todaysmarket.xml"
+            md = f"{tmp}/market.txt"
+            with open(tm, "w", encoding="utf-8") as f:
+                f.write(todaysmarket_xml)
+            with open(md, "w", encoding="utf-8") as f:
+                f.write(market_data)
+            out = load_ore_default_curve_inputs(tm, md, cpty_name="BANK")
+
+        self.assertAlmostEqual(float(out["recovery"]), 0.4)
+        self.assertEqual(out["reference_name"], "financials-North-Anerica-8")
+        self.assertIsNone(out["seniority"])
+        self.assertEqual(out["ccy"], "USD")
+        self.assertTrue(np.allclose(out["hazard_times"], np.array([1.0, 5.0])))
+        self.assertTrue(np.allclose(out["hazard_rates"], np.array([0.012, 0.018])))
+
+    def test_load_ore_default_curve_inputs_accepts_red_pipe_handle(self):
+        todaysmarket_xml = """\
+<TodaysMarket>
+  <DefaultCurves id="default">
+    <DefaultCurve name="BANK">Default/USD/RED:007G93|SNRFOR|USD|XR14</DefaultCurve>
+  </DefaultCurves>
+</TodaysMarket>
+"""
+        market_data = """\
+20260101 RECOVERY_RATE/RATE/007G93/SNRFOR/USD/XR14 0.4
+20260101 CDS/CREDIT_SPREAD/007G93/SNRFOR/USD/XR14/1Y 0.012
+20260101 CDS/CREDIT_SPREAD/007G93/SNRFOR/USD/XR14/5Y 0.018
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tm = f"{tmp}/todaysmarket.xml"
+            md = f"{tmp}/market.txt"
+            with open(tm, "w", encoding="utf-8") as f:
+                f.write(todaysmarket_xml)
+            with open(md, "w", encoding="utf-8") as f:
+                f.write(market_data)
+            out = load_ore_default_curve_inputs(tm, md, cpty_name="BANK")
+
+        self.assertAlmostEqual(float(out["recovery"]), 0.4)
+        self.assertEqual(out["reference_name"], "007G93")
+        self.assertEqual(out["seniority"], "SNRFOR")
+        self.assertEqual(out["ccy"], "USD")
+        self.assertEqual(out["tier"], "XR14")
+        self.assertTrue(np.allclose(out["hazard_times"], np.array([1.0, 5.0])))
+        self.assertTrue(
+            np.allclose(out["hazard_rates"], np.array([0.012 / 0.6, 0.018 / 0.6]))
+        )
+
     def test_load_ore_legs_from_flows_keeps_constant_leg_sign_when_coupons_turn_negative(self):
         from py_ore_tools.irs_xva_utils import load_ore_legs_from_flows
 

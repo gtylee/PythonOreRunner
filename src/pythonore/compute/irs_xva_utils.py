@@ -1307,25 +1307,80 @@ def load_ore_default_curve_inputs(
     if cpty_name not in mapping:
         raise ValueError(f"default curve mapping for '{cpty_name}' not found in todaysmarket.xml")
 
-    # Default/USD/CPTY_A_SR_USD -> name=CPTY_A, seniority=SR, ccy=USD
-    dc = mapping[cpty_name].split("/")
+    dc_handle = mapping[cpty_name]
+    dc = dc_handle.split("/")
     if len(dc) < 3:
-        raise ValueError(f"unexpected default curve handle '{mapping[cpty_name]}'")
-    suffix = dc[-1]
-    m = re.match(r"(.+)_([A-Z]+)_([A-Z]{3})$", suffix)
-    if m is None:
-        raise ValueError(f"cannot parse default curve suffix '{suffix}'")
-    ref_name = m.group(1)
-    seniority = m.group(2)
-    ccy = m.group(3)
+        raise ValueError(f"unexpected default curve handle '{dc_handle}'")
 
-    hazard_prefix = f"HAZARD_RATE/RATE/{ref_name}/{seniority}/{ccy}/"
-    cds_prefix = f"CDS/CREDIT_SPREAD/{ref_name}/{seniority}/{ccy}/"
-    recovery_key = f"RECOVERY_RATE/RATE/{ref_name}/{seniority}/{ccy}"
+    ccy = str(dc[1]).strip().upper() or None
+    suffix = str(dc[-1]).strip()
+    aliases = []
+    seniority_hint = None
+    tier_hint = None
+
+    def _append_alias(value: Optional[str]) -> None:
+        text = str(value or "").strip()
+        if text and text not in aliases:
+            aliases.append(text)
+
+    canonical_ref_name = suffix
+    if suffix.startswith("RED:"):
+        canonical_ref_name = suffix[len("RED:") :]
+    _append_alias(canonical_ref_name)
+    _append_alias(suffix)
+
+    legacy = re.match(r"(.+)_([A-Z0-9_]+)_([A-Z]{3})$", suffix)
+    if legacy is not None:
+        canonical_ref_name = legacy.group(1)
+        _append_alias(legacy.group(1))
+        seniority_hint = legacy.group(2)
+        ccy = legacy.group(3)
+
+    if "|" in suffix:
+        parts = [x.strip() for x in suffix.split("|")]
+        if len(parts) >= 3:
+            ref_token = parts[0]
+            if ref_token.startswith("RED:"):
+                ref_token = ref_token[len("RED:") :]
+            canonical_ref_name = ref_token
+            _append_alias(ref_token)
+            seniority_hint = parts[1] or seniority_hint
+            ccy = (parts[2] or ccy or "").upper() or ccy
+            if len(parts) >= 4:
+                tier_hint = parts[3] or tier_hint
+
+    ref_name = canonical_ref_name
+
+    def _match_credit_key(parts: list[str], *, want_tenor: bool) -> tuple[bool, Optional[str], Optional[str], Optional[str], Optional[float]]:
+        if not parts:
+            return False, None, None, None, None
+        tenor = None
+        body = parts
+        if want_tenor:
+            if len(parts) < 2:
+                return False, None, None, None, None
+            tenor = _tenor_to_years(parts[-1])
+            body = parts[:-1]
+        if not body:
+            return False, None, None, None, tenor
+        ref_token = body[0]
+        if ref_token not in aliases:
+            return False, None, None, None, tenor
+        tail = body[1:]
+        if ccy is not None and ccy not in [x.upper() for x in tail]:
+            return False, None, None, None, tenor
+        if seniority_hint is not None and seniority_hint not in [x.upper() for x in tail]:
+            return False, None, None, None, tenor
+        if tier_hint is not None and tier_hint not in [x.upper() for x in tail]:
+            return False, None, None, None, tenor
+        return True, seniority_hint, ccy, tier_hint, tenor
 
     hazard_points = []
     cds_points = []
     recovery = None
+    matched_seniority = seniority_hint
+    matched_tier = tier_hint
+    matched_ccy = ccy
     with open(market_data_file, encoding="utf-8") as f:
         for line in f:
             s = line.strip()
@@ -1336,17 +1391,34 @@ def load_ore_default_curve_inputs(
                 continue
             key = toks[1]
             val = float(toks[2])
-            if key == recovery_key:
+            key_parts = key.split("/")
+            if key_parts[:2] == ["RECOVERY_RATE", "RATE"]:
+                ok, sen, ccy_match, tier, _ = _match_credit_key(key_parts[2:], want_tenor=False)
+                if not ok:
+                    continue
                 recovery = val
-            elif key.startswith(hazard_prefix):
-                tenor = key[len(hazard_prefix) :]
-                hazard_points.append((_tenor_to_years(tenor), val))
-            elif key.startswith(cds_prefix):
-                tenor = key[len(cds_prefix) :]
-                cds_points.append((_tenor_to_years(tenor), val))
+                matched_seniority = sen or matched_seniority
+                matched_ccy = ccy_match or matched_ccy
+                matched_tier = tier or matched_tier
+            elif key_parts[:2] == ["HAZARD_RATE", "RATE"]:
+                ok, sen, ccy_match, tier, tenor = _match_credit_key(key_parts[2:], want_tenor=True)
+                if ok and tenor is not None:
+                    hazard_points.append((tenor, val))
+                    matched_seniority = sen or matched_seniority
+                    matched_ccy = ccy_match or matched_ccy
+                    matched_tier = tier or matched_tier
+            elif key_parts[:2] == ["CDS", "CREDIT_SPREAD"]:
+                ok, sen, ccy_match, tier, tenor = _match_credit_key(key_parts[2:], want_tenor=True)
+                if ok and tenor is not None:
+                    cds_points.append((tenor, val))
+                    matched_seniority = sen or matched_seniority
+                    matched_ccy = ccy_match or matched_ccy
+                    matched_tier = tier or matched_tier
 
     if recovery is None:
-        raise ValueError(f"recovery not found for key '{recovery_key}'")
+        raise ValueError(
+            f"recovery not found for default curve handle '{dc_handle}' using aliases {aliases}"
+        )
     if not hazard_points and cds_points:
         # ORE builds a default term structure from CDS spreads plus recovery.
         # For the lightweight Python path we use the same first-order flat-hazard
@@ -1355,17 +1427,18 @@ def load_ore_default_curve_inputs(
         hazard_points = sorted((t, s / lgd) for t, s in cds_points)
     if not hazard_points:
         raise ValueError(
-            f"hazard curve points not found for prefix '{hazard_prefix}' or '{cds_prefix}'"
+            f"hazard curve points not found for default curve handle '{dc_handle}' using aliases {aliases}"
         )
     hazard_points = sorted(hazard_points, key=lambda p: p[0])
     times = np.asarray([p[0] for p in hazard_points], dtype=float)
     hazard = np.asarray([p[1] for p in hazard_points], dtype=float)
     return {
         "counterparty": cpty_name,
-        "curve_handle": mapping[cpty_name],
+        "curve_handle": dc_handle,
         "reference_name": ref_name,
-        "seniority": seniority,
-        "ccy": ccy,
+        "seniority": matched_seniority,
+        "ccy": matched_ccy,
+        "tier": matched_tier,
         "recovery": float(recovery),
         "hazard_times": times,
         "hazard_rates": hazard,

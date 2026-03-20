@@ -843,15 +843,15 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(summary["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
         self.assertIn("FloatingLegData/Index not found", summary["diagnostics"]["fallback_error"])
 
-        def test_price_case_falls_back_to_reference_on_unsupported_product_error(self):
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                input_dir = root / "Input"
-                input_dir.mkdir()
-                ore_xml = input_dir / "ore.xml"
-                (input_dir / "simulation.xml").write_text("<Simulation />", encoding="utf-8")
-                ore_xml.write_text(
-                    """<ORE>
+    def test_price_case_falls_back_to_reference_on_unsupported_product_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            (input_dir / "simulation.xml").write_text("<Simulation />", encoding="utf-8")
+            ore_xml.write_text(
+                """<ORE>
   <Setup>
     <Parameter name="asofDate">2020-12-28</Parameter>
     <Parameter name="inputPath">Input</Parameter>
@@ -872,6 +872,9 @@ class TestOreSnapshotCli(unittest.TestCase):
             )
             args = ore_snapshot_cli.build_parser().parse_args([str(ore_xml), "--output-root", str(root / "artifacts")])
             with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value={}), patch(
+                "py_ore_tools.ore_snapshot_cli._supports_native_price_only",
+                return_value=True,
+            ), patch(
                 "py_ore_tools.ore_snapshot_cli._compute_price_only_case",
                 side_effect=ValueError("FloatingLegData/Index not found for trade 'X' in portfolio XML"),
             ), patch(
@@ -893,6 +896,60 @@ class TestOreSnapshotCli(unittest.TestCase):
                 summary = ore_snapshot_cli._run_case(ore_xml, args, artifact_root=root / "artifacts")
         self.assertEqual(summary["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
         self.assertIn("FloatingLegData/Index not found", summary["diagnostics"]["fallback_error"])
+
+    def test_price_case_falls_back_gracefully_when_quantlib_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir()
+            ore_xml = input_dir / "ore.xml"
+            (input_dir / "simulation.xml").write_text("<Simulation />", encoding="utf-8")
+            ore_xml.write_text(
+                """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2020-12-28</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+  </Setup>
+  <Analytics>
+    <Analytic type="npv">
+      <Parameter name="active">Y</Parameter>
+    </Analytic>
+    <Analytic type="simulation">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            args = ore_snapshot_cli.build_parser().parse_args([str(ore_xml), "--output-root", str(root / "artifacts")])
+            with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value={}), patch(
+                "py_ore_tools.ore_snapshot_cli._supports_native_price_only",
+                return_value=True,
+            ), patch(
+                "py_ore_tools.ore_snapshot_cli._compute_price_only_case",
+                side_effect=ImportError("QuantLib Python bindings are required for swaption price-only support"),
+            ), patch(
+                "py_ore_tools.ore_snapshot_cli._ore_reference_summary",
+                return_value={
+                    "ore_xml": str(ore_xml),
+                    "modes": ["price"],
+                    "trade_id": "X",
+                    "counterparty": "CPTY",
+                    "netting_set_id": "CPTY",
+                    "maturity_date": "",
+                    "maturity_time": 0.0,
+                    "pricing": {"ore_t0_npv": 1.0},
+                    "diagnostics": {"engine": "ore_reference_price_only"},
+                },
+            ), patch("py_ore_tools.ore_snapshot_cli._copy_native_ore_reports"), patch(
+                "py_ore_tools.ore_snapshot_cli._write_ore_compatible_reports"
+            ):
+                summary = ore_snapshot_cli._run_case(ore_xml, args, artifact_root=root / "artifacts")
+        self.assertEqual(summary["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
+        self.assertIn("QuantLib Python bindings are required", summary["diagnostics"]["fallback_error"])
 
     def test_case_run_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

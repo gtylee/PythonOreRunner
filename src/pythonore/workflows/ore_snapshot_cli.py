@@ -5161,6 +5161,10 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
     message = str(exc)
     return (
         isinstance(exc, FileNotFoundError)
+        or (
+            isinstance(exc, ImportError)
+            and "QuantLib Python bindings are required" in message
+        )
         or "FloatingLegData/Index not found" in message
         or "no equity smile quotes found" in message
         or "spot quote" in message
