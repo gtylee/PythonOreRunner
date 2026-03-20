@@ -4486,8 +4486,6 @@ def _compute_snapshot_case(
             npv_paths=npv,
             y_paths=y,
         )
-        print("Classic valuation summary [s]: update=0.00, calibration=0.00, initScenario=0.00, qlUpdate=0.00, calculator=0.00, cpty=0.00, fixing=0.00")
-        print("SimMarket update summary [s]: pre=0.00, date=0.00, scenarioFetch=0.00, applyScenario=0.00, refresh=0.00, fixings=0.00, asd=0.00")
     else:
         npv_xva = npv
 
@@ -4632,9 +4630,39 @@ def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None
     from pythonore.runtime.sensitivity import OreSnapshotPythonLgmSensitivityComparator
 
     case_dir = ore_xml.resolve().parents[1]
+    active = _parse_analytics(ore_xml)
+    resolved_metric = str(metric or "CVA").strip().upper()
+    if resolved_metric == "CVA" and active["price"] and not active["xva"]:
+        resolved_metric = "NPV"
+    sensi_params = _parse_sensitivity_analytic_params(ore_xml)
+    factor_shifts, curve_factor_specs, factor_labels = _parse_sensitivity_factor_setup(
+        ore_xml, sensi_params=sensi_params
+    )
     comparator, snapshot = OreSnapshotPythonLgmSensitivityComparator.from_case_dir(case_dir, ore_file=ore_xml.name)
-    result = comparator.compare(snapshot, metric=metric, netting_set_id=netting_set)
+    result = comparator.compare(
+        snapshot,
+        metric=resolved_metric,
+        netting_set_id=netting_set,
+        factor_shifts=factor_shifts,
+        curve_factor_specs=curve_factor_specs,
+        factor_labels=factor_labels,
+        native_only_output_mode="bump_change",
+    )
     comparisons = result.get("comparisons", [])
+    python_rows = [
+        {
+            "normalized_factor": row.normalized_factor,
+            "ore_factor": row.ore_factor,
+            "python_quote_key": row.raw_quote_key,
+            "shift_size": float(row.shift_size),
+            "base_value": float(row.base_value),
+            "base_metric_value": float(row.base_metric_value),
+            "up_metric_value": float(row.bumped_up_metric_value),
+            "down_metric_value": float(row.bumped_down_metric_value),
+            "delta": float(row.delta),
+        }
+        for row in result.get("python", [])
+    ]
     top_rows = [
         {
             "normalized_factor": row.normalized_factor,
@@ -4648,7 +4676,7 @@ def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None
         for row in comparisons[:top]
     ]
     return {
-        "metric": result.get("metric", metric),
+        "metric": result.get("metric", resolved_metric),
         "python_factor_count": len(result.get("python", [])),
         "ore_factor_count": len(result.get("ore", [])),
         "matched_factor_count": len(comparisons),
@@ -4657,6 +4685,10 @@ def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None
         "unsupported_factor_count": len(result.get("unsupported_factors", [])),
         "notes": list(result.get("notes", [])),
         "top_comparisons": top_rows,
+        "python_rows": python_rows,
+        "scenario_rows": _build_sensitivity_scenario_rows(python_rows),
+        "sensitivity_output_file": str(sensi_params.get("sensitivityOutputFile") or "sensitivity.csv"),
+        "scenario_output_file": str(sensi_params.get("scenarioOutputFile") or "scenario.csv"),
     }
 
 
@@ -4679,6 +4711,166 @@ def _parse_analytics(ore_xml: Path) -> dict[str, bool]:
         elif analytic_type == "sensitivity":
             active["sensi"] = True
     return active
+
+
+def _parse_sensitivity_analytic_params(ore_xml: Path) -> dict[str, str]:
+    root = ET.parse(ore_xml).getroot()
+    analytic = root.find("./Analytics/Analytic[@type='sensitivity']")
+    if analytic is None:
+        return {}
+    return {
+        (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+        for node in analytic.findall("./Parameter")
+        if (node.attrib.get("name", "") or "").strip()
+    }
+
+
+def _resolve_case_input_dir(ore_xml: Path) -> Path:
+    ore_root = ET.parse(ore_xml).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    base = ore_xml.resolve().parent
+    run_dir = base.parent
+    return (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+
+
+def _resolve_case_input_path(ore_xml: Path, value: str) -> Path:
+    candidate = Path(str(value or "").strip())
+    if candidate.is_absolute():
+        return candidate
+    return (_resolve_case_input_dir(ore_xml) / candidate).resolve()
+
+
+def _parse_sensitivity_factor_setup(
+    ore_xml: Path,
+    *,
+    sensi_params: dict[str, str],
+) -> tuple[dict[str, float], dict[str, dict[str, Any]], dict[str, str]]:
+    sensitivity_cfg = str(sensi_params.get("sensitivityConfigFile") or "").strip()
+    if not sensitivity_cfg:
+        return {}, {}, {}
+    sensitivity_xml = _resolve_case_input_path(ore_xml, sensitivity_cfg)
+    if not sensitivity_xml.exists():
+        return {}, {}, {}
+    root = ET.parse(sensitivity_xml).getroot()
+    factor_shifts: dict[str, float] = {}
+    curve_factor_specs: dict[str, dict[str, Any]] = {}
+    factor_labels: dict[str, str] = {}
+
+    def _tenor_list(node: ET.Element) -> list[str]:
+        text = (node.findtext("./ShiftTenors") or "").strip()
+        return [item.strip().upper() for item in text.split(",") if item.strip()]
+
+    def _shift_size(node: ET.Element) -> float:
+        text = (node.findtext("./ShiftSize") or "0.0001").strip()
+        try:
+            return float(text)
+        except ValueError:
+            return 1.0e-4
+
+    for curve in root.findall("./DiscountCurves/DiscountCurve"):
+        ccy = (curve.attrib.get("ccy", "") or "").strip().upper()
+        tenors = _tenor_list(curve)
+        if not ccy or not tenors:
+            continue
+        shift = _shift_size(curve)
+        node_times = [_tenor_to_years(tenor) for tenor in tenors]
+        for idx, tenor in enumerate(tenors):
+            normalized = f"zero:{ccy}:{tenor}"
+            factor_shifts[normalized] = shift
+            factor_labels[normalized] = f"DiscountCurve/{ccy}/{idx}/{tenor}"
+            curve_factor_specs[normalized] = {
+                "kind": "discount",
+                "ccy": ccy,
+                "target_time": _tenor_to_years(tenor),
+                "node_times": node_times,
+                "ore_factor": factor_labels[normalized],
+            }
+
+    for curve in root.findall("./IndexCurves/IndexCurve"):
+        index_name = (curve.attrib.get("index", "") or "").strip().upper()
+        tenors = _tenor_list(curve)
+        if not index_name or not tenors:
+            continue
+        shift = _shift_size(curve)
+        bits = index_name.split("-")
+        ccy = bits[0] if bits else ""
+        index_tenor = bits[-1] if bits else ""
+        node_times = [_tenor_to_years(tenor) for tenor in tenors]
+        for idx, tenor in enumerate(tenors):
+            normalized = f"fwd:{ccy}:{index_tenor}:{tenor}"
+            factor_shifts[normalized] = shift
+            factor_labels[normalized] = f"IndexCurve/{index_name}/{idx}/{tenor}"
+            curve_factor_specs[normalized] = {
+                "kind": "forward",
+                "ccy": ccy,
+                "index_tenor": index_tenor,
+                "target_time": _tenor_to_years(tenor),
+                "node_times": node_times,
+                "ore_factor": factor_labels[normalized],
+            }
+
+    for curve in root.findall("./CreditCurves/CreditCurve"):
+        name = (curve.attrib.get("name", "") or "").strip().upper()
+        tenors = _tenor_list(curve)
+        if not name or not tenors:
+            continue
+        shift = _shift_size(curve)
+        node_times = [_tenor_to_years(tenor) for tenor in tenors]
+        for idx, tenor in enumerate(tenors):
+            normalized = f"hazard:{name}:{tenor}"
+            factor_shifts[normalized] = shift
+            factor_labels[normalized] = f"SurvivalProbability/{name}/{idx}/{tenor}"
+            curve_factor_specs[normalized] = {
+                "kind": "credit",
+                "name": name,
+                "target_time": _tenor_to_years(tenor),
+                "node_times": node_times,
+                "ore_factor": factor_labels[normalized],
+            }
+
+    for fx_node in root.findall("./FxSpots/FxSpot"):
+        pair = (fx_node.attrib.get("ccypair", "") or fx_node.attrib.get("pair", "") or "").strip().upper()
+        if not pair:
+            continue
+        normalized = f"fx:{pair.replace('/', '')}"
+        factor_shifts[normalized] = _shift_size(fx_node)
+        factor_labels[normalized] = f"FXSpot/{pair.replace('/', '')}"
+
+    return factor_shifts, curve_factor_specs, factor_labels
+
+
+def _build_sensitivity_scenario_rows(python_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in python_rows:
+        base_metric = float(row.get("base_metric_value") or 0.0)
+        shift_size = float(row.get("shift_size") or 0.0)
+        factor = str(row.get("ore_factor") or row.get("normalized_factor") or "")
+        rows.append(
+            {
+                "factor": factor,
+                "direction": "Up",
+                "base_metric_value": base_metric,
+                "shift_size_1": shift_size,
+                "shift_size_2": "#N/A",
+                "scenario_metric_value": float(row.get("up_metric_value") or 0.0),
+                "difference": float(row.get("up_metric_value") or 0.0) - base_metric,
+            }
+        )
+        rows.append(
+            {
+                "factor": factor,
+                "direction": "Down",
+                "base_metric_value": base_metric,
+                "shift_size_1": shift_size,
+                "shift_size_2": "#N/A",
+                "scenario_metric_value": float(row.get("down_metric_value") or 0.0),
+                "difference": float(row.get("down_metric_value") or 0.0) - base_metric,
+            }
+        )
+    return rows
 
 
 def _has_active_simulation_analytic(ore_xml: Path) -> bool:
@@ -4725,7 +4917,7 @@ def _flatten_summary_rows(case_summary: dict[str, Any]) -> list[dict[str, Any]]:
     sensi = case_summary.get("sensitivity")
     if isinstance(sensi, dict):
         for key, value in sensi.items():
-            if key == "top_comparisons":
+            if key in {"top_comparisons", "python_rows", "scenario_rows"}:
                 continue
             rows.append({"section": "sensitivity", "field": key, "value": value})
     return rows
@@ -5482,6 +5674,7 @@ def _fmt_float(value: float, digits: int = 6) -> str:
 def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, Any]) -> None:
     pricing = case_summary.get("pricing") or {}
     xva = case_summary.get("xva") or {}
+    sensi = case_summary.get("sensitivity") or {}
     exposure_dates = list(case_summary.get("exposure_dates") or [])
     exposure_times = list(case_summary.get("exposure_times") or [])
     py_epe = list(case_summary.get("py_epe") or [])
@@ -5518,6 +5711,56 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             writer = csv.writer(handle)
             writer.writerow(npv_headers)
             writer.writerow(npv_row)
+    if sensi and str(sensi.get("metric", "")).strip().upper() in {"NPV", "PV"}:
+        sensitivity_rows = list(sensi.get("python_rows") or [])
+        scenario_rows = list(sensi.get("scenario_rows") or [])
+        sensitivity_filename = str(sensi.get("sensitivity_output_file") or "sensitivity.csv")
+        scenario_filename = str(sensi.get("scenario_output_file") or "scenario.csv")
+        if sensitivity_rows:
+            sensitivity_headers = [
+                "#TradeId", "IsPar", "Factor_1", "ShiftSize_1", "Factor_2", "ShiftSize_2",
+                "Currency", "Base NPV", "Delta", "Gamma",
+            ]
+            with open(case_out_dir / sensitivity_filename, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(sensitivity_headers)
+                for row in sensitivity_rows:
+                    writer.writerow(
+                        [
+                            trade_id,
+                            "false",
+                            str(row.get("ore_factor") or row.get("normalized_factor") or ""),
+                            _fmt_float(float(row.get("shift_size") or 0.0)),
+                            "",
+                            _fmt_float(0.0),
+                            str(pricing.get("currency") or pricing.get("report_ccy") or "EUR"),
+                            _fmt_float(float(row.get("base_metric_value") or 0.0), digits=2),
+                            _fmt_float(float(row.get("delta") or 0.0), digits=2),
+                            _fmt_float(0.0, digits=2),
+                        ]
+                    )
+        if scenario_rows:
+            scenario_headers = [
+                "#TradeId", "Factor", "Up/Down", "Base NPV", "ShiftSize_1",
+                "ShiftSize_2", "Scenario NPV", "Difference",
+            ]
+            with open(case_out_dir / scenario_filename, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(scenario_headers)
+                for row in scenario_rows:
+                    shift_size_2 = row.get("shift_size_2", "#N/A")
+                    writer.writerow(
+                        [
+                            trade_id,
+                            str(row.get("factor") or ""),
+                            str(row.get("direction") or ""),
+                            _fmt_float(float(row.get("base_metric_value") or 0.0), digits=2),
+                            _fmt_float(float(row.get("shift_size_1") or 0.0)),
+                            shift_size_2 if isinstance(shift_size_2, str) else _fmt_float(float(shift_size_2)),
+                            _fmt_float(float(row.get("scenario_metric_value") or 0.0), digits=2),
+                            _fmt_float(float(row.get("difference") or 0.0), digits=2),
+                        ]
+                    )
     if xva:
         xva_headers = [
             "#TradeId", "NettingSetId", "CVA", "DVA", "FBA", "FCA", "FBAexOwnSP", "FCAexOwnSP",
@@ -5674,7 +5917,7 @@ def _render_case_markdown(case_summary: dict[str, Any]) -> str:
     if sensi:
         lines.extend(["", "## Sensitivity", ""])
         for key, value in sensi.items():
-            if key == "top_comparisons":
+            if key in {"top_comparisons", "python_rows", "scenario_rows"}:
                 continue
             lines.append(f"- {key}: `{value}`")
     validation = case_summary.get("input_validation")
@@ -6302,7 +6545,7 @@ def _emit_ore_style_header(modes: ModeSelection, args: argparse.Namespace) -> No
         _ore_ok("XVA: Build Today's Market")
         _ore_ok("XVA: Build Portfolio")
     if modes.sensi:
-        _ore_ok("Sensitivity: Build Scenario Generator")
+        _ore_ok("Sensitivity: Prepare Analysis")
 
 
 def _emit_ore_style_footer(modes: ModeSelection, elapsed_seconds: float) -> None:

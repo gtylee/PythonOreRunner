@@ -40,6 +40,7 @@ SWAPTION_SMILE_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_19" / "In
 SWAPTION_LONG_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore_swaption.xml"
 SWAPTION_MIXED_CASE_XML = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_swap_swaptions.xml"
 BERMUDAN_CASE_XML = TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_3" / "Input" / "ore_bermudans.xml"
+BERMUDAN_SENSI_CASE_XML = TOOLS_DIR / "parity_artifacts" / "bermudan_sensitivity_compare" / "berm_200bp" / "Input" / "ore.xml"
 CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
 INFLATION_CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore_capfloor.xml"
 TA001_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Academy" / "TA001_Equity_Option" / "Input" / "ore.xml"
@@ -1673,6 +1674,108 @@ class TestOreSnapshotCli(unittest.TestCase):
             with open(Path(tmp) / "npv.csv", newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
         self.assertEqual(rows[0]["TradeType"], "Bond")
+
+    def test_parse_sensitivity_factor_setup_reads_curve_nodes(self):
+        params = ore_snapshot_cli._parse_sensitivity_analytic_params(BERMUDAN_SENSI_CASE_XML)
+        factor_shifts, curve_specs, factor_labels = ore_snapshot_cli._parse_sensitivity_factor_setup(
+            BERMUDAN_SENSI_CASE_XML,
+            sensi_params=params,
+        )
+        self.assertEqual(factor_shifts["zero:EUR:10Y"], 1.0e-4)
+        self.assertEqual(factor_shifts["fwd:EUR:6M:10Y"], 1.0e-4)
+        self.assertEqual(factor_labels["zero:EUR:10Y"], "DiscountCurve/EUR/0/10Y")
+        self.assertEqual(factor_labels["fwd:EUR:6M:10Y"], "IndexCurve/EUR-EURIBOR-6M/0/10Y")
+        self.assertEqual(curve_specs["zero:EUR:10Y"]["kind"], "discount")
+        self.assertEqual(curve_specs["fwd:EUR:6M:10Y"]["kind"], "forward")
+
+    def test_run_sensitivity_case_uses_native_npv_mode_for_pricing_sensitivity(self):
+        calls = {}
+
+        class _FakeComparator:
+            def compare(self, snapshot, **kwargs):
+                calls.update(kwargs)
+                row = SimpleNamespace(
+                    normalized_factor="zero:EUR:10Y",
+                    raw_quote_key="curve:DiscountCurve/EUR/0/10Y",
+                    ore_factor="DiscountCurve/EUR/0/10Y",
+                    shift_size=1.0e-4,
+                    base_value=0.0,
+                    base_metric_value=12.0,
+                    bumped_up_metric_value=12.25,
+                    bumped_down_metric_value=11.75,
+                    delta=0.25,
+                )
+                return {
+                    "metric": kwargs["metric"],
+                    "python": [row],
+                    "ore": [],
+                    "comparisons": [],
+                    "unmatched_ore": [],
+                    "unmatched_python": ["zero:EUR:10Y"],
+                    "unsupported_factors": [],
+                    "notes": ["native only"],
+                }
+
+        with patch(
+            "pythonore.runtime.sensitivity.OreSnapshotPythonLgmSensitivityComparator.from_case_dir",
+            return_value=(_FakeComparator(), object()),
+        ):
+            result = ore_snapshot_cli._run_sensitivity_case(
+                BERMUDAN_SENSI_CASE_XML,
+                metric="CVA",
+                netting_set=None,
+                top=5,
+            )
+        self.assertEqual(calls["metric"], "NPV")
+        self.assertIn("zero:EUR:10Y", calls["factor_shifts"])
+        self.assertEqual(result["metric"], "NPV")
+        self.assertEqual(result["python_factor_count"], 1)
+        self.assertEqual(result["scenario_rows"][0]["direction"], "Up")
+        self.assertEqual(result["sensitivity_output_file"], "sensitivity.csv")
+
+    def test_write_ore_reports_emits_native_sensitivity_and_scenario_csv(self):
+        case_summary = {
+            "trade_id": "Trade_1",
+            "netting_set_id": "CPTY_A",
+            "counterparty": "CPTY_A",
+            "maturity_date": "2030-01-01",
+            "maturity_time": 5.0,
+            "pricing": {"trade_type": "Swap", "py_t0_npv": 10.0, "currency": "EUR"},
+            "sensitivity": {
+                "metric": "NPV",
+                "python_rows": [
+                    {
+                        "normalized_factor": "zero:EUR:10Y",
+                        "ore_factor": "DiscountCurve/EUR/0/10Y",
+                        "shift_size": 1.0e-4,
+                        "base_metric_value": 10.0,
+                        "delta": 0.25,
+                    }
+                ],
+                "scenario_rows": [
+                    {
+                        "factor": "DiscountCurve/EUR/0/10Y",
+                        "direction": "Up",
+                        "base_metric_value": 10.0,
+                        "shift_size_1": 1.0e-4,
+                        "shift_size_2": "#N/A",
+                        "scenario_metric_value": 10.25,
+                        "difference": 0.25,
+                    }
+                ],
+                "sensitivity_output_file": "sensitivity.csv",
+                "scenario_output_file": "scenario.csv",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ore_snapshot_cli._write_ore_compatible_reports(Path(tmp), case_summary)
+            with open(Path(tmp) / "sensitivity.csv", newline="", encoding="utf-8") as handle:
+                sensitivity_rows = list(csv.DictReader(handle))
+            with open(Path(tmp) / "scenario.csv", newline="", encoding="utf-8") as handle:
+                scenario_rows = list(csv.DictReader(handle))
+        self.assertEqual(sensitivity_rows[0]["Factor_1"], "DiscountCurve/EUR/0/10Y")
+        self.assertEqual(scenario_rows[0]["Up/Down"], "Up")
+        self.assertEqual(scenario_rows[0]["Difference"], "0.25")
 
     def test_callable_bond_price_only_case_uses_python_dispatch(self):
         fake_result = {

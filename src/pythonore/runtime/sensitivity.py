@@ -18,6 +18,7 @@ from pythonore.runtime.runtime import XVAEngine
 class PythonSensitivityEntry:
     raw_quote_key: str
     normalized_factor: str
+    ore_factor: str
     shift_size: float
     base_value: float
     base_metric_value: float
@@ -75,16 +76,21 @@ class OreSnapshotPythonLgmSensitivityComparator:
         factor_shifts: Optional[Dict[str, float]] = None,
         bump_modes: Optional[Dict[str, str]] = None,
         curve_factor_specs: Optional[Dict[str, Dict[str, object]]] = None,
+        factor_labels: Optional[Dict[str, str]] = None,
         output_mode: str = "derivative",
     ) -> List[PythonSensitivityEntry]:
         factor_shifts = factor_shifts or {}
         bump_modes = bump_modes or {}
         curve_factor_specs = curve_factor_specs or {}
+        factor_labels = factor_labels or {}
         quote_map = self._discover_supported_quotes(snapshot)
         if factor_shifts:
-            requested = [f for f in factor_shifts if f in quote_map]
+            requested = [
+                f for f in factor_shifts
+                if f in quote_map or f in curve_factor_specs
+            ]
         else:
-            requested = sorted(quote_map)
+            requested = sorted(set(quote_map).union(curve_factor_specs))
         if not requested:
             return []
 
@@ -96,7 +102,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         )
         frozen_float_spreads = native_snapshot.config.params.get("python.frozen_float_spreads")
         base_result = self.engine.create_session(native_snapshot).run(return_cubes=False)
-        base_metric_value = float(base_result.xva_by_metric.get(metric, 0.0))
+        base_metric_value = self._result_metric_value(base_result, metric)
 
         entries: List[PythonSensitivityEntry] = []
         for normalized_factor in requested:
@@ -140,8 +146,8 @@ class OreSnapshotPythonLgmSensitivityComparator:
                 base_value = float(quote.value)
             up_result = self.engine.create_session(up_snapshot).run(return_cubes=False)
             down_result = self.engine.create_session(down_snapshot).run(return_cubes=False)
-            up_metric = float(up_result.xva_by_metric.get(metric, 0.0))
-            down_metric = float(down_result.xva_by_metric.get(metric, 0.0))
+            up_metric = self._result_metric_value(up_result, metric)
+            down_metric = self._result_metric_value(down_result, metric)
             if output_mode == "bump_change":
                 delta = up_metric - base_metric_value
             else:
@@ -150,6 +156,14 @@ class OreSnapshotPythonLgmSensitivityComparator:
                 PythonSensitivityEntry(
                     raw_quote_key=raw_label,
                     normalized_factor=normalized_factor,
+                    ore_factor=str(
+                        factor_labels.get(normalized_factor)
+                        or (
+                            curve_spec.get("ore_factor")
+                            if curve_spec is not None
+                            else _normalized_factor_to_ore_factor(normalized_factor)
+                        )
+                    ),
                     shift_size=shift_size,
                     base_value=base_value,
                     base_metric_value=base_metric_value,
@@ -208,6 +222,9 @@ class OreSnapshotPythonLgmSensitivityComparator:
         output_dir: str | Path | None = None,
         netting_set_id: Optional[str] = None,
         factor_shifts: Optional[Dict[str, float]] = None,
+        curve_factor_specs: Optional[Dict[str, Dict[str, object]]] = None,
+        factor_labels: Optional[Dict[str, str]] = None,
+        native_only_output_mode: str = "bump_change",
     ) -> Dict[str, object]:
         if output_dir is None:
             output_dir = snapshot.config.params.get("outputPath", "")
@@ -216,43 +233,32 @@ class OreSnapshotPythonLgmSensitivityComparator:
 
         ore_entries = self.load_ore_zero_sensitivities(output_dir, metric=metric, netting_set_id=netting_set_id)
         factor_shifts = dict(factor_shifts or {})
+        curve_factor_specs = dict(curve_factor_specs or {})
+        factor_labels = dict(factor_labels or {})
         bump_modes: Dict[str, str] = {}
         if ore_entries:
-            curve_factor_specs = _curve_factor_specs_from_ore_entries(ore_entries)
+            ore_curve_factor_specs = _curve_factor_specs_from_ore_entries(ore_entries)
+            curve_factor_specs = {**curve_factor_specs, **ore_curve_factor_specs}
             for entry in ore_entries:
                 if entry.shift_size != 0.0:
                     factor_shifts.setdefault(entry.normalized_factor, entry.shift_size)
                 if entry.normalized_factor.startswith("hazard:"):
                     bump_modes.setdefault(entry.normalized_factor, "survival_probability")
-        else:
-            curve_factor_specs = {}
+                factor_labels.setdefault(entry.normalized_factor, entry.factor)
         if not factor_shifts:
-            resolved_csv = self._resolve_ore_sensitivity_file(
-                output_dir, f"xva_zero_sensitivity_{metric.lower()}.csv"
-            )
-            legacy_path = Path(output_dir) / f"{metric.lower()}_sensitivity_nettingset_{netting_set_id or 'CPTY_A'}.csv"
-            note = (
-                f"No ORE zero-sensitivity rows found in '{resolved_csv}'. "
-                "Python sensitivities were not run because there is no aligned factor set to compare against."
-            )
-            if legacy_path.exists():
-                note += f" Legacy file '{legacy_path.name}' exists but uses a different shape and is not yet mapped."
-            return {
-                "metric": metric,
-                "python": [],
-                "ore": ore_entries,
-                "comparisons": [],
-                "unmatched_python": [],
-                "unmatched_ore": sorted({entry.normalized_factor for entry in ore_entries}),
-                "notes": [note],
-            }
+            notes = [
+                "No ORE zero-sensitivity rows were found; running native finite-difference sensitivities only."
+            ]
+        else:
+            notes = []
         python_entries = self.compute_python_sensitivities(
             snapshot,
             metric=metric,
             factor_shifts=factor_shifts,
             bump_modes=bump_modes,
             curve_factor_specs=curve_factor_specs,
-            output_mode="bump_change" if ore_entries else "derivative",
+            factor_labels=factor_labels,
+            output_mode="bump_change" if ore_entries else native_only_output_mode,
         )
         unsupported_prefixes = ("recovery:",)
         unsupported_factors = sorted(
@@ -267,7 +273,6 @@ class OreSnapshotPythonLgmSensitivityComparator:
                 if e.normalized_factor.startswith(unsupported_prefixes)
             }
         )
-        notes: List[str] = []
         if unsupported_factors:
             notes.append(
                 "Recovery sensitivity parity is not implemented in the Python snapshot path and is excluded "
@@ -308,6 +313,12 @@ class OreSnapshotPythonLgmSensitivityComparator:
             "unsupported_factors": unsupported_factors,
             "notes": notes,
         }
+
+    def _result_metric_value(self, result, metric: str) -> float:
+        metric_name = str(metric or "").strip().upper()
+        if metric_name in {"NPV", "PV"}:
+            return float(getattr(result, "pv_total", 0.0))
+        return float(getattr(result, "xva_by_metric", {}).get(metric_name, 0.0))
 
     def _resolve_ore_sensitivity_file(self, output_dir: str | Path, file_name: str) -> Path:
         output_dir = Path(output_dir)
@@ -507,6 +518,24 @@ def normalize_ore_factor(factor: str) -> Optional[str]:
     if head == "FXSpot" and len(parts) >= 2:
         return f"fx:{parts[1].upper()}"
     return None
+
+
+def _normalized_factor_to_ore_factor(normalized_factor: str) -> str:
+    parts = str(normalized_factor).strip().split(":")
+    if len(parts) < 2:
+        return normalized_factor
+    head = parts[0].lower()
+    if head == "zero" and len(parts) >= 3:
+        return f"DiscountCurve/{parts[1].upper()}/0/{parts[2].upper()}"
+    if head == "fwd" and len(parts) >= 4:
+        return f"IndexCurve/{parts[1].upper()}-{parts[2].upper()}/0/{parts[3].upper()}"
+    if head == "hazard" and len(parts) >= 3:
+        return f"SurvivalProbability/{parts[1].upper()}/0/{parts[2].upper()}"
+    if head == "recovery" and len(parts) >= 2:
+        return f"RecoveryRate/{parts[1].upper()}"
+    if head == "fx" and len(parts) >= 2:
+        return f"FXSpot/{parts[1].upper()}"
+    return normalized_factor
 
 
 def _curve_factor_specs_from_ore_entries(
