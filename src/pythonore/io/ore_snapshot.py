@@ -1769,7 +1769,7 @@ def extract_market_instruments_by_currency(
                 quote = float(toks[2])
             except ValueError:
                 continue
-            parsed = _parse_market_instrument_key(key)
+            parsed = _parse_market_instrument_key(key, asof_date=asof_date)
             if parsed is None:
                 continue
             instrument_type = str(parsed["instrument_type"]).upper()
@@ -1818,7 +1818,7 @@ def extract_market_instruments_by_currency_from_quotes(
             quote = float(q.get("value"))
         except Exception:
             continue
-        parsed = _parse_market_instrument_key(key)
+        parsed = _parse_market_instrument_key(key, asof_date=asof_date)
         if parsed is None:
             continue
         instrument_type = str(parsed["instrument_type"]).upper()
@@ -1958,6 +1958,68 @@ def quote_dicts_from_pairs(
     ``quote_dicts_from_pairs([("ZERO/RATE/USD/1Y", 0.05)])``
     """
     return [{"key": str(k), "value": float(v)} for k, v in quote_pairs]
+
+
+def _forward_family_tokens(index_name: str) -> set[str]:
+    text = str(index_name or "").strip().upper()
+    if text.endswith("1D") or "EONIA" in text or "SOFR" in text:
+        return {"1D"}
+    if text.endswith("1M"):
+        return {"1M"}
+    if text.endswith("3M"):
+        return {"1M", "3M"}
+    if text.endswith("6M"):
+        return {"1M", "3M", "6M"}
+    if text.endswith("12M"):
+        return {"1M", "3M", "6M", "12M"}
+    return set()
+
+
+def _fit_discount_and_forward_curves_from_market(
+    ore_xml_path: str | Path,
+    *,
+    asof_date: str,
+    currency: str,
+    forward_index: str,
+) -> Dict[str, object]:
+    payload = extract_market_instruments_by_currency(ore_xml_path).get(str(currency).upper())
+    if payload is None:
+        raise ValueError("discount/forward curve extraction is incomplete")
+    discount_instruments = list(payload.get("instruments", []))
+    if not discount_instruments:
+        raise ValueError("discount/forward curve extraction is incomplete")
+    discount_fit = _fit_curve_from_instruments(
+        asof_date,
+        discount_instruments,
+        fit_method="weighted_zero_logdf_v1",
+        fit_grid_mode="instrument",
+        dense_step_years=0.25,
+        future_convexity_mode="external_adjusted_fra",
+        future_model_params=None,
+    )
+    family_tokens = _forward_family_tokens(forward_index)
+    forward_instruments = [
+        ins
+        for ins in discount_instruments
+        if str(ins.get("instrument_type", "")).upper() == "ZERO"
+        or (
+            str(ins.get("instrument_type", "")).upper() == "IR_SWAP"
+            and any(token in str(ins.get("index", "")).upper() for token in family_tokens)
+        )
+    ]
+    if family_tokens and forward_instruments:
+        forward_fit = _fit_curve_from_instruments(
+            asof_date,
+            forward_instruments,
+            fit_method="weighted_zero_logdf_v1",
+            fit_grid_mode="instrument",
+            dense_step_years=0.25,
+            future_convexity_mode="external_adjusted_fra",
+            future_model_params=None,
+        )
+    else:
+        forward_fit = discount_fit
+    return {"discount_fit": discount_fit, "forward_fit": forward_fit}
 
 
 def fitted_curves_to_dataframe(
@@ -2231,54 +2293,71 @@ def load_from_ore_xml(
     xva_csv = output_path / "xva.csv"
     npv_csv = output_path / "npv.csv"
 
-    for f in (curves_csv, exposure_csv, xva_csv, npv_csv):
+    for f in (exposure_csv, xva_csv, npv_csv):
         if not f.exists():
             raise FileNotFoundError(
                 f"ORE output file not found (run ORE first): {f}"
             )
 
-    # Discount curve
-    curve_dates_by_col = _load_ore_discount_pairs_by_columns_with_day_counter(
-        str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
-    )
-    _, curve_times_disc, curve_dfs_disc = curve_dates_by_col[discount_column]
-    p0_disc = build_discount_curve_from_discount_pairs(
-        list(zip(curve_times_disc, curve_dfs_disc))
-    )
-
-    # Forward curve (may equal discount curve if columns are the same)
-    if forward_column == discount_column:
-        curve_times_fwd = curve_times_disc
-        curve_dfs_fwd = curve_dfs_disc
-        p0_fwd = p0_disc
-    else:
-        _, curve_times_fwd, curve_dfs_fwd = _load_ore_discount_pairs_by_columns_with_day_counter(
-            str(curves_csv), [forward_column], asof_date=asof_date, day_counter=model_day_counter
-        )[forward_column]
-        p0_fwd = build_discount_curve_from_discount_pairs(
-            list(zip(curve_times_fwd, curve_dfs_fwd))
+    if curves_csv.exists():
+        curve_dates_by_col = _load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
+        )
+        _, curve_times_disc, curve_dfs_disc = curve_dates_by_col[discount_column]
+        p0_disc = build_discount_curve_from_discount_pairs(
+            list(zip(curve_times_disc, curve_dfs_disc))
         )
 
-    if xva_discount_column == discount_column:
+        if forward_column == discount_column:
+            curve_times_fwd = curve_times_disc
+            curve_dfs_fwd = curve_dfs_disc
+            p0_fwd = p0_disc
+        else:
+            _, curve_times_fwd, curve_dfs_fwd = _load_ore_discount_pairs_by_columns_with_day_counter(
+                str(curves_csv), [forward_column], asof_date=asof_date, day_counter=model_day_counter
+            )[forward_column]
+            p0_fwd = build_discount_curve_from_discount_pairs(
+                list(zip(curve_times_fwd, curve_dfs_fwd))
+            )
+
+        if xva_discount_column == discount_column:
+            curve_times_xva_disc = curve_times_disc
+            curve_dfs_xva_disc = curve_dfs_disc
+            p0_xva_disc = p0_disc
+        elif xva_discount_column == forward_column:
+            curve_times_xva_disc = curve_times_fwd
+            curve_dfs_xva_disc = curve_dfs_fwd
+            p0_xva_disc = p0_fwd
+        else:
+            _, curve_times_xva_disc, curve_dfs_xva_disc = _load_ore_discount_pairs_by_columns_with_day_counter(
+                str(curves_csv), [xva_discount_column], asof_date=asof_date, day_counter=model_day_counter
+            )[xva_discount_column]
+            p0_xva_disc = build_discount_curve_from_discount_pairs(
+                list(zip(curve_times_xva_disc, curve_dfs_xva_disc))
+            )
+    else:
+        fit_payload = _fit_discount_and_forward_curves_from_market(
+            ore_xml_path,
+            asof_date=asof_date,
+            currency=domestic_ccy,
+            forward_index=forward_column,
+        )
+        discount_fit = fit_payload["discount_fit"]
+        forward_fit = fit_payload["forward_fit"]
+        curve_times_disc = np.asarray(discount_fit["times"], dtype=float)
+        curve_dfs_disc = np.asarray(discount_fit["dfs"], dtype=float)
+        curve_times_fwd = np.asarray(forward_fit["times"], dtype=float)
+        curve_dfs_fwd = np.asarray(forward_fit["dfs"], dtype=float)
+        p0_disc = build_discount_curve_from_discount_pairs(list(zip(curve_times_disc, curve_dfs_disc)))
+        p0_fwd = build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
         curve_times_xva_disc = curve_times_disc
         curve_dfs_xva_disc = curve_dfs_disc
         p0_xva_disc = p0_disc
-    elif xva_discount_column == forward_column:
-        curve_times_xva_disc = curve_times_fwd
-        curve_dfs_xva_disc = curve_dfs_fwd
-        p0_xva_disc = p0_fwd
-    else:
-        _, curve_times_xva_disc, curve_dfs_xva_disc = _load_ore_discount_pairs_by_columns_with_day_counter(
-            str(curves_csv), [xva_discount_column], asof_date=asof_date, day_counter=model_day_counter
-        )[xva_discount_column]
-        p0_xva_disc = build_discount_curve_from_discount_pairs(
-            list(zip(curve_times_xva_disc, curve_dfs_xva_disc))
-        )
 
     curve_times_borrow = None
     curve_dfs_borrow = None
     p0_borrow = None
-    if borrowing_curve_column:
+    if curves_csv.exists() and borrowing_curve_column:
         _, curve_times_borrow, curve_dfs_borrow = _load_ore_discount_pairs_by_columns_with_day_counter(
             str(curves_csv), [borrowing_curve_column], asof_date=asof_date, day_counter=model_day_counter
         )[borrowing_curve_column]
@@ -2289,7 +2368,7 @@ def load_from_ore_xml(
     curve_times_lend = None
     curve_dfs_lend = None
     p0_lend = None
-    if lending_curve_column:
+    if curves_csv.exists() and lending_curve_column:
         _, curve_times_lend, curve_dfs_lend = _load_ore_discount_pairs_by_columns_with_day_counter(
             str(curves_csv), [lending_curve_column], asof_date=asof_date, day_counter=model_day_counter
         )[lending_curve_column]
@@ -2438,7 +2517,7 @@ def load_from_ore_xml(
         market_data_path=str(market_data_file),
         simulation_xml_path=str(simulation_xml),
         calibration_xml_path=str(calibration_xml) if calibration_xml is not None and calibration_xml.exists() else None,
-        curves_csv_path=str(curves_csv),
+        curves_csv_path=str(curves_csv) if curves_csv.exists() else None,
         exposure_csv_path=str(exposure_csv),
         xva_csv_path=str(xva_csv),
         npv_csv_path=str(npv_csv),
@@ -2806,7 +2885,25 @@ def _resolve_ore_run_files(
     return ore_xml, asof_date, market_data_file, todaysmarket_xml, output_path
 
 
-def _parse_market_instrument_key(key: str) -> Optional[Dict[str, object]]:
+def _parse_zero_quote_date_token(token: str, asof_date: Optional[str]) -> Optional[float]:
+    if not asof_date:
+        return None
+    token_text = str(token).strip()
+    try:
+        if re.fullmatch(r"\d{8}", token_text):
+            pillar_date = datetime.strptime(token_text, "%Y%m%d").date()
+        else:
+            pillar_date = _normalize_date_input(token_text)
+        anchor_date = _normalize_date_input(asof_date)
+    except Exception:
+        return None
+    maturity = _year_fraction_from_day_counter(anchor_date, pillar_date, "A365F")
+    if maturity <= 0.0:
+        return None
+    return float(maturity)
+
+
+def _parse_market_instrument_key(key: str, asof_date: Optional[str] = None) -> Optional[Dict[str, object]]:
     parts = key.strip().upper().split("/")
     if len(parts) < 4:
         return None
@@ -2816,6 +2913,8 @@ def _parse_market_instrument_key(key: str) -> Optional[Dict[str, object]]:
         ccy = parts[2]
         tenor = parts[-1]
         maturity = _safe_tenor_years(tenor)
+        if maturity is None:
+            maturity = _parse_zero_quote_date_token(tenor, asof_date)
         if maturity is None:
             return None
         return {

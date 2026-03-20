@@ -17,6 +17,7 @@ from collections import Counter
 from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,15 +29,6 @@ except Exception:  # pragma: no cover - optional at import time
     ql = None
 
 import pythonore.io.ore_snapshot as ore_snapshot_mod
-from pythonore.benchmarks import (
-    benchmark_lgm_fx_forward_torch,
-    benchmark_lgm_fx_hybrid_torch,
-    benchmark_lgm_fx_portfolio_torch,
-    benchmark_lgm_torch,
-    benchmark_lgm_torch_swap,
-)
-import pythonore.compute.bond_pricing as bond_pricing_mod
-from pythonore.compute.bond_pricing import price_bond_trade
 from pythonore.compute.irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     calibrate_float_spreads_from_coupon,
@@ -51,21 +43,6 @@ from pythonore.compute.irs_xva_utils import (
     survival_probability_from_hazard,
     swap_npv_from_ore_legs_dual_curve,
 )
-from pythonore.compute.inflation import (
-    InflationCapFloorDefinition,
-    inflation_swap_payment_times,
-    load_inflation_curve_from_market_data,
-    load_zero_inflation_surface_quote,
-    parse_inflation_models_from_simulation_xml,
-    price_inflation_capfloor,
-    price_inflation_capfloor_at_time,
-    price_yoy_swap,
-    price_yoy_swap_at_time,
-    price_zero_coupon_cpi_swap,
-    price_zero_coupon_cpi_swap_at_time,
-)
-from pythonore.compute.lgm_fx_xva_utils import FxForwardDef, FxOptionDef, build_two_ccy_hybrid, fx_option_npv
-from pythonore.compute.lgm_ir_options import CapFloorDef, capfloor_npv, capfloor_npv_paths
 from pythonore.compute.lgm import LGM1F, LGMParams, make_ore_gaussian_rng, simulate_ba_measure, simulate_lgm_measure
 from pythonore.io.ore_snapshot import (
     fit_discount_curves_from_ore_market,
@@ -74,7 +51,6 @@ from pythonore.io.ore_snapshot import (
     validate_ore_input_snapshot,
 )
 from pythonore.repo_paths import default_ore_bin, find_engine_repo_root, local_parity_artifacts_root
-from pythonore.runtime.bermudan import price_bermudan_from_ore_case
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
@@ -102,6 +78,117 @@ REPORT_BUCKET_HINTS = {
     "missing_reference_xva": "Provide or regenerate XVA reference artifacts (`xva.csv` / exposure files) before XVA parity work.",
     "hard_error": "Inspect the recorded error/parse failure before any parity debugging.",
 }
+
+
+def _bond_pricing_mod():
+    return import_module("pythonore.compute.bond_pricing")
+
+
+def price_bond_trade(*args, **kwargs):
+    return _bond_pricing_mod().price_bond_trade(*args, **kwargs)
+
+
+def _inflation_mod():
+    return import_module("pythonore.compute.inflation")
+
+
+def InflationCapFloorDefinition(*args, **kwargs):
+    return _inflation_mod().InflationCapFloorDefinition(*args, **kwargs)
+
+
+def inflation_swap_payment_times(*args, **kwargs):
+    return _inflation_mod().inflation_swap_payment_times(*args, **kwargs)
+
+
+def load_inflation_curve_from_market_data(*args, **kwargs):
+    return _inflation_mod().load_inflation_curve_from_market_data(*args, **kwargs)
+
+
+def load_zero_inflation_surface_quote(*args, **kwargs):
+    return _inflation_mod().load_zero_inflation_surface_quote(*args, **kwargs)
+
+
+def parse_inflation_models_from_simulation_xml(*args, **kwargs):
+    return _inflation_mod().parse_inflation_models_from_simulation_xml(*args, **kwargs)
+
+
+def price_inflation_capfloor(*args, **kwargs):
+    return _inflation_mod().price_inflation_capfloor(*args, **kwargs)
+
+
+def price_inflation_capfloor_at_time(*args, **kwargs):
+    return _inflation_mod().price_inflation_capfloor_at_time(*args, **kwargs)
+
+
+def price_yoy_swap(*args, **kwargs):
+    return _inflation_mod().price_yoy_swap(*args, **kwargs)
+
+
+def price_yoy_swap_at_time(*args, **kwargs):
+    return _inflation_mod().price_yoy_swap_at_time(*args, **kwargs)
+
+
+def price_zero_coupon_cpi_swap(*args, **kwargs):
+    return _inflation_mod().price_zero_coupon_cpi_swap(*args, **kwargs)
+
+
+def price_zero_coupon_cpi_swap_at_time(*args, **kwargs):
+    return _inflation_mod().price_zero_coupon_cpi_swap_at_time(*args, **kwargs)
+
+
+def _lgm_fx_xva_mod():
+    return import_module("pythonore.compute.lgm_fx_xva_utils")
+
+
+def FxForwardDef(*args, **kwargs):
+    return _lgm_fx_xva_mod().FxForwardDef(*args, **kwargs)
+
+
+def FxOptionDef(*args, **kwargs):
+    return _lgm_fx_xva_mod().FxOptionDef(*args, **kwargs)
+
+
+def build_two_ccy_hybrid(*args, **kwargs):
+    return _lgm_fx_xva_mod().build_two_ccy_hybrid(*args, **kwargs)
+
+
+def fx_option_npv(*args, **kwargs):
+    return _lgm_fx_xva_mod().fx_option_npv(*args, **kwargs)
+
+
+def _lgm_ir_options_mod():
+    return import_module("pythonore.compute.lgm_ir_options")
+
+
+def CapFloorDef(*args, **kwargs):
+    return _lgm_ir_options_mod().CapFloorDef(*args, **kwargs)
+
+
+def capfloor_npv(*args, **kwargs):
+    return _lgm_ir_options_mod().capfloor_npv(*args, **kwargs)
+
+
+def capfloor_npv_paths(*args, **kwargs):
+    return _lgm_ir_options_mod().capfloor_npv_paths(*args, **kwargs)
+
+
+def price_bermudan_from_ore_case(*args, **kwargs):
+    return import_module("pythonore.runtime.bermudan").price_bermudan_from_ore_case(*args, **kwargs)
+
+
+class _LazyBenchmarkModule:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+
+    def main(self, argv):
+        return import_module(self._module_name).main(argv)
+
+
+benchmark_lgm_torch = _LazyBenchmarkModule("pythonore.benchmarks.benchmark_lgm_torch")
+benchmark_lgm_torch_swap = _LazyBenchmarkModule("pythonore.benchmarks.benchmark_lgm_torch_swap")
+benchmark_lgm_fx_hybrid_torch = _LazyBenchmarkModule("pythonore.benchmarks.benchmark_lgm_fx_hybrid_torch")
+benchmark_lgm_fx_forward_torch = _LazyBenchmarkModule("pythonore.benchmarks.benchmark_lgm_fx_forward_torch")
+benchmark_lgm_fx_portfolio_torch = _LazyBenchmarkModule("pythonore.benchmarks.benchmark_lgm_fx_portfolio_torch")
 
 
 def _example_devices_for_backend(tensor_backend: str) -> list[str]:
@@ -658,25 +745,30 @@ def _build_minimal_pricing_payload(
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
     xva_discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, sim_config_id, domestic_ccy)
 
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
-    if curves_csv is None:
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
     if npv_csv is None:
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
-
-    curve_dates_by_col = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
-        str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
-    )
-    _, curve_times_disc, curve_dfs_disc = curve_dates_by_col[discount_column]
-    p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_disc, curve_dfs_disc)))
-    if forward_column == discount_column:
-        p0_fwd = p0_disc
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is not None:
+        curve_dates_by_col = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
+        )
+        _, curve_times_disc, curve_dfs_disc = curve_dates_by_col[discount_column]
+        p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_disc, curve_dfs_disc)))
+        if forward_column == discount_column:
+            p0_fwd = p0_disc
+        else:
+            _, curve_times_fwd, curve_dfs_fwd = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+                str(curves_csv), [forward_column], asof_date=asof_date, day_counter=model_day_counter
+            )[forward_column]
+            p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
     else:
-        _, curve_times_fwd, curve_dfs_fwd = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
-            str(curves_csv), [forward_column], asof_date=asof_date, day_counter=model_day_counter
-        )[forward_column]
-        p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
+        p0_disc, p0_fwd, _, _ = _build_fitted_discount_and_forward_curves(
+            ore_xml,
+            asof=_parse_ore_date(asof_date),
+            currency=domestic_ccy,
+            float_index=forward_column,
+        )
 
     if simulation_xml is not None and simulation_xml.exists():
         calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
@@ -1721,23 +1813,28 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         raise ValueError(
             f"todaysmarket.xml is missing discounting curve mappings for FX pair {pair} under config '{pricing_config_id}'"
         )
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
     flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
-    if curves_csv is None:
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
     if npv_csv is None:
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
-    curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
-        str(curves_csv),
-        [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
-        asof_date=asof_date,
-        day_counter="A365F",
-    )
-    dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
-    dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
-    p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
-    p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is not None:
+        curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv),
+            [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
+            asof_date=asof_date,
+            day_counter="A365F",
+        )
+        dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
+        dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
+        p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
+        p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+    else:
+        p0_for, p0_dom, dates_for, dfs_for, dates_dom, dfs_dom = _build_fx_discount_curves_from_market_fit(
+            ore_xml,
+            bought_ccy=bought_ccy,
+            sold_ccy=sold_ccy,
+        )
 
     fx_spots_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
         tm_root,
@@ -1800,7 +1897,7 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             if flows_csv is not None and flows_csv.exists()
             else None
         ),
-        "reference_output_dirs": sorted({str(curves_csv.parent), str(npv_csv.parent)}),
+        "reference_output_dirs": sorted({str(path.parent) for path in (curves_csv, npv_csv) if path is not None}),
         "using_expected_output": any(
             _classify_reference_dir(ore_xml, path.parent) == "expected_output"
             for path in (curves_csv, npv_csv, flows_csv)
@@ -1964,20 +2061,25 @@ def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         raise ValueError(
             f"todaysmarket.xml is missing discounting curve mappings for FX pair {bought_ccy}/{sold_ccy} under config '{pricing_config_id}'"
         )
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
-    if curves_csv is None:
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'curves.csv'}")
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
-    curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
-        str(curves_csv),
-        [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
-        asof_date=asof_date,
-        day_counter="A365F",
-    )
-    dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
-    dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
-    p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
-    p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    if curves_csv is not None:
+        curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv),
+            [mappings[bought_ccy]["source_column"], mappings[sold_ccy]["source_column"]],
+            asof_date=asof_date,
+            day_counter="A365F",
+        )
+        dates_for, times_for, dfs_for = curve_dates[mappings[bought_ccy]["source_column"]]
+        dates_dom, times_dom, dfs_dom = curve_dates[mappings[sold_ccy]["source_column"]]
+        p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_for, dfs_for)))
+        p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(times_dom, dfs_dom)))
+    else:
+        p0_for, p0_dom, dates_for, dfs_for, dates_dom, dfs_dom = _build_fx_discount_curves_from_market_fit(
+            ore_xml,
+            bought_ccy=bought_ccy,
+            sold_ccy=sold_ccy,
+        )
 
     fx_spots_id = ore_snapshot_mod._resolve_todaysmarket_section_id(
         tm_root,
@@ -2173,14 +2275,20 @@ def _build_fitted_discount_and_forward_curves(
     )
     family_tokens = _ibor_family_tokens(float_index)
     if family_tokens:
-        forward_fit = _fit_market_curve_from_selector(
-            ore_xml,
-            currency=currency,
-            selector=lambda ins: (
-                str(ins.get("instrument_type", "")).upper() == "IR_SWAP"
-                and str(ins.get("index", "")).upper() in family_tokens
-            ),
-        )
+        try:
+            forward_fit = _fit_market_curve_from_selector(
+                ore_xml,
+                currency=currency,
+                selector=lambda ins: (
+                    (
+                        str(ins.get("instrument_type", "")).upper() == "IR_SWAP"
+                        and any(token in str(ins.get("index", "")).upper() for token in family_tokens)
+                    )
+                    or str(ins.get("instrument_type", "")).upper() == "ZERO"
+                ),
+            )
+        except ValueError:
+            forward_fit = discount_fit
     else:
         forward_fit = discount_fit
     p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
@@ -2190,6 +2298,30 @@ def _build_fitted_discount_and_forward_curves(
         list(zip([float(x) for x in forward_fit["times"]], [float(x) for x in forward_fit["dfs"]]))
     )
     return p0_disc, p0_fwd, _ql_handle_from_fit_payload(asof, discount_fit), _ql_handle_from_fit_payload(asof, forward_fit)
+
+
+def _build_fx_discount_curves_from_market_fit(
+    ore_xml: Path,
+    *,
+    bought_ccy: str,
+    sold_ccy: str,
+) -> tuple[Any, Any, list[str], list[float], list[str], list[float]]:
+    fit_for = _fit_market_curve_from_selector(ore_xml, currency=bought_ccy, selector=lambda _ins: True)
+    fit_dom = _fit_market_curve_from_selector(ore_xml, currency=sold_ccy, selector=lambda _ins: True)
+    p0_for = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+        list(zip([float(x) for x in fit_for["times"]], [float(x) for x in fit_for["dfs"]]))
+    )
+    p0_dom = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+        list(zip([float(x) for x in fit_dom["times"]], [float(x) for x in fit_dom["dfs"]]))
+    )
+    return (
+        p0_for,
+        p0_dom,
+        [str(x) for x in fit_for["calendar_dates"]],
+        [float(x) for x in fit_for["dfs"]],
+        [str(x) for x in fit_dom["calendar_dates"]],
+        [float(x) for x in fit_dom["dfs"]],
+    )
 
 
 def _build_reference_discount_and_forward_curves(
@@ -2294,6 +2426,7 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     float_rules = float_leg.find("./ScheduleData/Rules")
     if fixed_rules is None or float_rules is None:
         raise ValueError(f"missing swaption schedule rules in {portfolio_xml}")
+    bond_pricing_mod = _bond_pricing_mod()
     cal = bond_pricing_mod._ql_calendar((fixed_rules.findtext("./Calendar") or float_rules.findtext("./Calendar") or "TARGET").strip())
     fixed_schedule = ql.Schedule(
         ql.DateParser.parseFormatted((fixed_rules.findtext("./StartDate") or "").strip(), "%Y%m%d"),
@@ -3607,8 +3740,8 @@ def _compute_fx_option_snapshot_case(
     curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
     exposure_csv = _find_reference_output_file(ore_xml, f"exposure_trade_{payload['trade_id']}.csv")
     xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
-    if curves_csv is None or exposure_csv is None or xva_csv is None:
-        raise FileNotFoundError("FX option XVA requires curves.csv, exposure_trade_<id>.csv and xva.csv")
+    if exposure_csv is None or xva_csv is None:
+        raise FileNotFoundError("FX option XVA requires exposure_trade_<id>.csv and xva.csv")
 
     exposure_profile = load_ore_exposure_profile(str(exposure_csv))
     exposure_times = np.asarray(exposure_profile["time"], dtype=float)
@@ -3616,14 +3749,20 @@ def _compute_fx_option_snapshot_case(
     if exposure_times.size == 0 or exposure_times[0] != 0.0:
         raise ValueError("FX option exposure profile must start at time 0.0")
 
-    report_curve_data = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
-        str(curves_csv),
-        [report_curve_col],
-        asof_date=asof_date,
-        day_counter="A365F",
-    )
-    _, curve_times_report, curve_dfs_report = report_curve_data[report_curve_col]
-    p0_report = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_report, curve_dfs_report)))
+    if curves_csv is not None:
+        report_curve_data = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+            str(curves_csv),
+            [report_curve_col],
+            asof_date=asof_date,
+            day_counter="A365F",
+        )
+        _, curve_times_report, curve_dfs_report = report_curve_data[report_curve_col]
+        p0_report = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_report, curve_dfs_report)))
+    else:
+        report_fit = _fit_market_curve_from_selector(ore_xml, currency=report_ccy, selector=lambda _ins: True)
+        p0_report = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+            list(zip([float(x) for x in report_fit["times"]], [float(x) for x in report_fit["dfs"]]))
+        )
 
     sim_root = ET.parse(simulation_xml).getroot()
     calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(

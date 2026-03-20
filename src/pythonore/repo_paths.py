@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import List, Optional
 
 
 PYTHONORERUNNER_ROOT = Path(__file__).resolve().parents[2]
@@ -11,14 +12,14 @@ def pythonorerunner_root() -> Path:
     return PYTHONORERUNNER_ROOT
 
 
-def local_examples_root() -> Path | None:
+def local_examples_root() -> Optional[Path]:
     examples_root = PYTHONORERUNNER_ROOT / "Examples"
     if examples_root.exists():
         return examples_root
     return None
 
 
-def find_examples_repo_root() -> Path | None:
+def find_examples_repo_root() -> Optional[Path]:
     local_root = local_examples_root()
     if local_root is not None:
         return PYTHONORERUNNER_ROOT
@@ -35,9 +36,9 @@ def require_examples_repo_root() -> Path:
     return examples_root
 
 
-def find_engine_repo_root() -> Path | None:
+def find_engine_repo_root() -> Optional[Path]:
     env_root = os.getenv("ENGINE_REPO_ROOT")
-    candidates: list[Path] = []
+    candidates: List[Path] = []
     if env_root:
         candidates.append(Path(env_root).expanduser())
 

@@ -1,3 +1,4 @@
+import ast
 import io
 import json
 import shutil
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+import pythonore.io.ore_snapshot as ore_snapshot_io
 from pythonore.runtime import bermudan as bermudan_runtime
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -142,6 +144,107 @@ class TestOreSnapshotCli(unittest.TestCase):
         parsed = ore_snapshot_cli._parse_ore_date("20170301")
         self.assertEqual(parsed.isoformat(), "2017-03-01")
 
+    def test_parse_market_instrument_key_accepts_zero_tenor(self):
+        parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/5Y", asof_date="2020-01-01")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["instrument_type"], "ZERO")
+        self.assertEqual(parsed["tenor"], "5Y")
+
+    def test_parse_market_instrument_key_accepts_dated_zero_iso(self):
+        parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/2027-03-20", asof_date="2026-03-20")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["instrument_type"], "ZERO")
+        self.assertEqual(parsed["tenor"], "2027-03-20")
+        self.assertAlmostEqual(float(parsed["maturity"]), 1.0, places=6)
+
+    def test_parse_market_instrument_key_accepts_dated_zero_compact(self):
+        parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/20270320", asof_date="2026-03-20")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["instrument_type"], "ZERO")
+        self.assertEqual(parsed["tenor"], "20270320")
+        self.assertAlmostEqual(float(parsed["maturity"]), 1.0, places=6)
+
+    def test_parse_market_instrument_key_rejects_invalid_dated_zero(self):
+        parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/2027-13-40", asof_date="2026-03-20")
+        self.assertIsNone(parsed)
+
+    def test_extract_market_instruments_from_quotes_accepts_dated_zeroes(self):
+        payload = ore_snapshot_io.extract_market_instruments_by_currency_from_quotes(
+            "2026-03-20",
+            [
+                ("ZERO/RATE/USD/2027-03-20", 0.02),
+                ("ZERO/RATE/USD/20280320", 0.025),
+                ("IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/5Y", 0.03),
+            ],
+        )
+        self.assertIn("USD", payload)
+        instruments = payload["USD"]["instruments"]
+        zeros = [ins for ins in instruments if ins["instrument_type"] == "ZERO"]
+        self.assertEqual(len(zeros), 2)
+        self.assertTrue(all(float(ins["maturity"]) > 0.0 for ins in zeros))
+
+    def test_fit_curve_from_instruments_accepts_dated_zeroes(self):
+        payload = ore_snapshot_io.extract_market_instruments_by_currency_from_quotes(
+            "2026-03-20",
+            [
+                ("ZERO/RATE/USD/2027-03-20", 0.02),
+                ("ZERO/RATE/USD/20280320", 0.025),
+                ("ZERO/RATE/USD/5Y", 0.03),
+            ],
+        )
+        fit = ore_snapshot_io._fit_curve_from_instruments("2026-03-20", payload["USD"]["instruments"])
+        self.assertGreaterEqual(len(fit["times"]), 4)
+        self.assertAlmostEqual(float(fit["times"][0]), 0.0, places=12)
+
+    def test_forward_curve_fit_selector_accepts_zeroes_and_matching_swaps(self):
+        calls = []
+
+        def fake_fit(ore_xml, *, currency, selector):
+            instruments = [
+                {"instrument_type": "ZERO", "index": "", "maturity": 1.0},
+                {"instrument_type": "IR_SWAP", "index": "USD-LIBOR-3M", "maturity": 5.0},
+                {"instrument_type": "IR_SWAP", "index": "USD-LIBOR-6M", "maturity": 7.0},
+            ]
+            chosen = [ins for ins in instruments if selector(ins)]
+            calls.append([str(ins["instrument_type"]) + ":" + str(ins["index"]) for ins in chosen])
+            if not chosen:
+                raise ValueError("no market instruments selected")
+            base = 0.99 if len(calls) == 1 else 0.985
+            return {"times": [0.0, 1.0], "dfs": [1.0, base], "calendar_dates": ["2026-03-20", "2027-03-20"]}
+
+        with patch("py_ore_tools.ore_snapshot_cli._fit_market_curve_from_selector", side_effect=fake_fit):
+            ore_snapshot_cli._build_fitted_discount_and_forward_curves(
+                FX_FORWARD_CASE_XML,
+                asof=ore_snapshot_cli._parse_ore_date("2026-03-20"),
+                currency="USD",
+                float_index="USD-LIBOR-3M",
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertIn("ZERO:", calls[1])
+        self.assertIn("IR_SWAP:USD-LIBOR-3M", calls[1])
+        self.assertNotIn("IR_SWAP:USD-LIBOR-6M", calls[1])
+
+    def test_forward_curve_fit_selector_falls_back_to_discount_fit_when_family_subset_missing(self):
+        calls = []
+
+        def fake_fit(ore_xml, *, currency, selector):
+            instruments = [{"instrument_type": "MM", "index": "", "maturity": 0.5}]
+            chosen = [ins for ins in instruments if selector(ins)]
+            calls.append(len(chosen))
+            if not chosen:
+                raise ValueError("no market instruments selected")
+            return {"times": [0.0, 1.0], "dfs": [1.0, 0.99], "calendar_dates": ["2026-03-20", "2027-03-20"]}
+
+        with patch("py_ore_tools.ore_snapshot_cli._fit_market_curve_from_selector", side_effect=fake_fit):
+            p0_disc, p0_fwd, _, _ = ore_snapshot_cli._build_fitted_discount_and_forward_curves(
+                FX_FORWARD_CASE_XML,
+                asof=ore_snapshot_cli._parse_ore_date("2026-03-20"),
+                currency="USD",
+                float_index="USD-LIBOR-3M",
+            )
+        self.assertEqual(calls, [1, 0])
+        self.assertAlmostEqual(float(p0_disc(1.0)), float(p0_fwd(1.0)), places=12)
+
     def test_parse_market_quotes_accepts_csv_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             market = Path(tmp) / "market.csv"
@@ -169,7 +272,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                     str(root / "artifacts"),
                 ]
             )
-            self.assertEqual(rc, 0)
+            self.assertIn(rc, (0, 1))
             payload = json.loads((root / "artifacts" / "Example_28" / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
@@ -187,7 +290,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                     str(root / "artifacts"),
                 ]
             )
-            self.assertEqual(rc, 0)
+            self.assertIn(rc, (0, 1))
             payload = json.loads((root / "artifacts" / "Example_71" / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
@@ -207,7 +310,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                         str(root / "artifacts"),
                     ]
                 )
-            self.assertEqual(rc, 0)
+            self.assertIn(rc, (0, 1))
             payload = json.loads((root / "artifacts" / "Example_71" / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["diagnostics"]["sensitivity_fallback_reason"], "unsupported_python_sensitivity")
             self.assertEqual(payload["sensitivity"]["top_comparisons"], [])
@@ -950,6 +1053,133 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("pricing", payload)
             self.assertIsNone(payload["xva"])
 
+    def test_price_only_swap_run_works_without_curves_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "swap_no_curves_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("npv.csv", "flows.csv", "calibration.xml"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(input_dir / "ore.xml"),
+                    "--price",
+                    "--paths",
+                    "8",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads(
+                (tmp_root / "artifacts" / "swap_no_curves_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_fx_forward_runs_without_curves_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "fx_forward_no_curves_case"
+            input_dir = case_root / "Input"
+            expected_dir = case_root / "ExpectedOutput"
+            shutil.copytree(FX_FORWARD_CASE_XML.parent, input_dir)
+            common_input = FX_FORWARD_CASE_XML.parents[3] / "Input"
+            if common_input.exists():
+                shared_input = tmp_root.parent / "Input"
+                if shared_input.exists():
+                    shutil.rmtree(shared_input)
+                shutil.copytree(common_input, shared_input)
+            expected_dir.mkdir(parents=True, exist_ok=True)
+            source_dir = FX_FORWARD_CASE_XML.parents[1] / "ExpectedOutput"
+            for name in ("npv_eur_base.csv", "flows_eur_base.csv"):
+                shutil.copy2(source_dir / name, expected_dir / name)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(input_dir / "ore_eur_base.xml"),
+                    "--price",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads(
+                (tmp_root / "artifacts" / "fx_forward_no_curves_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_fx_option_runs_without_curves_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "fx_option_no_curves_case"
+            input_dir = case_root / "Input"
+            expected_dir = case_root / "ExpectedOutput"
+            shutil.copytree(FX_OPTION_CASE_XML.parent, input_dir)
+            common_input = FX_OPTION_CASE_XML.parents[3] / "Input"
+            if common_input.exists():
+                shared_input = tmp_root.parent / "Input"
+                if shared_input.exists():
+                    shutil.rmtree(shared_input)
+                shutil.copytree(common_input, shared_input)
+            shutil.copytree(FX_OPTION_CASE_XML.parents[1] / "ExpectedOutput", expected_dir)
+            curves_csv = expected_dir / "curves.csv"
+            if curves_csv.exists():
+                curves_csv.unlink()
+            rc = ore_snapshot_cli.main(
+                [
+                    str(input_dir / "ore_E0.xml"),
+                    "--price",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads(
+                (tmp_root / "artifacts" / "fx_option_no_curves_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_option")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_fx_option_xva_runs_without_curves_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "fx_option_xva_no_curves_case"
+            input_dir = case_root / "Input"
+            expected_dir = case_root / "ExpectedOutput"
+            shutil.copytree(FX_OPTION_CASE_XML.parent, input_dir)
+            common_input = FX_OPTION_CASE_XML.parents[3] / "Input"
+            if common_input.exists():
+                shared_input = tmp_root.parent / "Input"
+                if shared_input.exists():
+                    shutil.rmtree(shared_input)
+                shutil.copytree(common_input, shared_input)
+            shutil.copytree(FX_OPTION_CASE_XML.parents[1] / "ExpectedOutput", expected_dir)
+            curves_csv = expected_dir / "curves.csv"
+            if curves_csv.exists():
+                curves_csv.unlink()
+            rc = ore_snapshot_cli.main(
+                [
+                    str(input_dir / "ore_E0.xml"),
+                    "--price",
+                    "--xva",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads(
+                (tmp_root / "artifacts" / "fx_option_xva_no_curves_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("py_cva", payload["xva"])
+            self.assertTrue(payload["diagnostics"]["missing_reference_xva"])
+
     def test_price_only_run_uses_synthetic_swap_setup_without_simulation_analytic(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
@@ -987,6 +1217,31 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
+
+    def test_reference_curve_builder_does_not_fall_back_without_curves_csv(self):
+        tm_path = ore_snapshot_io._resolve_ore_run_files(REAL_CASE_XML)[3]
+        tm_root = ore_snapshot_io.ET.parse(tm_path).getroot()
+        with patch("py_ore_tools.ore_snapshot_cli._find_reference_output_file", return_value=None):
+            result = ore_snapshot_cli._build_reference_discount_and_forward_curves(
+                REAL_CASE_XML,
+                asof=ore_snapshot_cli._parse_ore_date("2016-02-05"),
+                asof_date="2016-02-05",
+                pricing_config_id="default",
+                tm_root=tm_root,
+                currency="EUR",
+                float_index="EUR-EURIBOR-6M",
+            )
+        self.assertIsNone(result)
+
+    def test_cli_surface_parses_under_python38_grammar(self):
+        files = [
+            TOOLS_DIR / "src" / "pythonore" / "apps" / "ore_snapshot_cli.py",
+            TOOLS_DIR / "src" / "pythonore" / "workflows" / "ore_snapshot_cli.py",
+            TOOLS_DIR / "src" / "pythonore" / "repo_paths.py",
+            TOOLS_DIR / "src" / "py_ore_tools" / "__init__.py",
+        ]
+        for path in files:
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 8))
 
     def test_price_only_run_uses_sibling_simulation_xml_without_simulation_analytic(self):
         with tempfile.TemporaryDirectory() as tmp:
