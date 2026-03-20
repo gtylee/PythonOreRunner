@@ -771,8 +771,9 @@ def _build_minimal_pricing_payload(
         )
 
     if simulation_xml is not None and simulation_xml.exists():
-        calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
+        params_dict, _, _ = ore_snapshot_mod.resolve_lgm_params(
             ore_xml_path=str(ore_xml_path),
+            input_dir=input_dir,
             output_path=output_path,
             market_data_path=market_data_path,
             curve_config_path=curve_config_path,
@@ -781,19 +782,6 @@ def _build_minimal_pricing_payload(
             simulation_xml_path=simulation_xml,
             domestic_ccy=domestic_ccy,
         )
-        if calibration_xml is not None and calibration_xml.exists():
-            try:
-                params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(
-                    str(calibration_xml), ccy_key=domestic_ccy
-                )
-            except Exception:
-                params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(
-                    str(simulation_xml), ccy_key=domestic_ccy
-                )
-        else:
-            params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(
-                str(simulation_xml), ccy_key=domestic_ccy
-            )
     else:
         params_dict = {
             "alpha_times": (1.0,),
@@ -2827,8 +2815,9 @@ def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     elif (input_dir / "simulation.xml").exists():
         simulation_xml = (input_dir / "simulation.xml").resolve()
     if simulation_xml is not None and simulation_xml.exists():
-        calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
+        params_dict, _, _ = ore_snapshot_mod.resolve_lgm_params(
             ore_xml_path=str(ore_xml_path),
+            input_dir=input_dir,
             output_path=output_path,
             market_data_path=market_data_path,
             curve_config_path=curve_config_path,
@@ -2837,13 +2826,6 @@ def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             simulation_xml_path=simulation_xml,
             domestic_ccy=ccy,
         )
-        if calibration_xml is not None and calibration_xml.exists():
-            try:
-                params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy)
-            except Exception:
-                params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(str(simulation_xml), ccy_key=ccy)
-        else:
-            params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(str(simulation_xml), ccy_key=ccy)
     else:
         params_dict = {
             "alpha_times": (1.0,),
@@ -3771,26 +3753,19 @@ def _compute_fx_option_snapshot_case(
         )
 
     sim_root = ET.parse(simulation_xml).getroot()
-    calibration_xml = ore_snapshot_mod.resolve_calibration_xml_path(
-        ore_xml_path=str(ore_xml.resolve()),
-        output_path=output_path,
-        market_data_path=market_data_path,
-        curve_config_path=curve_config_path,
-        conventions_path=conventions_path,
-        todaysmarket_xml_path=todaysmarket_xml,
-        simulation_xml_path=simulation_xml,
-        domestic_ccy=(sim_root.findtext("./CrossAssetModel/DomesticCcy") or report_ccy).strip(),
-    )
     ir_specs: dict[str, dict[str, object]] = {}
     for ccy in (base, quote):
-        params_dict = None
-        if calibration_xml is not None and calibration_xml.exists():
-            try:
-                params_dict = ore_snapshot_mod.parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy)
-            except Exception:
-                params_dict = None
-        if params_dict is None:
-            params_dict = ore_snapshot_mod.parse_lgm_params_from_simulation_xml(str(simulation_xml), ccy_key=ccy)
+        params_dict, _, _ = ore_snapshot_mod.resolve_lgm_params(
+            ore_xml_path=str(ore_xml.resolve()),
+            input_dir=input_dir,
+            output_path=output_path,
+            market_data_path=market_data_path,
+            curve_config_path=curve_config_path,
+            conventions_path=conventions_path,
+            todaysmarket_xml_path=todaysmarket_xml,
+            simulation_xml_path=simulation_xml,
+            domestic_ccy=ccy,
+        )
         ir_specs[ccy] = {
             "alpha": (params_dict["alpha_times"], params_dict["alpha_values"]),
             "kappa": (params_dict["kappa_times"], params_dict["kappa_values"]),

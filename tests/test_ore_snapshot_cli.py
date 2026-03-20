@@ -1083,6 +1083,99 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
             self.assertIn("py_t0_npv", payload["pricing"])
 
+    def test_price_only_swap_run_calibrates_lgm_params_when_reference_calibration_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "swap_calibration_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("npv.csv", "flows.csv"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            calibrated = {
+                "alpha_times": (1.0,),
+                "alpha_values": (0.015, 0.015),
+                "kappa_times": (1.0,),
+                "kappa_values": (0.03, 0.03),
+                "shift": 0.0,
+                "scaling": 1.0,
+            }
+            with patch("py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None), patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
+                return_value=calibrated,
+            ) as calibrate_mock, patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.parse_lgm_params_from_simulation_xml",
+                side_effect=AssertionError("simulation fallback should not be used"),
+            ):
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(input_dir / "ore.xml"),
+                        "--price",
+                        "--paths",
+                        "8",
+                        "--output-root",
+                        str(tmp_root / "artifacts"),
+                    ]
+                )
+            self.assertIn(rc, (0, 1))
+            self.assertEqual(calibrate_mock.call_count, 1)
+            payload = json.loads(
+                (tmp_root / "artifacts" / "swap_calibration_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_swap_run_falls_back_to_simulation_when_runtime_calibration_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "swap_simulation_fallback_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("npv.csv", "flows.csv"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            sim_params = {
+                "alpha_times": (1.0,),
+                "alpha_values": (0.01, 0.01),
+                "kappa_times": (1.0,),
+                "kappa_values": (0.03, 0.03),
+                "shift": 0.0,
+                "scaling": 1.0,
+            }
+            with patch("py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None), patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
+                return_value=None,
+            ) as calibrate_mock, patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.parse_lgm_params_from_simulation_xml",
+                return_value=sim_params,
+            ) as simulation_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(input_dir / "ore.xml"),
+                        "--price",
+                        "--paths",
+                        "8",
+                        "--output-root",
+                        str(tmp_root / "artifacts"),
+                    ]
+                )
+            self.assertIn(rc, (0, 1))
+            self.assertEqual(calibrate_mock.call_count, 1)
+            self.assertEqual(simulation_mock.call_count, 1)
+            payload = json.loads(
+                (tmp_root / "artifacts" / "swap_simulation_fallback_case" / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertIn("py_t0_npv", payload["pricing"])
+
     def test_price_only_fx_forward_runs_without_curves_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
@@ -1232,6 +1325,26 @@ class TestOreSnapshotCli(unittest.TestCase):
                 float_index="EUR-EURIBOR-6M",
             )
         self.assertIsNone(result)
+
+    def test_load_from_ore_xml_runs_runtime_calibration_when_reference_calibration_missing(self):
+        calibrated = {
+            "alpha_times": (1.0,),
+            "alpha_values": (0.02, 0.02),
+            "kappa_times": (1.0,),
+            "kappa_values": (0.03, 0.03),
+            "shift": 0.0,
+            "scaling": 1.0,
+        }
+        with patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            return_value=calibrated,
+        ) as calibrate_mock, patch(
+            "pythonore.io.ore_snapshot.parse_lgm_params_from_simulation_xml",
+            side_effect=AssertionError("simulation fallback should not be used"),
+        ):
+            snap = ore_snapshot_io.load_from_ore_xml(REAL_CASE_XML)
+        self.assertEqual(calibrate_mock.call_count, 1)
+        self.assertEqual(snap.alpha_source, "calibration")
 
     def test_cli_surface_parses_under_python38_grammar(self):
         files = [

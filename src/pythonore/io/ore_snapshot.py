@@ -58,13 +58,15 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import subprocess
+import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 
@@ -92,6 +94,7 @@ from pythonore.compute.irs_xva_utils import (
     parse_lgm_params_from_simulation_xml,
     survival_probability_from_hazard,
 )
+from pythonore.repo_paths import default_ore_bin
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = REPO_ROOT
@@ -725,6 +728,119 @@ def resolve_calibration_xml_path(
                 if calibration_xml.exists():
                     return calibration_xml.resolve()
     return None
+
+
+def calibrate_lgm_params_via_ore(
+    *,
+    ore_xml_path: Union[str, Path],
+    input_dir: Union[str, Path],
+    simulation_xml_path: Union[str, Path],
+    ccy_key: str,
+) -> Optional[Dict[str, object]]:
+    ore_bin = default_ore_bin()
+    if not ore_bin.exists():
+        return None
+    ore_xml = Path(ore_xml_path).resolve()
+    input_root = Path(input_dir).resolve()
+    simulation_xml = Path(simulation_xml_path).resolve()
+    with tempfile.TemporaryDirectory(prefix="ore_cli_calibration_") as td:
+        temp_root = Path(td)
+        target = temp_root / ore_xml.name
+        tree = ET.parse(ore_xml)
+        root = tree.getroot()
+        setup = root.find("./Setup")
+        if setup is None:
+            setup = ET.SubElement(root, "Setup")
+        setup_params = {
+            (node.attrib.get("name", "") or "").strip(): node
+            for node in setup.findall("./Parameter")
+        }
+        for name, value in (
+            ("inputPath", str(input_root)),
+            ("outputPath", str((temp_root / "Output").resolve())),
+        ):
+            node = setup_params.get(name)
+            if node is None:
+                node = ET.SubElement(setup, "Parameter", {"name": name})
+            node.text = value
+        analytics = root.find("./Analytics")
+        if analytics is None:
+            analytics = ET.SubElement(root, "Analytics")
+        calibration = analytics.find("./Analytic[@type='calibration']")
+        if calibration is None:
+            calibration = ET.SubElement(analytics, "Analytic", {"type": "calibration"})
+        params = {
+            (node.attrib.get("name", "") or "").strip(): node
+            for node in calibration.findall("./Parameter")
+        }
+        for name, value in (
+            ("active", "Y"),
+            ("configFile", str(simulation_xml)),
+            ("outputFile", "calibration.csv"),
+        ):
+            node = params.get(name)
+            if node is None:
+                node = ET.SubElement(calibration, "Parameter", {"name": name})
+            node.text = value
+        tree.write(target, encoding="utf-8", xml_declaration=True)
+        cp = subprocess.run(
+            [str(ore_bin), str(target)],
+            cwd=str(temp_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calibration_xml = temp_root / "Output" / "calibration.xml"
+        if cp.returncode != 0 or not calibration_xml.exists():
+            return None
+        try:
+            return parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy_key)
+        except Exception:
+            return None
+
+
+def resolve_lgm_params(
+    *,
+    ore_xml_path: Union[str, Path],
+    input_dir: Union[str, Path],
+    output_path: Union[str, Path],
+    market_data_path: Union[str, Path],
+    curve_config_path: Union[str, Path],
+    conventions_path: Union[str, Path],
+    todaysmarket_xml_path: Union[str, Path],
+    simulation_xml_path: Union[str, Path],
+    domestic_ccy: str,
+) -> Tuple[Dict[str, object], str, Optional[Path]]:
+    calibration_xml = resolve_calibration_xml_path(
+        ore_xml_path=str(ore_xml_path),
+        output_path=output_path,
+        market_data_path=market_data_path,
+        curve_config_path=curve_config_path,
+        conventions_path=conventions_path,
+        todaysmarket_xml_path=todaysmarket_xml_path,
+        simulation_xml_path=simulation_xml_path,
+        domestic_ccy=domestic_ccy,
+    )
+    if calibration_xml is not None and calibration_xml.exists():
+        try:
+            params_dict = parse_lgm_params_from_calibration_xml(
+                str(calibration_xml), ccy_key=domestic_ccy
+            )
+            return params_dict, "calibration", calibration_xml.resolve()
+        except Exception:
+            pass
+    params_dict = calibrate_lgm_params_via_ore(
+        ore_xml_path=ore_xml_path,
+        input_dir=input_dir,
+        simulation_xml_path=simulation_xml_path,
+        ccy_key=domestic_ccy,
+    )
+    if params_dict is not None:
+        return params_dict, "calibration", None
+    params_dict = parse_lgm_params_from_simulation_xml(
+        str(simulation_xml_path), ccy_key=domestic_ccy
+    )
+    return params_dict, "simulation", calibration_xml.resolve() if calibration_xml is not None and calibration_xml.exists() else None
 
 
 def validate_ore_input_snapshot(
@@ -2249,8 +2365,9 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     # 5. Determine LGM parameters (calibration.xml preferred)
     # ------------------------------------------------------------------
-    calibration_xml = resolve_calibration_xml_path(
+    params_dict, alpha_source, calibration_xml = resolve_lgm_params(
         ore_xml_path=str(ore_xml_path),
+        input_dir=input_dir,
         output_path=output_path,
         market_data_path=market_data_file,
         curve_config_path=curve_config_file,
@@ -2259,22 +2376,6 @@ def load_from_ore_xml(
         simulation_xml_path=simulation_xml,
         domestic_ccy=domestic_ccy,
     )
-    if calibration_xml is not None and calibration_xml.exists():
-        try:
-            params_dict = parse_lgm_params_from_calibration_xml(
-                str(calibration_xml), ccy_key=domestic_ccy
-            )
-            alpha_source = "calibration"
-        except (ValueError, ET.ParseError):
-            params_dict = parse_lgm_params_from_simulation_xml(
-                str(simulation_xml), ccy_key=domestic_ccy
-            )
-            alpha_source = "simulation"
-    else:
-        params_dict = parse_lgm_params_from_simulation_xml(
-            str(simulation_xml), ccy_key=domestic_ccy
-        )
-        alpha_source = "simulation"
 
     lgm_params = LGMParams(
         alpha_times=tuple(float(x) for x in params_dict["alpha_times"]),
