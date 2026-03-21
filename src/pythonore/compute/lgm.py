@@ -229,7 +229,6 @@ class OreSobolBrownianBridgeGaussianRng:
         self.seed = _coerce_seed(seed)
         self._dimension: Optional[int] = None
         self._generator = None
-        self._bridge = None
         self._bridge_times: Optional[tuple[float, ...]] = None
 
     def _ensure_dimension(self, size: int) -> None:
@@ -238,9 +237,9 @@ class OreSobolBrownianBridgeGaussianRng:
             raise ValueError("size must be positive")
         if self._dimension is None:
             ql = _load_quantlib()
-            uniform = ql.SobolRsg(size, self.seed)
-            self._generator = ql.InvCumulativeSobolGaussianRsg(uniform)
-            self._bridge = ql.BrownianBridge(list(self._bridge_times)) if self._bridge_times is not None else ql.BrownianBridge(size)
+            self._generator = ql.SobolBrownianBridgeRsg(1, size)
+            for _ in range(self.seed):
+                self._generator.nextSequence()
             self._dimension = size
             return
         if size != self._dimension:
@@ -261,19 +260,11 @@ class OreSobolBrownianBridgeGaussianRng:
                     "configured bridge time grid length must match existing RNG dimension "
                     f"{self._dimension}, got {len(self._bridge_times)}"
                 )
-            ql = _load_quantlib()
-            self._bridge = (
-                ql.BrownianBridge(list(self._bridge_times))
-                if self._bridge_times is not None
-                else ql.BrownianBridge(self._dimension)
-            )
 
     def next_sequence(self, size: int) -> np.ndarray:
         self._ensure_dimension(size)
         assert self._generator is not None
-        assert self._bridge is not None
-        seq = np.asarray(self._generator.nextSequence().value(), dtype=float)
-        return np.asarray(self._bridge.transform(seq.tolist()), dtype=float)
+        return np.asarray(self._generator.nextSequence().value(), dtype=float)
 
     def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
         if isinstance(size, tuple):

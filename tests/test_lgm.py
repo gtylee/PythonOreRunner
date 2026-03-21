@@ -151,14 +151,24 @@ class TestLGM(unittest.TestCase):
         dimension = 5
         rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
         actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
-        base_gen = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed))
-        bridge = ql.BrownianBridge(dimension)
-        expected = np.vstack(
-            [
-                np.asarray(bridge.transform(list(base_gen.nextSequence().value())), dtype=float)
-                for _ in range(4)
-            ]
-        )
+        bridge_rsg = ql.SobolBrownianBridgeRsg(1, dimension)
+        for _ in range(seed):
+            bridge_rsg.nextSequence()
+        expected = np.vstack([np.asarray(bridge_rsg.nextSequence().value(), dtype=float) for _ in range(4)])
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_sobol_brownian_bridge_ignores_actual_time_grid_for_ordering_steps(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        seed = 42
+        dimension = 5
+        rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
+        rng.configure_time_grid([0.1, 0.21, 0.34, 0.55, 0.89])
+        actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
+        bridge_rsg = ql.SobolBrownianBridgeRsg(1, dimension)
+        for _ in range(seed):
+            bridge_rsg.nextSequence()
+        expected = np.vstack([np.asarray(bridge_rsg.nextSequence().value(), dtype=float) for _ in range(4)])
         self.assertTrue(np.array_equal(actual, expected))
 
     def test_discount_bond_profile_matches_when_paths_are_shared(self):

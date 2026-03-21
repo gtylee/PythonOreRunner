@@ -31,6 +31,12 @@ _EXPORTS = {
     "load_manifest": ("pythonore.workflows", "load_manifest"),
     "refresh_baselines": ("pythonore.workflows", "refresh_baselines"),
     "compare_baselines": ("pythonore.workflows", "compare_baselines"),
+    "PayoffModuleIR": ("pythonore.payoff_ir", "PayoffModuleIR"),
+    "lower_ore_script": ("pythonore.payoff_ir", "lower_ore_script"),
+    "lower_python_payoff": ("pythonore.payoff_ir", "lower_python_payoff"),
+    "emit_ore_script": ("pythonore.payoff_ir", "emit_ore_script"),
+    "normalize_module": ("pythonore.payoff_ir", "normalize_module"),
+    "validate_module": ("pythonore.payoff_ir", "validate_module"),
 }
 
 __all__ = sorted(_EXPORTS)
