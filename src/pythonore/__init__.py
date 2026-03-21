@@ -18,6 +18,7 @@ _EXPORTS = {
     "ORESwigAdapter": ("pythonore.runtime", "ORESwigAdapter"),
     "PythonLgmAdapter": ("pythonore.runtime", "PythonLgmAdapter"),
     "DeterministicToyAdapter": ("pythonore.runtime", "DeterministicToyAdapter"),
+    "classify_portfolio_support": ("pythonore.runtime", "classify_portfolio_support"),
     "BufferCaseInputs": ("pythonore.workflows", "BufferCaseInputs"),
     "PurePythonRunOptions": ("pythonore.workflows", "PurePythonRunOptions"),
     "PurePythonCaseResult": ("pythonore.workflows", "PurePythonCaseResult"),

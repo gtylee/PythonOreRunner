@@ -471,6 +471,7 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
         fixed_leg = None
         float_leg = None
         inflation_leg = None
+        generic_rate_leg = None
         for leg in trade.findall(".//SwapData/LegData"):
             leg_type = (_text(leg, "./LegType") or "").lower()
             if leg_type in {"fixed", "zerocouponfixed"}:
@@ -479,6 +480,8 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
                 float_leg = leg
             elif leg_type in {"cpi", "yy"}:
                 inflation_leg = leg
+            elif leg_type in {"cms", "cmsspread", "digitalcmsspread"}:
+                generic_rate_leg = leg
         if inflation_leg is not None:
             ccy = _text(inflation_leg, "./Currency") or _text(fixed_leg, "./Currency") or _text(float_leg, "./Currency") or "EUR"
             notional = float(
@@ -528,6 +531,8 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
                 end_date=_normalize_date(end) if end else None,
                 schedule_tenor=_text(inflation_leg, "./ScheduleData/Rules/Tenor") or "1Y",
             )
+        if generic_rate_leg is not None:
+            return GenericProduct(payload={"trade_type": trade_type, "subtype": "GenericRateSwap", "xml": _product_inner_xml(trade)})
         if fixed_leg is not None:
             ccy = _text(fixed_leg, "./Currency") or "EUR"
             notional = float(_text(fixed_leg, "./Notionals/Notional") or 0.0)

@@ -2,17 +2,31 @@
 
 Python utilities and a native XVA interface for [Open Risk Engine (ORE)](https://github.com/OpenSourceRisk/Engine). Use this to run ORE configs from Python, compare ORE vs Python LGM results, and drive XVA workflows.
 
-## Standalone Python LGM model
+## Python-first native workflow
 
-**`py_ore_tools`** includes a **standalone Python LGM (Linear Gaussian Model)** implementation that consumes **ORE-style inputs** but runs entirely in **native Python**—no ORE binary or SWIG build required. Same curves, same conventions, same exposure/XVA workflow, so you can iterate quickly and compare directly to ORE.
+The maintained Python-native path is:
 
-**Supported products and features:**
+`XVASnapshot` -> `PythonLgmAdapter(fallback_to_swig=False)` -> Python pricing/XVA reports
 
-- **IRS** – single- and multi-currency interest rate swaps, dual-curve discount/forward, ORE parity-oriented conventions  
-- **FX forwards** – multi-currency LGM–FX hybrid, FX forwards and XCCY float-float  
-- **Caps & floors** – pathwise cap/floor valuation and exposure  
-- **Bermudan swaptions** – exercise-date handling and pathwise NPV  
-- **Multi-currency** – LGM–FX hybrid with correlated IR and FX, aggregate exposure and CVA/FVA-style XVA terms  
+This path runs entirely in native Python for the product families supported below. Use it when you want an in-memory workflow with no ORE binary and no SWIG dependency.
+
+The quickest starting points are:
+
+- [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb) for the canonical in-memory walkthrough
+- [`example_ore_snapshot.py`](/Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot.py) for the ORE-XML-to-Python-snapshot bridge
+- `python -m pythonore.apps.ore_snapshot_cli ... --xva` for the Python-first CLI flow
+
+### Native capability matrix
+
+| Area | Native Python | Fallback-only | Not supported |
+|------|---------------|---------------|---------------|
+| Rates | IRS, generic rate swaps already mapped to native legs, caps/floors, Bermudan swaption flow, rate futures | Some remaining non-native swap families when loaded as unsupported generic trades | Full ORE rates surface parity is not claimed |
+| FX | FX forwards, XCCY float-float helper flow, vanilla FX option helper pricing | Products that route through unsupported trade types in the runtime | Smile/barrier/exotic support |
+| Inflation | Inflation swaps and inflation cap/floor runtime flow | None intended for the current native set | Broader inflation product coverage |
+| XVA metrics | CVA, DVA, FVA, MVA via Python DIM feeder | Any metric only available from ORE reports on unsupported trades | KVA |
+| Equity / Commodity | Dataclasses only for schema / interop | ORE SWIG may price some loaded cases if available | Native Python pricing is not implemented |
+
+Equity and commodity dataclasses remain in the model for compatibility and mapping, but they should be treated as schema/interop types, not native pricers.
 
 Use it for fast prototyping, regression tests, teaching, or as the Python leg in ORE-vs-Python parity runs. The maintained implementation now lives under `src/pythonore/`; `py_ore_tools/` and `native_xva_interface/` remain compatibility-facing packages and script entrypoints.
 
@@ -133,6 +147,8 @@ Ad hoc root scripts now live under [`scripts/`](/Users/gordonlee/Documents/Pytho
 ## Notebook Series
 
 The five-part notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
+
+For the native Python story, start with [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb). That is the canonical end-to-end in-memory flow: programmatic snapshot build, validation, support preflight, native session run, and incremental updates.
 
 Older one-off demo notebooks now live under [`notebook_series/legacy/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/legacy).
 

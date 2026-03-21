@@ -5,16 +5,20 @@
 """
 # 05_1. Python-Only Workflow
 
-This companion notebook replaces the mixed-engine workflow with a pure Python session workflow. The goal is to show
-what can already be done interactively with the native snapshot model and the Python LGM adapter alone.
+This is the canonical native-Python workflow notebook. The goal is to show the full in-memory lifecycle around
+`XVASnapshot` and `PythonLgmAdapter(fallback_to_swig=False)` with no ORE binary, no SWIG dependency, and no
+dependence on ORE output files.
 
 **Purpose**
+- build and validate a programmatic snapshot
+- preflight native-vs-SWIG support before a run starts
 - run the Python LGM adapter on a programmatic snapshot
 - show how market and portfolio updates flow through one session
 - keep the workflow focused on reusable Python objects rather than external runs
 
 **What you will learn**
-- how to launch a Python-only XVA session
+- how to launch a Python-only XVA session from an in-memory snapshot
+- how to validate and preflight the portfolio before pricing
 - how to compare base, market-bumped, and portfolio-updated runs
 - which pieces of the workflow are already interactive without any external engine
 """
@@ -76,16 +80,27 @@ print(repo)
 # %% cell 2
 from dataclasses import replace
 
-from native_xva_interface import FXForward, PythonLgmAdapter, Trade, XVAEngine
+from native_xva_interface import (
+    FXForward,
+    PythonLgmAdapter,
+    Trade,
+    XVAEngine,
+    classify_portfolio_support,
+)
+from py_ore_tools import validate_xva_snapshot_dataclasses, xva_snapshot_validation_dataframe
 
 snapshot = nh.make_programmatic_snapshot(num_paths=768)
 adapter = PythonLgmAdapter(fallback_to_swig=False)
+support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+validation = validate_xva_snapshot_dataclasses(snapshot)
 session = XVAEngine(adapter=adapter).create_session(snapshot)
 
 base_result = session.run(return_cubes=False)
 display(nh.snapshot_overview(snapshot))
 display(nh.trade_frame(snapshot))
 display(nh.quote_family_frame(snapshot))
+display(pd.DataFrame([support]))
+display(xva_snapshot_validation_dataframe(validation))
 display(nh.result_metrics_frame(base_result))
 
 # %% cell 3
@@ -93,7 +108,9 @@ display(nh.result_metrics_frame(base_result))
 ## Base run
 
 The base snapshot is intentionally small. That keeps the session updates easy to reason about and makes it obvious
-which change caused which metric move.
+which change caused which metric move. The validation and support-preflight tables above are meant to be the first
+stop in a real workflow: confirm the snapshot is coherent, then confirm the portfolio stays native in
+`fallback_to_swig=False` mode.
 """
 
 # %% cell 4
@@ -136,7 +153,8 @@ genuinely moving and which are mostly stable to this small bump.
 ## Portfolio update
 
 Next add one trade and reprice through the same Python session. This is the workflow analogue of a trader-side
-portfolio patch rather than a market move.
+portfolio patch rather than a market move. After the patch, rerun the same support preflight to confirm that the
+session is still native-only.
 """
 
 # %% cell 9
@@ -159,8 +177,10 @@ session.update_portfolio(
     ]
 )
 portfolio_result = session.run(return_cubes=False)
+portfolio_support = classify_portfolio_support(session.state.snapshot, fallback_to_swig=False)
 
 portfolio_compare = nh.compare_results_frame("base", base_result, "portfolio_patch", portfolio_result)
+display(pd.DataFrame([portfolio_support]))
 display(portfolio_compare)
 nh.plot_metric_comparison(portfolio_compare, "base", "portfolio_patch", title="Python-only session: base vs portfolio patch")
 nh.plot_metric_delta(portfolio_compare, title="Python-only session: portfolio patch minus base")
@@ -186,17 +206,20 @@ plt.close(fig)
 """
 ## Capabilities in this workflow
 
-The capability table is still useful here, but it is read purely as a Python-side checklist rather than a split
-between engines.
+The capability table here is intentionally phrased around the native workflow boundary. Equity and commodity
+dataclasses are not shown as native pricing capability; they remain schema/interop types until native pricers exist.
 """
 
 # %% cell 12
 capability_df = pd.DataFrame(
     [
         {"capability": "Programmatic snapshot build", "python_only": True},
+        {"capability": "Snapshot validation", "python_only": True},
+        {"capability": "Support preflight (native vs SWIG)", "python_only": True},
         {"capability": "Session market updates", "python_only": True},
         {"capability": "Session portfolio updates", "python_only": True},
         {"capability": "Pathwise exposure and XVA metrics", "python_only": True},
+        {"capability": "Equity/commodity native pricing", "python_only": False},
         {"capability": "Fresh external run required", "python_only": False},
     ]
 )
@@ -207,8 +230,8 @@ nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python_
 """
 ## Key takeaways
 
-- The native Python session is already enough for interactive market and portfolio iteration.
+- The native Python session is already enough for a full in-memory workflow: build, validate, preflight, run, and update.
 - Base, market-bumped, and portfolio-patched runs are easiest to compare in one persistent session.
-- The notebook is most useful as a workflow demo when the snapshot stays small and explicit.
+- Native-only mode is explicit: `PythonLgmAdapter(fallback_to_swig=False)` plus `classify_portfolio_support(...)`.
+- Equity and commodity dataclasses are compatibility types today, not native pricing claims.
 """
-

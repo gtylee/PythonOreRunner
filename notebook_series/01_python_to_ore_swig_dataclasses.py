@@ -3,16 +3,17 @@
 
 # %% cell 0
 """
-# 01. Python Dataclasses -> ORE-SWIG
+# 01. Python Dataclasses -> Runtime Inputs
 
-This notebook is the start of the series. The goal is to make the Python-facing snapshot model concrete before we
-talk about loaders, calibration, or XVA numbers. The core question here is simple: what exactly do we hand around
+This notebook is the object-model starting point for the series. The canonical end-to-end native workflow lives in
+`05_1_python_only_workflow`; this notebook focuses on the question underneath it: what exactly do we hand around
 in Python before either engine runs?
 
 **Purpose**
 - show the shape of the `XVASnapshot` object
 - prove that the snapshot survives serialization without changing meaning
 - show how the same snapshot is mapped into ORE-style runtime inputs
+- set up the object model used by the Python-only workflow notebook
 
 **Prerequisites**
 - the main path is Python-only and should run anywhere
@@ -306,4 +307,3 @@ else:
 
 The next notebook moves from a hand-built snapshot to a loader-backed snapshot built from a fresh ORE run.
 """
-

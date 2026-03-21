@@ -1406,7 +1406,7 @@ def validate_xva_snapshot_dataclasses(snapshot) -> Dict[str, object]:
     """Validate an in-memory XVASnapshot-style dataclass object.
 
     This is intended for snapshots from ``native_xva_interface.dataclasses``
-    or compatible programmatic objects with the same attribute layout.
+    or compatible in-memory objects with the same attribute layout.
     """
     market = snapshot.market
     fixings = snapshot.fixings
@@ -1463,7 +1463,7 @@ def validate_xva_snapshot_dataclasses(snapshot) -> Dict[str, object]:
                 "code": "quote_date_mismatch",
                 "severity": "error",
                 "what_failed": "Some market quotes carry a date different from snapshot.market.asof.",
-                "what_to_fix": "Either restamp those MarketQuote.date values to the snapshot asof or move them into a snapshot whose asof matches the quote date.",
+                "what_to_fix": "Either restamp those MarketQuote.date values to the snapshot asof or move them into an in-memory snapshot whose asof matches the quote date.",
                 "where_to_fix": ["snapshot.market.raw_quotes[*].date"],
                 "details": market_quote_dates,
             }
@@ -1498,8 +1498,8 @@ def validate_xva_snapshot_dataclasses(snapshot) -> Dict[str, object]:
             {
                 "code": "unsupported_analytics",
                 "severity": "error",
-                "what_failed": "The analytics tuple contains unsupported metric names or no metrics at all.",
-                "what_to_fix": "Use only supported metrics: CVA, DVA, FVA, MVA.",
+                "what_failed": "The analytics tuple contains unsupported metric names or no metrics at all for the Python-native runtime.",
+                "what_to_fix": "Use only supported Python-native metrics: CVA, DVA, FVA, MVA.",
                 "where_to_fix": ["snapshot.config.analytics"],
                 "details": {"invalid": invalid_metrics, "requested": list(analytics)},
             }
@@ -1555,6 +1555,7 @@ def validate_xva_snapshot_dataclasses(snapshot) -> Dict[str, object]:
         "summary": {
             "asof": config.asof,
             "base_currency": config.base_currency,
+            "source_mode": getattr(getattr(config, "source_meta", None), "origin", "dataclass"),
             "analytics": list(analytics),
             "trade_count": len(portfolio.trades),
             "quote_count": len(market.raw_quotes),

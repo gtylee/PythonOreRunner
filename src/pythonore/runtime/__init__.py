@@ -25,6 +25,7 @@ _EXPORTS = {
     "stress_classic_native_preset": ("pythonore.runtime.presets", "stress_classic_native_preset"),
     "stress_classic_native_runtime": ("pythonore.runtime.presets", "stress_classic_native_runtime"),
     "DeterministicToyAdapter": ("pythonore.runtime.runtime", "DeterministicToyAdapter"),
+    "classify_portfolio_support": ("pythonore.runtime.runtime", "classify_portfolio_support"),
     "ORESwigAdapter": ("pythonore.runtime.runtime", "ORESwigAdapter"),
     "PythonLgmAdapter": ("pythonore.runtime.runtime", "PythonLgmAdapter"),
     "XVAEngine": ("pythonore.runtime.runtime", "XVAEngine"),

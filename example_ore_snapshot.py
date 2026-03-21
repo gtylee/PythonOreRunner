@@ -46,8 +46,9 @@ What this script does not do
 - It does not compare Python results against ORE results.
 
 It is intentionally a read/inspect quickstart. After confirming the snapshot
-loads, the next step is usually:
+loads, the next step is usually the canonical Python-only notebook or CLI:
 
+    notebook_series/05_1_python_only_workflow.ipynb
     python3 -m pythonore.apps.ore_snapshot_cli <ore.xml> --xva --paths 10000
 
 Example usage
@@ -129,12 +130,16 @@ def main() -> None:
     print("  pythonore.workflows.ore_snapshot_cli")
     print()
     print("Typical next steps:")
-    print("  1. Inspect snapshot fields programmatically.")
-    print("  2. Run the canonical CLI for pricing/XVA.")
-    print("  3. Use the snapshot as input to higher-level Python workflows.")
+    print("  1. Open notebook_series/05_1_python_only_workflow.ipynb for the canonical Python-only flow.")
+    print("  2. Inspect snapshot fields programmatically.")
+    print("  3. Run the canonical CLI for pricing/XVA.")
+    print("  4. Use the snapshot as input to higher-level Python workflows.")
     print()
     print("CLI quickstart:")
     print(f"  python3 -m pythonore.apps.ore_snapshot_cli {snapshot.ore_xml_path} --xva --paths 10000")
+    print()
+    print("Notebook quickstart:")
+    print("  notebook_series/05_1_python_only_workflow.ipynb")
     print()
     print("Programmatic quickstart:")
     print("  from pythonore.io.ore_snapshot import load_from_ore_xml")

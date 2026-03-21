@@ -103,6 +103,7 @@ _EXPORTS = {
     ),
     "build_input_parameters": ("pythonore.mapping.mapper", "build_input_parameters"),
     "compare_results": ("pythonore.runtime.parity", "compare_results"),
+    "classify_portfolio_support": ("pythonore.runtime.runtime", "classify_portfolio_support"),
     "map_snapshot": ("pythonore.mapping.mapper", "map_snapshot"),
     "merge_snapshots": ("pythonore.io.loader", "merge_snapshots"),
     "price_bermudan_from_ore_case": ("pythonore.runtime.bermudan", "price_bermudan_from_ore_case"),

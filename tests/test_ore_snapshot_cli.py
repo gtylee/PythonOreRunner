@@ -1,6 +1,7 @@
 import ast
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -1776,6 +1777,52 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(sensitivity_rows[0]["Factor_1"], "DiscountCurve/EUR/0/10Y")
         self.assertEqual(scenario_rows[0]["Up/Down"], "Up")
         self.assertEqual(scenario_rows[0]["Difference"], "0.25")
+
+    @unittest.skipUnless(
+        os.getenv("PY_ORE_RUN_SLOW_CLI_INTEGRATION") == "1",
+        "set PY_ORE_RUN_SLOW_CLI_INTEGRATION=1 to run slow real-case CLI sensitivity integration",
+    )
+    def test_real_swap_case_writes_native_npv_sensitivity_and_scenarios(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ore_snapshot_cli.main(
+                [
+                    str(REAL_CASE_XML),
+                    "--price",
+                    "--sensi",
+                    "--sensi-metric",
+                    "NPV",
+                    "--paths",
+                    "32",
+                    "--output-root",
+                    tmp,
+                ]
+            )
+            self.assertEqual(rc, 0)
+            case_dir = Path(tmp) / REAL_CASE_XML.parents[1].name
+            summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["trade_id"], "SWAP_EUR_5Y_A_flat")
+            self.assertEqual(summary["sensitivity"]["metric"], "NPV")
+            self.assertGreaterEqual(summary["sensitivity"]["python_factor_count"], 100)
+            self.assertTrue((case_dir / "sensitivity.csv").exists())
+            self.assertTrue((case_dir / "scenario.csv").exists())
+
+            with open(case_dir / "sensitivity.csv", newline="", encoding="utf-8") as handle:
+                sensi_rows = list(csv.DictReader(handle))
+            sensi_rows.sort(key=lambda row: abs(float(row["Delta"])), reverse=True)
+            self.assertEqual(sensi_rows[0]["Factor_1"], "IndexCurve/EUR-6M/0/5Y")
+            self.assertEqual(sensi_rows[0]["Delta"], "-4325.57")
+            self.assertEqual(sensi_rows[1]["Factor_1"], "DiscountCurve/EUR/0/5Y")
+            self.assertEqual(sensi_rows[1]["Delta"], "-4325.57")
+
+            with open(case_dir / "scenario.csv", newline="", encoding="utf-8") as handle:
+                scenario_rows = list(csv.DictReader(handle))
+            scenario_rows.sort(key=lambda row: abs(float(row["Difference"])), reverse=True)
+            self.assertEqual(scenario_rows[0]["Factor"], "IndexCurve/EUR-6M/0/5Y")
+            self.assertEqual(scenario_rows[0]["Up/Down"], "Up")
+            self.assertEqual(scenario_rows[0]["Difference"], "-4325.57")
+            self.assertEqual(scenario_rows[1]["Factor"], "DiscountCurve/EUR/0/5Y")
+            self.assertEqual(scenario_rows[1]["Up/Down"], "Up")
+            self.assertEqual(scenario_rows[1]["Difference"], "-4325.57")
 
     def test_callable_bond_price_only_case_uses_python_dispatch(self):
         fake_result = {
