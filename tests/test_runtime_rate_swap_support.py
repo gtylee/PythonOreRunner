@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from pythonore.domain.dataclasses import GenericProduct
+from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
 from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
 from pythonore.runtime.runtime import XVAEngine
@@ -60,6 +60,27 @@ def _clone_pricing_only_case(case_name: str, *, trade_ids):
     return tmp, case_root
 
 
+def _write_poisoned_output_artifacts(case_root: Path):
+    output_dir = case_root / "Output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "curves.csv").write_text(
+        "Date,EUR-EONIA\n2016-02-05,-99.0\n2017-02-05,-99.0\n",
+        encoding="utf-8",
+    )
+    (output_dir / "flows.csv").write_text(
+        "#TradeId,Type,CashflowNo,LegNo,PayDate,FlowType,Amount,Currency,Coupon,Accrual,AccrualStartDate,AccrualEndDate,AccruedAmount,fixingDate,fixingValue,Notional,DiscountFactor,PresentValue,FXRate(Local-Base),PresentValue(Base),BaseCurrency\n"
+        "CMS_Spread_Swap,Swap,1,0,1900-01-01,InterestProjected,999999999,EUR,9.99,1.0,1900-01-01,1901-01-01,0.0,1900-01-01,9.99,1.0,1.0,1.0,1.0,1.0,EUR\n",
+        encoding="utf-8",
+    )
+    poisoned_calibration = """<?xml version="1.0" encoding="UTF-8"?>
+<Root><InterestRateModels><LGM currency="EUR"><CalibrationType>Bootstrap</CalibrationType>
+<Reversion><TimeGrid>1.0</TimeGrid><Value>9.99</Value></Reversion>
+<Volatility><TimeGrid>1.0</TimeGrid><Value>9.99</Value></Volatility>
+<ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+</LGM></InterestRateModels></Root>"""
+    (output_dir / "calibration.xml").write_text(poisoned_calibration, encoding="utf-8")
+
+
 def test_loader_treats_cms_swap_as_generic_rate_swap():
     snapshot = _load_case("Examples/Legacy/Example_21/Input")
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "CMS_Swap")
@@ -87,6 +108,94 @@ def test_python_runtime_supports_real_cms_spread_case_without_fallback():
     assert math.isfinite(float(result.pv_total))
 
 
+def test_runtime_exposure_profiles_include_pfe_and_basel_fields():
+    snapshot = _load_case("Examples/Legacy/Example_21/Input")
+    cms_trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "CMS_Swap")
+    snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(cms_trade,)))
+    runtime = snapshot.config.runtime or RuntimeConfig()
+    snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            num_paths=32,
+            runtime=replace(
+                runtime,
+                xva_analytic=replace(runtime.xva_analytic, pfe_quantile=0.95),
+            ),
+        ),
+    )
+    result = _run_python(snapshot, "exposure-profile-shape")
+    assert result.exposure_profiles_by_netting_set
+    assert result.exposure_profiles_by_trade
+    ns_profile = next(iter(result.exposure_profiles_by_netting_set.values()))
+    trade_profile = next(iter(result.exposure_profiles_by_trade.values()))
+    for profile in (ns_profile, trade_profile):
+        for key in (
+            "times",
+            "closeout_times",
+            "valuation_epe",
+            "valuation_ene",
+            "closeout_epe",
+            "closeout_ene",
+            "pfe",
+            "basel_ee",
+            "basel_eee",
+            "time_weighted_basel_epe",
+            "time_weighted_basel_eepe",
+        ):
+            assert key in profile
+        assert len(profile["times"]) == len(profile["pfe"])
+        assert len(profile["times"]) == len(profile["basel_ee"])
+    basel_eee = np.asarray(ns_profile["basel_eee"], dtype=float)
+    assert np.all(basel_eee[1:] >= basel_eee[:-1])
+    assert math.isclose(
+        result.reports["exposure"][0]["BaselEEPE"],
+        result.netting_exposure_profile(next(iter(result.exposure_profiles_by_netting_set))).series("time_weighted_basel_eepe")[
+            min(
+                np.searchsorted(np.asarray(ns_profile["times"], dtype=float), 1.0, side="left"),
+                len(ns_profile["times"]) - 1,
+            )
+        ],
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    )
+
+
+def test_runtime_pfe_quantile_is_monotonic():
+    snapshot = _load_case("Examples/Legacy/Example_21/Input")
+    cms_trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "CMS_Swap")
+    snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(cms_trade,)))
+    runtime = snapshot.config.runtime or RuntimeConfig()
+    low_snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            num_paths=64,
+            runtime=replace(
+                runtime,
+                xva_analytic=replace(getattr(runtime, "xva_analytic", XVAAnalyticConfig()), pfe_quantile=0.80),
+            ),
+        ),
+    )
+    high_snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            num_paths=64,
+            runtime=replace(
+                runtime,
+                xva_analytic=replace(getattr(runtime, "xva_analytic", XVAAnalyticConfig()), pfe_quantile=0.99),
+            ),
+        ),
+    )
+    low = _run_python(low_snapshot, "pfe-q80")
+    high = _run_python(high_snapshot, "pfe-q99")
+    netting_id = next(iter(low.exposure_profiles_by_netting_set))
+    low_pfe = np.asarray(low.netting_exposure_profile(netting_id).series("pfe"), dtype=float)
+    high_pfe = np.asarray(high.netting_exposure_profile(netting_id).series("pfe"), dtype=float)
+    assert np.all(high_pfe >= low_pfe - 1.0e-12)
+
+
 def test_python_runtime_reprices_example25_cmsspread_from_input_market():
     tmp, case_root = _clone_pricing_only_case("Example_25", trade_ids=("CMS_Spread_Swap",))
     try:
@@ -97,7 +206,8 @@ def test_python_runtime_reprices_example25_cmsspread_from_input_market():
             mapped=map_snapshot(snapshot),
             run_id="cmsspread-native",
         )
-        assert math.isclose(float(result.pv_total), 406186.32950821426, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(result.pv_total), 309150.0484271799, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert result.metadata["cmsspread_profile_mode"] == "frozen_input_native"
     finally:
         tmp.cleanup()
 
@@ -249,10 +359,40 @@ def test_python_runtime_reprices_example25_digital_cmsspread_from_input_market()
             mapped=map_snapshot(snapshot),
             run_id="digital-cmsspread-native",
         )
-        assert math.isclose(float(result.pv_total), 342727.856174012, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(result.pv_total), 284672.65625257127, rel_tol=1.0e-10, abs_tol=1.0e-8)
         provenance = result.metadata["input_provenance"]
         assert provenance["market"] == "market_overlay"
         assert provenance["model_params"] == "calibration"
+        assert result.metadata["cmsspread_profile_mode"] == "frozen_input_native"
+    finally:
+        tmp.cleanup()
+
+
+def test_example25_cmsspread_ignores_poisoned_output_artifacts():
+    tmp, case_root = _clone_pricing_only_case("Example_25", trade_ids=("CMS_Spread_Swap", "Digital_CMS_Spread"))
+    try:
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(snapshot, config=replace(snapshot.config, num_paths=4))
+        baseline = _run_python(snapshot, "cmsspread-baseline")
+        _write_poisoned_output_artifacts(case_root)
+        poisoned_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        poisoned_snapshot = replace(poisoned_snapshot, config=replace(poisoned_snapshot.config, num_paths=4))
+        poisoned = _run_python(poisoned_snapshot, "cmsspread-poisoned")
+        assert math.isclose(float(baseline.pv_total), float(poisoned.pv_total), rel_tol=1.0e-12, abs_tol=1.0e-12)
+    finally:
+        tmp.cleanup()
+
+
+def test_example25_cmsspread_prices_without_flows_csv():
+    tmp, case_root = _clone_pricing_only_case("Example_25", trade_ids=("CMS_Spread_Swap", "Digital_CMS_Spread"))
+    try:
+        output_dir = case_root / "Output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(snapshot, config=replace(snapshot.config, num_paths=4))
+        result = _run_python(snapshot, "cmsspread-no-flows")
+        assert math.isfinite(float(result.pv_total))
+        assert result.metadata["cmsspread_profile_mode"] == "frozen_input_native"
     finally:
         tmp.cleanup()
 
@@ -283,8 +423,8 @@ def test_python_runtime_compares_example25_digital_cmsspread_with_local_ore_run(
         )
 
         assert math.isclose(ore_npv, 279806.656601, rel_tol=1.0e-10, abs_tol=1.0e-8)
-        assert math.isclose(float(py_result.pv_total), 342727.856174012, rel_tol=1.0e-10, abs_tol=1.0e-8)
-        assert math.isclose(float(py_result.pv_total - ore_npv), 62921.199573012015, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(py_result.pv_total), 284672.65625257127, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(py_result.pv_total - ore_npv), 4865.99965157127, rel_tol=1.0e-10, abs_tol=1.0e-8)
     finally:
         tmp.cleanup()
 
@@ -315,7 +455,7 @@ def test_python_runtime_compares_example25_cmsspread_with_local_ore_run():
         )
 
         assert math.isclose(ore_npv, 328271.965698, rel_tol=1.0e-10, abs_tol=1.0e-8)
-        assert math.isclose(float(py_result.pv_total), 406186.32950821426, rel_tol=1.0e-10, abs_tol=1.0e-8)
-        assert math.isclose(float(py_result.pv_total - ore_npv), 77914.36381021427, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(py_result.pv_total), 309150.0484271799, rel_tol=1.0e-10, abs_tol=1.0e-8)
+        assert math.isclose(float(py_result.pv_total - ore_npv), -19121.917270820122, rel_tol=1.0e-10, abs_tol=1.0e-8)
     finally:
         tmp.cleanup()

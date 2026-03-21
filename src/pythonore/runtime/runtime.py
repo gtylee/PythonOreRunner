@@ -298,6 +298,8 @@ class DeterministicToyAdapter:
             xva_total=xva_total,
             xva_by_metric=metric_values,
             exposure_by_netting_set=epe_by_ns,
+            exposure_profiles_by_netting_set={},
+            exposure_profiles_by_trade={},
             reports=reports,
             cubes=cubes,
             metadata={
@@ -340,6 +342,7 @@ class _PythonLgmInputs:
     forward_curves: Dict[str, Callable[[float], float]]    # Composite forward/index curves keyed by ISO currency.
     forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]  # Forward curves keyed by (ccy, tenor string).
     forward_curves_by_name: Dict[str, Callable[[float], float]]  # Forward curves keyed by exact index name.
+    swap_index_forward_tenors: Dict[str, str]  # CMS/swap index name -> underlying ibor tenor, from conventions.xml.
     inflation_curves: Dict[Tuple[str, str], Any]  # Inflation curves keyed by (index, curve_type) where curve_type is ZC or YY.
     xva_discount_curve: Optional[Callable[[float], float]]  # Simulation-market discount curve used for XVA deflation; falls back to discount_curves[base_ccy].
     funding_borrow_curve: Optional[Callable[[float], float]]  # Own-name borrowing curve used in FCA calculation; None when not configured.
@@ -959,6 +962,29 @@ class PythonLgmAdapter:
             )
         return curves
 
+    def _parse_swap_index_forward_tenors(self, conventions_xml: str) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        if not conventions_xml.strip():
+            return mapping
+        try:
+            root = ET.fromstring(conventions_xml)
+        except Exception:
+            return mapping
+        swap_conv_to_index: Dict[str, str] = {}
+        for node in root.findall("./Swap"):
+            conv_id = (node.findtext("./Id") or "").strip()
+            ibor_index = (node.findtext("./Index") or "").strip().upper()
+            tenor_match = re.search(r"(\d+[YMWD])$", ibor_index)
+            if conv_id and tenor_match is not None:
+                swap_conv_to_index[conv_id] = tenor_match.group(1).upper()
+        for node in root.findall("./SwapIndex"):
+            index_id = (node.findtext("./Id") or "").strip().upper()
+            conv_id = (node.findtext("./Conventions") or "").strip()
+            tenor = swap_conv_to_index.get(conv_id, "")
+            if index_id and tenor:
+                mapping[index_id] = tenor
+        return mapping
+
     def _load_inflation_curves(
         self,
         snapshot: XVASnapshot,
@@ -1033,6 +1059,7 @@ class PythonLgmAdapter:
         fx_vols = overlay.get("fx_vol", {})
         swaption_normal_vols = overlay.get("swaption_normal_vols", {})
         cms_correlations = overlay.get("cms_correlations", {})
+        swap_index_forward_tenors = self._parse_swap_index_forward_tenors(xml.get("conventions.xml", ""))
         zero_curves = overlay["zero"]
         named_zero_curves = overlay.get("named_zero", {})
         fwd_curves_raw = overlay.get("fwd", {})
@@ -1139,6 +1166,11 @@ class PythonLgmAdapter:
                     else:
                         forward_curves[ccy] = discount_curves[ccy]
                     forward_curves_by_tenor[ccy] = tenor_curves
+                for index_name, tenor in swap_index_forward_tenors.items():
+                    index_ccy = index_name.split("-", 1)[0].upper()
+                    curve = forward_curves_by_tenor.get(index_ccy, {}).get(str(tenor).upper())
+                    if curve is not None:
+                        forward_curves_by_name.setdefault(index_name.upper(), curve)
                 curve_source = "market_overlay"
 
         runtime = snapshot.config.runtime
@@ -1260,6 +1292,7 @@ class PythonLgmAdapter:
             forward_curves=forward_curves,
             forward_curves_by_tenor=forward_curves_by_tenor,
             forward_curves_by_name=forward_curves_by_name,
+            swap_index_forward_tenors=swap_index_forward_tenors,
             inflation_curves=inflation_curves,
             xva_discount_curve=xva_discount_curve,
             funding_borrow_curve=funding_borrow_curve,
@@ -1482,6 +1515,32 @@ class PythonLgmAdapter:
             ccy_set = {snapshot.config.base_currency.upper()}
             for spec in trade_specs:
                 ccy_set.add(spec.ccy.upper())
+            ore_xml_text = snapshot.config.xml_buffers.get("ore.xml", "")
+            ore_root = ET.fromstring(ore_xml_text) if ore_xml_text.strip() else None
+            tm_root = ET.fromstring(snapshot.config.xml_buffers.get("todaysmarket.xml", ""))
+            pricing_config_id = (
+                (ore_root.findtext("./Markets/Parameter[@name='pricing']") if ore_root is not None else None)
+                or "default"
+            ).strip() or "default"
+            sim_config_id = (
+                (ore_root.findtext("./Markets/Parameter[@name='simulation']") if ore_root is not None else None)
+                or pricing_config_id
+            ).strip() or pricing_config_id
+            discount_meta = {
+                ccy: {
+                    "source_column": self._ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, ccy),
+                }
+                for ccy in sorted(ccy_set)
+            }
+            xva_discount_meta = {
+                ccy: {
+                    "source_column": self._ore_snapshot_mod._resolve_discount_column(tm_root, sim_config_id, ccy),
+                }
+                for ccy in sorted(ccy_set)
+            }
+            swap_index_forward_tenors = self._parse_swap_index_forward_tenors(
+                snapshot.config.xml_buffers.get("conventions.xml", "")
+            )
 
             discount_curves: Dict[str, Callable[[float], float]] = {}
             for ccy in sorted(ccy_set):
@@ -1515,11 +1574,17 @@ class PythonLgmAdapter:
             forward_curves_by_name: Dict[str, Callable[[float], float]] = {}
             needed_tenors: Dict[str, set[str]] = {}
             for spec in trade_specs:
-                if spec.kind != "IRS" or spec.legs is None:
-                    continue
-                tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-                if tenor:
-                    needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+                if spec.kind == "IRS" and spec.legs is not None:
+                    tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+                    if tenor:
+                        needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+                elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
+                    for leg in spec.legs.get("rate_legs", []):
+                        for field in ("index_name", "index_name_1", "index_name_2"):
+                            index_name = str(leg.get(field, "")).upper()
+                            tenor = swap_index_forward_tenors.get(index_name, "")
+                            if tenor:
+                                needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
             for ccy, tenors in needed_tenors.items():
                 tenor_curves: Dict[str, Callable[[float], float]] = {}
                 for tenor in sorted(tenors):
@@ -1543,6 +1608,9 @@ class PythonLgmAdapter:
                             index_name = str(spec.legs.get("float_index", "")).upper()
                             if index_name:
                                 forward_curves_by_name[index_name] = tenor_curves[tenor]
+                    for index_name, mapped_tenor in swap_index_forward_tenors.items():
+                        if index_name.startswith(ccy + "-") and mapped_tenor == tenor:
+                            forward_curves_by_name.setdefault(index_name.upper(), tenor_curves[tenor])
                 forward_curves_by_tenor[ccy] = tenor_curves
                 if tenor_curves:
                     preferred = "6M" if "6M" in tenor_curves else sorted(tenor_curves)[0]
@@ -1560,6 +1628,7 @@ class PythonLgmAdapter:
                 forward_curves=forward_curves,
                 forward_curves_by_tenor=forward_curves_by_tenor,
                 forward_curves_by_name=forward_curves_by_name,
+                swap_index_forward_tenors=swap_index_forward_tenors,
                 xva_discount_curve=base_curve,
                 funding_borrow_curve=None,
                 funding_lend_curve=None,
@@ -2314,6 +2383,9 @@ class PythonLgmAdapter:
         key = str(index_name).strip().upper()
         if key and key in inputs.forward_curves_by_name:
             return inputs.forward_curves_by_name[key]
+        mapped_tenor = inputs.swap_index_forward_tenors.get(key, "")
+        if mapped_tenor and mapped_tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
+            return inputs.forward_curves_by_tenor[ccy][mapped_tenor]
         tenor_match = re.search(r"(\d+[YMWD])$", key)
         if tenor_match:
             tenor = tenor_match.group(1).upper()
@@ -2440,18 +2512,6 @@ class PythonLgmAdapter:
             import QuantLib as ql
         except Exception:
             return None
-        tenor_match = re.search(r"(\d+[YMWD])$", index_name.upper())
-        if ccy.upper() != "EUR" or tenor_match is None:
-            return None
-        tenor = tenor_match.group(1)
-        vol_points = inputs.swaption_normal_vols.get((ccy.upper(), tenor), [])
-        if not vol_points:
-            return None
-        eval_date = ql.DateParser.parseISO(_normalize_asof_date(asof))
-        ql.Settings.instance().evaluationDate = eval_date
-        def _ql_date_from_time(t: float) -> Any:
-            return ql.DateParser.parseISO(_date_from_time(_normalize_asof_date(asof), float(t)))
-
         def _curve_handle(curve: Callable[[float], float]) -> Any:
             grid = [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0]
             dates = [eval_date]
@@ -2468,6 +2528,17 @@ class PythonLgmAdapter:
             if norm in {"30/360", "30E/360"}:
                 return ql.Thirty360(ql.Thirty360.BondBasis)
             return ql.Actual365Fixed()
+        tenor_match = re.search(r"(\d+[YMWD])$", index_name.upper())
+        if ccy.upper() != "EUR" or tenor_match is None:
+            return None
+        tenor = tenor_match.group(1)
+        vol_points = inputs.swaption_normal_vols.get((ccy.upper(), tenor), [])
+        if not vol_points:
+            return None
+        eval_date = ql.DateParser.parseISO(_normalize_asof_date(asof))
+        ql.Settings.instance().evaluationDate = eval_date
+        def _ql_date_from_time(t: float) -> Any:
+            return ql.DateParser.parseISO(_date_from_time(_normalize_asof_date(asof), float(t)))
 
         disc = _curve_handle(inputs.discount_curves[ccy.upper()])
         fwd = _curve_handle(self._resolve_index_curve(inputs, ccy.upper(), index_name))
@@ -2517,17 +2588,6 @@ class PythonLgmAdapter:
             import QuantLib as ql
         except Exception:
             return None
-        tenor1 = re.search(r"(\d+[YMWD])$", idx1.upper())
-        tenor2 = re.search(r"(\d+[YMWD])$", idx2.upper())
-        if ccy.upper() != "EUR" or tenor1 is None or tenor2 is None:
-            return None
-        vol1, vol2, corr = self._cmsspread_vol_inputs(inputs, ccy, idx1, idx2, max(float(start_time), 1.0e-8))
-        avg_vol = max(0.5 * (abs(vol1) + abs(vol2)), 1.0e-8)
-        eval_date = ql.DateParser.parseISO(_normalize_asof_date(asof))
-        ql.Settings.instance().evaluationDate = eval_date
-
-        def _ql_date_from_time(t: float) -> Any:
-            return ql.DateParser.parseISO(_date_from_time(_normalize_asof_date(asof), float(t)))
 
         def _curve_handle(curve: Callable[[float], float]) -> Any:
             grid = [0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0]
@@ -2545,6 +2605,18 @@ class PythonLgmAdapter:
             if norm in {"30/360", "30E/360"}:
                 return ql.Thirty360(ql.Thirty360.BondBasis)
             return ql.Actual365Fixed()
+
+        tenor1 = re.search(r"(\d+[YMWD])$", idx1.upper())
+        tenor2 = re.search(r"(\d+[YMWD])$", idx2.upper())
+        if ccy.upper() != "EUR" or tenor1 is None or tenor2 is None:
+            return None
+        vol1, vol2, corr = self._cmsspread_vol_inputs(inputs, ccy, idx1, idx2, max(float(start_time), 1.0e-8))
+        avg_vol = max(0.5 * (abs(vol1) + abs(vol2)), 1.0e-8)
+        eval_date = ql.DateParser.parseISO(_normalize_asof_date(asof))
+        ql.Settings.instance().evaluationDate = eval_date
+
+        def _ql_date_from_time(t: float) -> Any:
+            return ql.DateParser.parseISO(_date_from_time(_normalize_asof_date(asof), float(t)))
 
         disc = _curve_handle(inputs.discount_curves[ccy.upper()])
         fwd1 = _curve_handle(self._resolve_index_curve(inputs, ccy.upper(), idx1))
@@ -2890,11 +2962,24 @@ class PythonLgmAdapter:
         n_paths = int(x_paths.shape[1])
         p_disc = inputs.discount_curves[spec.ccy]
         vals = np.zeros((n_times, n_paths), dtype=float)
+        frozen_coupon_paths: Dict[int, np.ndarray] = {}
+        for leg_idx, leg in enumerate(rate_legs):
+            kind = str(leg.get("kind", "")).upper()
+            if kind not in {"CMS", "CMSSPREAD", "DIGITALCMSSPREAD"}:
+                continue
+            frozen_coupon_paths[leg_idx] = self._rate_leg_coupon_paths(
+                model,
+                leg,
+                spec.ccy,
+                inputs,
+                0.0,
+                x_paths[0, :],
+            )
         for i, t in enumerate(inputs.times):
             x_t = x_paths[i, :]
             p_t = float(p_disc(float(t)))
             pv = np.zeros((n_paths,), dtype=float)
-            for leg in rate_legs:
+            for leg_idx, leg in enumerate(rate_legs):
                 kind = str(leg.get("kind", "")).upper()
                 pay = np.asarray(leg.get("pay_time", []), dtype=float)
                 start = np.asarray(leg.get("start_time", []), dtype=float)
@@ -2907,7 +2992,10 @@ class PythonLgmAdapter:
                     amount = np.asarray(leg.get("amount", np.zeros(pay.shape)), dtype=float)[live]
                     pv += np.sum(amount[:, None] * disc, axis=0)
                     continue
-                coupons = self._rate_leg_coupon_paths(model, leg, spec.ccy, inputs, float(t), x_t)[live, :]
+                if float(t) > 1.0e-12 and leg_idx in frozen_coupon_paths:
+                    coupons = frozen_coupon_paths[leg_idx][live, :]
+                else:
+                    coupons = self._rate_leg_coupon_paths(model, leg, spec.ccy, inputs, float(t), x_t)[live, :]
                 notional = float(leg.get("notional", 0.0))
                 sign = float(leg.get("sign", 1.0))
                 amount = sign * notional * accr[live, None] * coupons
@@ -2961,6 +3049,9 @@ class PythonLgmAdapter:
         pv_total = 0.0
         npv_cube_payload: Dict[str, Dict[str, object]] = {}
         exposure_cube_payload: Dict[str, Dict[str, object]] = {}
+        exposure_profiles_by_trade: Dict[str, Dict[str, object]] = {}
+        exposure_profiles_by_netting_set: Dict[str, Dict[str, object]] = {}
+        pfe_quantile = _pfe_quantile(snapshot)
 
         for spec in inputs.trade_specs:
             v = npv_by_trade.get(spec.trade.trade_id)
@@ -2996,6 +3087,8 @@ class PythonLgmAdapter:
             valuation_ene = np.mean(np.maximum(-v_xva_val, 0.0), axis=1)
             epe = np.mean(np.maximum(v_xva_obs, 0.0), axis=1)
             ene = np.mean(np.maximum(-v_xva_obs, 0.0), axis=1)
+            pfe = np.maximum(np.quantile(v_xva_obs, pfe_quantile, axis=1), 0.0)
+            basel_profile = _basel_profile(obs_times, epe)
             ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(v_xva_val)) + v_xva_val
             ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(v_xva_obs)) + v_xva_obs
             xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
@@ -3009,6 +3102,24 @@ class PythonLgmAdapter:
                 "valuation_ene": valuation_ene.tolist(),
                 "closeout_epe": epe.tolist(),
                 "closeout_ene": ene.tolist(),
+                "pfe": pfe.tolist(),
+                "basel_ee": basel_profile["basel_ee"],
+                "basel_eee": basel_profile["basel_eee"],
+                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
+                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
+            }
+            exposure_profiles_by_trade[spec.trade.trade_id] = {
+                "times": obs_times.tolist(),
+                "closeout_times": obs_closeout_times.tolist(),
+                "valuation_epe": valuation_epe.tolist(),
+                "valuation_ene": valuation_ene.tolist(),
+                "closeout_epe": epe.tolist(),
+                "closeout_ene": ene.tolist(),
+                "pfe": pfe.tolist(),
+                "basel_ee": basel_profile["basel_ee"],
+                "basel_eee": basel_profile["basel_eee"],
+                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
+                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
             }
 
         epe_by_ns_paths: Dict[str, np.ndarray] = {}
@@ -3024,6 +3135,21 @@ class PythonLgmAdapter:
             valuation_ene_by_ns_paths[ns] = np.mean(np.maximum(-valuation_paths_net, 0.0), axis=1)
             epe_by_ns_paths[ns] = np.mean(np.maximum(closeout_paths_net, 0.0), axis=1)
             ene_by_ns_paths[ns] = np.mean(np.maximum(-closeout_paths_net, 0.0), axis=1)
+            pfe_vec = np.maximum(np.quantile(closeout_paths_net, pfe_quantile, axis=1), 0.0)
+            basel_profile = _basel_profile(obs_times, epe_by_ns_paths[ns])
+            exposure_profiles_by_netting_set[ns] = {
+                "times": obs_times.tolist(),
+                "closeout_times": obs_closeout_times.tolist(),
+                "valuation_epe": valuation_epe_by_ns_paths[ns].tolist(),
+                "valuation_ene": valuation_ene_by_ns_paths[ns].tolist(),
+                "closeout_epe": epe_by_ns_paths[ns].tolist(),
+                "closeout_ene": ene_by_ns_paths[ns].tolist(),
+                "pfe": pfe_vec.tolist(),
+                "basel_ee": basel_profile["basel_ee"],
+                "basel_eee": basel_profile["basel_eee"],
+                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
+                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
+            }
 
         exposure_by_ns = {ns: float(np.max(vals)) for ns, vals in epe_by_ns_paths.items()}
         xva_by_metric: Dict[str, float] = {}
@@ -3100,6 +3226,11 @@ class PythonLgmAdapter:
                 "valuation_ene": valuation_ene_by_ns_paths.get(ns, np.zeros_like(ene_vec)).tolist(),
                 "closeout_epe": epe_vec.tolist(),
                 "closeout_ene": ene_vec.tolist(),
+                "pfe": exposure_profiles_by_netting_set.get(ns, {}).get("pfe", []),
+                "basel_ee": exposure_profiles_by_netting_set.get(ns, {}).get("basel_ee", []),
+                "basel_eee": exposure_profiles_by_netting_set.get(ns, {}).get("basel_eee", []),
+                "time_weighted_basel_epe": exposure_profiles_by_netting_set.get(ns, {}).get("time_weighted_basel_epe", []),
+                "time_weighted_basel_eepe": exposure_profiles_by_netting_set.get(ns, {}).get("time_weighted_basel_eepe", []),
             }
 
         if "CVA" in metric_set:
@@ -3114,9 +3245,25 @@ class PythonLgmAdapter:
         if "MVA" in metric_set:
             xva_by_metric["MVA"] = mva_total
 
+        exposure_report_rows = []
+        for ns, peak_epe in exposure_by_ns.items():
+            profile = exposure_profiles_by_netting_set.get(ns, {})
+            pfe_series = np.asarray(profile.get("pfe", []), dtype=float)
+            closeout_epe_series = np.asarray(profile.get("closeout_epe", []), dtype=float)
+            peak_idx = int(np.argmax(closeout_epe_series)) if closeout_epe_series.size else 0
+            peak_pfe = float(pfe_series[peak_idx]) if pfe_series.size > peak_idx else 0.0
+            exposure_report_rows.append(
+                {
+                    "NettingSetId": ns,
+                    "EPE": peak_epe,
+                    "PFE": peak_pfe,
+                    "BaselEPE": _one_year_basel_value(profile, "time_weighted_basel_epe"),
+                    "BaselEEPE": _one_year_basel_value(profile, "time_weighted_basel_eepe"),
+                }
+            )
         reports = {
             "xva": [{"Metric": k, "Value": v} for k, v in xva_by_metric.items()],
-            "exposure": [{"NettingSetId": k, "EPE": v} for k, v in exposure_by_ns.items()],
+            "exposure": exposure_report_rows,
         }
         cubes = {
             "npv_cube": CubeAccessor(name="npv_cube", payload=npv_cube_payload),
@@ -3157,11 +3304,25 @@ class PythonLgmAdapter:
             "observation_grid_size": int(obs_times.size),
             "closeout_grid_size": int(np.unique(inputs.observation_closeout_times).size),
             "path_count": int(snapshot.config.num_paths),
+            "pfe_quantile": float(pfe_quantile),
             "mpor_enabled": bool(inputs.mpor.enabled),
             "mpor_days": int(inputs.mpor.mpor_days),
             "mpor_mode": "sticky",
             "mpor_source": inputs.mpor.source,
         }
+        cmsspread_trades = [
+            spec.trade.trade_id
+            for spec in inputs.trade_specs
+            if spec.kind == "RateSwap"
+            and spec.legs is not None
+            and any(
+                str(leg.get("kind", "")).upper() in {"CMS", "CMSSPREAD", "DIGITALCMSSPREAD"}
+                for leg in spec.legs.get("rate_legs", [])
+            )
+        ]
+        if cmsspread_trades:
+            metadata["cmsspread_profile_mode"] = "frozen_input_native"
+            metadata["cmsspread_profile_trades"] = cmsspread_trades
         if fallback is not None:
             metadata["fallback_adapter"] = "ore-swig"
 
@@ -3171,6 +3332,8 @@ class PythonLgmAdapter:
             xva_total=float(sum(xva_by_metric.values())),
             xva_by_metric=xva_by_metric,
             exposure_by_netting_set=exposure_by_ns,
+            exposure_profiles_by_netting_set=exposure_profiles_by_netting_set,
+            exposure_profiles_by_trade=exposure_profiles_by_trade,
             reports=reports,
             cubes=cubes,
             metadata=metadata,
@@ -3575,6 +3738,54 @@ def _active_dim_mode(snapshot: XVASnapshot) -> str | None:
     if runtime is None or runtime.xva_analytic is None:
         return None
     return runtime.xva_analytic.dim_model
+
+
+def _pfe_quantile(snapshot: XVASnapshot) -> float:
+    runtime = snapshot.config.runtime
+    quantile = 0.95
+    if runtime is not None and runtime.xva_analytic is not None:
+        quantile = float(getattr(runtime.xva_analytic, "pfe_quantile", quantile))
+    return min(max(quantile, 0.0), 1.0)
+
+
+def _basel_profile(times: np.ndarray, closeout_epe: np.ndarray) -> Dict[str, list[float]]:
+    t = np.asarray(times, dtype=float)
+    epe = np.asarray(closeout_epe, dtype=float)
+    basel_ee = epe.copy()
+    basel_eee = np.maximum.accumulate(basel_ee)
+    tw_epe = np.zeros_like(basel_ee)
+    tw_eepe = np.zeros_like(basel_eee)
+    acc_epe = 0.0
+    acc_eepe = 0.0
+    prev_t = 0.0
+    for i, ti in enumerate(t):
+        dt = max(float(ti) - prev_t, 0.0)
+        prev_t = float(ti)
+        if i == 0 and float(ti) == 0.0:
+            tw_epe[i] = float(basel_ee[i])
+            tw_eepe[i] = float(basel_eee[i])
+            continue
+        acc_epe += float(basel_ee[i]) * dt
+        acc_eepe += float(basel_eee[i]) * dt
+        denom = max(float(ti), 1.0e-12)
+        tw_epe[i] = acc_epe / denom
+        tw_eepe[i] = acc_eepe / denom
+    return {
+        "basel_ee": basel_ee.tolist(),
+        "basel_eee": basel_eee.tolist(),
+        "time_weighted_basel_epe": tw_epe.tolist(),
+        "time_weighted_basel_eepe": tw_eepe.tolist(),
+    }
+
+
+def _one_year_basel_value(profile: Mapping[str, Any], key: str) -> float:
+    times = np.asarray(profile.get("times", []), dtype=float)
+    values = np.asarray(profile.get(key, []), dtype=float)
+    if times.size == 0 or values.size == 0:
+        return 0.0
+    idx = int(np.searchsorted(times, 1.0, side="left"))
+    idx = min(idx, values.size - 1)
+    return float(values[idx])
 
 
 def _configured_output_dir(snapshot: XVASnapshot) -> Path | None:

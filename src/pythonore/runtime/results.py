@@ -40,6 +40,15 @@ class DIMResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExposureProfileAccessor:
+    entity_id: str
+    payload: Dict[str, Any]
+
+    def series(self, key: str, default: Optional[Any] = None) -> Any:
+        return self.payload.get(key, default)
+
+
 @dataclass
 class XVAResult:
     run_id: str
@@ -47,6 +56,8 @@ class XVAResult:
     xva_total: float
     xva_by_metric: Dict[str, float]
     exposure_by_netting_set: Dict[str, float]
+    exposure_profiles_by_netting_set: Dict[str, Any] = field(default_factory=dict)
+    exposure_profiles_by_trade: Dict[str, Any] = field(default_factory=dict)
     reports: Dict[str, Any] = field(default_factory=dict)
     cubes: Dict[str, CubeAccessor] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -56,6 +67,18 @@ class XVAResult:
 
     def cube(self, name: str) -> CubeAccessor:
         return self.cubes[name]
+
+    def netting_exposure_profile(self, netting_set_id: str) -> ExposureProfileAccessor:
+        return ExposureProfileAccessor(
+            entity_id=netting_set_id,
+            payload=self.exposure_profiles_by_netting_set[netting_set_id],
+        )
+
+    def trade_exposure_profile(self, trade_id: str) -> ExposureProfileAccessor:
+        return ExposureProfileAccessor(
+            entity_id=trade_id,
+            payload=self.exposure_profiles_by_trade[trade_id],
+        )
 
     def reports_as_dataframe(self, name: str):
         import pandas as pd

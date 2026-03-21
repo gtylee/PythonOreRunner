@@ -357,8 +357,79 @@ class SnapshotComputation:
     py_epe: list[float]
     py_ene: list[float]
     py_pfe: list[float]
+    exposure_profile_by_trade: dict[str, Any]
+    exposure_profile_by_netting_set: dict[str, Any]
     ore_basel_epe: float
     ore_basel_eepe: float
+
+
+def _build_ore_style_exposure_profile(
+    entity_id: str,
+    exposure_dates: Sequence[str],
+    exposure_times: Sequence[float],
+    epe: Sequence[float],
+    ene: Sequence[float],
+    pfe: Sequence[float],
+    *,
+    closeout_times: Sequence[float] | None = None,
+    expected_collateral: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    times = np.asarray(exposure_times, dtype=float)
+    epe_arr = np.asarray(epe, dtype=float)
+    ene_arr = np.asarray(ene, dtype=float)
+    pfe_arr = np.asarray(pfe, dtype=float)
+    closeout = np.asarray(closeout_times if closeout_times is not None else exposure_times, dtype=float)
+    basel_ee = epe_arr.copy()
+    basel_eee = np.maximum.accumulate(basel_ee)
+    tw_epe = np.zeros_like(basel_ee)
+    tw_eepe = np.zeros_like(basel_eee)
+    acc_epe = 0.0
+    acc_eepe = 0.0
+    prev_t = 0.0
+    for i, t in enumerate(times):
+        dt = max(float(t) - prev_t, 0.0)
+        prev_t = float(t)
+        if i == 0 and float(t) == 0.0:
+            tw_epe[i] = float(basel_ee[i])
+            tw_eepe[i] = float(basel_eee[i])
+            continue
+        acc_epe += float(basel_ee[i]) * dt
+        acc_eepe += float(basel_eee[i]) * dt
+        denom = max(float(t), 1.0e-12)
+        tw_epe[i] = acc_epe / denom
+        tw_eepe[i] = acc_eepe / denom
+    if expected_collateral is None:
+        exp_coll = np.zeros_like(epe_arr)
+        if exp_coll.size:
+            exp_coll[0] = epe_arr[0]
+    else:
+        exp_coll = np.asarray(expected_collateral, dtype=float)
+    return {
+        "entity_id": entity_id,
+        "dates": [str(x) for x in exposure_dates],
+        "times": times.tolist(),
+        "closeout_times": closeout.tolist(),
+        "valuation_epe": epe_arr.tolist(),
+        "valuation_ene": ene_arr.tolist(),
+        "closeout_epe": epe_arr.tolist(),
+        "closeout_ene": ene_arr.tolist(),
+        "pfe": pfe_arr.tolist(),
+        "expected_collateral": exp_coll.tolist(),
+        "basel_ee": basel_ee.tolist(),
+        "basel_eee": basel_eee.tolist(),
+        "time_weighted_basel_epe": tw_epe.tolist(),
+        "time_weighted_basel_eepe": tw_eepe.tolist(),
+    }
+
+
+def _one_year_profile_value(profile: Mapping[str, Any], key: str) -> float:
+    times = np.asarray(profile.get("times", []), dtype=float)
+    values = np.asarray(profile.get(key, []), dtype=float)
+    if times.size == 0 or values.size == 0:
+        return 0.0
+    idx = int(np.searchsorted(times, 1.0, side="left"))
+    idx = min(idx, values.size - 1)
+    return float(values[idx])
 
 
 @dataclass(frozen=True)
@@ -3936,6 +4007,22 @@ def _compute_fx_option_snapshot_case(
         **({} if has_trade_xva_reference else {"missing_reference_xva": True}),
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
     }
+    trade_profile = _build_ore_style_exposure_profile(
+        str(payload["trade_id"]),
+        exposure_dates,
+        exposure_times,
+        epe,
+        ene,
+        pfe,
+    )
+    netting_profile = _build_ore_style_exposure_profile(
+        str(payload["netting_set_id"]),
+        exposure_dates,
+        exposure_times,
+        epe,
+        ene,
+        pfe,
+    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=str(payload["trade_id"]),
@@ -3955,6 +4042,8 @@ def _compute_fx_option_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
+        exposure_profile_by_trade=trade_profile,
+        exposure_profile_by_netting_set=netting_profile,
         ore_basel_epe=float(xva_row["basel_epe"]) if has_trade_xva_reference else 0.0,
         ore_basel_eepe=float(xva_row["basel_eepe"]) if has_trade_xva_reference else 0.0,
     )
@@ -4135,6 +4224,22 @@ def _compute_capfloor_snapshot_case(
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
         **({} if pricing_fallback_reason is None else {"pricing_fallback_reason": pricing_fallback_reason}),
     }
+    trade_profile = _build_ore_style_exposure_profile(
+        str(payload["trade_id"]),
+        exposure_dates,
+        exposure_times,
+        epe,
+        ene,
+        pfe,
+    )
+    netting_profile = _build_ore_style_exposure_profile(
+        str(payload["netting_set_id"]),
+        exposure_dates,
+        exposure_times,
+        epe,
+        ene,
+        pfe,
+    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=str(payload["trade_id"]),
@@ -4154,6 +4259,8 @@ def _compute_capfloor_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
+        exposure_profile_by_trade=trade_profile,
+        exposure_profile_by_netting_set=netting_profile,
         ore_basel_epe=float(xva_row["basel_epe"]) if has_trade_xva_reference and xva_row is not None else 0.0,
         ore_basel_eepe=float(xva_row["basel_eepe"]) if has_trade_xva_reference and xva_row is not None else 0.0,
     )
@@ -4294,6 +4401,12 @@ def _compute_inflation_swap_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
+        exposure_profile_by_trade=_build_ore_style_exposure_profile(
+            str(payload["trade_id"]), exposure_dates, exposure_times, epe, ene, pfe
+        ),
+        exposure_profile_by_netting_set=_build_ore_style_exposure_profile(
+            str(payload["netting_set_id"]), exposure_dates, exposure_times, epe, ene, pfe
+        ),
         ore_basel_epe=0.0,
         ore_basel_eepe=0.0,
     )
@@ -4414,6 +4527,12 @@ def _compute_inflation_capfloor_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
+        exposure_profile_by_trade=_build_ore_style_exposure_profile(
+            str(payload["trade_id"]), exposure_dates, exposure_times, epe, ene, pfe
+        ),
+        exposure_profile_by_netting_set=_build_ore_style_exposure_profile(
+            str(payload["netting_set_id"]), exposure_dates, exposure_times, epe, ene, pfe
+        ),
         ore_basel_epe=0.0,
         ore_basel_eepe=0.0,
     )
@@ -4603,6 +4722,22 @@ def _compute_snapshot_case(
         "xva_mode": "ore" if ore_style_xva else "classic",
     }
     diagnostics.update(_build_leg_diagnostics(snap, paths=effective_paths))
+    trade_profile = _build_ore_style_exposure_profile(
+        snap.trade_id,
+        [str(x) for x in snap.exposure_dates],
+        [float(x) for x in snap.exposure_times],
+        [float(x) for x in epe],
+        [float(x) for x in ene],
+        [float(x) for x in pfe],
+    )
+    netting_profile = _build_ore_style_exposure_profile(
+        snap.netting_set_id,
+        [str(x) for x in snap.exposure_dates],
+        [float(x) for x in snap.exposure_times],
+        [float(x) for x in epe],
+        [float(x) for x in ene],
+        [float(x) for x in pfe],
+    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=snap.trade_id,
@@ -4622,6 +4757,8 @@ def _compute_snapshot_case(
         py_epe=[float(x) for x in epe],
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
+        exposure_profile_by_trade=trade_profile,
+        exposure_profile_by_netting_set=netting_profile,
         ore_basel_epe=float(snap.ore_basel_epe),
         ore_basel_eepe=float(snap.ore_basel_eepe),
     )
@@ -5676,11 +5813,13 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
     pricing = case_summary.get("pricing") or {}
     xva = case_summary.get("xva") or {}
     sensi = case_summary.get("sensitivity") or {}
-    exposure_dates = list(case_summary.get("exposure_dates") or [])
-    exposure_times = list(case_summary.get("exposure_times") or [])
-    py_epe = list(case_summary.get("py_epe") or [])
-    py_ene = list(case_summary.get("py_ene") or [])
-    py_pfe = list(case_summary.get("py_pfe") or [])
+    trade_profile = dict(case_summary.get("exposure_profile_by_trade") or {})
+    netting_profile = dict(case_summary.get("exposure_profile_by_netting_set") or {})
+    exposure_dates = list(trade_profile.get("dates") or case_summary.get("exposure_dates") or [])
+    exposure_times = list(trade_profile.get("times") or case_summary.get("exposure_times") or [])
+    py_epe = list(trade_profile.get("closeout_epe") or case_summary.get("py_epe") or [])
+    py_ene = list(trade_profile.get("closeout_ene") or case_summary.get("py_ene") or [])
+    py_pfe = list(trade_profile.get("pfe") or case_summary.get("py_pfe") or [])
     trade_id = str(case_summary.get("trade_id", ""))
     netting_set_id = str(case_summary.get("netting_set_id", ""))
     counterparty = str(case_summary.get("counterparty", ""))
@@ -5780,8 +5919,8 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             f"{xva.get('py_cva', 0.0):.2f}",
             f"{xva.get('py_dva', 0.0):.2f}",
             "None",
-            f"{xva.get('py_basel_epe', 0.0):.2f}",
-            f"{xva.get('py_basel_eepe', 0.0):.2f}",
+            f"{_one_year_profile_value(netting_profile, 'time_weighted_basel_epe') or xva.get('py_basel_epe', 0.0):.2f}",
+            f"{_one_year_profile_value(netting_profile, 'time_weighted_basel_eepe') or xva.get('py_basel_eepe', 0.0):.2f}",
         ]
         trade_row = [
             trade_id,
@@ -5794,8 +5933,8 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             "0.00",
             "0.00",
             "None",
-            f"{xva.get('py_basel_epe', 0.0):.2f}",
-            f"{xva.get('py_basel_eepe', 0.0):.2f}",
+            f"{_one_year_profile_value(trade_profile, 'time_weighted_basel_epe') or xva.get('py_basel_epe', 0.0):.2f}",
+            f"{_one_year_profile_value(trade_profile, 'time_weighted_basel_eepe') or xva.get('py_basel_eepe', 0.0):.2f}",
         ]
         with open(case_out_dir / "xva.csv", "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
@@ -5813,27 +5952,23 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
         ]
         trade_rows = []
         ns_rows = []
-        running_eee = 0.0
-        acc_epe = 0.0
-        acc_eepe = 0.0
-        prev_t = 0.0
+        trade_basel_ee = list(trade_profile.get("basel_ee") or py_epe)
+        trade_basel_eee = list(trade_profile.get("basel_eee") or py_epe)
+        trade_tw_epe = list(trade_profile.get("time_weighted_basel_epe") or py_epe)
+        trade_tw_eepe = list(trade_profile.get("time_weighted_basel_eepe") or py_epe)
+        netting_epe = list(netting_profile.get("closeout_epe") or py_epe)
+        netting_ene = list(netting_profile.get("closeout_ene") or py_ene)
+        netting_pfe = list(netting_profile.get("pfe") or py_pfe)
+        netting_expected_collateral = list(netting_profile.get("expected_collateral") or [])
+        netting_basel_ee = list(netting_profile.get("basel_ee") or netting_epe)
+        netting_basel_eee = list(netting_profile.get("basel_eee") or netting_epe)
+        netting_tw_epe = list(netting_profile.get("time_weighted_basel_epe") or netting_epe)
+        netting_tw_eepe = list(netting_profile.get("time_weighted_basel_eepe") or netting_epe)
         for i, (d, t, epe, ene, pfe) in enumerate(zip(exposure_dates, exposure_times, py_epe, py_ene, py_pfe)):
             t = float(t)
             epe = float(epe)
             ene = float(ene)
             pfe = float(pfe)
-            running_eee = max(running_eee, epe)
-            dt = max(t - prev_t, 0.0)
-            prev_t = t
-            if i == 0 and t == 0.0:
-                tw_epe = epe
-                tw_eepe = running_eee
-            else:
-                acc_epe += epe * dt
-                acc_eepe += running_eee * dt
-                denom = max(t, 1.0e-12)
-                tw_epe = acc_epe / denom
-                tw_eepe = acc_eepe / denom
             trade_rows.append([
                 trade_id,
                 d,
@@ -5843,23 +5978,23 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
                 "0",
                 "0",
                 f"{pfe:.0f}",
-                f"{epe:.0f}",
-                f"{running_eee:.0f}",
-                f"{tw_epe:.2f}",
-                f"{tw_eepe:.2f}",
+                f"{float(trade_basel_ee[i]):.0f}",
+                f"{float(trade_basel_eee[i]):.0f}",
+                f"{float(trade_tw_epe[i]):.2f}",
+                f"{float(trade_tw_eepe[i]):.2f}",
             ])
             ns_rows.append([
                 netting_set_id,
                 d,
                 _fmt_float(t),
-                f"{epe:.2f}",
-                f"{ene:.2f}",
-                f"{pfe:.2f}",
-                f"{epe:.2f}" if i == 0 else "0.00",
-                f"{epe:.2f}",
-                f"{running_eee:.2f}",
-                f"{tw_epe:.2f}",
-                f"{tw_eepe:.2f}",
+                f"{float(netting_epe[i]):.2f}",
+                f"{float(netting_ene[i]):.2f}",
+                f"{float(netting_pfe[i]):.2f}",
+                f"{float(netting_expected_collateral[i]):.2f}" if i < len(netting_expected_collateral) else ("0.00" if i else f"{float(netting_epe[i]):.2f}"),
+                f"{float(netting_basel_ee[i]):.2f}",
+                f"{float(netting_basel_eee[i]):.2f}",
+                f"{float(netting_tw_epe[i]):.2f}",
+                f"{float(netting_tw_eepe[i]):.2f}",
             ])
         with open(case_out_dir / f"exposure_trade_{trade_id}.csv", "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
@@ -6297,6 +6432,8 @@ def _run_case(
                     "py_epe": base_summary.py_epe,
                     "py_ene": base_summary.py_ene,
                     "py_pfe": base_summary.py_pfe,
+                    "exposure_profile_by_trade": base_summary.exposure_profile_by_trade,
+                    "exposure_profile_by_netting_set": base_summary.exposure_profile_by_netting_set,
                 }
             )
     elif modes.price:

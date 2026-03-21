@@ -1108,6 +1108,62 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("python_paths", diagnostics)
             self.assertTrue(diagnostics["sample_count_mismatch"])
 
+    def test_report_writer_prefers_exposure_profile_payload_over_legacy_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            summary = {
+                "trade_id": "T1",
+                "counterparty": "CPTY_A",
+                "netting_set_id": "CPTY_A",
+                "maturity_date": "2021-03-01",
+                "maturity_time": 5.0,
+                "pricing": {"py_t0_npv": 10.0, "trade_type": "Swap"},
+                "xva": {"py_cva": 1.0, "py_dva": 2.0, "py_fba": 3.0, "py_fca": 4.0, "py_basel_epe": 999.0, "py_basel_eepe": 999.0},
+                "exposure_dates": ["2020-01-01", "2021-01-01"],
+                "exposure_times": [0.0, 1.0],
+                "py_epe": [999.0, 999.0],
+                "py_ene": [999.0, 999.0],
+                "py_pfe": [999.0, 999.0],
+                "exposure_profile_by_trade": {
+                    "dates": ["2020-01-01", "2021-01-01"],
+                    "times": [0.0, 1.0],
+                    "closeout_times": [0.0, 1.0],
+                    "closeout_epe": [10.0, 20.0],
+                    "closeout_ene": [1.0, 2.0],
+                    "pfe": [30.0, 40.0],
+                    "basel_ee": [10.0, 20.0],
+                    "basel_eee": [10.0, 20.0],
+                    "time_weighted_basel_epe": [10.0, 15.0],
+                    "time_weighted_basel_eepe": [10.0, 15.0],
+                },
+                "exposure_profile_by_netting_set": {
+                    "dates": ["2020-01-01", "2021-01-01"],
+                    "times": [0.0, 1.0],
+                    "closeout_times": [0.0, 1.0],
+                    "closeout_epe": [100.0, 200.0],
+                    "closeout_ene": [11.0, 22.0],
+                    "pfe": [300.0, 400.0],
+                    "expected_collateral": [100.0, 0.0],
+                    "basel_ee": [100.0, 200.0],
+                    "basel_eee": [100.0, 200.0],
+                    "time_weighted_basel_epe": [100.0, 150.0],
+                    "time_weighted_basel_eepe": [100.0, 150.0],
+                },
+            }
+            ore_snapshot_cli._write_ore_compatible_reports(out_dir, summary)
+            with open(out_dir / "exposure_trade_T1.csv", newline="", encoding="utf-8") as f:
+                trade_rows = list(csv.DictReader(f))
+            with open(out_dir / "exposure_nettingset_CPTY_A.csv", newline="", encoding="utf-8") as f:
+                netting_rows = list(csv.DictReader(f))
+            with open(out_dir / "xva.csv", newline="", encoding="utf-8") as f:
+                xva_rows = list(csv.DictReader(f))
+            self.assertEqual(trade_rows[1]["PFE"], "40")
+            self.assertEqual(trade_rows[1]["TimeWeightedBaselEEPE"], "15.00")
+            self.assertEqual(netting_rows[1]["PFE"], "400.00")
+            self.assertEqual(netting_rows[0]["ExpectedCollateral"], "100.00")
+            self.assertEqual(xva_rows[0]["BaselEPE"], "150.00")
+            self.assertEqual(xva_rows[0]["BaselEEPE"], "150.00")
+
     def test_default_xva_run_uses_snapshot_sample_count_when_paths_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:
             rc = ore_snapshot_cli.main(
@@ -1652,6 +1708,8 @@ class TestOreSnapshotCli(unittest.TestCase):
             py_epe=[],
             py_ene=[],
             py_pfe=[],
+            exposure_profile_by_trade={},
+            exposure_profile_by_netting_set={},
             ore_basel_epe=0.0,
             ore_basel_eepe=0.0,
         )
