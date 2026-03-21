@@ -85,6 +85,16 @@ For a simpler single-`ore.xml` Python-side parity run without calling the ORE bi
 ```bash
 python -m py_ore_tools.ore_snapshot_cli \
   Examples/Exposure/Input/ore_measure_lgm.xml \
+  --preflight
+```
+
+That classifies the loaded portfolio into Python-native and SWIG-only buckets before you commit to a longer pricing/XVA run.
+
+To run the Python-side parity/XVA flow itself:
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  Examples/Exposure/Input/ore_measure_lgm.xml \
   --xva \
   --paths 10000 \
   --rng ore_parity

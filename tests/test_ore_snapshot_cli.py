@@ -281,6 +281,49 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
             self.assertIn("py_t0_npv", payload["pricing"])
 
+    def test_preflight_mode_writes_support_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout = io.StringIO()
+            support = {
+                "mode": "native_only",
+                "native_only": True,
+                "python_supported": False,
+                "native_trade_ids": ["IRS_A"],
+                "native_trade_types": ["Swap"],
+                "requires_swig_trade_ids": ["EQ_1"],
+                "requires_swig_trade_types": ["EquityOption"],
+                "native_trade_count": 1,
+                "requires_swig_trade_count": 1,
+            }
+            validation = {
+                "input_links_valid": True,
+                "issues": [],
+                "summary": {"source_mode": "ore_xml"},
+            }
+            with patch("py_ore_tools.ore_snapshot_cli.load_from_ore_xml", return_value=SimpleNamespace()):
+                with patch("py_ore_tools.ore_snapshot_cli.classify_portfolio_support", return_value=support):
+                    with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value=validation):
+                        with redirect_stdout(stdout):
+                            rc = ore_snapshot_cli.main(
+                                [
+                                    str(REAL_CASE_XML),
+                                    "--preflight",
+                                    "--output-root",
+                                    str(root / "artifacts"),
+                                ]
+                            )
+            self.assertEqual(rc, 0)
+            text = stdout.getvalue()
+            self.assertIn("PRECHECK done.", text)
+            self.assertIn("requires_swig_trade_types=EquityOption", text)
+            payload = json.loads((root / "artifacts" / "flat_EUR_5Y_A" / "preflight.json").read_text(encoding="utf-8"))
+            self.assertFalse(payload["native_ready"])
+            self.assertTrue(payload["hybrid_ready"])
+            self.assertEqual(payload["support"]["requires_swig_trade_ids"], ["EQ_1"])
+            self.assertTrue((root / "artifacts" / "flat_EUR_5Y_A" / "preflight.md").exists())
+            self.assertTrue((root / "artifacts" / "flat_EUR_5Y_A" / "preflight_support.csv").exists())
+
     def test_price_only_fx_ndf_uses_cash_settlement_formula(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -51,6 +51,7 @@ from pythonore.io.ore_snapshot import (
     validate_ore_input_snapshot,
 )
 from pythonore.repo_paths import default_ore_bin, find_engine_repo_root, local_parity_artifacts_root
+from pythonore.runtime import classify_portfolio_support
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
@@ -6481,6 +6482,96 @@ def _render_terminal_case_summary(case_summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _run_preflight_case(
+    ore_xml: Path,
+    args: argparse.Namespace,
+    *,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    snapshot = load_from_ore_xml(ore_xml, anchor_t0_npv=args.anchor_t0_npv)
+    requested_modes = [name for name, enabled in asdict(_infer_modes(args, ore_xml)).items() if enabled]
+    validation = validate_ore_input_snapshot(ore_xml, requested_modes=requested_modes)
+    support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+    summary = {
+        "ore_xml": str(ore_xml),
+        "requested_modes": requested_modes,
+        "validation": validation,
+        "support": support,
+        "native_ready": bool(validation.get("input_links_valid", False)) and support["requires_swig_trade_count"] == 0,
+        "hybrid_ready": bool(validation.get("input_links_valid", False)),
+        "trade_count": int(support["native_trade_count"]) + int(support["requires_swig_trade_count"]),
+        "next_step": (
+            "run with PythonLgmAdapter(fallback_to_swig=False) or the Python CLI pricing/XVA modes"
+            if support["requires_swig_trade_count"] == 0
+            else "run in hybrid mode with SWIG available, or remove the SWIG-only trades before a native-only run"
+        ),
+    }
+    case_out_dir = artifact_root / _case_slug(ore_xml)
+    case_out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.ore_output_only:
+        _write_json(case_out_dir / "preflight.json", summary)
+        support_rows = [
+            {"bucket": "native_trade_ids", "value": trade_id}
+            for trade_id in summary["support"]["native_trade_ids"]
+        ]
+        support_rows.extend(
+            {"bucket": "requires_swig_trade_ids", "value": trade_id}
+            for trade_id in summary["support"]["requires_swig_trade_ids"]
+        )
+        _write_csv(case_out_dir / "preflight_support.csv", support_rows)
+        (case_out_dir / "preflight.md").write_text(_render_preflight_markdown(summary), encoding="utf-8")
+    return summary
+
+
+def _render_preflight_markdown(summary: dict[str, Any]) -> str:
+    support = summary["support"]
+    validation = summary["validation"]
+    lines = [
+        "# ORE Snapshot CLI Preflight",
+        "",
+        f"- ore_xml: `{summary['ore_xml']}`",
+        f"- requested_modes: `{','.join(summary['requested_modes'])}`",
+        f"- validation_ok: `{bool(validation.get('input_links_valid', False))}`",
+        f"- native_ready: `{summary['native_ready']}`",
+        f"- hybrid_ready: `{summary['hybrid_ready']}`",
+        f"- native_trade_count: `{support['native_trade_count']}`",
+        f"- requires_swig_trade_count: `{support['requires_swig_trade_count']}`",
+        f"- support_mode: `{support['mode']}`",
+        f"- next_step: `{summary['next_step']}`",
+    ]
+    if support["native_trade_types"]:
+        lines.append(f"- native_trade_types: `{', '.join(support['native_trade_types'])}`")
+    if support["requires_swig_trade_types"]:
+        lines.append(f"- requires_swig_trade_types: `{', '.join(support['requires_swig_trade_types'])}`")
+    issues = validation.get("issues") or []
+    if issues:
+        lines.append("")
+        lines.append("## Validation Issues")
+        lines.append("")
+        for issue in issues:
+            lines.append(f"- {issue}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_terminal_preflight_summary(summary: dict[str, Any]) -> str:
+    support = summary["support"]
+    validation = summary["validation"]
+    lines = [
+        "PRECHECK done.",
+        f"ore_xml={summary['ore_xml']}",
+        f"requested_modes={','.join(summary['requested_modes'])}",
+        f"validation_ok={bool(validation.get('input_links_valid', False))}",
+        f"native_ready={summary['native_ready']}",
+        f"hybrid_ready={summary['hybrid_ready']}",
+        f"native_trade_count={support['native_trade_count']}",
+        f"requires_swig_trade_count={support['requires_swig_trade_count']}",
+    ]
+    if support["requires_swig_trade_types"]:
+        lines.append(f"requires_swig_trade_types={','.join(support['requires_swig_trade_types'])}")
+    lines.append(f"next_step={summary['next_step']}")
+    return "\n".join(lines)
+
+
 def _run_pack(args: argparse.Namespace, ore_xmls: list[Path], artifact_root: Path) -> int:
     pack_dir = artifact_root / "pack"
     pack_dir.mkdir(parents=True, exist_ok=True)
@@ -6595,7 +6686,7 @@ def _run_cli_example(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ore_snapshot_cli",
-        usage="%(prog)s path/to/ore.xml [--price] [--xva] [--sensi] [--pack|--report-examples] [options]",
+        usage="%(prog)s path/to/ore.xml [--preflight] [--price] [--xva] [--sensi] [--pack|--report-examples] [options]",
         add_help=False,
     )
     parser.add_argument("ore_xml", nargs="?")
@@ -6612,6 +6703,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price", action="store_true")
     parser.add_argument("--xva", action="store_true")
     parser.add_argument("--sensi", action="store_true")
+    parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--pack", action="store_true")
     parser.add_argument("--report-examples", action="store_true")
     parser.add_argument("--case", action="append", dest="cases", default=[])
@@ -6648,6 +6740,7 @@ def _print_help(parser: argparse.ArgumentParser) -> None:
     print("  - -h/--hash matches ore.exe hash flag")
     print("  - use --help for help output")
     print("  - use --example <name> with --tensor-backend auto|numpy|torch-cpu|torch-mps for built-in backend-dispatch examples")
+    print("  - use --preflight to classify native-vs-SWIG support before a full run")
     print("  - use --report-examples for a live parity sweep across Examples/**/Input/ore*.xml")
 
 
@@ -6686,6 +6779,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_pack(args, ore_xmls, artifact_root)
     if args.report_examples:
         return _run_report_examples(args, artifact_root)
+    if args.preflight:
+        summary = _run_preflight_case(ore_xmls[0], args, artifact_root=artifact_root)
+        print(_render_terminal_preflight_summary(summary))
+        return 0
 
     modes = _infer_modes(args, ore_xmls[0])
     start = time.perf_counter()
