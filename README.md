@@ -114,7 +114,7 @@ python -m pythonore.apps.examples_regression compare
 ## Examples
 
 - **`example_basic.py`** / **`example.py`** – Run ORE from Python and inspect NPV/XVA. Expects an ORE executable and an ORE input folder (e.g. from an ORE repo).
-- **`example_ore_snapshot.py`** – Load ORE XML into a snapshot and run the **standalone Python LGM** (no ORE binary) for exposure/XVA.
+- **`example_ore_snapshot.py`** – Load ORE XML into the canonical Python snapshot object and bridge into the Python-first workflow.
 - **`example_systemic.py`** – Uses `OreBasic` with network/graph dependencies.
 
 Set `ORE_EXE` to the path of the `ore` binary. Set `ORE_EXAMPLE_DIR` to an ORE example folder (for example `path/to/ORE/Examples/Legacy/Example_1`). If unset, examples will auto-discover `ENGINE_REPO_ROOT` and default to `Examples/Legacy/Example_1`.
@@ -146,7 +146,7 @@ Ad hoc root scripts now live under [`scripts/`](/Users/gordonlee/Documents/Pytho
 
 ## Notebook Series
 
-The five-part notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
+The main notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
 
 For the native Python story, start with [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb). That is the canonical end-to-end in-memory flow: programmatic snapshot build, validation, support preflight, native session run, and incremental updates.
 
