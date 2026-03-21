@@ -252,6 +252,348 @@ Fresh native reruns in `/tmp` can look like a model/XVA mismatch when they are r
 
 ---
 
+## Native CMS / CMSSpread / BMA
+
+### Generic rate-swap support is now the native path for CMS, CMSSpread, digital CMSSpread, and BMA basis swaps
+
+In this repo, native Python support for these products lives in:
+
+- `src/pythonore/runtime/runtime.py`
+- `src/pythonore/io/loader.py`
+
+The supported swap-side generic-rate products are:
+
+- `CMS`
+- `CMSSPREAD`
+- `DIGITALCMSSPREAD`
+- BMA basis swaps with two floating legs
+
+This is separate from the vanilla IRS path. Do not try to force these products through the old `flows.csv`-driven IRS adapter.
+
+### Do not cheat with ORE output artifacts on the native CMSSpread path
+
+For CMS / CMSSpread parity work, native pricing must be input-only:
+
+- use `ore.xml`
+- use `portfolio.xml`
+- use `todaysmarket.xml`
+- use `curveconfig.xml`
+- use `conventions.xml`
+- use `market_*.txt`
+- use `fixings_*.txt`
+- use `simulation.xml` only where already allowed for native runtime config / calibration fallback
+
+Do not use these as native pricing inputs:
+
+- `Output/curves.csv`
+- `Output/flows.csv`
+- `Output/npv.csv`
+- `Output/calibration.xml`
+- any other residual `ore` / `oreapp` output artifact
+
+Local `ore` runs are allowed only as the reference side of tests.
+
+There are now regression tests that poison `Output/curves.csv`, `Output/flows.csv`, and `Output/calibration.xml` and assert native CMSSpread results do not change.
+
+### The main CMSSpread parity trap was CMS index curve resolution, not the digital wrapper
+
+The most important hard-won finding:
+
+- `EUR-CMS-10Y` and `EUR-CMS-2Y` must not fall through to tenor-suffix forward lookup (`10Y`, `2Y`)
+- they must resolve through `conventions.xml` to their underlying ibor tenor
+- in `Example_25`, both map to `EUR-EURIBOR-6M`
+
+Concretely:
+
+- `Examples/Input/conventions.xml`
+  - `EUR-CMS-10Y` -> `EUR-6M-SWAP-CONVENTIONS`
+  - `EUR-CMS-2Y` -> `EUR-6M-SWAP-CONVENTIONS`
+- `EUR-6M-SWAP-CONVENTIONS` uses `EUR-EURIBOR-6M`
+
+If CMS index names are resolved by suffix tenor instead of by swap-index convention, CMSSpread parity is materially wrong even if the coupon pricer itself looks reasonable.
+
+The runtime now parses swap-index-to-underlying-tenor mappings from `conventions.xml` and stores them in `_PythonLgmInputs.swap_index_forward_tenors`.
+
+### Current native CMSSpread parity status on `Example_25`
+
+After fixing CMS index forward-curve resolution, real-case parity improved materially:
+
+- `CMS_Spread_Swap`
+  - ORE: `328271.965698`
+  - Python: `309150.0484271799`
+  - gap: about `-19121.9`
+- `Digital_CMS_Spread`
+  - ORE: `279806.656601`
+  - Python: `284672.65625257127`
+  - gap: about `+4866.0`
+
+This is much closer than the earlier states encountered during development:
+
+- `CMS_Spread_Swap` had previously been as bad as negative PV or `406186+`
+- `Digital_CMS_Spread` had previously been around `490240` and later `342727+`
+
+### The remaining CMSSpread gap is now mostly curve / pricer fidelity
+
+Useful diagnosis from direct coupon-level comparison against a live local `ore` run:
+
+- the native static QuantLib CMSSpread coupon helper was still materially off at the first few coupon rates even before exposure/profile logic entered
+- that means remaining mismatch is upstream of profile freezing and scenario handling
+
+The main remaining suspects are:
+
+- curve quality / curve source
+- exact CMS coupon-pricer setup parity
+- any remaining differences in how ORE wires the richer CMS pricer into CMSSpread coupons
+
+The digital wrapper is no longer the dominant problem.
+
+### ORE / QuantExt C++ files that matter for CMSSpread parity
+
+When debugging CMS / CMSSpread parity, read these first:
+
+- `OREData/ored/portfolio/builders/cms.cpp`
+- `OREData/ored/portfolio/builders/cmsspread.cpp`
+- `OREData/ored/portfolio/legdata.cpp`
+- `QuantExt/qle/cashflows/lognormalcmsspreadpricer.cpp`
+
+Relevant facts from those files:
+
+- ORE uses `LinearTsrPricer` for CMS
+- ORE uses `LognormalCmsSpreadPricer` for CMSSpread
+- digital CMSSpread legs are built as actual `DigitalCmsSpreadLeg`s in ORE, not as an afterthought outside the coupon stack
+- the spread pricer depends on the underlying CMS coupon pricer beneath it
+
+### Python QuantLib binding traps discovered during CMSSpread work
+
+Be careful with the Python bindings:
+
+- `LinearTsrPricerSettings` exists as `QuantLib.LinearTsrPricerSettings`
+- but passing settings through the Python binding caused unstable `Unknown strategy (...)` runtime failures in this workspace
+- keep the stable constructor path unless you have a reproducible binding-safe reason to change it
+
+Also:
+
+- `LognormalCmsSpreadPricer` in Python takes a `QuoteHandle` correlation, not the richer correlation term structure handle ORE uses internally
+- this limits exact C++ parity from Python bindings alone
+
+### The native quote-fit path has known unfinished work
+
+There is a native quote-fit alternative in `PythonLgmAdapter._fit_curves_from_market_quotes(...)`.
+
+Two important facts:
+
+1. It had a real bug:
+   - it referenced `discount_meta` / `xva_discount_meta` outside scope
+   - the broad `except` swallowed that and silently returned `None`
+   - so `python.curve_fit_mode='ore_fit'` was not actually active for some runs
+
+2. Even after partial fixes, do not assume it is active:
+   - confirm `result.metadata["input_provenance"]["market"] == "ore_quote_fit"`
+   - if provenance still says `market_overlay`, the fitted curve path is not in effect
+
+Do not claim CMSSpread parity improvements from quote-fit unless the provenance explicitly shows the fitted-curve path was used.
+
+### Frozen-profile mode for CMS-family trades is explicit
+
+For native CMS / CMSSpread / digital CMSSpread profile generation:
+
+- `t0` uses the richer native input-derived coupon model
+- future profile handling is currently frozen from that native `t0` coupon model
+
+This is intentionally explicit in metadata:
+
+- `cmsspread_profile_mode = "frozen_input_native"`
+
+Do not describe this as full pathwise future QuantLib CMSSpread revaluation. It is a frozen native profile approximation.
+
+### Regression tests that should stay green
+
+The main native rate-swap coverage lives in:
+
+- `tests/test_runtime_rate_swap_support.py`
+- `tests/test_runtime_sensitivity.py`
+
+Important assertions now include:
+
+- CMS swap support without fallback
+- BMA basis support without fallback
+- `Example_25` isolated `CMS_Spread_Swap` parity
+- `Example_25` isolated `Digital_CMS_Spread` parity
+- poisoned-output-artifact regressions
+- no-`flows.csv` regression
+- local `ore` parity comparisons for `Example_25` when the binary exists
+
+If you change CMSSpread logic, rerun:
+
+```bash
+PYTHONPATH=src pytest -q tests/test_runtime_rate_swap_support.py tests/test_runtime_sensitivity.py
+```
+
+Current known-good result after the latest CMS-index fix:
+
+- `18 passed, 3 warnings`
+
+---
+
+## Python-first Native Runtime
+
+### The canonical native story is now in-memory first, not ORE-output first
+
+For this repo, the maintained native path is now:
+
+- dataclass / programmatic `XVASnapshot`
+- `PythonLgmAdapter(fallback_to_swig=False)`
+- Python-native pricing / XVA / DIM reporting
+
+The most important entrypoints are:
+
+- `src/pythonore/runtime/runtime.py`
+- `src/pythonore/io/ore_snapshot.py`
+- `notebook_series/05_1_python_only_workflow.py`
+- `example_ore_snapshot.py`
+
+If a user asks for the "main" native workflow, point them to the Python-only notebook and the programmatic snapshot path first. Do not frame ORE XML files or ORE `Output/` artifacts as the primary native workflow.
+
+### Programmatic snapshot construction is a first-class path and should be treated that way
+
+There are two distinct snapshot routes:
+
+- `load_from_ore_xml(...)`
+- programmatic / dataclass assembly plus in-memory validation
+
+The second route is not a fallback or toy path. It is central to the native Python positioning.
+
+If you are documenting or demoing native runtime behavior, show at least:
+
+1. snapshot build
+2. validation
+3. support preflight
+4. run
+5. incremental market or portfolio update
+
+That full lifecycle now belongs in the canonical Python-only walkthrough.
+
+### Use support classification before long runs when native coverage matters
+
+The public preflight helper is:
+
+- `pythonore.runtime.classify_portfolio_support(...)`
+
+It classifies a snapshot into:
+
+- Python-native trades
+- trades that require SWIG fallback
+
+This is the right first check when a user wants:
+
+- native-only assurance
+- a quick answer on whether equity / commodity / other unsupported families will fall back
+- a fast preflight before spending time on a longer pricing or XVA run
+
+Do not wait for runtime failure if the task can be answered by preflight classification.
+
+### `fallback_to_swig=False` vs `True` is a product-boundary decision, not a small runtime option
+
+Treat the runtime modes explicitly:
+
+- `fallback_to_swig=False`
+  - native-only mode
+  - unsupported trades should fail early and clearly
+- `fallback_to_swig=True`
+  - hybrid mode
+  - unsupported trades may route through ORE SWIG if the environment has it
+
+The important user-facing distinction is:
+
+- "unsupported by the Python runtime"
+- "supported only through SWIG fallback"
+- "fallback requested but SWIG is unavailable"
+
+Do not blur those together in docs, diagnostics, or review comments.
+
+### Equity and commodity dataclasses are schema / interop types, not native pricing claims
+
+This repo still contains equity and commodity-related dataclasses for compatibility and mapping, but that does not mean native pricing exists.
+
+When describing capabilities, use three buckets:
+
+- native
+- fallback-only
+- not supported
+
+Do not advertise equity / commodity as Python-native unless an actual native pricer and tests exist.
+
+### Validation wording matters: avoid XML-specific language for in-memory snapshots
+
+`validate_ore_input_snapshot(...)` and related validation/reporting can be used on snapshots that were not built from XML files.
+
+When explaining validation output:
+
+- use neutral wording like "snapshot inputs" or "in-memory snapshot"
+- do not imply every validated object came from ORE XML
+
+If validation text sounds XML-specific on a programmatic snapshot, that is a documentation / UX bug, not just a wording preference.
+
+### The CLI now has a dedicated preflight mode
+
+The maintained CLI preflight path is:
+
+```bash
+python -m pythonore.apps.ore_snapshot_cli path/to/ore.xml --preflight
+```
+
+That mode now:
+
+- loads the snapshot
+- runs validation
+- classifies native vs SWIG-only support
+- writes `preflight.json`, `preflight.md`, and `preflight_support.csv`
+
+Use this when the user wants a quick support check before a full run. Do not tell them to launch an XVA run if preflight already answers the question.
+
+### The main documentation entrypoints should stay aligned
+
+The Python-first messaging now depends on these files staying consistent:
+
+- `README.md`
+- `notebook_series/README.md`
+- `notebook_series/05_1_python_only_workflow.py`
+- `notebook_series/01_python_to_ore_swig_dataclasses.py`
+- `example_ore_snapshot.py`
+
+If you update native capability claims or fallback semantics, sweep all of those together. The main risk is stale secondary wording that quietly reintroduces an ORE-first story or overclaims native coverage.
+
+### Current regression gates for this milestone
+
+The most relevant tests for the Python-first/fallback boundary are:
+
+- `tests/test_runtime_native_workflow.py`
+- `tests/test_lgm_fx_xva_utils_native.py`
+- `tests/test_ore_snapshot_cli.py`
+- `tests/test_ore_snapshot_dataclass_validation.py`
+- `tests/test_runtime_rate_swap_support.py`
+- `tests/test_runtime_sensitivity.py`
+- `tests/test_inflation_support.py`
+- `tests/test_notebook_smoke.py`
+
+Useful targeted commands:
+
+```bash
+PYTHONPATH=src pytest -q tests/test_runtime_native_workflow.py tests/test_lgm_fx_xva_utils_native.py tests/test_ore_snapshot_dataclass_validation.py
+PYTHONPATH=src pytest -q tests/test_ore_snapshot_cli.py
+PYTHONPATH=src pytest -q tests/test_runtime_rate_swap_support.py tests/test_runtime_sensitivity.py
+PYTHONPATH=src pytest -q tests/test_inflation_support.py tests/test_notebook_smoke.py
+```
+
+Observed slow boundary from this work:
+
+- `tests/test_notebook_smoke.py` is materially slower than the small runtime/unit files
+- `tests/test_inflation_support.py` is also non-trivial
+
+So if you need a fast confidence loop, run the native workflow and CLI files first.
+
+---
+
 ## Callable Bond Parity
 
 ### The active callable-bond parity target is native ORE deterministic `LGM + Grid`

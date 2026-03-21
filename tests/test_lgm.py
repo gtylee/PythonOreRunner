@@ -9,6 +9,8 @@ from py_ore_tools.lgm import (
     LGM1F,
     LGMParams,
     ORE_PARITY_SEQUENCE_TYPE,
+    ORE_SOBOL_SEQUENCE_TYPE,
+    ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE,
     make_ore_gaussian_rng,
     simulate_ba_measure,
     simulate_lgm_measure,
@@ -127,9 +129,37 @@ class TestLGM(unittest.TestCase):
         )
         self.assertTrue(np.array_equal(actual, expected))
 
-    def test_exact_parity_rejects_non_mersenne_twister(self):
-        with self.assertRaisesRegex(ValueError, ORE_PARITY_SEQUENCE_TYPE):
-            make_ore_gaussian_rng(42, sequence_type="SobolBrownianBridge")
+    def test_exact_parity_rejects_unknown_sequence_type(self):
+        with self.assertRaisesRegex(ValueError, "unsupported sequence_type"):
+            make_ore_gaussian_rng(42, sequence_type="NotARealSequence")
+
+    def test_sobol_rng_matches_quantlib_sequence(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        seed = 42
+        dimension = 5
+        rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_SEQUENCE_TYPE)
+        actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
+        expected_gen = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed))
+        expected = np.vstack([np.asarray(expected_gen.nextSequence().value(), dtype=float) for _ in range(4)])
+        self.assertTrue(np.array_equal(actual, expected))
+
+    def test_sobol_brownian_bridge_rng_matches_quantlib_transform(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        seed = 42
+        dimension = 5
+        rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
+        actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
+        base_gen = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed))
+        bridge = ql.BrownianBridge(dimension)
+        expected = np.vstack(
+            [
+                np.asarray(bridge.transform(list(base_gen.nextSequence().value())), dtype=float)
+                for _ in range(4)
+            ]
+        )
+        self.assertTrue(np.array_equal(actual, expected))
 
     def test_discount_bond_profile_matches_when_paths_are_shared(self):
         payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))

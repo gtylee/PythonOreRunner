@@ -5,6 +5,7 @@ import numpy as np
 
 from py_ore_tools.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
+    compute_realized_float_coupons,
     load_ore_default_curve_inputs,
     payer_swap_npv_at_time,
     swap_npv_from_ore_legs,
@@ -300,6 +301,62 @@ class TestIrsXvaUtils(unittest.TestCase):
                 use_node_interpolation=True,
             )
             self.assertTrue(np.allclose(got, ref, rtol=1.0e-12, atol=1.0e-11))
+
+    def test_compute_realized_float_coupons_matches_t0_coupon_pv_in_expectation(self):
+        legs = {
+            "float_start_time": np.array([0.5, 1.0], dtype=float),
+            "float_end_time": np.array([1.0, 1.5], dtype=float),
+            "float_fixing_time": np.array([0.45, 0.95], dtype=float),
+            "float_pay_time": np.array([1.0, 1.5], dtype=float),
+            "float_accrual": np.array([0.5, 0.5], dtype=float),
+            "float_index_accrual": np.array([0.5, 0.5], dtype=float),
+            "float_notional": np.array([1_000_000.0, 1_000_000.0], dtype=float),
+            "float_sign": np.array([1.0, 1.0], dtype=float),
+            "float_spread": np.array([0.0010, 0.0012], dtype=float),
+            "float_coupon": np.array([0.0200, 0.0215], dtype=float),
+        }
+        sim_times = np.array([0.0, 0.45, 0.95, 1.5], dtype=float)
+        x_paths = np.vstack(
+            [
+                np.zeros(self.x_t.size),
+                np.linspace(-0.04, 0.04, self.x_t.size),
+                np.linspace(-0.06, 0.06, self.x_t.size),
+                np.linspace(-0.08, 0.08, self.x_t.size),
+            ]
+        )
+
+        coupons = compute_realized_float_coupons(
+            self.model,
+            self.p0,
+            self.p0_fwd,
+            legs,
+            sim_times,
+            x_paths,
+        )
+
+        for i, ft in enumerate(legs["float_fixing_time"]):
+            j = int(np.searchsorted(sim_times, ft))
+            x_fix = x_paths[j, :]
+            pay = float(legs["float_pay_time"][i])
+            disc = self.model.discount_bond(float(ft), pay, x_fix, self.p0(float(ft)), self.p0(pay))
+            num = self.model.numeraire_lgm(float(ft), x_fix, self.p0)
+            pv = (
+                float(legs["float_sign"][i])
+                * float(legs["float_notional"][i])
+                * float(legs["float_accrual"][i])
+                * coupons[i, :]
+                * disc
+                / num
+            )
+            target = (
+                float(legs["float_sign"][i])
+                * float(legs["float_notional"][i])
+                * float(legs["float_accrual"][i])
+                * float(legs["float_coupon"][i])
+                * self.p0(pay)
+            )
+        self.assertAlmostEqual(float(np.mean(pv)), float(target), places=11)
+
 
     def test_load_ore_default_curve_inputs_converts_cds_spreads_to_hazard(self):
         todaysmarket_xml = """\

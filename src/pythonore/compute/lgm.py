@@ -31,6 +31,9 @@ DiscountInput = Union[float, np.ndarray, Callable[[float], float]]
 PiecewiseSpec = Union[float, Tuple[Iterable[float], Iterable[float]], Mapping[str, Iterable[float]]]
 
 ORE_PARITY_SEQUENCE_TYPE = "MersenneTwister"
+ORE_PARITY_ANTITHETIC_SEQUENCE_TYPE = "MersenneTwisterAntithetic"
+ORE_SOBOL_SEQUENCE_TYPE = "Sobol"
+ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE = "SobolBrownianBridge"
 
 
 def _as_1d_float_array(values: Iterable[float], name: str) -> np.ndarray:
@@ -152,14 +155,159 @@ class OreMersenneTwisterGaussianRng:
         return self.next_sequence(int(size))
 
 
-def make_ore_gaussian_rng(seed: int, sequence_type: str = ORE_PARITY_SEQUENCE_TYPE) -> OreMersenneTwisterGaussianRng:
-    """Build an exact-match RNG for Ore parity runs."""
-    if sequence_type != ORE_PARITY_SEQUENCE_TYPE:
-        raise ValueError(
-            f"exact Ore parity is only supported for sequence_type='{ORE_PARITY_SEQUENCE_TYPE}', "
-            f"got '{sequence_type}'"
-        )
-    return OreMersenneTwisterGaussianRng(seed)
+class OreMersenneTwisterAntitheticGaussianRng:
+    """Path-major MT Gaussian generator with simple antithetic pairing."""
+
+    def __init__(self, seed: int) -> None:
+        self._base = OreMersenneTwisterGaussianRng(seed)
+        self._pending_negative: Optional[np.ndarray] = None
+
+    def next_sequence(self, size: int) -> np.ndarray:
+        if self._pending_negative is not None:
+            out = self._pending_negative
+            self._pending_negative = None
+            return out.copy()
+        draws = self._base.next_sequence(size)
+        self._pending_negative = -draws
+        return draws
+
+    def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
+        if isinstance(size, tuple):
+            if len(size) != 1:
+                raise ValueError(
+                    "OreMersenneTwisterAntitheticGaussianRng only supports one-dimensional draws"
+                )
+            size = size[0]
+        return self.next_sequence(int(size))
+
+
+class OreSobolGaussianRng:
+    """QuantLib-backed Sobol Gaussian generator for path-major LGM simulation.
+
+    This uses ``SobolRsg`` followed by inverse-Gaussian transformation. It matches
+    the sequence family ORE uses more closely than pseudo-random MT draws, but it
+    does not apply Brownian-bridge reordering yet.
+    """
+
+    def __init__(self, seed: int) -> None:
+        self.seed = _coerce_seed(seed)
+        self._dimension: Optional[int] = None
+        self._generator = None
+
+    def _ensure_dimension(self, size: int) -> None:
+        size = int(size)
+        if size <= 0:
+            raise ValueError("size must be positive")
+        if self._dimension is None:
+            ql = _load_quantlib()
+            uniform = ql.SobolRsg(size, self.seed)
+            self._generator = ql.InvCumulativeSobolGaussianRsg(uniform)
+            self._dimension = size
+            return
+        if size != self._dimension:
+            raise ValueError(
+                f"OreSobolGaussianRng was initialised with dimension {self._dimension}, got {size}"
+            )
+
+    def next_sequence(self, size: int) -> np.ndarray:
+        self._ensure_dimension(size)
+        assert self._generator is not None
+        return np.asarray(self._generator.nextSequence().value(), dtype=float)
+
+    def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
+        if isinstance(size, tuple):
+            if len(size) != 1:
+                raise ValueError("OreSobolGaussianRng only supports one-dimensional draws")
+            size = size[0]
+        return self.next_sequence(int(size))
+
+
+class OreSobolBrownianBridgeGaussianRng:
+    """QuantLib-backed Sobol Gaussian generator with Brownian-bridge rotation."""
+
+    def __init__(self, seed: int) -> None:
+        self.seed = _coerce_seed(seed)
+        self._dimension: Optional[int] = None
+        self._generator = None
+        self._bridge = None
+        self._bridge_times: Optional[tuple[float, ...]] = None
+
+    def _ensure_dimension(self, size: int) -> None:
+        size = int(size)
+        if size <= 0:
+            raise ValueError("size must be positive")
+        if self._dimension is None:
+            ql = _load_quantlib()
+            uniform = ql.SobolRsg(size, self.seed)
+            self._generator = ql.InvCumulativeSobolGaussianRsg(uniform)
+            self._bridge = ql.BrownianBridge(list(self._bridge_times)) if self._bridge_times is not None else ql.BrownianBridge(size)
+            self._dimension = size
+            return
+        if size != self._dimension:
+            raise ValueError(
+                "OreSobolBrownianBridgeGaussianRng was initialised with "
+                f"dimension {self._dimension}, got {size}"
+            )
+
+    def configure_time_grid(self, times: Iterable[float]) -> None:
+        times_arr = tuple(float(x) for x in times)
+        if len(times_arr) == 0:
+            self._bridge_times = None
+        else:
+            self._bridge_times = times_arr
+        if self._dimension is not None and self._generator is not None:
+            if self._bridge_times is not None and len(self._bridge_times) != self._dimension:
+                raise ValueError(
+                    "configured bridge time grid length must match existing RNG dimension "
+                    f"{self._dimension}, got {len(self._bridge_times)}"
+                )
+            ql = _load_quantlib()
+            self._bridge = (
+                ql.BrownianBridge(list(self._bridge_times))
+                if self._bridge_times is not None
+                else ql.BrownianBridge(self._dimension)
+            )
+
+    def next_sequence(self, size: int) -> np.ndarray:
+        self._ensure_dimension(size)
+        assert self._generator is not None
+        assert self._bridge is not None
+        seq = np.asarray(self._generator.nextSequence().value(), dtype=float)
+        return np.asarray(self._bridge.transform(seq.tolist()), dtype=float)
+
+    def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
+        if isinstance(size, tuple):
+            if len(size) != 1:
+                raise ValueError(
+                    "OreSobolBrownianBridgeGaussianRng only supports one-dimensional draws"
+                )
+            size = size[0]
+        return self.next_sequence(int(size))
+
+
+def make_ore_gaussian_rng(
+    seed: int, sequence_type: str = ORE_PARITY_SEQUENCE_TYPE
+) -> Union[
+    OreMersenneTwisterGaussianRng,
+    OreMersenneTwisterAntitheticGaussianRng,
+    OreSobolGaussianRng,
+    OreSobolBrownianBridgeGaussianRng,
+]:
+    """Build a QuantLib-backed Gaussian RNG for Ore-style path-major simulation."""
+    if sequence_type == ORE_PARITY_SEQUENCE_TYPE:
+        return OreMersenneTwisterGaussianRng(seed)
+    if sequence_type == ORE_PARITY_ANTITHETIC_SEQUENCE_TYPE:
+        return OreMersenneTwisterAntitheticGaussianRng(seed)
+    if sequence_type == ORE_SOBOL_SEQUENCE_TYPE:
+        return OreSobolGaussianRng(seed)
+    if sequence_type == ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE:
+        return OreSobolBrownianBridgeGaussianRng(seed)
+    raise ValueError(
+        f"unsupported sequence_type '{sequence_type}', expected one of "
+        f"'{ORE_PARITY_SEQUENCE_TYPE}', '{ORE_PARITY_ANTITHETIC_SEQUENCE_TYPE}', "
+        f"'{ORE_SOBOL_SEQUENCE_TYPE}' or "
+        f"'{ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE}'"
+    )
 
 
 @dataclass(frozen=True)
@@ -697,6 +845,8 @@ def simulate_lgm_measure(
         if var < -1.0e-14:
             raise ValueError("encountered negative variance increment")
         step_scales[i] = np.sqrt(max(var, 0.0))
+    if hasattr(rng, "configure_time_grid"):
+        rng.configure_time_grid(times_arr[1:])
     for p in range(n_paths):
         draws = np.asarray(rng.next_sequence(step_scales.size), dtype=float)
         if draws.shape != step_scales.shape:

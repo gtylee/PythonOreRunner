@@ -72,6 +72,11 @@ from pythonore.mapping.mapper import (
     build_input_parameters,
     map_snapshot,
 )
+from pythonore.runtime.exposure_profiles import (
+    build_ore_exposure_profile_from_paths,
+    one_year_profile_value,
+    ore_pfe_quantile,
+)
 from pythonore.runtime.dim import calculate_python_dim
 from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.results import CubeAccessor, XVAResult
@@ -1640,7 +1645,9 @@ class PythonLgmAdapter:
         """Determine the RNG mode for LGM path simulation from config params.
 
         Reads ``python.lgm_rng_mode`` from the snapshot config and returns a
-        normalised lower-case string (``"numpy"`` or ``"ore_parity"``).
+        normalised lower-case string (``"numpy"``, ``"ore_parity"``,
+        ``"ore_parity_antithetic"``, ``"ore_sobol"``, or
+        ``"ore_sobol_bridge"``).
         """
         return str(snapshot.config.params.get("python.lgm_rng_mode", "numpy")).strip().lower()
 
@@ -1699,17 +1706,29 @@ class PythonLgmAdapter:
     def _build_lgm_rng(self, seed: int, rng_mode: str):
         """Construct the random number generator for LGM path simulation.
 
-        Supports ``"numpy"`` (NumPy default RNG, time-major draw order) and
-        ``"ore_parity"`` (ORE Gaussian RNG producing path-major draws that
-        match the ORE C++ simulation grid exactly).  Raises
+        Supports ``"numpy"`` (NumPy default RNG, time-major draw order),
+        ``"ore_parity"`` (QuantLib MT Gaussian RNG in ORE path-major order),
+        ``"ore_parity_antithetic"`` (QuantLib MT Gaussian RNG with antithetic
+        path pairing in ORE path-major order),
+        ``"ore_sobol"`` (QuantLib Sobol Gaussian RNG in ORE path-major order),
+        and ``"ore_sobol_bridge"`` (QuantLib Sobol Gaussian RNG with
+        Brownian-bridge rotation in ORE path-major order). Raises
         :class:`EngineRunError` for any other mode string.
         """
         if rng_mode == "numpy":
             return np.random.default_rng(seed), "time_major"
         if rng_mode == "ore_parity":
             return self._lgm_mod.make_ore_gaussian_rng(seed), "ore_path_major"
+        if rng_mode == "ore_parity_antithetic":
+            return self._lgm_mod.make_ore_gaussian_rng(seed, sequence_type="MersenneTwisterAntithetic"), "ore_path_major"
+        if rng_mode == "ore_sobol":
+            return self._lgm_mod.make_ore_gaussian_rng(seed, sequence_type="Sobol"), "ore_path_major"
+        if rng_mode == "ore_sobol_bridge":
+            return self._lgm_mod.make_ore_gaussian_rng(seed, sequence_type="SobolBrownianBridge"), "ore_path_major"
         raise EngineRunError(
-            f"Unsupported PythonLgmAdapter RNG mode '{rng_mode}'. Use 'numpy' or 'ore_parity'."
+            "Unsupported PythonLgmAdapter RNG mode "
+            f"'{rng_mode}'. Use 'numpy', 'ore_parity', 'ore_parity_antithetic', 'ore_sobol' or "
+            "'ore_sobol_bridge'."
         )
 
     def _day_counter_from_sim_xml(self, sim_xml: str) -> str:
@@ -2332,6 +2351,9 @@ class PythonLgmAdapter:
         tau = np.asarray(legs.get("float_accrual", []), dtype=float)
         spr = np.asarray(legs.get("float_spread", np.zeros_like(s)), dtype=float)
         fix_t = np.asarray(legs.get("float_fixing_time", s), dtype=float)
+        pay_t = np.asarray(legs.get("float_pay_time", e), dtype=float)
+        notional = np.asarray(legs.get("float_notional", np.ones_like(s)), dtype=float)
+        sign = np.asarray(legs.get("float_sign", np.ones_like(s)), dtype=float)
         quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
         fixed_mask = np.asarray(legs.get("float_is_historically_fixed", np.zeros(s.shape, dtype=bool)), dtype=bool)
 
@@ -2341,7 +2363,9 @@ class PythonLgmAdapter:
 
         for i in range(n_cf):
             if fixed_mask[i]:
-                out[i, :] = quoted_coupon[i] + float(spr[i])
+                # Historical fixings already overwrite quoted_coupon with the full
+                # locked coupon, so adding spread again would double-count it.
+                out[i, :] = quoted_coupon[i]
                 continue
             if tau[i] <= 0.0:
                 out[i, :] = quoted_coupon[i]
@@ -2371,7 +2395,22 @@ class PythonLgmAdapter:
             p_t_s_f = p_t_s_d * (bs / bt)
             p_t_e_f = p_t_e_d * (be / bt)
             fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(tau[i])
-            out[i, :] = fwd_path + float(spr[i])
+            coupon_path = fwd_path + float(spr[i])
+            target_coupon = float(quoted_coupon[i])
+            if abs(target_coupon) > 1.0e-14:
+                p_fix_pay_d = model.discount_bond(ft, float(pay_t[i]), x_fix, p_ft, float(p0_disc(float(pay_t[i]))))
+                numeraire = model.numeraire_lgm(ft, x_fix, p0_disc)
+                current_mean = float(
+                    np.mean(
+                        float(sign[i]) * float(notional[i]) * float(tau[i]) * coupon_path * p_fix_pay_d / numeraire
+                    )
+                )
+                target_mean = (
+                    float(sign[i]) * float(notional[i]) * float(tau[i]) * target_coupon * float(p0_disc(float(pay_t[i])))
+                )
+                if abs(current_mean) > 1.0e-18:
+                    coupon_path = coupon_path * (target_mean / current_mean)
+            out[i, :] = coupon_path
         return out
 
     def _resolve_index_curve(
@@ -3019,6 +3058,10 @@ class PythonLgmAdapter:
         valuation_times = inputs.valuation_times
         obs_times = inputs.observation_times
         obs_closeout_times = inputs.observation_closeout_times
+        obs_dates = [
+            (datetime.fromisoformat(inputs.asof).date() + timedelta(days=int(round(float(t) * 365.0)))).isoformat()
+            for t in obs_times
+        ]
         valuation_idx = np.searchsorted(times, valuation_times)
         obs_idx = np.searchsorted(times, obs_times)
         obs_closeout_idx = np.searchsorted(times, obs_closeout_times)
@@ -3087,8 +3130,18 @@ class PythonLgmAdapter:
             valuation_ene = np.mean(np.maximum(-v_xva_val, 0.0), axis=1)
             epe = np.mean(np.maximum(v_xva_obs, 0.0), axis=1)
             ene = np.mean(np.maximum(-v_xva_obs, 0.0), axis=1)
-            pfe = np.maximum(np.quantile(v_xva_obs, pfe_quantile, axis=1), 0.0)
-            basel_profile = _basel_profile(obs_times, epe)
+            pfe = ore_pfe_quantile(v_xva_obs, pfe_quantile)
+            trade_profile = build_ore_exposure_profile_from_paths(
+                spec.trade.trade_id,
+                obs_dates,
+                obs_times.tolist(),
+                v_xva_val,
+                v_xva_obs,
+                discount_factors=obs_df_vec.tolist(),
+                closeout_times=obs_closeout_times.tolist(),
+                pfe_quantile=pfe_quantile,
+                asof_date=inputs.asof,
+            )
             ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(v_xva_val)) + v_xva_val
             ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(v_xva_obs)) + v_xva_obs
             xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
@@ -3103,24 +3156,12 @@ class PythonLgmAdapter:
                 "closeout_epe": epe.tolist(),
                 "closeout_ene": ene.tolist(),
                 "pfe": pfe.tolist(),
-                "basel_ee": basel_profile["basel_ee"],
-                "basel_eee": basel_profile["basel_eee"],
-                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
-                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
+                "basel_ee": trade_profile["basel_ee"],
+                "basel_eee": trade_profile["basel_eee"],
+                "time_weighted_basel_epe": trade_profile["time_weighted_basel_epe"],
+                "time_weighted_basel_eepe": trade_profile["time_weighted_basel_eepe"],
             }
-            exposure_profiles_by_trade[spec.trade.trade_id] = {
-                "times": obs_times.tolist(),
-                "closeout_times": obs_closeout_times.tolist(),
-                "valuation_epe": valuation_epe.tolist(),
-                "valuation_ene": valuation_ene.tolist(),
-                "closeout_epe": epe.tolist(),
-                "closeout_ene": ene.tolist(),
-                "pfe": pfe.tolist(),
-                "basel_ee": basel_profile["basel_ee"],
-                "basel_eee": basel_profile["basel_eee"],
-                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
-                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
-            }
+            exposure_profiles_by_trade[spec.trade.trade_id] = trade_profile
 
         epe_by_ns_paths: Dict[str, np.ndarray] = {}
         ene_by_ns_paths: Dict[str, np.ndarray] = {}
@@ -3135,21 +3176,18 @@ class PythonLgmAdapter:
             valuation_ene_by_ns_paths[ns] = np.mean(np.maximum(-valuation_paths_net, 0.0), axis=1)
             epe_by_ns_paths[ns] = np.mean(np.maximum(closeout_paths_net, 0.0), axis=1)
             ene_by_ns_paths[ns] = np.mean(np.maximum(-closeout_paths_net, 0.0), axis=1)
-            pfe_vec = np.maximum(np.quantile(closeout_paths_net, pfe_quantile, axis=1), 0.0)
-            basel_profile = _basel_profile(obs_times, epe_by_ns_paths[ns])
-            exposure_profiles_by_netting_set[ns] = {
-                "times": obs_times.tolist(),
-                "closeout_times": obs_closeout_times.tolist(),
-                "valuation_epe": valuation_epe_by_ns_paths[ns].tolist(),
-                "valuation_ene": valuation_ene_by_ns_paths[ns].tolist(),
-                "closeout_epe": epe_by_ns_paths[ns].tolist(),
-                "closeout_ene": ene_by_ns_paths[ns].tolist(),
-                "pfe": pfe_vec.tolist(),
-                "basel_ee": basel_profile["basel_ee"],
-                "basel_eee": basel_profile["basel_eee"],
-                "time_weighted_basel_epe": basel_profile["time_weighted_basel_epe"],
-                "time_weighted_basel_eepe": basel_profile["time_weighted_basel_eepe"],
-            }
+            exposure_profiles_by_netting_set[ns] = build_ore_exposure_profile_from_paths(
+                ns,
+                obs_dates,
+                obs_times.tolist(),
+                valuation_paths_net,
+                closeout_paths_net,
+                discount_factors=obs_df_vec.tolist(),
+                closeout_times=obs_closeout_times.tolist(),
+                expected_collateral=np.mean(collateral_paths, axis=1).tolist(),
+                pfe_quantile=pfe_quantile,
+                asof_date=inputs.asof,
+            )
 
         exposure_by_ns = {ns: float(np.max(vals)) for ns, vals in epe_by_ns_paths.items()}
         xva_by_metric: Dict[str, float] = {}
@@ -3257,8 +3295,8 @@ class PythonLgmAdapter:
                     "NettingSetId": ns,
                     "EPE": peak_epe,
                     "PFE": peak_pfe,
-                    "BaselEPE": _one_year_basel_value(profile, "time_weighted_basel_epe"),
-                    "BaselEEPE": _one_year_basel_value(profile, "time_weighted_basel_eepe"),
+                    "BaselEPE": one_year_profile_value(profile, "time_weighted_basel_epe", asof_date=inputs.asof),
+                    "BaselEEPE": one_year_profile_value(profile, "time_weighted_basel_eepe", asof_date=inputs.asof),
                 }
             )
         reports = {
@@ -3746,46 +3784,6 @@ def _pfe_quantile(snapshot: XVASnapshot) -> float:
     if runtime is not None and runtime.xva_analytic is not None:
         quantile = float(getattr(runtime.xva_analytic, "pfe_quantile", quantile))
     return min(max(quantile, 0.0), 1.0)
-
-
-def _basel_profile(times: np.ndarray, closeout_epe: np.ndarray) -> Dict[str, list[float]]:
-    t = np.asarray(times, dtype=float)
-    epe = np.asarray(closeout_epe, dtype=float)
-    basel_ee = epe.copy()
-    basel_eee = np.maximum.accumulate(basel_ee)
-    tw_epe = np.zeros_like(basel_ee)
-    tw_eepe = np.zeros_like(basel_eee)
-    acc_epe = 0.0
-    acc_eepe = 0.0
-    prev_t = 0.0
-    for i, ti in enumerate(t):
-        dt = max(float(ti) - prev_t, 0.0)
-        prev_t = float(ti)
-        if i == 0 and float(ti) == 0.0:
-            tw_epe[i] = float(basel_ee[i])
-            tw_eepe[i] = float(basel_eee[i])
-            continue
-        acc_epe += float(basel_ee[i]) * dt
-        acc_eepe += float(basel_eee[i]) * dt
-        denom = max(float(ti), 1.0e-12)
-        tw_epe[i] = acc_epe / denom
-        tw_eepe[i] = acc_eepe / denom
-    return {
-        "basel_ee": basel_ee.tolist(),
-        "basel_eee": basel_eee.tolist(),
-        "time_weighted_basel_epe": tw_epe.tolist(),
-        "time_weighted_basel_eepe": tw_eepe.tolist(),
-    }
-
-
-def _one_year_basel_value(profile: Mapping[str, Any], key: str) -> float:
-    times = np.asarray(profile.get("times", []), dtype=float)
-    values = np.asarray(profile.get(key, []), dtype=float)
-    if times.size == 0 or values.size == 0:
-        return 0.0
-    idx = int(np.searchsorted(times, 1.0, side="left"))
-    idx = min(idx, values.size - 1)
-    return float(values[idx])
 
 
 def _configured_output_dir(snapshot: XVASnapshot) -> Path | None:

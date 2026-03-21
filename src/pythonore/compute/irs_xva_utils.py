@@ -1025,6 +1025,9 @@ def compute_realized_float_coupons(
     index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"]), dtype=float)
     spr = np.asarray(legs["float_spread"], dtype=float)
     fix_t = np.asarray(legs.get("float_fixing_time", s), dtype=float)
+    pay_t = np.asarray(legs.get("float_pay_time", e), dtype=float)
+    notional = np.asarray(legs.get("float_notional", np.ones_like(s)), dtype=float)
+    sign = np.asarray(legs.get("float_sign", np.ones_like(s)), dtype=float)
     quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
 
     n_cf = s.size
@@ -1055,7 +1058,20 @@ def compute_realized_float_coupons(
         p_t_s_f = p_t_s_d * (bs / bt)
         p_t_e_f = p_t_e_d * (be / bt)
         fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
-        out[i, :] = fwd_path + float(spr[i])
+        coupon_path = fwd_path + float(spr[i])
+        target_coupon = float(quoted_coupon[i])
+        if abs(target_coupon) > 1.0e-14:
+            p_fix_pay_d = model.discount_bond(ft, float(pay_t[i]), x_fix, p_ft, float(p0_disc(float(pay_t[i]))))
+            numeraire = model.numeraire_lgm(ft, x_fix, p0_disc)
+            current_mean = float(
+                np.mean(
+                    float(sign[i]) * float(notional[i]) * float(tau[i]) * coupon_path * p_fix_pay_d / numeraire
+                )
+            )
+            target_mean = float(sign[i]) * float(notional[i]) * float(tau[i]) * target_coupon * float(p0_disc(float(pay_t[i])))
+            if abs(current_mean) > 1.0e-18:
+                coupon_path = coupon_path * (target_mean / current_mean)
+        out[i, :] = coupon_path
     return out
 
 

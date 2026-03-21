@@ -52,6 +52,11 @@ from pythonore.io.ore_snapshot import (
 )
 from pythonore.repo_paths import default_ore_bin, find_engine_repo_root, local_parity_artifacts_root
 from pythonore.runtime import classify_portfolio_support
+from pythonore.runtime.exposure_profiles import (
+    build_ore_exposure_profile_from_paths,
+    build_ore_exposure_profile_from_series,
+    one_year_profile_value as _shared_one_year_profile_value,
+)
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
@@ -371,65 +376,29 @@ def _build_ore_style_exposure_profile(
     ene: Sequence[float],
     pfe: Sequence[float],
     *,
+    discount_factors: Sequence[float] | None = None,
     closeout_times: Sequence[float] | None = None,
     expected_collateral: Sequence[float] | None = None,
+    asof_date: date | str | None = None,
 ) -> dict[str, Any]:
-    times = np.asarray(exposure_times, dtype=float)
-    epe_arr = np.asarray(epe, dtype=float)
-    ene_arr = np.asarray(ene, dtype=float)
-    pfe_arr = np.asarray(pfe, dtype=float)
-    closeout = np.asarray(closeout_times if closeout_times is not None else exposure_times, dtype=float)
-    basel_ee = epe_arr.copy()
-    basel_eee = np.maximum.accumulate(basel_ee)
-    tw_epe = np.zeros_like(basel_ee)
-    tw_eepe = np.zeros_like(basel_eee)
-    acc_epe = 0.0
-    acc_eepe = 0.0
-    prev_t = 0.0
-    for i, t in enumerate(times):
-        dt = max(float(t) - prev_t, 0.0)
-        prev_t = float(t)
-        if i == 0 and float(t) == 0.0:
-            tw_epe[i] = float(basel_ee[i])
-            tw_eepe[i] = float(basel_eee[i])
-            continue
-        acc_epe += float(basel_ee[i]) * dt
-        acc_eepe += float(basel_eee[i]) * dt
-        denom = max(float(t), 1.0e-12)
-        tw_epe[i] = acc_epe / denom
-        tw_eepe[i] = acc_eepe / denom
-    if expected_collateral is None:
-        exp_coll = np.zeros_like(epe_arr)
-        if exp_coll.size:
-            exp_coll[0] = epe_arr[0]
-    else:
-        exp_coll = np.asarray(expected_collateral, dtype=float)
-    return {
-        "entity_id": entity_id,
-        "dates": [str(x) for x in exposure_dates],
-        "times": times.tolist(),
-        "closeout_times": closeout.tolist(),
-        "valuation_epe": epe_arr.tolist(),
-        "valuation_ene": ene_arr.tolist(),
-        "closeout_epe": epe_arr.tolist(),
-        "closeout_ene": ene_arr.tolist(),
-        "pfe": pfe_arr.tolist(),
-        "expected_collateral": exp_coll.tolist(),
-        "basel_ee": basel_ee.tolist(),
-        "basel_eee": basel_eee.tolist(),
-        "time_weighted_basel_epe": tw_epe.tolist(),
-        "time_weighted_basel_eepe": tw_eepe.tolist(),
-    }
+    return build_ore_exposure_profile_from_series(
+        entity_id,
+        exposure_dates,
+        exposure_times,
+        valuation_epe=epe,
+        valuation_ene=ene,
+        closeout_epe=epe,
+        closeout_ene=ene,
+        pfe=pfe,
+        discount_factors=discount_factors,
+        closeout_times=closeout_times,
+        expected_collateral=expected_collateral,
+        asof_date=asof_date,
+    )
 
 
 def _one_year_profile_value(profile: Mapping[str, Any], key: str) -> float:
-    times = np.asarray(profile.get("times", []), dtype=float)
-    values = np.asarray(profile.get(key, []), dtype=float)
-    if times.size == 0 or values.size == 0:
-        return 0.0
-    idx = int(np.searchsorted(times, 1.0, side="left"))
-    idx = min(idx, values.size - 1)
-    return float(values[idx])
+    return _shared_one_year_profile_value(profile, key)
 
 
 @dataclass(frozen=True)
@@ -1989,6 +1958,25 @@ def _requested_xva_metrics_from_ore_xml(ore_xml: Path) -> list[str]:
     if params.get("fva", "N").strip().upper() == "Y":
         requested.append("FVA")
     return requested
+
+
+def _ore_exposure_quantile(ore_xml: Path) -> float:
+    root = ET.parse(ore_xml).getroot()
+    for analytic_type in ("xva", "pfe"):
+        analytic = root.find(f"./Analytics/Analytic[@type='{analytic_type}']")
+        if analytic is None:
+            continue
+        params = {
+            (node.attrib.get("name", "") or "").strip(): (node.text or "").strip()
+            for node in analytic.findall("./Parameter")
+        }
+        for key in ("quantile", "pfeQuantile"):
+            if params.get(key, "").strip():
+                try:
+                    return min(max(float(params[key]), 0.0), 1.0)
+                except Exception:
+                    pass
+    return 0.95
 
 
 def _xva_csv_has_trade_row(xva_csv: Path, trade_id: str) -> bool:
@@ -3897,7 +3885,27 @@ def _compute_fx_option_snapshot_case(
 
     epe = np.mean(np.maximum(npv, 0.0), axis=1)
     ene = np.mean(np.maximum(-npv, 0.0), axis=1)
-    pfe = np.quantile(np.maximum(npv, 0.0), 0.95, axis=1)
+    trade_profile = build_ore_exposure_profile_from_paths(
+        str(payload["trade_id"]),
+        exposure_dates,
+        exposure_times,
+        npv,
+        npv,
+        discount_factors=np.asarray([p0_report(float(t)) for t in exposure_times], dtype=float).tolist(),
+        pfe_quantile=_ore_exposure_quantile(ore_xml),
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    netting_profile = build_ore_exposure_profile_from_paths(
+        str(payload["netting_set_id"]),
+        exposure_dates,
+        exposure_times,
+        npv,
+        npv,
+        discount_factors=np.asarray([p0_report(float(t)) for t in exposure_times], dtype=float).tolist(),
+        pfe_quantile=_ore_exposure_quantile(ore_xml),
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    pfe = np.asarray(trade_profile["pfe"], dtype=float)
     credit = load_ore_default_curve_inputs(str(todaysmarket_xml), str(market_data_path), cpty_name=str(payload["counterparty"]))
     q_c = survival_probability_from_hazard(exposure_times, credit["hazard_times"], credit["hazard_rates"])
     dva_name = (xva_params.get("dvaName") or "BANK").strip() or "BANK"
@@ -3936,29 +3944,16 @@ def _compute_fx_option_snapshot_case(
         trade_id=str(payload["trade_id"]),
         netting_set_id=str(payload["netting_set_id"]),
     )
-    basel_ee = epe.copy()
-    basel_eee = np.maximum.accumulate(basel_ee)
-    time_weighted_basel_epe = np.zeros_like(basel_ee)
-    time_weighted_basel_eepe = np.zeros_like(basel_eee)
-    acc_epe = 0.0
-    acc_eepe = 0.0
-    prev_time = 0.0
-    for i, t in enumerate(exposure_times):
-        dt = max(float(t) - prev_time, 0.0)
-        prev_time = float(t)
-        if i == 0 and float(t) == 0.0:
-            time_weighted_basel_epe[i] = float(basel_ee[i])
-            time_weighted_basel_eepe[i] = float(basel_eee[i])
-            continue
-        acc_epe += float(basel_ee[i]) * dt
-        acc_eepe += float(basel_eee[i]) * dt
-        denom = max(float(t), 1.0e-12)
-        time_weighted_basel_epe[i] = acc_epe / denom
-        time_weighted_basel_eepe[i] = acc_eepe / denom
-    one_year_idx = int(np.searchsorted(exposure_times, 1.0, side="left")) if exposure_times.size else 0
-    one_year_idx = min(one_year_idx, max(exposure_times.size - 1, 0))
-    py_basel_epe = float(time_weighted_basel_epe[one_year_idx]) if exposure_times.size else 0.0
-    py_basel_eepe = float(time_weighted_basel_eepe[one_year_idx]) if exposure_times.size else 0.0
+    py_basel_epe = _shared_one_year_profile_value(
+        trade_profile,
+        "time_weighted_basel_epe",
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    py_basel_eepe = _shared_one_year_profile_value(
+        trade_profile,
+        "time_weighted_basel_eepe",
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
 
     pricing = {
         "py_t0_npv": float(np.mean(npv[0, :])),
@@ -4007,22 +4002,6 @@ def _compute_fx_option_snapshot_case(
         **({} if has_trade_xva_reference else {"missing_reference_xva": True}),
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
     }
-    trade_profile = _build_ore_style_exposure_profile(
-        str(payload["trade_id"]),
-        exposure_dates,
-        exposure_times,
-        epe,
-        ene,
-        pfe,
-    )
-    netting_profile = _build_ore_style_exposure_profile(
-        str(payload["netting_set_id"]),
-        exposure_dates,
-        exposure_times,
-        epe,
-        ene,
-        pfe,
-    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=str(payload["trade_id"]),
@@ -4083,6 +4062,15 @@ def _compute_capfloor_snapshot_case(
     if rng_mode == "ore_parity":
         rng = make_ore_gaussian_rng(seed)
         draw_order = "ore_path_major"
+    elif rng_mode == "ore_parity_antithetic":
+        rng = make_ore_gaussian_rng(seed, sequence_type="MersenneTwisterAntithetic")
+        draw_order = "ore_path_major"
+    elif rng_mode == "ore_sobol":
+        rng = make_ore_gaussian_rng(seed, sequence_type="Sobol")
+        draw_order = "ore_path_major"
+    elif rng_mode == "ore_sobol_bridge":
+        rng = make_ore_gaussian_rng(seed, sequence_type="SobolBrownianBridge")
+        draw_order = "ore_path_major"
     else:
         rng = np.random.default_rng(seed)
         draw_order = "time_major"
@@ -4107,7 +4095,27 @@ def _compute_capfloor_snapshot_case(
     npv = npv_all[idx, :]
     epe = np.mean(np.maximum(npv, 0.0), axis=1)
     ene = np.mean(np.maximum(-npv, 0.0), axis=1)
-    pfe = np.quantile(np.maximum(npv, 0.0), 0.95, axis=1)
+    trade_profile = build_ore_exposure_profile_from_paths(
+        str(payload["trade_id"]),
+        exposure_dates,
+        exposure_times,
+        npv,
+        npv,
+        discount_factors=np.asarray([payload["p0_disc"](float(t)) for t in exposure_times], dtype=float).tolist(),
+        pfe_quantile=_ore_exposure_quantile(ore_xml),
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    netting_profile = build_ore_exposure_profile_from_paths(
+        str(payload["netting_set_id"]),
+        exposure_dates,
+        exposure_times,
+        npv,
+        npv,
+        discount_factors=np.asarray([payload["p0_disc"](float(t)) for t in exposure_times], dtype=float).tolist(),
+        pfe_quantile=_ore_exposure_quantile(ore_xml),
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    pfe = np.asarray(trade_profile["pfe"], dtype=float)
     credit = load_ore_default_curve_inputs(str(payload["todaysmarket_xml"]), str(payload["market_data_path"]), cpty_name=str(payload["counterparty"]))
     q_c = survival_probability_from_hazard(exposure_times, credit["hazard_times"], credit["hazard_rates"])
     dva_name = (xva_params.get("dvaName") or "BANK").strip() or "BANK"
@@ -4145,28 +4153,16 @@ def _compute_capfloor_snapshot_case(
         )
     else:
         xva_row, has_trade_xva_reference = None, False
-    basel_ee = epe.copy()
-    basel_eee = np.maximum.accumulate(basel_ee)
-    time_weighted_basel_epe = np.zeros_like(basel_ee)
-    time_weighted_basel_eepe = np.zeros_like(basel_eee)
-    acc_epe = 0.0
-    acc_eepe = 0.0
-    prev_time = 0.0
-    for i, t in enumerate(exposure_times):
-        dt = max(float(t) - prev_time, 0.0)
-        prev_time = float(t)
-        if i == 0 and float(t) == 0.0:
-            time_weighted_basel_epe[i] = float(basel_ee[i])
-            time_weighted_basel_eepe[i] = float(basel_eee[i])
-            continue
-        acc_epe += float(basel_ee[i]) * dt
-        acc_eepe += float(basel_eee[i]) * dt
-        denom = max(float(t), 1.0e-12)
-        time_weighted_basel_epe[i] = acc_epe / denom
-        time_weighted_basel_eepe[i] = acc_eepe / denom
-    one_year_idx = min(int(np.searchsorted(exposure_times, 1.0, side="left")) if exposure_times.size else 0, max(exposure_times.size - 1, 0))
-    py_basel_epe = float(time_weighted_basel_epe[one_year_idx]) if exposure_times.size else 0.0
-    py_basel_eepe = float(time_weighted_basel_eepe[one_year_idx]) if exposure_times.size else 0.0
+    py_basel_epe = _shared_one_year_profile_value(
+        trade_profile,
+        "time_weighted_basel_epe",
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
+    py_basel_eepe = _shared_one_year_profile_value(
+        trade_profile,
+        "time_weighted_basel_eepe",
+        asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
+    )
     pricing = {
         "py_t0_npv": float(np.mean(npv[0, :])),
         "trade_type": "CapFloor",
@@ -4224,22 +4220,6 @@ def _compute_capfloor_snapshot_case(
         **({} if payload.get("ore_t0_npv") is not None else {"missing_native_pricing_reference": True}),
         **({} if pricing_fallback_reason is None else {"pricing_fallback_reason": pricing_fallback_reason}),
     }
-    trade_profile = _build_ore_style_exposure_profile(
-        str(payload["trade_id"]),
-        exposure_dates,
-        exposure_times,
-        epe,
-        ene,
-        pfe,
-    )
-    netting_profile = _build_ore_style_exposure_profile(
-        str(payload["netting_set_id"]),
-        exposure_dates,
-        exposure_times,
-        epe,
-        ene,
-        pfe,
-    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=str(payload["trade_id"]),
@@ -4402,10 +4382,24 @@ def _compute_inflation_swap_snapshot_case(
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
         exposure_profile_by_trade=_build_ore_style_exposure_profile(
-            str(payload["trade_id"]), exposure_dates, exposure_times, epe, ene, pfe
+            str(payload["trade_id"]),
+            exposure_dates,
+            exposure_times,
+            epe,
+            ene,
+            pfe,
+            discount_factors=discount.tolist(),
+            asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
         ),
         exposure_profile_by_netting_set=_build_ore_style_exposure_profile(
-            str(payload["netting_set_id"]), exposure_dates, exposure_times, epe, ene, pfe
+            str(payload["netting_set_id"]),
+            exposure_dates,
+            exposure_times,
+            epe,
+            ene,
+            pfe,
+            discount_factors=discount.tolist(),
+            asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
         ),
         ore_basel_epe=0.0,
         ore_basel_eepe=0.0,
@@ -4528,10 +4522,24 @@ def _compute_inflation_capfloor_snapshot_case(
         py_ene=[float(x) for x in ene],
         py_pfe=[float(x) for x in pfe],
         exposure_profile_by_trade=_build_ore_style_exposure_profile(
-            str(payload["trade_id"]), exposure_dates, exposure_times, epe, ene, pfe
+            str(payload["trade_id"]),
+            exposure_dates,
+            exposure_times,
+            epe,
+            ene,
+            pfe,
+            discount_factors=discount.tolist(),
+            asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
         ),
         exposure_profile_by_netting_set=_build_ore_style_exposure_profile(
-            str(payload["netting_set_id"]), exposure_dates, exposure_times, epe, ene, pfe
+            str(payload["netting_set_id"]),
+            exposure_dates,
+            exposure_times,
+            epe,
+            ene,
+            pfe,
+            discount_factors=discount.tolist(),
+            asof_date=payload.get("asof_date") or payload.get("asof") or exposure_dates[0],
         ),
         ore_basel_epe=0.0,
         ore_basel_eepe=0.0,
@@ -4550,11 +4558,21 @@ def _compute_snapshot_case(
     xva_mode: str,
 ) -> SnapshotComputation:
     snap = load_from_ore_xml(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    pfe_quantile = _ore_exposure_quantile(ore_xml)
     effective_paths = int(paths) if paths is not None else int(getattr(snap, "n_samples", 500) or 500)
     model = snap.build_model()
     setattr(model, "_measure", str(getattr(snap, "measure", "LGM")).upper())
     if rng_mode == "ore_parity":
         rng = make_ore_gaussian_rng(seed)
+        draw_order = "ore_path_major"
+    elif rng_mode == "ore_parity_antithetic":
+        rng = make_ore_gaussian_rng(seed, sequence_type="MersenneTwisterAntithetic")
+        draw_order = "ore_path_major"
+    elif rng_mode == "ore_sobol":
+        rng = make_ore_gaussian_rng(seed, sequence_type="Sobol")
+        draw_order = "ore_path_major"
+    elif rng_mode == "ore_sobol_bridge":
+        rng = make_ore_gaussian_rng(seed, sequence_type="SobolBrownianBridge")
         draw_order = "ore_path_major"
     else:
         rng = np.random.default_rng(seed)
@@ -4611,8 +4629,30 @@ def _compute_snapshot_case(
 
     epe = np.mean(np.maximum(npv_xva, 0.0), axis=1)
     ene = np.mean(np.maximum(-npv_xva, 0.0), axis=1)
-    pfe = np.quantile(np.maximum(npv_xva, 0.0), 0.95, axis=1)
     times = snap.exposure_model_times
+    trade_profile = build_ore_exposure_profile_from_paths(
+        snap.trade_id,
+        [str(x) for x in snap.exposure_dates],
+        [float(x) for x in snap.exposure_times],
+        npv_xva,
+        npv_xva,
+        discount_factors=np.asarray([snap.p0_disc(float(t)) for t in times], dtype=float).tolist(),
+        closeout_times=[float(x) for x in snap.exposure_times],
+        pfe_quantile=pfe_quantile,
+        asof_date=snap.asof_date,
+    )
+    netting_profile = build_ore_exposure_profile_from_paths(
+        snap.netting_set_id,
+        [str(x) for x in snap.exposure_dates],
+        [float(x) for x in snap.exposure_times],
+        npv_xva,
+        npv_xva,
+        discount_factors=np.asarray([snap.p0_disc(float(t)) for t in times], dtype=float).tolist(),
+        closeout_times=[float(x) for x in snap.exposure_times],
+        pfe_quantile=pfe_quantile,
+        asof_date=snap.asof_date,
+    )
+    pfe = np.asarray(trade_profile["pfe"], dtype=float)
     q_c = snap.survival_probability(times)
     if (
         snap.own_hazard_times is not None
@@ -4657,33 +4697,12 @@ def _compute_snapshot_case(
     py_fca = float(xva_pack.get("fca", 0.0))
     py_fva = float(xva_pack.get("fva", py_fba + py_fca))
     py_t0_npv = float(np.mean(npv[0, :]))
-    basel_ee = epe.copy()
-    basel_eee = np.maximum.accumulate(basel_ee)
-    time_weighted_basel_epe = np.zeros_like(basel_ee)
-    time_weighted_basel_eepe = np.zeros_like(basel_eee)
-    acc_epe = 0.0
-    acc_eepe = 0.0
-    prev_time = 0.0
-    for i, t in enumerate(times):
-        dt = max(float(t) - prev_time, 0.0)
-        prev_time = float(t)
-        if i == 0 and float(t) == 0.0:
-            time_weighted_basel_epe[i] = float(basel_ee[i])
-            time_weighted_basel_eepe[i] = float(basel_eee[i])
-            continue
-        acc_epe += float(basel_ee[i]) * dt
-        acc_eepe += float(basel_eee[i]) * dt
-        denom = max(float(t), 1.0e-12)
-        time_weighted_basel_epe[i] = acc_epe / denom
-        time_weighted_basel_eepe[i] = acc_eepe / denom
-    one_year_idx = int(np.searchsorted(times, 1.0, side="left")) if times.size else 0
-    if times.size:
-        one_year_idx = min(one_year_idx, times.size - 1)
-        py_basel_epe = float(time_weighted_basel_epe[one_year_idx])
-        py_basel_eepe = float(time_weighted_basel_eepe[one_year_idx])
-    else:
-        py_basel_epe = 0.0
-        py_basel_eepe = 0.0
+    py_basel_epe = _shared_one_year_profile_value(
+        trade_profile, "time_weighted_basel_epe", asof_date=snap.asof_date
+    )
+    py_basel_eepe = _shared_one_year_profile_value(
+        trade_profile, "time_weighted_basel_eepe", asof_date=snap.asof_date
+    )
 
     pricing = {
         "ore_t0_npv": float(snap.ore_t0_npv),
@@ -4722,22 +4741,6 @@ def _compute_snapshot_case(
         "xva_mode": "ore" if ore_style_xva else "classic",
     }
     diagnostics.update(_build_leg_diagnostics(snap, paths=effective_paths))
-    trade_profile = _build_ore_style_exposure_profile(
-        snap.trade_id,
-        [str(x) for x in snap.exposure_dates],
-        [float(x) for x in snap.exposure_times],
-        [float(x) for x in epe],
-        [float(x) for x in ene],
-        [float(x) for x in pfe],
-    )
-    netting_profile = _build_ore_style_exposure_profile(
-        snap.netting_set_id,
-        [str(x) for x in snap.exposure_dates],
-        [float(x) for x in snap.exposure_times],
-        [float(x) for x in epe],
-        [float(x) for x in ene],
-        [float(x) for x in pfe],
-    )
     return SnapshotComputation(
         ore_xml=str(ore_xml),
         trade_id=snap.trade_id,
@@ -6019,6 +6022,172 @@ def _copy_native_ore_reports(ore_xml: Path, case_out_dir: Path) -> None:
             shutil.copy2(src, dst)
 
 
+def benchmark_pfe_profile_vs_ore(
+    ore_xml: str | Path,
+    *,
+    paths: int | None = None,
+    seeds: Sequence[int] | None = None,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    def _load_ore_trade_exposure_csv(path: Path) -> dict[str, list[Any]]:
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            out = {"date": [], "time": [], "epe": [], "pfe": []}
+            for row in reader:
+                out["date"].append(str(row.get("Date") or ""))
+                out["time"].append(float(row.get("Time") or 0.0))
+                out["epe"].append(float(row.get("EPE") or 0.0))
+                out["pfe"].append(float(row.get("PFE") or 0.0))
+        return out
+
+    ore_xml = Path(ore_xml).resolve()
+    snap = load_from_ore_xml(ore_xml, anchor_t0_npv=False)
+    reference_seed = int(getattr(snap, "seed", 42))
+    benchmark_seeds = [reference_seed] if seeds is None else [int(s) for s in seeds]
+    exposure_csv = _find_reference_output_file(ore_xml, f"exposure_trade_{snap.trade_id}.csv")
+    if exposure_csv is None:
+        raise FileNotFoundError(f"reference exposure report not found for trade '{snap.trade_id}'")
+    if exposure_csv.exists():
+        ore_profile = _load_ore_trade_exposure_csv(exposure_csv)
+    else:
+        fallback_profile = load_ore_exposure_profile(str(exposure_csv))
+        ore_profile = {
+            "date": list(fallback_profile.get("date", [])),
+            "time": list(fallback_profile.get("time", [])),
+            "epe": list(fallback_profile.get("epe", [])),
+            "pfe": list(fallback_profile.get("pfe", fallback_profile.get("epe", []))),
+        }
+    ore_times = np.asarray(ore_profile["time"], dtype=float)
+    ore_pfe = np.asarray(ore_profile["pfe"], dtype=float)
+    ore_epe = np.asarray(ore_profile["epe"], dtype=float)
+
+    runs: list[dict[str, Any]] = []
+    pfe_rows: list[np.ndarray] = []
+    epe_rows: list[np.ndarray] = []
+    for seed in benchmark_seeds:
+        result = _compute_snapshot_case(
+            ore_xml,
+            paths=paths,
+            seed=int(seed),
+            rng_mode="ore_parity",
+            anchor_t0_npv=False,
+            own_hazard=0.01,
+            own_recovery=0.4,
+            xva_mode="ore",
+        )
+        trade_profile = result.exposure_profile_by_trade
+        py_times = np.asarray(trade_profile.get("times", []), dtype=float)
+        py_pfe = np.asarray(trade_profile.get("pfe", []), dtype=float)
+        py_epe = np.asarray(
+            trade_profile.get("closeout_epe", result.py_epe if hasattr(result, "py_epe") else []),
+            dtype=float,
+        )
+        if py_times.shape != ore_times.shape or not np.allclose(py_times, ore_times, atol=1.0e-10, rtol=0.0):
+            raise ValueError("Python and ORE exposure grids are not aligned for PFE benchmark")
+        pfe_rows.append(py_pfe)
+        epe_rows.append(py_epe)
+        runs.append(
+            {
+                "seed": int(seed),
+                "paths": int(result.paths),
+                "one_year_pfe": float(_shared_one_year_profile_value(trade_profile, "pfe", asof_date=ore_profile["date"][0])),
+                "one_year_epe": float(
+                    _shared_one_year_profile_value(trade_profile, "closeout_epe", asof_date=ore_profile["date"][0])
+                ),
+                "peak_pfe": float(np.max(py_pfe)) if py_pfe.size else 0.0,
+            }
+        )
+
+    py_pfe_runs = np.asarray(pfe_rows, dtype=float)
+    py_epe_runs = np.asarray(epe_rows, dtype=float)
+    py_pfe_mean = np.mean(py_pfe_runs, axis=0)
+    py_pfe_sigma = np.std(py_pfe_runs, axis=0, ddof=1 if py_pfe_runs.shape[0] > 1 else 0)
+    py_epe_mean = np.mean(py_epe_runs, axis=0)
+    py_epe_sigma = np.std(py_epe_runs, axis=0, ddof=1 if py_epe_runs.shape[0] > 1 else 0)
+    abs_diff = np.abs(py_pfe_mean - ore_pfe)
+    rel_diff = np.zeros_like(abs_diff)
+    nonzero_ref = np.abs(ore_pfe) > 1.0e-12
+    rel_diff[nonzero_ref] = abs_diff[nonzero_ref] / np.abs(ore_pfe[nonzero_ref])
+    epe_abs_diff = np.abs(py_epe_mean - ore_epe)
+    epe_rel_diff = np.zeros_like(epe_abs_diff)
+    nonzero_epe_ref = np.abs(ore_epe) > 1.0e-12
+    epe_rel_diff[nonzero_epe_ref] = epe_abs_diff[nonzero_epe_ref] / np.abs(ore_epe[nonzero_epe_ref])
+    sigma_multiple = np.full_like(abs_diff, np.inf)
+    nonzero_sigma = py_pfe_sigma > 1.0e-12
+    sigma_multiple[nonzero_sigma] = abs_diff[nonzero_sigma] / py_pfe_sigma[nonzero_sigma]
+    sigma_multiple[~nonzero_sigma & (abs_diff <= 1.0e-12)] = 0.0
+    economically_relevant = (ore_times > 1.0e-10) & ((np.abs(ore_pfe) > 1.0e-8) | (abs_diff > 1.0e-8))
+    if not np.any(economically_relevant):
+        economically_relevant = np.ones_like(ore_times, dtype=bool)
+    one_year_idx = min(
+        max(0, int(np.searchsorted(ore_times, 1.0, side="left"))),
+        max(ore_times.size - 1, 0),
+    )
+    peak_idx = int(np.argmax(ore_pfe)) if ore_pfe.size else 0
+    within_two_sigma = sigma_multiple[economically_relevant] <= 2.0
+    finite_sigma = sigma_multiple[economically_relevant][np.isfinite(sigma_multiple[economically_relevant])]
+    max_sigma = float(np.max(finite_sigma)) if finite_sigma.size else 0.0
+    summary = {
+        "trade_id": snap.trade_id,
+        "netting_set_id": snap.netting_set_id,
+        "paths": int(paths if paths is not None else snap.n_samples),
+        "ore_reference_seed": reference_seed,
+        "seeds": benchmark_seeds,
+        "uses_reference_seed_only": len(benchmark_seeds) == 1 and benchmark_seeds[0] == reference_seed,
+        "grid_points": int(ore_times.size),
+        "relevant_points": int(np.sum(economically_relevant)),
+        "ignored_points": int(ore_times.size - np.sum(economically_relevant)),
+        "one_year_index": int(one_year_idx),
+        "peak_index": int(peak_idx),
+        "one_year_sigma_multiple": float(sigma_multiple[one_year_idx]) if sigma_multiple.size else 0.0,
+        "peak_sigma_multiple": float(sigma_multiple[peak_idx]) if sigma_multiple.size else 0.0,
+        "within_two_sigma_ratio": float(np.mean(within_two_sigma)) if within_two_sigma.size else 1.0,
+        "max_sigma_multiple": max_sigma,
+        "mean_abs_diff": float(np.mean(abs_diff)) if abs_diff.size else 0.0,
+        "median_rel_diff": float(np.median(rel_diff)) if rel_diff.size else 0.0,
+        "p95_rel_diff": float(np.percentile(rel_diff, 95.0)) if rel_diff.size else 0.0,
+        "mean_abs_epe_diff": float(np.mean(epe_abs_diff)) if epe_abs_diff.size else 0.0,
+        "median_rel_epe_diff": float(np.median(epe_rel_diff)) if epe_rel_diff.size else 0.0,
+        "p95_rel_epe_diff": float(np.percentile(epe_rel_diff, 95.0)) if epe_rel_diff.size else 0.0,
+        "accepted": bool(
+            np.any(economically_relevant)
+            and float(np.mean(within_two_sigma)) >= 0.95
+            and float(sigma_multiple[one_year_idx]) <= 2.0
+            and float(sigma_multiple[peak_idx]) <= 2.0
+            and max_sigma <= 3.0
+        ),
+    }
+    pointwise_rows = [
+        {
+            "Date": str(ore_profile["date"][i]),
+            "Time": float(ore_times[i]),
+            "OreEPE": float(ore_epe[i]),
+            "OrePFE": float(ore_pfe[i]),
+            "PythonMeanEPE": float(py_epe_mean[i]),
+            "PythonSigmaEPE": float(py_epe_sigma[i]),
+            "PythonMeanPFE": float(py_pfe_mean[i]),
+            "PythonSigmaPFE": float(py_pfe_sigma[i]),
+            "EPEAbsDiff": float(epe_abs_diff[i]),
+            "EPERelDiff": float(epe_rel_diff[i]),
+            "AbsDiff": float(abs_diff[i]),
+            "RelDiff": float(rel_diff[i]),
+            "SigmaMultiple": float(sigma_multiple[i]),
+        }
+        for i in range(ore_times.size)
+    ]
+    result = {
+        "summary": summary,
+        "runs": runs,
+        "pointwise": pointwise_rows,
+    }
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        _write_json(out / "pfe_benchmark.json", result)
+        _write_csv(out / "pfe_benchmark.csv", pointwise_rows)
+    return result
+
+
 def _render_case_markdown(case_summary: dict[str, Any]) -> str:
     lines = [
         "# ORE Snapshot CLI Report",
@@ -6852,7 +7021,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ore-output-only", action="store_true")
     parser.add_argument("--paths", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--rng", choices=("numpy", "ore_parity"), default="ore_parity")
+    parser.add_argument(
+        "--rng",
+        choices=("numpy", "ore_parity", "ore_parity_antithetic", "ore_sobol", "ore_sobol_bridge"),
+        default="ore_parity",
+    )
     parser.add_argument("--xva-mode", choices=("classic", "ore"), default="ore")
     parser.add_argument("--anchor-t0-npv", action="store_true")
     parser.add_argument("--own-hazard", type=float, default=0.01)

@@ -12,9 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pythonore.io.ore_snapshot as ore_snapshot_io
 from pythonore.runtime import bermudan as bermudan_runtime
+from pythonore.runtime.exposure_profiles import ore_pfe_quantile
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
@@ -1163,6 +1165,79 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(netting_rows[0]["ExpectedCollateral"], "100.00")
             self.assertEqual(xva_rows[0]["BaselEPE"], "150.00")
             self.assertEqual(xva_rows[0]["BaselEEPE"], "150.00")
+
+    def test_profile_builder_uses_ore_quantile_and_discounted_basel_fields(self):
+        profile = ore_snapshot_cli._build_ore_style_exposure_profile(
+            "T1",
+            ["2020-01-03", "2021-01-04", "2021-01-08"],
+            [0.0, 1.005, 1.02],
+            [100.0, 100.0, 100.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            discount_factors=[1.0, 0.9, 0.8],
+        )
+        self.assertAlmostEqual(profile["basel_ee"][1], 100.0 / 0.9, places=12)
+        self.assertAlmostEqual(profile["basel_ee"][2], 100.0 / 0.8, places=12)
+        self.assertAlmostEqual(
+            ore_snapshot_cli._one_year_profile_value(profile, "time_weighted_basel_epe"),
+            profile["time_weighted_basel_epe"][1],
+            places=12,
+        )
+
+    def test_ore_pfe_quantile_matches_ore_rounding_and_floors_after_selection(self):
+        samples = np.asarray([[-10.0, -5.0, -1.0, 2.0, 100.0]], dtype=float)
+        self.assertEqual(float(ore_pfe_quantile(samples, 0.80)[0]), 2.0)
+        self.assertEqual(float(ore_pfe_quantile(np.asarray([[-10.0, -5.0, -1.0]], dtype=float), 0.95)[0]), 0.0)
+
+    def test_benchmark_pfe_profile_vs_ore_aggregates_seed_statistics(self):
+        ore_profile = {
+            "date": ["2020-01-01", "2021-01-02"],
+            "time": [0.0, 1.0],
+            "epe": [10.0, 20.0],
+            "pfe": [12.0, 22.0],
+        }
+
+        def fake_compute(*args, **kwargs):
+            seed = int(kwargs["seed"])
+            pfe = [12.0 + seed, 22.0 + seed]
+            return ore_snapshot_cli.SnapshotComputation(
+                ore_xml=str(REAL_CASE_XML),
+                trade_id="T1",
+                counterparty="CPTY_A",
+                netting_set_id="NS1",
+                paths=2000,
+                seed=seed,
+                rng_mode="ore_parity",
+                pricing={},
+                xva={},
+                parity={},
+                diagnostics={},
+                maturity_date="2025-01-01",
+                maturity_time=5.0,
+                exposure_dates=["2020-01-01", "2021-01-02"],
+                exposure_times=[0.0, 1.0],
+                py_epe=[10.0, 20.0],
+                py_ene=[0.0, 0.0],
+                py_pfe=pfe,
+                exposure_profile_by_trade={
+                    "dates": ["2020-01-01", "2021-01-02"],
+                    "times": [0.0, 1.0],
+                    "pfe": pfe,
+                },
+                exposure_profile_by_netting_set={},
+                ore_basel_epe=0.0,
+                ore_basel_eepe=0.0,
+            )
+
+        with patch("py_ore_tools.ore_snapshot_cli.load_from_ore_xml", return_value=SimpleNamespace(trade_id="T1", netting_set_id="NS1", n_samples=2000)):
+            with patch("py_ore_tools.ore_snapshot_cli._find_reference_output_file", return_value=Path("/tmp/exposure_trade_T1.csv")):
+                with patch("py_ore_tools.ore_snapshot_cli.load_ore_exposure_profile", return_value=ore_profile):
+                    with patch("py_ore_tools.ore_snapshot_cli._compute_snapshot_case", side_effect=fake_compute):
+                        result = ore_snapshot_cli.benchmark_pfe_profile_vs_ore(REAL_CASE_XML, paths=2000, seeds=[1, 3])
+        self.assertEqual(result["summary"]["grid_points"], 2)
+        self.assertEqual(len(result["runs"]), 2)
+        self.assertIn("SigmaMultiple", result["pointwise"][0])
+        self.assertGreaterEqual(result["summary"]["within_two_sigma_ratio"], 0.0)
 
     def test_default_xva_run_uses_snapshot_sample_count_when_paths_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:
