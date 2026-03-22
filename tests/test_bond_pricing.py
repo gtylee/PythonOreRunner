@@ -1017,7 +1017,9 @@ class TestBondPricing(unittest.TestCase):
 
     @unittest.skipUnless(LOCAL_ORE_BINARY.exists(), "local ORE binary not available")
     def test_native_ore_callable_no_call_differs_from_equivalent_plain_bond(self):
-        with tempfile.TemporaryDirectory(dir=TOOLS_DIR / "tmp") as tmpdir:
+        tmp_parent = TOOLS_DIR / "tmp"
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_parent) as tmpdir:
             tmp_root = Path(tmpdir)
             ore_xml, _ = self._callable_portfolio_with_underlying_bond(tmp_root)
             proc = subprocess.run(
@@ -1042,7 +1044,9 @@ class TestBondPricing(unittest.TestCase):
 
     @unittest.expectedFailure
     def test_python_callable_no_call_differs_from_equivalent_plain_bond(self):
-        with tempfile.TemporaryDirectory(dir=TOOLS_DIR / "tmp") as tmpdir:
+        tmp_parent = TOOLS_DIR / "tmp"
+        tmp_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_parent) as tmpdir:
             tmp_root = Path(tmpdir)
             ore_xml, portfolio = self._callable_portfolio_with_underlying_bond(tmp_root)
             callable_out = price_bond_trade(

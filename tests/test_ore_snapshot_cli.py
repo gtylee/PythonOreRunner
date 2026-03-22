@@ -52,6 +52,53 @@ SCRIPTED_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "ScriptedTrade" / "Input" / 
 
 
 class TestOreSnapshotCli(unittest.TestCase):
+    def test_simulate_with_fixing_grid_uses_exposure_grid_then_bridges_fixings_for_ore_path_major(self):
+        class _DummyModel:
+            _measure = "LGM"
+
+            @staticmethod
+            def zeta(t):
+                return np.asarray(t, dtype=float)
+
+        class _DummyRng:
+            seed = 42
+
+        exposure_times = np.array([0.0, 0.5, 1.0], dtype=float)
+        fixing_times = np.array([0.25, 0.75], dtype=float)
+        base_x = np.array(
+            [
+                [0.0, 0.0],
+                [1.0, -1.0],
+                [2.0, -2.0],
+            ],
+            dtype=float,
+        )
+
+        calls = []
+
+        def _fake_simulate(model, times, n_paths, rng=None, x0=0.0, draw_order="time_major"):
+            calls.append(np.asarray(times, dtype=float).copy())
+            return base_x.copy()
+
+        with patch("py_ore_tools.ore_snapshot_cli.simulate_lgm_measure", side_effect=_fake_simulate):
+            x_exp, x_all, sim_times, y_exp, y_all = ore_snapshot_cli._simulate_with_fixing_grid(
+                model=_DummyModel(),
+                exposure_times=exposure_times,
+                fixing_times=fixing_times,
+                n_paths=2,
+                rng=_DummyRng(),
+                draw_order="ore_path_major",
+            )
+
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_allclose(calls[0], exposure_times)
+        np.testing.assert_allclose(x_exp, base_x)
+        np.testing.assert_allclose(sim_times, np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float))
+        exp_idx = np.searchsorted(sim_times, exposure_times)
+        np.testing.assert_allclose(x_all[exp_idx, :], base_x)
+        self.assertEqual(y_exp is None, True)
+        self.assertEqual(y_all is None, True)
+
     @staticmethod
     def _real_case_buffers() -> tuple[dict[str, str], dict[str, str]]:
         input_files = {

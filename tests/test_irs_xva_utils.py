@@ -337,25 +337,16 @@ class TestIrsXvaUtils(unittest.TestCase):
         for i, ft in enumerate(legs["float_fixing_time"]):
             j = int(np.searchsorted(sim_times, ft))
             x_fix = x_paths[j, :]
-            pay = float(legs["float_pay_time"][i])
-            disc = self.model.discount_bond(float(ft), pay, x_fix, self.p0(float(ft)), self.p0(pay))
-            num = self.model.numeraire_lgm(float(ft), x_fix, self.p0)
-            pv = (
-                float(legs["float_sign"][i])
-                * float(legs["float_notional"][i])
-                * float(legs["float_accrual"][i])
-                * coupons[i, :]
-                * disc
-                / num
+            p_ft_f = self.p0_fwd(float(ft))
+            p_t_s_f = self.model.discount_bond(
+                float(ft), float(legs["float_start_time"][i]), x_fix, p_ft_f, self.p0_fwd(float(legs["float_start_time"][i]))
             )
-            target = (
-                float(legs["float_sign"][i])
-                * float(legs["float_notional"][i])
-                * float(legs["float_accrual"][i])
-                * float(legs["float_coupon"][i])
-                * self.p0(pay)
+            p_t_e_f = self.model.discount_bond(
+                float(ft), float(legs["float_end_time"][i]), x_fix, p_ft_f, self.p0_fwd(float(legs["float_end_time"][i]))
             )
-        self.assertAlmostEqual(float(np.mean(pv)), float(target), places=11)
+            expected = (p_t_s_f / p_t_e_f - 1.0) / float(legs["float_index_accrual"][i])
+            expected = expected + float(legs["float_spread"][i])
+            np.testing.assert_allclose(coupons[i, :], expected, atol=1.0e-12, rtol=0.0)
 
 
     def test_load_ore_default_curve_inputs_converts_cds_spreads_to_hazard(self):

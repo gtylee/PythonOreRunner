@@ -1049,29 +1049,11 @@ def compute_realized_float_coupons(
         if j >= sim_times.size or abs(float(sim_times[j]) - ft) > 1.0e-12:
             raise ValueError(f"fixing time {ft} not present on simulation grid")
         x_fix = x_paths_on_sim_grid[j, :]
-        p_ft = float(p0_disc(ft))
-        p_t_s_d = model.discount_bond(ft, float(s[i]), x_fix, p_ft, float(p0_disc(float(s[i]))))
-        p_t_e_d = model.discount_bond(ft, float(e[i]), x_fix, p_ft, float(p0_disc(float(e[i]))))
-        bt = float(p0_fwd(ft) / p0_disc(ft))
-        bs = float(p0_fwd(float(s[i])) / p0_disc(float(s[i])))
-        be = float(p0_fwd(float(e[i])) / p0_disc(float(e[i])))
-        p_t_s_f = p_t_s_d * (bs / bt)
-        p_t_e_f = p_t_e_d * (be / bt)
+        p_ft_f = float(p0_fwd(ft))
+        p_t_s_f = model.discount_bond(ft, float(s[i]), x_fix, p_ft_f, float(p0_fwd(float(s[i]))))
+        p_t_e_f = model.discount_bond(ft, float(e[i]), x_fix, p_ft_f, float(p0_fwd(float(e[i]))))
         fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
-        coupon_path = fwd_path + float(spr[i])
-        target_coupon = float(quoted_coupon[i])
-        if abs(target_coupon) > 1.0e-14:
-            p_fix_pay_d = model.discount_bond(ft, float(pay_t[i]), x_fix, p_ft, float(p0_disc(float(pay_t[i]))))
-            numeraire = model.numeraire_lgm(ft, x_fix, p0_disc)
-            current_mean = float(
-                np.mean(
-                    float(sign[i]) * float(notional[i]) * float(tau[i]) * coupon_path * p_fix_pay_d / numeraire
-                )
-            )
-            target_mean = float(sign[i]) * float(notional[i]) * float(tau[i]) * target_coupon * float(p0_disc(float(pay_t[i])))
-            if abs(current_mean) > 1.0e-18:
-                coupon_path = coupon_path * (target_mean / current_mean)
-        out[i, :] = coupon_path
+        out[i, :] = fwd_path + float(spr[i])
     return out
 
 

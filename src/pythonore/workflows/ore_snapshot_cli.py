@@ -285,6 +285,51 @@ def _simulate_with_fixing_grid(
     rng: Any,
     draw_order: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    def _bridge_fill_lgm_states(
+        base_times: np.ndarray,
+        base_x: np.ndarray,
+        extra_times: np.ndarray,
+        rng_seed: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        sim_times = np.unique(np.concatenate((base_times, extra_times)))
+        if sim_times.size == base_times.size:
+            return sim_times, base_x
+        out = np.empty((sim_times.size, base_x.shape[1]), dtype=float)
+        base_idx = np.searchsorted(sim_times, base_times)
+        out[base_idx, :] = base_x
+        local_rng = np.random.default_rng(int(rng_seed))
+        zeta_base = np.asarray(model.zeta(base_times), dtype=float)
+        for left in range(base_times.size - 1):
+            mask = (sim_times > base_times[left] + 1.0e-12) & (sim_times < base_times[left + 1] - 1.0e-12)
+            if not np.any(mask):
+                continue
+            local_times = sim_times[mask]
+            u0 = float(zeta_base[left])
+            u1 = float(zeta_base[left + 1])
+            if u1 <= u0 + 1.0e-18:
+                out[mask, :] = base_x[left, :]
+                continue
+            ui = np.asarray(model.zeta(local_times), dtype=float)
+            weight = (ui - u0) / (u1 - u0)
+            mean = (
+                base_x[left, :][None, :]
+                + weight[:, None] * (base_x[left + 1, :] - base_x[left, :])[None, :]
+            )
+            if local_times.size == 1:
+                var = max((ui[0] - u0) * (u1 - ui[0]) / (u1 - u0), 0.0)
+                if var <= 0.0:
+                    out[mask, :] = mean
+                else:
+                    out[mask, :] = mean + math.sqrt(var) * local_rng.standard_normal((1, base_x.shape[1]))
+                continue
+            cov = np.minimum.outer(ui, ui) - u0 - np.outer(ui - u0, ui - u0) / (u1 - u0)
+            cov = np.asarray(cov, dtype=float)
+            cov.flat[:: cov.shape[0] + 1] = np.maximum(np.diag(cov), 0.0)
+            chol = np.linalg.cholesky(cov + 1.0e-18 * np.eye(cov.shape[0]))
+            draws = chol @ local_rng.standard_normal((cov.shape[0], base_x.shape[1]))
+            out[mask, :] = mean + draws
+        return sim_times, out
+
     def _simulate(times: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
         if str(getattr(model, "_measure", "LGM")).upper() == "BA":
             if str(draw_order).strip().lower() == "ore_path_major" and hasattr(rng, "seed"):
@@ -304,6 +349,19 @@ def _simulate_with_fixing_grid(
     if extra.size == 0:
         x_exp, y_exp = _simulate(exposure_times)
         return x_exp, x_exp, exposure_times, y_exp, y_exp
+    if (
+        str(getattr(model, "_measure", "LGM")).upper() != "BA"
+        and str(draw_order).strip().lower() == "ore_path_major"
+    ):
+        x_exp, y_exp = _simulate(exposure_times)
+        sim_times, x_all = _bridge_fill_lgm_states(
+            np.asarray(exposure_times, dtype=float),
+            np.asarray(x_exp, dtype=float),
+            extra,
+            int(getattr(rng, "seed", 0)),
+        )
+        idx = np.searchsorted(sim_times, exposure_times)
+        return x_exp, x_all, sim_times, y_exp, y_exp
     sim_times = np.unique(np.concatenate((exposure_times, extra)))
     x_all, y_all = _simulate(sim_times)
     idx = np.searchsorted(sim_times, exposure_times)

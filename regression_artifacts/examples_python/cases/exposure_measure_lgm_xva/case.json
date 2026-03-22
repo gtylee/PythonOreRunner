@@ -30,7 +30,7 @@
     "tolerances": {},
     "workflow": "python"
   },
-  "exit_code": 1,
+  "exit_code": 0,
   "files": [
     "calibration.csv",
     "calibration.xml",

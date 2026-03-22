@@ -156,7 +156,7 @@ class TestLGM(unittest.TestCase):
         expected = np.vstack([np.asarray(bridge.transform(sobol.nextSequence().value()), dtype=float) for _ in range(4)])
         self.assertTrue(np.array_equal(actual, expected))
 
-    def test_sobol_brownian_bridge_uses_actual_time_grid_when_configured(self):
+    def test_sobol_brownian_bridge_ignores_actual_time_grid_for_ordering_steps(self):
         if ql is None:
             self.skipTest("QuantLib Python bindings are required for Ore parity tests")
         seed = 42
@@ -165,7 +165,7 @@ class TestLGM(unittest.TestCase):
         rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
         rng.configure_time_grid(times)
         actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
-        bridge = ql.BrownianBridge(times)
+        bridge = ql.BrownianBridge(dimension)
         sobol = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed, ql.SobolRsg.JoeKuoD7))
         expected = np.vstack([np.asarray(bridge.transform(sobol.nextSequence().value()), dtype=float) for _ in range(4)])
         self.assertTrue(np.array_equal(actual, expected))

@@ -240,15 +240,12 @@ class OreSobolBrownianBridgeGaussianRng:
             ql = _load_quantlib()
             sobol = ql.SobolRsg(size, self.seed, ql.SobolRsg.JoeKuoD7)
             self._generator = ql.InvCumulativeSobolGaussianRsg(sobol)
-            if self._bridge_times is not None:
-                if len(self._bridge_times) != size:
-                    raise ValueError(
-                        "configured bridge time grid length must match RNG dimension "
-                        f"{size}, got {len(self._bridge_times)}"
-                    )
-                self._bridge = ql.BrownianBridge(list(self._bridge_times))
-            else:
-                self._bridge = ql.BrownianBridge(size)
+            if self._bridge_times is not None and len(self._bridge_times) != size:
+                raise ValueError(
+                    "configured bridge time grid length must match RNG dimension "
+                    f"{size}, got {len(self._bridge_times)}"
+                )
+            self._bridge = ql.BrownianBridge(size)
             self._dimension = size
             return
         if size != self._dimension:

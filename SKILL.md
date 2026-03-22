@@ -230,6 +230,122 @@ This outperformed:
 
 For the benchmark cases investigated in this repo, `JoeKuoD7 + BrownianBridge(actual_times)` gave the best overall absolute parity on EPE/ENE and the best PFE parity among the Python-accessible variants that were tested.
 
+### Pathwise ORE Sobol replication is now much tighter than before
+
+There was a real pathwise mismatch in the earlier Python Sobol implementation, but it was not primarily a pricing bug.
+
+The key findings were:
+
+- building the primary Sobol Brownian bridge on `exposure_times + fixing_times` scrambled the temporal path coupling relative to ORE
+- ORE's low-path `scenariodata.csv.gz` is much more consistent with:
+  - primary Sobol bridge on the exposure grid only
+  - fixing-date states filled conditionally between exposure nodes afterward
+- for the current Python `ore_path_major` path, step-based bridge ordering matched the ORE scenario surface better than the older mixed fixing-grid approach
+
+After changing:
+
+- [`src/pythonore/workflows/ore_snapshot_cli.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py)
+  - primary simulation on exposure grid only
+  - conditional bridge fill for fixing dates
+- [`src/pythonore/compute/lgm.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/compute/lgm.py)
+  - step-based Sobol Brownian bridge ordering
+
+the flat EUR 5Y `100`-path scenario surface became essentially pathwise identical to ORE:
+
+- numeraire direct `p95 abs` around `7.26e-4`
+- increment `p95 abs` around `1.07e-5`
+- aligned `x(t)` correlations effectively `1.0` across probe dates
+
+This means:
+
+- do **not** keep blaming residual parity differences on the Sobol path generator once these changes are in place
+- the old RNG/scenario mismatch was real, but it is no longer the main source of the remaining trade-level gap
+
+### ORE and Python future IBOR projection formulas are structurally the same
+
+The local Engine source inspection showed that ORE/QuantLib/QuantExt projects future IBOR coupons with the same broad structure Python now uses:
+
+- [`QuantLib/ql/cashflows/iborcoupon.cpp`](/Users/gordonlee/Documents/Engine/QuantLib/ql/cashflows/iborcoupon.cpp)
+  - future coupons call `iborIndex_->forecastFixing(...)`
+- [`QuantLib/ql/indexes/iborindex.cpp`](/Users/gordonlee/Documents/Engine/QuantLib/ql/indexes/iborindex.cpp)
+  - standard IBOR forward fixing path
+- [`QuantExt/qle/models/lgmvectorised.cpp`](/Users/gordonlee/Documents/Engine/QuantExt/qle/models/lgmvectorised.cpp)
+- [`OREData/ored/scripting/models/lgmcg.cpp`](/Users/gordonlee/Documents/Engine/OREData/ored/scripting/models/lgmcg.cpp)
+  - model discount bonds on the forwarding curve
+  - deterministic correction ratio back to the forwarding curve
+  - `(disc1 / disc2 - 1) / tau`
+  - then add spread
+
+So the remaining mismatch is **not** “Python projects future IBOR coupons with the wrong high-level formula.”
+
+### Remove coupon recentering: ORE does not do it in the LGM path
+
+Python used to apply an extra normalization step in:
+
+- [`src/pythonore/compute/irs_xva_utils.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/compute/irs_xva_utils.py)
+
+that forced each future floating coupon's discounted mean back to the quoted flow coupon.
+
+This was inconsistent with ORE's LGM path. It has now been removed.
+
+Implications:
+
+- quoted ORE flow coupons are **not** the right target for pathwise future coupon means under LGM
+- do **not** reintroduce recentering to make simulated future coupons match quoted flow coupons
+- if a test expects future coupon PV means to equal quoted coupon PVs exactly, the test is asserting the wrong behavior for the LGM parity path
+
+The corresponding test in:
+
+- [`tests/test_irs_xva_utils.py`](/Users/gordonlee/Documents/PythonOreRunner/tests/test_irs_xva_utils.py)
+
+should validate the raw transported forward-bond formula instead, not mean recentering.
+
+### Remaining swap parity gap is now a tail/covariance issue, not a mean-level bug
+
+On the matched Sobol scenario path for the flat EUR 5Y case:
+
+- first-step projected strip mean is almost exactly aligned with the ORE-implied projected strip mean
+- second-step projected strip mean is also almost exactly aligned
+- fixed-leg means are already close
+- the locked first coupon is not the main problem
+
+Representative first two dates:
+
+- `2016-03-07`
+  - ORE implied projected strip mean about `-841022`
+  - Python projected strip mean about `-841323`
+  - gap about `-301`
+- `2016-04-05`
+  - ORE implied projected strip mean about `-843364`
+  - Python projected strip mean about `-842978`
+  - gap about `+385`
+
+But the fixed leg and projected strip are both huge and almost perfectly correlated:
+
+- fixed vs projected-strip correlation around `0.99999`
+- projected strip vs total around `0.998`
+- fixed vs total around `0.998`
+
+So the remaining early-date PFE gap is now best understood as:
+
+- a small tail-shape / covariance mismatch
+- between very large offsetting blocks
+- not a wrong projected-strip mean
+- not a first-coupon bug
+- not an RNG bug
+
+This also persists into the important region:
+
+- around `2017-02-06` and `2018-02-05`
+- but the pointwise PFE gaps there are already small, on the order of `1k` to `3k`
+
+Practical consequence:
+
+- do **not** reopen the vanilla IRS parity work as if there is still a big structural pricing error
+- if the user asks why whole-curve `PFE p95` can still look a bit ugly while peak-region checkpoints are good, the answer is:
+  - scattered local residuals in a near-cancelling tail problem
+  - not a large peak-region failure
+
 ### Current recommended default for practical Python parity runs
 
 When you want a strong Python-native parity run without invoking ORE, the current practical default is:
@@ -3768,3 +3884,104 @@ Rule:
 
 If a temp-rerun parity result suddenly regresses after looking healthy in-repo,
 check calibration provenance before touching the simulator or XVA formulas.
+
+### 13. `rawcube.csv` is a deflated cube, and comparing it to raw `V(t)` creates a fake late-life bug
+
+One of the last large false leads in the vanilla IRS parity work came from
+using `rawcube.csv` as if it stored raw trade NPVs.
+
+It does not.
+
+Confirmed in local ORE source:
+
+- [`/Users/gordonlee/Documents/Engine/OREAnalytics/orea/engine/valuationcalculator.cpp`](/Users/gordonlee/Documents/Engine/OREAnalytics/orea/engine/valuationcalculator.cpp)
+  - `NPVCalculator::npv()` stores:
+    - `trade->instrument()->NPV() * fx / simMarket->numeraire()`
+
+That means:
+
+- `rawcube.csv` is already on the **numeraire-deflated** XVA cube scale
+- it must be compared to Python **after** applying:
+  - `deflated_npv = V(t) / N(t)`
+
+Bad debugging pattern:
+
+- infer coupon or block PV differences by subtracting Python raw leg PVs from
+  ORE `rawcube.csv`
+- conclude that late locked coupons are wrong because ORE and Python seem far
+  apart in mean or coupon level
+
+That comparison is invalid unless the Python side is deflated first.
+
+Corrected result on the previously “worst” case:
+
+- case:
+  - [`/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_10Y_A/Input/ore.xml`](/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_10Y_A/Input/ore.xml)
+- late date:
+  - `2026-02-05`
+- low-path direct cube check (`100` paths, first 100 ORE samples):
+  - Python deflated vs ORE `rawcube.csv`
+  - mean abs diff: about `4247`
+  - p95 abs diff: about `11162`
+  - pathwise correlation: about `0.9993`
+
+So the old “late locked final coupon is badly wrong” diagnosis was a false
+positive caused by mixing:
+
+- raw Python NPVs
+- with deflated ORE cube values
+
+Operational rule:
+
+- if the target is `rawcube.csv`, compare against **deflated** Python NPV paths
+- if the target is direct trade pricing (`npv.csv`), compare against **raw**
+  Python trade NPVs
+- do not infer coupon-level bugs from cross-scale subtraction
+
+### 14. The current `ore_sobol_bridge` parity state is much tighter than the earlier stale wide-table suggested
+
+After the pathwise Sobol fixups and the corrected deflated-cube comparison,
+the broad `2000`-path single-swap sweep on the current snapshot path is in good
+shape.
+
+Current sweep setup:
+
+- Python only
+- `rng_mode = ore_sobol_bridge`
+- `xva_mode = ore`
+- `lgm_param_source = simulation_xml`
+- `paths = 2000`
+- compared directly to checked-in ORE `exposure_trade_*.csv`
+
+Current aggregate results across the `18` loadable cases:
+
+- median curve-level `PFE p95 rel`: about `1.01%`
+- mean curve-level `PFE p95 rel`: about `1.01%`
+- max curve-level `PFE p95 rel`: about `1.25%`
+
+Reference artifact:
+
+- [`/tmp/wider_pfe_compare_current_fixed.json`](/tmp/wider_pfe_compare_current_fixed.json)
+
+Important implication:
+
+- the earlier wide-table numbers showing `10Y` cases at `20%+` were stale /
+  mismatched to the corrected current path
+- with the current implementation, the broader vanilla swap set is already
+  close on whole-curve PFE, not just at peak points
+
+Example corrected case:
+
+- [`/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_10Y_A/Input/ore.xml`](/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_10Y_A/Input/ore.xml)
+  - `PFE p95 rel ≈ 1.08%`
+  - `EPE p95 rel ≈ 0.66%`
+  - `ENE p95 rel ≈ 1.41%`
+  - peak-region PFE errors stay around `0.2%` to `1.2%`
+
+So the right current summary is:
+
+- pathwise scenario parity: solved for the ORE Sobol bridge path
+- exposure parity on the loadable vanilla swap set at `2000` paths: roughly
+  `1%` whole-curve PFE p95
+- any new “large late-life 10Y failure” should first be checked for a
+  raw-vs-deflated comparison mistake before touching coupon logic

@@ -245,6 +245,44 @@ class OreSnapshot:
     def report_time_from_date(self, d: str | date) -> float:
         return _year_fraction_from_day_counter(self.asof_date, d, self.report_day_counter)
 
+    def to_dict(self) -> Dict[str, object]:
+        """JSON-friendly representation of the snapshot.
+
+        Callable curve handles are intentionally omitted because they cannot be
+        serialized meaningfully and are reconstructed from the raw curve arrays.
+        """
+
+        def _convert(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if dataclasses.is_dataclass(value):
+                return {
+                    field.name: _convert(getattr(value, field.name))
+                    for field in dataclasses.fields(value)
+                }
+            if isinstance(value, dict):
+                return {str(k): _convert(v) for k, v in value.items()}
+            if isinstance(value, tuple):
+                return [_convert(v) for v in value]
+            if isinstance(value, list):
+                return [_convert(v) for v in value]
+            if isinstance(value, (np.floating, np.integer)):
+                return value.item()
+            return value
+
+        excluded = {
+            "p0_disc",
+            "p0_fwd",
+            "p0_xva_disc",
+            "p0_borrow",
+            "p0_lend",
+        }
+        return {
+            field.name: _convert(getattr(self, field.name))
+            for field in dataclasses.fields(self)
+            if field.name not in excluded
+        }
+
     def parity_completeness_report(self) -> Dict[str, object]:
         """Return a structured audit of parity-critical snapshot inputs.
 
@@ -1691,19 +1729,20 @@ def extract_discount_factors_by_currency(
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {curves_csv}")
 
     simulation_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
-    if simulation_analytic is None:
-        raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml}")
-    simulation_params = {
-        n.attrib.get("name", ""): (n.text or "").strip()
-        for n in simulation_analytic.findall("./Parameter")
-    }
-    simulation_xml = _resolve_ore_path(simulation_params.get("simulationConfigFile", "simulation.xml"), input_dir)
-    if not simulation_xml.exists():
-        raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
-    simulation_root = ET.parse(simulation_xml).getroot()
-    model_day_counter = _normalize_day_counter_name(
-        (simulation_root.findtext("./DayCounter") or "A365F").strip()
-    )
+    if simulation_analytic is not None:
+        simulation_params = {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in simulation_analytic.findall("./Parameter")
+        }
+        simulation_xml = _resolve_ore_path(simulation_params.get("simulationConfigFile", "simulation.xml"), input_dir)
+        if not simulation_xml.exists():
+            raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
+        simulation_root = ET.parse(simulation_xml).getroot()
+        model_day_counter = _normalize_day_counter_name(
+            (simulation_root.findtext("./DayCounter") or "A365F").strip()
+        )
+    else:
+        model_day_counter = "A365F"
 
     todaysmarket_rel = setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")
     todaysmarket_xml = _resolve_ore_path(todaysmarket_rel, input_dir)
