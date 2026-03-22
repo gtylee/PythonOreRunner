@@ -121,6 +121,12 @@ class TestOreSnapshotCli(unittest.TestCase):
         )
         self.assertTrue(
             ore_snapshot_cli._supports_native_price_only(
+                "ScriptedTrade",
+                SCRIPTED_EQUITY_CASE_XML,
+            )
+        )
+        self.assertTrue(
+            ore_snapshot_cli._supports_native_price_only(
                 "FxOption",
                 FX_OPTION_CASE_XML,
             )
@@ -390,14 +396,20 @@ class TestOreSnapshotCli(unittest.TestCase):
                 [
                     str(SCRIPTED_EQUITY_CASE_XML),
                     "--price",
+                    "--trade-id",
+                    "2:EquityOption",
                     "--output-root",
                     str(root / "artifacts"),
                 ]
             )
             self.assertIn(rc, (0, 1))
             payload = json.loads((root / "artifacts" / "ScriptedTrade" / "summary.json").read_text(encoding="utf-8"))
-            self.assertIn(payload["diagnostics"]["engine"], {"python_price_only", "ore_reference_expected_output"})
-            self.assertTrue(payload["pricing"])
+            self.assertEqual(payload["trade_id"], "2:EquityOption")
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["pricing"]["trade_type"], "ScriptedTrade")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_scripted_trade_ir_mc")
+            self.assertEqual(payload["diagnostics"]["script_source"], "inline")
+            self.assertIn("py_t0_npv", payload["pricing"])
 
     def test_price_only_swaption_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:

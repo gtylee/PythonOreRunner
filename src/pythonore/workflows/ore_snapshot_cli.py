@@ -29,6 +29,8 @@ except Exception:  # pragma: no cover - optional at import time
     ql = None
 
 import pythonore.io.ore_snapshot as ore_snapshot_mod
+from pythonore.payoff_ir import build_equity_ore_black_scholes_model, lower_ore_script
+from pythonore.payoff_ir.exec_numpy import execute_numpy
 from pythonore.compute.irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     calibrate_float_spreads_from_coupon,
@@ -3133,6 +3135,382 @@ def _find_reference_npv_file(ore_xml: Path, trade_id: str) -> Path | None:
     return primary
 
 
+def _resolve_case_input_dir_and_setup(ore_xml: Path) -> tuple[Path, dict[str, str]]:
+    ore_root = ET.parse(ore_xml).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    base = ore_xml.resolve().parent
+    run_dir = base.parent
+    input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
+    return input_dir, setup_params
+
+
+def _parse_scripted_trade_library(script_library_path: Path) -> dict[str, dict[str, Any]]:
+    root = ET.parse(script_library_path).getroot()
+    entries: dict[str, dict[str, Any]] = {}
+    for wrapper in root.findall("./Script"):
+        name = (wrapper.findtext("./Name") or "").strip()
+        if not name:
+            continue
+        variants: dict[str, dict[str, Any]] = {}
+        for script_node in wrapper.findall("./Script"):
+            purpose = (script_node.get("purpose") or "").strip()
+            results = tuple(
+                (
+                    str(result_node.get("rename") or (result_node.text or "").strip()),
+                    (result_node.text or "").strip(),
+                )
+                for result_node in script_node.findall("./Results/Result")
+                if (result_node.text or "").strip()
+            )
+            variants[purpose] = {
+                "code": (script_node.findtext("./Code") or "").strip(),
+                "npv_variable": (script_node.findtext("./NPV") or "").strip(),
+                "results": results,
+            }
+        entries[name] = {
+            "name": name,
+            "product_tag": (wrapper.findtext("./ProductTag") or "").strip(),
+            "variants": variants,
+        }
+    return entries
+
+
+def _ql_date_from_py(dt: date):
+    if ql is None:
+        raise RuntimeError("QuantLib is required for scripted schedule generation")
+    return ql.Date(dt.day, dt.month, dt.year)
+
+
+def _ql_calendar(name: str):
+    cal_name = str(name or "").strip().upper()
+    if ql is None:
+        raise RuntimeError("QuantLib is required for scripted schedule generation")
+    if cal_name in {"", "NULLCALENDAR", "NULL"}:
+        return ql.NullCalendar()
+    if cal_name == "TARGET":
+        return ql.TARGET()
+    return ql.NullCalendar()
+
+
+def _ql_business_convention(name: str):
+    key = str(name or "").strip().upper()
+    mapping = {
+        "F": ql.Following,
+        "FOLLOWING": ql.Following,
+        "MF": ql.ModifiedFollowing,
+        "MODIFIEDFOLLOWING": ql.ModifiedFollowing,
+        "P": ql.Preceding,
+        "PRECEDING": ql.Preceding,
+        "U": ql.Unadjusted,
+        "UNADJUSTED": ql.Unadjusted,
+    }
+    return mapping.get(key, ql.Following)
+
+
+def _ql_date_generation_rule(name: str):
+    key = str(name or "").strip().upper()
+    mapping = {
+        "FORWARD": ql.DateGeneration.Forward,
+        "BACKWARD": ql.DateGeneration.Backward,
+    }
+    return mapping.get(key, ql.DateGeneration.Forward)
+
+
+def _schedule_from_rules(rules: ET.Element) -> tuple[str, ...]:
+    start = _parse_ore_date((rules.findtext("./StartDate") or "").strip())
+    end = _parse_ore_date((rules.findtext("./EndDate") or "").strip())
+    tenor = (rules.findtext("./Tenor") or "1D").strip()
+    if ql is None:
+        step = int(re.sub(r"[^0-9]", "", tenor) or "1")
+        unit = tenor[-1:].upper()
+        dates = [start]
+        current = start
+        while current < end:
+            if unit == "D":
+                current = current + timedelta(days=step)
+            elif unit == "W":
+                current = current + timedelta(days=7 * step)
+            elif unit == "M":
+                current = date(current.year + (current.month - 1 + step) // 12, ((current.month - 1 + step) % 12) + 1, current.day)
+            elif unit == "Y":
+                current = date(current.year + step, current.month, current.day)
+            else:
+                current = current + timedelta(days=step)
+            if current <= end:
+                dates.append(current)
+        if dates[-1] != end:
+            dates.append(end)
+        return tuple(d.isoformat() for d in dates)
+    sched = ql.Schedule(
+        _ql_date_from_py(start),
+        _ql_date_from_py(end),
+        ql.Period(tenor),
+        _ql_calendar((rules.findtext("./Calendar") or "").strip()),
+        _ql_business_convention((rules.findtext("./Convention") or "").strip()),
+        _ql_business_convention((rules.findtext("./TermConvention") or "").strip()),
+        _ql_date_generation_rule((rules.findtext("./Rule") or "").strip()),
+        ((rules.findtext("./EndOfMonth") or "").strip().lower() in {"y", "yes", "true", "1"}),
+    )
+    return tuple(date(d.year(), int(d.month()), d.dayOfMonth()).isoformat() for d in sched)
+
+
+def _apply_schedule_shift(base_schedule: tuple[str, ...], shift: str, calendar: str, convention: str) -> tuple[str, ...]:
+    if not base_schedule:
+        return tuple()
+    if ql is None:
+        period = str(shift or "0D").strip().upper()
+        step = int(re.sub(r"[^0-9]", "", period) or "0")
+        unit = period[-1:] if period else "D"
+        sign = -1 if period.startswith("-") else 1
+        shifted = []
+        for item in base_schedule:
+            dt = _parse_ore_date(item)
+            if unit == "D":
+                dt = dt + timedelta(days=sign * step)
+            shifted.append(dt.isoformat())
+        return tuple(shifted)
+    cal = _ql_calendar(calendar)
+    bdc = _ql_business_convention(convention)
+    period = ql.Period(str(shift or "0D").strip())
+    out = []
+    for item in base_schedule:
+        qd = _ql_date_from_py(_parse_ore_date(item))
+        shifted = cal.advance(qd, period, bdc)
+        out.append(date(shifted.year(), int(shifted.month()), shifted.dayOfMonth()).isoformat())
+    return tuple(out)
+
+
+def _parse_scripted_trade_parameters(data_node: ET.Element) -> dict[str, Any]:
+    parameters: dict[str, Any] = {}
+    for child in data_node.findall("./*"):
+        tag = child.tag
+        name = (child.findtext("./Name") or "").strip()
+        if not name:
+            continue
+        if tag == "Number":
+            values = [float((value.text or "").strip()) for value in child.findall("./Values/Value")]
+            if values:
+                parameters[name] = tuple(values)
+            else:
+                parameters[name] = float((child.findtext("./Value") or "0").strip())
+            continue
+        if tag in {"Currency", "Index", "Daycounter"}:
+            parameters[name] = (child.findtext("./Value") or "").strip()
+            continue
+        if tag == "Event":
+            value_text = (child.findtext("./Value") or "").strip()
+            if value_text:
+                parameters[name] = _parse_ore_date(value_text).isoformat()
+                continue
+            explicit_dates = [
+                _parse_ore_date((node.text or "").strip()).isoformat()
+                for node in child.findall("./ScheduleData/Dates/Dates/Date")
+                if (node.text or "").strip()
+            ]
+            if explicit_dates:
+                parameters[name] = tuple(explicit_dates)
+                continue
+            rules = child.find("./ScheduleData/Rules")
+            if rules is not None:
+                parameters[name] = _schedule_from_rules(rules)
+                continue
+            derived = child.find("./DerivedSchedule")
+            if derived is not None:
+                base_name = (derived.findtext("./BaseSchedule") or "").strip()
+                base_schedule = parameters.get(base_name, tuple())
+                if not isinstance(base_schedule, tuple):
+                    raise ValueError(f"DerivedSchedule base '{base_name}' is not a schedule")
+                parameters[name] = _apply_schedule_shift(
+                    base_schedule,
+                    shift=(derived.findtext("./Shift") or "0D").strip(),
+                    calendar=(derived.findtext("./Calendar") or "NullCalendar").strip(),
+                    convention=(derived.findtext("./Convention") or "U").strip(),
+                )
+                continue
+            raise ValueError(f"Unsupported scripted Event payload for '{name}'")
+    return parameters
+
+
+def _resolve_scripted_trade_definition(ore_xml: Path, trade_node: ET.Element) -> dict[str, Any]:
+    input_dir, setup_params = _resolve_case_input_dir_and_setup(ore_xml)
+    scripted = trade_node.find("./ScriptedTradeData")
+    if scripted is None:
+        raise ValueError("ScriptedTradeData missing")
+    data_node = scripted.find("./Data")
+    if data_node is None:
+        raise ValueError("ScriptedTradeData/Data missing")
+    product_tag = (scripted.findtext("./ProductTag") or "").strip()
+    parameters = _parse_scripted_trade_parameters(data_node)
+
+    inline_script = scripted.find("./Script")
+    if inline_script is not None:
+        code = (inline_script.findtext("./Code") or "").strip()
+        npv_variable = (inline_script.findtext("./NPV") or "").strip()
+        results = tuple(
+            (
+                str(result_node.get("rename") or (result_node.text or "").strip()),
+                (result_node.text or "").strip(),
+            )
+            for result_node in inline_script.findall("./Results/Result")
+            if (result_node.text or "").strip()
+        )
+        return {
+            "script_name": (scripted.findtext("./ScriptName") or "").strip() or "inline",
+            "script_source": "inline",
+            "product_tag": product_tag,
+            "code": code,
+            "npv_variable": npv_variable,
+            "results": results,
+            "parameters": parameters,
+        }
+
+    script_name = (scripted.findtext("./ScriptName") or "").strip()
+    if not script_name:
+        raise ValueError("Scripted trade has neither inline script nor ScriptName")
+    script_library_file = (setup_params.get("scriptLibrary", "scriptlibrary.xml") or "scriptlibrary.xml").strip()
+    library_path = (input_dir / script_library_file).resolve()
+    library = _parse_scripted_trade_library(library_path)
+    entry = library.get(script_name)
+    if entry is None:
+        raise KeyError(f"Script '{script_name}' not found in {library_path}")
+    variant = entry["variants"].get("") or next(iter(entry["variants"].values()), None)
+    if variant is None:
+        raise ValueError(f"Script '{script_name}' has no runnable code variants")
+    return {
+        "script_name": script_name,
+        "script_source": "library",
+        "product_tag": product_tag or str(entry.get("product_tag") or ""),
+        "code": str(variant["code"]),
+        "npv_variable": str(variant["npv_variable"]),
+        "results": tuple(variant["results"]),
+        "parameters": parameters,
+    }
+
+
+def _scripted_trade_observation_dates(parameters: Mapping[str, Any]) -> tuple[str, ...]:
+    dates: set[str] = set()
+    for value in parameters.values():
+        if isinstance(value, str):
+            try:
+                dates.add(_parse_ore_date(value).isoformat())
+            except Exception:
+                continue
+        elif isinstance(value, tuple):
+            for item in value:
+                if isinstance(item, str):
+                    try:
+                        dates.add(_parse_ore_date(item).isoformat())
+                    except Exception:
+                        continue
+    return tuple(sorted(dates))
+
+
+def _scripted_trade_is_fd_european(defn: Mapping[str, Any]) -> bool:
+    tag = str(defn.get("product_tag") or "").strip()
+    params = defn.get("parameters") or {}
+    return (
+        tag == "SingleAssetOptionBwd({AssetClass})"
+        and all(name in params for name in ("Strike", "Expiry", "Settlement", "PutCall", "LongShort", "Quantity", "Underlying", "PayCcy"))
+    )
+
+
+def _price_scripted_trade_case(ore_xml: Path, *, trade_id: str, trade_node: ET.Element) -> dict[str, Any]:
+    input_dir, setup_params = _resolve_case_input_dir_and_setup(ore_xml)
+    defn = _resolve_scripted_trade_definition(ore_xml, trade_node)
+    params = dict(defn["parameters"])
+    underlying = str(params.get("Underlying") or "")
+    if underlying.startswith("EQ-"):
+        equity_name = underlying[3:]
+    else:
+        equity_name = underlying
+    if "Underlying" in params:
+        params["Underlying"] = equity_name
+    currency = str(params.get("PayCcy") or "")
+    strike = float(params.get("Strike") or 0.0)
+    option_type = "Call" if float(params.get("PutCall") or 1.0) >= 0.0 else "Put"
+    asof = _parse_ore_date(setup_params.get("asofDate", ""))
+    pricing_config_id = (ET.parse(ore_xml).getroot().findtext("./Markets/Parameter[@name='pricing']") or "default").strip()
+    model = build_equity_ore_black_scholes_model(
+        ore_xml=ore_xml,
+        todaysmarket_xml=(input_dir / (setup_params.get("marketConfigFile") or "todaysmarket.xml")).resolve(),
+        curveconfig_path=(input_dir / (setup_params.get("curveConfigFile") or "curveconfig.xml")).resolve(),
+        market_data_path=(input_dir / (setup_params.get("marketDataFile") or "market.csv")).resolve(),
+        pricing_config_id=pricing_config_id,
+        asof=asof,
+        equity_name=equity_name,
+        currency=currency,
+        strike=strike,
+        option_type=option_type,
+        observation_dates=_scripted_trade_observation_dates(params),
+        n_paths=max(1000, min(10000, int(float((ET.parse(input_dir / (setup_params.get("pricingEnginesFile") or "pricingengine.xml")).getroot().findtext("./Product[@type='ScriptedTrade']/EngineParameters/Parameter[@name='Samples']") or "10000"))))),
+        seed=42,
+    )
+    pricing_mode = "python_scripted_trade_ir_mc"
+    if _scripted_trade_is_fd_european(defn):
+        py_t0_npv = float(
+            model.fd_single_asset_option_price(
+                strike=float(params["Strike"]),
+                expiry=str(params["Expiry"]),
+                settlement=str(params["Settlement"]),
+                put_call=float(params["PutCall"]),
+                long_short=float(params["LongShort"]),
+                quantity=float(params["Quantity"]),
+            )
+        )
+        metadata = {"backend": "fd", "npv_t0": py_t0_npv}
+        pricing_mode = "python_scripted_trade_ir_fd"
+    else:
+        module = lower_ore_script(
+            defn["code"],
+            npv_variable=str(defn["npv_variable"]),
+            results=tuple((str(name), str(ref)) for name, ref in defn["results"]),
+        )
+        execution = execute_numpy(module, model.make_env(params))
+        py_t0_npv = float(execution.metadata["npv_t0"])
+        metadata = dict(execution.metadata)
+    npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
+    npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id) if npv_csv is not None else None
+    pricing: dict[str, Any] = {
+        "py_t0_npv": py_t0_npv,
+        "trade_type": "ScriptedTrade",
+        "pricing_mode": pricing_mode,
+        "script_name": str(defn["script_name"]),
+        "script_source": str(defn["script_source"]),
+        "product_tag": str(defn["product_tag"] or ""),
+        "underlying": underlying,
+        "currency": currency,
+        "mc_paths": int(model.n_paths),
+    }
+    if npv_details is not None and npv_details.get("npv") is not None:
+        pricing["ore_t0_npv"] = float(npv_details["npv"])
+        pricing["t0_npv_abs_diff"] = abs(py_t0_npv - float(npv_details["npv"]))
+    diagnostics: dict[str, Any] = {
+        "engine": "python_price_only",
+        "pricing_mode": pricing_mode,
+        "trade_type": "ScriptedTrade",
+        "script_name": str(defn["script_name"]),
+        "script_source": str(defn["script_source"]),
+        "product_tag": str(defn["product_tag"] or ""),
+        "reference_output_dirs": [str(npv_csv.parent)] if npv_csv is not None else [],
+        "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
+        "mc_paths": int(model.n_paths),
+        "npv_mc_err_est": metadata.get("npv_mc_err_est"),
+    }
+    return {
+        "trade_id": trade_id,
+        "trade_type": "ScriptedTrade",
+        "counterparty": ore_snapshot_mod._get_cpty_from_portfolio(ET.parse(_resolve_case_portfolio_path(ore_xml)).getroot(), trade_id),
+        "netting_set_id": ore_snapshot_mod._get_netting_set_from_portfolio(ET.parse(_resolve_case_portfolio_path(ore_xml)).getroot(), trade_id),
+        "maturity_date": str(max(_scripted_trade_observation_dates(params), default=asof.isoformat())),
+        "maturity_time": max(((_parse_ore_date(max(_scripted_trade_observation_dates(params), default=asof.isoformat())) - asof).days / 365.0), 0.0),
+        "pricing": pricing,
+        "diagnostics": diagnostics,
+    }
+
+
 def _load_fx_forward_fixing_value_from_flows(flows_csv: Path, trade_id: str, bought_amount: float) -> float | None:
     if bought_amount == 0.0:
         return None
@@ -3204,13 +3582,19 @@ def _compute_price_only_case(
     ore_xml: Path,
     *,
     anchor_t0_npv: bool,
+    trade_id_override: str | None = None,
 ) -> dict[str, Any]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
         raise FileNotFoundError(f"portfolio xml not found: {portfolio_xml}")
     portfolio_root = ET.parse(portfolio_xml).getroot()
-    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_id = str(trade_id_override or ore_snapshot_mod._get_first_trade_id(portfolio_root)).strip()
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
+    trade_node = portfolio_root.find(f"./Trade[@id='{trade_id}']")
+    if trade_node is None:
+        raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
+    if trade_type == "ScriptedTrade":
+        return _price_scripted_trade_case(ore_xml, trade_id=trade_id, trade_node=trade_node)
     if trade_type in {"EquityOption", "EquityForward"}:
         payload = _build_equity_pricing_payload(ore_xml)
         sign = 1.0 if str(payload.get("long_short", "Long")).strip().lower() == "long" else -1.0
@@ -5468,6 +5852,7 @@ def _supports_native_price_only(first_trade_type: str, ore_xml: Path) -> bool:
         "EquityOption",
         "EquityForward",
         "EquitySwap",
+        "ScriptedTrade",
     }:
         return True
     if trade_type == "CapFloor":
@@ -6649,6 +7034,7 @@ def _run_case(
                 price_summary = _compute_price_only_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,
+                    trade_id_override=args.trade_id,
                 )
                 if not explicit_mode_request and first_trade_type in {"Bond", "ForwardBond", "CallableBond"}:
                     price_summary = _python_only_summary(price_summary)
@@ -7034,6 +7420,7 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     parser.add_argument("ore_xml", nargs="?")
+    parser.add_argument("--trade-id", default=None)
     parser.add_argument("-v", "--version", action="store_true")
     parser.add_argument("-h", "--hash", dest="show_hash", action="store_true")
     parser.add_argument("--help", action="store_true")

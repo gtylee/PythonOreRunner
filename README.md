@@ -125,6 +125,54 @@ On the flat EUR 5Y benchmark case, the current Python path was:
 - `simulation_xml`: about `0.13s`
 - `provided`: about `0.13s`
 
+Recommended practical default for parity-quality Python runs:
+
+- `--paths 10000`
+- `--rng ore_sobol_bridge`
+- `--xva-mode ore`
+- `--lgm-param-source simulation_xml`
+
+On the flat EUR 5Y benchmark, that setup currently gives:
+
+- runtime about `0.49s`
+- EPE `p95` under `1%`
+- ENE `p95` about `2.2%`
+- PFE `p95` about `3.7%`
+
+That is a good default when you want fast Python-native runs with solid parity quality and without invoking the ORE executable.
+
+## Single-Swap 99% Benchmark Evidence
+
+For single vanilla swap migration work, a useful benchmark triangle is:
+
+- ORE at modest path count
+- Python Monte Carlo
+- Python locked-coupon quantile proxy
+
+The locked-coupon quantile proxy is a fast structural benchmark built from:
+
+- the current LGM state quantile at each exposure date
+- fixing-time quantiles for already-locked coupons
+
+This matters when ORE high-path runs are too expensive. If Python Monte Carlo stays close to the proxy, then a modest Python-vs-ORE gap is more likely to be Monte Carlo / engine parity noise than a broken Python swap valuation.
+
+At `99%` PFE and `10000` Python paths, the wider single-swap benchmark sweep currently looks like this:
+
+- `18` successful cases
+- median curve-level `PFE p95 rel`: `2.37%`
+- mean curve-level `PFE p95 rel`: `2.44%`
+- max curve-level `PFE p95 rel`: `4.09%`
+- median peak-point relative error: `0.94%`
+- max peak-point relative error: `2.45%`
+- median one-year relative error: `1.93%`
+- max one-year relative error: `3.53%`
+
+Interpretation:
+
+- this is strong evidence that the Python single-swap `99%` PFE shape is structurally correct at `10000` paths
+- the proxy is tight enough to support migration discussions even when ORE cannot afford a very high-path confirmation run
+- this evidence is strongest for single vanilla swaps and similar low-dimensional IR trades, not for large netted portfolios
+
 ## CLI
 
 The main CLI is built in [`ore_snapshot_cli.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py) and is exposed through the compatibility module:

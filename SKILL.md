@@ -230,6 +230,60 @@ This outperformed:
 
 For the benchmark cases investigated in this repo, `JoeKuoD7 + BrownianBridge(actual_times)` gave the best overall absolute parity on EPE/ENE and the best PFE parity among the Python-accessible variants that were tested.
 
+### Current recommended default for practical Python parity runs
+
+When you want a strong Python-native parity run without invoking ORE, the current practical default is:
+
+- `--paths 10000`
+- `--rng ore_sobol_bridge`
+- `--xva-mode ore`
+- `--lgm-param-source simulation_xml`
+
+On the flat EUR 5Y benchmark, this currently gives roughly:
+
+- runtime about `0.49s`
+- EPE `p95` under `1%`
+- ENE `p95` about `2.2%`
+- PFE `p95` about `3.7%`
+
+So treat this as the current “good default” for parity-quality Python runs:
+
+- fast enough for repeated diagnostics
+- much faster than `auto`
+- tighter than the MT-based alternatives on exposure parity
+
+### The locked-coupon quantile proxy is now a credible single-swap migration benchmark at 99%
+
+For single vanilla swaps, the current trade-level proxy built from:
+
+- current LGM state quantile at exposure time
+- fixing-time quantiles for already-locked coupons
+
+is strong enough to use as a structural benchmark when ORE high-path MC is too expensive.
+
+This is the right way to frame it:
+
+- ORE low-path MC is the noisy external reference
+- Python full simulation is the candidate implementation
+- the locked-coupon quantile proxy is the model-consistent anchor
+
+At `99%` and `10000` Python paths, the wider successful single-swap benchmark sweep currently gives:
+
+- `18` successful cases
+- median curve-level `PFE p95 rel`: `2.37%`
+- mean curve-level `PFE p95 rel`: `2.44%`
+- max curve-level `PFE p95 rel`: `4.09%`
+- median peak relative error: `0.94%`
+- max peak relative error: `2.45%`
+- median one-year relative error: `1.93%`
+- max one-year relative error: `3.53%`
+
+Practical interpretation:
+
+- this is good enough to argue that Python is structurally right on the single-swap benchmark class at `99%`
+- if Python MC and the proxy agree closely, but ORE low-path MC differs modestly, that is more likely MC / engine parity noise than a broken Python swap implementation
+- do not over-generalize this to large netted portfolios; the argument is strongest for single swaps and similarly low-dimensional trades
+
 ### Do not treat Sobol seed changes like MT seed changes
 
 For the current Python Sobol parity path, varying the seed did **not** produce a useful empirical MC envelope:
