@@ -98,6 +98,7 @@ from pythonore.repo_paths import default_ore_bin
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = REPO_ROOT
+LGMParamSource = str
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +811,35 @@ def resolve_lgm_params(
     todaysmarket_xml_path: Union[str, Path],
     simulation_xml_path: Union[str, Path],
     domestic_ccy: str,
+    lgm_param_source: LGMParamSource = "auto",
+    provided_lgm_params: Optional[Union[LGMParams, Dict[str, object]]] = None,
 ) -> Tuple[Dict[str, object], str, Optional[Path]]:
+    lgm_param_source = str(lgm_param_source or "auto").strip().lower()
+
+    def _coerce_params(payload: Union[LGMParams, Dict[str, object]]) -> Dict[str, object]:
+        if isinstance(payload, LGMParams):
+            return {
+                "alpha_times": np.asarray(payload.alpha_times, dtype=float),
+                "alpha_values": np.asarray(payload.alpha_values, dtype=float),
+                "kappa_times": np.asarray(payload.kappa_times, dtype=float),
+                "kappa_values": np.asarray(payload.kappa_values, dtype=float),
+                "shift": float(payload.shift),
+                "scaling": float(payload.scaling),
+            }
+        return {
+            "alpha_times": np.asarray(payload.get("alpha_times", []), dtype=float),
+            "alpha_values": np.asarray(payload.get("alpha_values", [0.01]), dtype=float),
+            "kappa_times": np.asarray(payload.get("kappa_times", []), dtype=float),
+            "kappa_values": np.asarray(payload.get("kappa_values", [0.03]), dtype=float),
+            "shift": float(payload.get("shift", 0.0)),
+            "scaling": float(payload.get("scaling", 1.0)),
+        }
+
+    if lgm_param_source in {"provided", "dataclass"}:
+        if provided_lgm_params is None:
+            raise ValueError("provided_lgm_params is required when lgm_param_source='provided'")
+        return _coerce_params(provided_lgm_params), "provided", None
+
     calibration_xml = resolve_calibration_xml_path(
         ore_xml_path=str(ore_xml_path),
         output_path=output_path,
@@ -821,22 +850,28 @@ def resolve_lgm_params(
         simulation_xml_path=simulation_xml_path,
         domestic_ccy=domestic_ccy,
     )
-    if calibration_xml is not None and calibration_xml.exists():
+    if lgm_param_source in {"auto", "calibration", "calibration_xml"} and calibration_xml is not None and calibration_xml.exists():
         try:
             params_dict = parse_lgm_params_from_calibration_xml(
                 str(calibration_xml), ccy_key=domestic_ccy
             )
             return params_dict, "calibration", calibration_xml.resolve()
         except Exception:
-            pass
-    params_dict = calibrate_lgm_params_via_ore(
-        ore_xml_path=ore_xml_path,
-        input_dir=input_dir,
-        simulation_xml_path=simulation_xml_path,
-        ccy_key=domestic_ccy,
-    )
-    if params_dict is not None:
-        return params_dict, "calibration", None
+            if lgm_param_source in {"calibration", "calibration_xml"}:
+                raise
+    if lgm_param_source in {"auto", "ore", "runtime_calibration"}:
+        params_dict = calibrate_lgm_params_via_ore(
+            ore_xml_path=ore_xml_path,
+            input_dir=input_dir,
+            simulation_xml_path=simulation_xml_path,
+            ccy_key=domestic_ccy,
+        )
+        if params_dict is not None:
+            return params_dict, "calibration", None
+        if lgm_param_source in {"ore", "runtime_calibration"}:
+            raise ValueError("ORE runtime calibration failed to produce LGM params")
+    if lgm_param_source not in {"auto", "simulation", "simulation_xml"}:
+        raise ValueError(f"Unsupported lgm_param_source: {lgm_param_source}")
     params_dict = parse_lgm_params_from_simulation_xml(
         str(simulation_xml_path), ccy_key=domestic_ccy
     )
@@ -2196,6 +2231,8 @@ def load_from_ore_xml(
     trade_id: Optional[str] = None,
     cpty: Optional[str] = None,
     anchor_t0_npv: bool = False,
+    lgm_param_source: LGMParamSource = "auto",
+    provided_lgm_params: Optional[Union[LGMParams, Dict[str, object]]] = None,
 ) -> OreSnapshot:
     """Load the complete ORE input set from a single ore.xml entry point.
 
@@ -2221,6 +2258,13 @@ def load_from_ore_xml(
         can degrade parity.  Defaults to *False*; use
         :func:`~py_ore_tools.irs_xva_utils.apply_parallel_float_spread_shift_to_match_npv`
         directly for fine-grained control.
+    lgm_param_source:
+        Source policy for LGM parameters. Supported values:
+        ``"auto"`` (default), ``"calibration_xml"``, ``"simulation_xml"``,
+        ``"ore"`` and ``"provided"``.
+    provided_lgm_params:
+        Optional explicit LGM parameters used when ``lgm_param_source`` is
+        ``"provided"``. Accepts either :class:`LGMParams` or a parameter dict.
 
     Returns
     -------
@@ -2376,6 +2420,8 @@ def load_from_ore_xml(
         todaysmarket_xml_path=todaysmarket_xml,
         simulation_xml_path=simulation_xml,
         domestic_ccy=domestic_ccy,
+        lgm_param_source=lgm_param_source,
+        provided_lgm_params=provided_lgm_params,
     )
 
     lgm_params = LGMParams(

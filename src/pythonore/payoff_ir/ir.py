@@ -164,6 +164,13 @@ class AssignStateStmt(Statement):
 
 
 @dataclass(frozen=True)
+class AssignItemStmt(Statement):
+    target: str
+    index: Expr
+    expr: Expr
+
+
+@dataclass(frozen=True)
 class IfStmt(Statement):
     condition: Expr
     then_body: Tuple[Statement, ...]

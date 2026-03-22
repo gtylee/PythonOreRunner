@@ -6,6 +6,7 @@ from typing import Iterable, Set
 from pythonore.payoff_ir.ir import (
     AbsExpr,
     AboveProbExpr,
+    AssignItemStmt,
     AssignStateStmt,
     BelowProbExpr,
     BinaryExpr,
@@ -124,6 +125,11 @@ def _validate_block(stmts: tuple[Statement, ...], defined: Set[str], params: Set
         elif isinstance(stmt, AssignStateStmt):
             if stmt.name not in defined:
                 raise ValueError(f"AssignState target '{stmt.name}' is not defined")
+            _validate_expr(stmt.expr, defined, params)
+        elif isinstance(stmt, AssignItemStmt):
+            if stmt.target not in defined:
+                raise ValueError(f"AssignItem target '{stmt.target}' is not defined")
+            _validate_expr(stmt.index, defined, params)
             _validate_expr(stmt.expr, defined, params)
         elif isinstance(stmt, IfStmt):
             _validate_expr(stmt.condition, defined, params)

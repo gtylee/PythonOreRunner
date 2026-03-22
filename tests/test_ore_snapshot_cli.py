@@ -1579,6 +1579,54 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(calibrate_mock.call_count, 1)
         self.assertEqual(snap.alpha_source, "calibration")
 
+    def test_load_from_ore_xml_can_force_simulation_xml_params(self):
+        simulated = {
+            "alpha_times": (1.0,),
+            "alpha_values": (0.015, 0.015),
+            "kappa_times": (1.0,),
+            "kappa_values": (0.025, 0.025),
+            "shift": 0.0,
+            "scaling": 1.0,
+        }
+        with patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            side_effect=AssertionError("ORE calibration should not be used"),
+        ) as calibrate_mock, patch(
+            "pythonore.io.ore_snapshot.parse_lgm_params_from_simulation_xml",
+            return_value=simulated,
+        ) as simulation_mock:
+            snap = ore_snapshot_io.load_from_ore_xml(REAL_CASE_XML, lgm_param_source="simulation_xml")
+        self.assertEqual(calibrate_mock.call_count, 0)
+        self.assertEqual(simulation_mock.call_count, 1)
+        self.assertEqual(snap.alpha_source, "simulation")
+        self.assertAlmostEqual(snap.lgm_params.alpha_values[0], 0.015, places=12)
+
+    def test_load_from_ore_xml_can_use_provided_lgm_params(self):
+        provided = ore_snapshot_io.LGMParams(
+            alpha_times=(1.0,),
+            alpha_values=(0.014, 0.014),
+            kappa_times=(1.0,),
+            kappa_values=(0.031, 0.031),
+            shift=0.0,
+            scaling=1.0,
+        )
+        with patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            side_effect=AssertionError("ORE calibration should not be used"),
+        ) as calibrate_mock, patch(
+            "pythonore.io.ore_snapshot.parse_lgm_params_from_simulation_xml",
+            side_effect=AssertionError("simulation params should not be used"),
+        ) as simulation_mock:
+            snap = ore_snapshot_io.load_from_ore_xml(
+                REAL_CASE_XML,
+                lgm_param_source="provided",
+                provided_lgm_params=provided,
+            )
+        self.assertEqual(calibrate_mock.call_count, 0)
+        self.assertEqual(simulation_mock.call_count, 0)
+        self.assertEqual(snap.alpha_source, "provided")
+        self.assertEqual(tuple(snap.lgm_params.alpha_values), (0.014, 0.014))
+
     def test_cli_surface_parses_under_python38_grammar(self):
         files = [
             TOOLS_DIR / "src" / "pythonore" / "apps" / "ore_snapshot_cli.py",

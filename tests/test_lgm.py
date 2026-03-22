@@ -151,25 +151,34 @@ class TestLGM(unittest.TestCase):
         dimension = 5
         rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
         actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
-        bridge_rsg = ql.SobolBrownianBridgeRsg(1, dimension)
-        for _ in range(seed):
-            bridge_rsg.nextSequence()
-        expected = np.vstack([np.asarray(bridge_rsg.nextSequence().value(), dtype=float) for _ in range(4)])
+        bridge = ql.BrownianBridge(dimension)
+        sobol = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed, ql.SobolRsg.JoeKuoD7))
+        expected = np.vstack([np.asarray(bridge.transform(sobol.nextSequence().value()), dtype=float) for _ in range(4)])
         self.assertTrue(np.array_equal(actual, expected))
 
-    def test_sobol_brownian_bridge_ignores_actual_time_grid_for_ordering_steps(self):
+    def test_sobol_brownian_bridge_uses_actual_time_grid_when_configured(self):
         if ql is None:
             self.skipTest("QuantLib Python bindings are required for Ore parity tests")
         seed = 42
         dimension = 5
+        times = [0.1, 0.21, 0.34, 0.55, 0.89]
         rng = make_ore_gaussian_rng(seed, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
-        rng.configure_time_grid([0.1, 0.21, 0.34, 0.55, 0.89])
+        rng.configure_time_grid(times)
         actual = np.vstack([rng.next_sequence(dimension) for _ in range(4)])
-        bridge_rsg = ql.SobolBrownianBridgeRsg(1, dimension)
-        for _ in range(seed):
-            bridge_rsg.nextSequence()
-        expected = np.vstack([np.asarray(bridge_rsg.nextSequence().value(), dtype=float) for _ in range(4)])
+        bridge = ql.BrownianBridge(times)
+        sobol = ql.InvCumulativeSobolGaussianRsg(ql.SobolRsg(dimension, seed, ql.SobolRsg.JoeKuoD7))
+        expected = np.vstack([np.asarray(bridge.transform(sobol.nextSequence().value()), dtype=float) for _ in range(4)])
         self.assertTrue(np.array_equal(actual, expected))
+
+    def test_sobol_brownian_bridge_seed_matches_current_quantlib_binding_behavior(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        dimension = 5
+        rng_a = make_ore_gaussian_rng(7, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
+        rng_b = make_ore_gaussian_rng(42, sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE)
+        seq_a = np.vstack([rng_a.next_sequence(dimension) for _ in range(4)])
+        seq_b = np.vstack([rng_b.next_sequence(dimension) for _ in range(4)])
+        self.assertTrue(np.array_equal(seq_a, seq_b))
 
     def test_discount_bond_profile_matches_when_paths_are_shared(self):
         payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))

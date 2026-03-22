@@ -1,173 +1,451 @@
 # PythonOreRunner
 
-Python utilities and a native XVA interface for [Open Risk Engine (ORE)](https://github.com/OpenSourceRisk/Engine). Use this to run ORE configs from Python, compare ORE vs Python LGM results, and drive XVA workflows.
+Python tools for loading ORE-style cases, running native Python pricing/XVA flows, and comparing Python results against ORE reference outputs.
 
-## Python-first native workflow
+The main maintained code lives under [`src/pythonore/`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore). Legacy import surfaces such as `py_ore_tools` remain available as compatibility shims.
 
-The maintained Python-native path is:
+## What This Repo Is For
 
-`XVASnapshot` -> `PythonLgmAdapter(fallback_to_swig=False)` -> Python pricing/XVA reports
+Use this repo when you want to:
 
-This path runs entirely in native Python for the product families supported below. Use it when you want an in-memory workflow with no ORE binary and no SWIG dependency.
+- load an ORE case from a single `ore.xml`
+- inspect or validate the linked ORE inputs
+- run pricing, XVA, and sensitivity workflows in native Python
+- compare Python results to existing ORE output files
+- benchmark or diagnose parity gaps between Python and ORE
 
-The quickest starting points are:
+There are two broad workflows:
 
-- [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb) for the canonical in-memory walkthrough
-- [`example_ore_snapshot.py`](/Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot.py) for the ORE-XML-to-Python-snapshot bridge
-- `python -m pythonore.apps.ore_snapshot_cli ... --xva` for the Python-first CLI flow
+- Python-first workflow:
+  `ore.xml` -> `OreSnapshot` / `XVASnapshot` -> Python runtime -> reports
+- ORE-integrated workflow:
+  dataclasses / mapper -> ORE XML + ORE executable -> ORE output -> Python comparison / diagnostics
 
-### Native capability matrix
+## Current Native Coverage
 
-| Area | Native Python | Fallback-only | Not supported |
-|------|---------------|---------------|---------------|
-| Rates | IRS, generic rate swaps already mapped to native legs, caps/floors, Bermudan swaption flow, rate futures | Some remaining non-native swap families when loaded as unsupported generic trades | Full ORE rates surface parity is not claimed |
-| FX | FX forwards, XCCY float-float helper flow, vanilla FX option helper pricing | Products that route through unsupported trade types in the runtime | Smile/barrier/exotic support |
-| Inflation | Inflation swaps and inflation cap/floor runtime flow | None intended for the current native set | Broader inflation product coverage |
-| XVA metrics | CVA, DVA, FVA, MVA via Python DIM feeder | Any metric only available from ORE reports on unsupported trades | KVA |
-| Equity / Commodity | Dataclasses only for schema / interop | ORE SWIG may price some loaded cases if available | Native Python pricing is not implemented |
+The maintained native path is strongest for:
 
-Equity and commodity dataclasses remain in the model for compatibility and mapping, but they should be treated as schema/interop types, not native pricers.
+- vanilla IRS and related mapped rate swaps
+- FX forwards
+- inflation swaps and inflation cap/floor flows already supported by the runtime
+- XVA exposure, CVA, DVA, FVA, and related parity-style reporting for supported products
 
-Use it for fast prototyping, regression tests, teaching, or as the Python leg in ORE-vs-Python parity runs. The maintained implementation now lives under `src/pythonore/`; `py_ore_tools/` and `native_xva_interface/` remain compatibility-facing packages and script entrypoints.
+Not everything in ORE is natively priced here. Unsupported trades may still require ORE or SWIG-backed flows.
 
-## Layout
+## Repository Layout
 
-| Path | Description |
-|------|-------------|
-| `src/pythonore/` | Canonical Python package layout: shared domain types, IO, mapping, runtime, workflows, and app entrypoints |
-| `py_ore_tools/` | Compatibility package for the standalone Python LGM, ORE runner, and thin legacy entrypoints |
-| `native_xva_interface/` | Compatibility package for dataclass loaders, ORE-SWIG and Python LGM adapters; see [native_xva_interface/README.md](native_xva_interface/README.md) |
-| `legacy/` | Relocated legacy demos, benchmarks, notebooks, docs, writeups, and former root scripts from the pre-`src` package layout |
-| `example_ore_snapshot.py` | Single root quickstart demo for the canonical ORE snapshot flow |
-| `scripts/` | Ad hoc checks, diagnostics, dumps, plots, and parity comparison utilities; see [scripts/README.md](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md) |
-| `notebook_series/legacy/` | Older standalone demo notebooks retained for reference |
-| `docs/` | Project notes and longer-form writeups that do not belong at the root |
-| `tests/` | Unit tests for `py_ore_tools` |
-| `parity_artifacts/` | Generated benchmark/parity outputs (optional; can be recreated) |
-| `regression_artifacts/examples_python/` | Central Python-first regression baselines generated from curated cases under `Examples/` |
+| Path | Purpose |
+|---|---|
+| [`src/pythonore/`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore) | Main package: IO, runtime, workflows, mapping, compute, apps |
+| [`py_ore_tools/`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools) | Compatibility package and legacy entrypoints |
+| [`native_xva_interface/`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface) | Compatibility-facing interface layer |
+| [`tests/`](/Users/gordonlee/Documents/PythonOreRunner/tests) | Test suite |
+| [`scripts/`](/Users/gordonlee/Documents/PythonOreRunner/scripts) | Diagnostics, dumps, plots, ad hoc utilities |
+| [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series) | Notebook walkthroughs |
+| [`parity_artifacts/`](/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts) | Stored parity inputs and outputs |
+| [`example_ore_snapshot.py`](/Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot.py) | Root-level snapshot quickstart |
 
-## Architecture
+## Installation
 
-The maintained Python flows now separate into two explicit paths:
-
-- Python-first: dataclasses -> loader/programmatic build -> Python compute -> snapshot/report artifacts
-- ORE integration: dataclasses -> XML mapper -> oreapp / SWIG runtime -> snapshot-compatible artifacts
-
-The canonical import surface for new code lives under [`src/pythonore/`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore), while [`py_ore_tools/`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools) and [`native_xva_interface/`](/Users/gordonlee/Documents/PythonOreRunner/native_xva_interface) remain compatibility-facing packages.
-
-## Requirements
+Requirements:
 
 - Python 3.8+
-- See [requirements.txt](requirements.txt). Core: `numpy`, `pandas`; examples/plots: `matplotlib`, `networkx`.
+- packages from [`requirements.txt`](/Users/gordonlee/Documents/PythonOreRunner/requirements.txt)
+
+Install:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
-
-This repo includes an ORE-style Python CLI flow: point it at an ORE case directory with `Input/` and `Output/`, run the case, then inspect the same style of artifacts you would expect from an ORE run.
-
-If you have an Engine checkout available:
+If you want to use the ORE executable for reference generation or calibration, also set:
 
 ```bash
 export ENGINE_REPO_ROOT=/path/to/Engine
-export ORE_EXE="$ENGINE_REPO_ROOT/build/apple-make-relwithdebinfo-arm64/App/ore"
-
-cd Examples/XvaRisk
-"$ORE_EXE" Input/ore_stress_classic.xml
+export ORE_EXE="$ENGINE_REPO_ROOT/build/.../App/ore"
 ```
 
-That runs a standard vendored ORE case against the stress portfolio in [`Examples/XvaRisk/Input/portfolio_stress.xml`](/Users/gordonlee/Documents/PythonOreRunner/Examples/XvaRisk/Input/portfolio_stress.xml). Results are written under [`Examples/XvaRisk/Output/stress/classic/`](/Users/gordonlee/Documents/PythonOreRunner/Examples/XvaRisk/Output/stress/classic), typically including `npv.csv`, `flows.csv`, `log.txt`, and the configured stress / XVA reports for that case.
+## Quick Start
 
-For a simpler single-`ore.xml` Python-side parity run without calling the ORE binary:
+### 1. Preflight an ORE case
 
 ```bash
 python -m py_ore_tools.ore_snapshot_cli \
-  Examples/Exposure/Input/ore_measure_lgm.xml \
+  parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml \
   --preflight
 ```
 
-That classifies the loaded portfolio into Python-native and SWIG-only buckets before you commit to a longer pricing/XVA run.
+This checks that the case links resolve and reports whether the portfolio looks natively supported.
 
-To run the Python-side parity/XVA flow itself:
+### 2. Run native Python XVA
 
 ```bash
 python -m py_ore_tools.ore_snapshot_cli \
-  Examples/Exposure/Input/ore_measure_lgm.xml \
+  parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml \
   --xva \
-  --paths 10000 \
-  --rng ore_parity
+  --paths 2000 \
+  --rng ore_sobol_bridge \
+  --lgm-param-source simulation_xml
 ```
 
-That loads the ORE-style XML inputs, runs the standalone Python LGM parity/XVA path, and prints the pricing, XVA, and parity diagnostics directly in the terminal.
+This keeps the run on the Python side and avoids the expensive ORE calibration subprocess.
 
-## Running tests
-
-From the project root:
+### 3. Run pricing only
 
 ```bash
-# py_ore_tools tests
-python -m pytest tests/ -q
-
-# native_xva_interface tests (add project root to PYTHONPATH)
-PYTHONPATH=. python -m pytest native_xva_interface/tests/ -q
+python -m py_ore_tools.ore_snapshot_cli \
+  parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml \
+  --price \
+  --lgm-param-source simulation_xml
 ```
 
-To refresh or compare the curated Python-first example baselines:
+## LGM Parameter Source
+
+The snapshot loader can populate LGM parameters from several sources.
+
+- `auto`
+  Default behavior. Prefer an existing `calibration.xml`, otherwise try runtime ORE calibration, otherwise fall back to `simulation.xml`.
+- `calibration_xml`
+  Use an existing `calibration.xml`. Do not run runtime ORE calibration.
+- `simulation_xml`
+  Parse model parameters directly from `simulation.xml`.
+- `ore`
+  Force runtime ORE calibration through the ORE executable.
+- `provided`
+  Use a supplied `LGMParams` object or parameter payload from Python code.
+
+Important performance note:
+
+- `auto` may invoke the ORE executable and is much slower
+- `simulation_xml` and `provided` are the fast Python-only paths
+
+On the flat EUR 5Y benchmark case, the current Python path was:
+
+- `auto`: about `11.2s`
+- `simulation_xml`: about `0.13s`
+- `provided`: about `0.13s`
+
+## CLI
+
+The main CLI is built in [`ore_snapshot_cli.py`](/Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py) and is exposed through the compatibility module:
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli <path-to-ore.xml> [options]
+```
+
+### Main command shape
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  path/to/ore.xml \
+  [--price] [--xva] [--sensi] [--preflight] \
+  [--paths N] [--seed N] [--rng MODE] \
+  [--xva-mode MODE] [--lgm-param-source SOURCE]
+```
+
+### What The CLI Produces
+
+Depending on the flags, the CLI can:
+
+- validate the case
+- run native Python pricing
+- run native Python XVA
+- compare Python outputs to ORE output files already present in the case
+- write artifacts under an output root
+- generate report packs across multiple cases
+
+## CLI Argument Reference
+
+### Informational flags
+
+- `-v`, `--version`
+  Print version information.
+- `-h`, `--hash`
+  Print the build / hash style identifier used by the tool.
+- `--help`
+  Print help text.
+
+### Mode selection
+
+- `--price`
+  Run pricing.
+- `--xva`
+  Run XVA.
+- `--sensi`
+  Run sensitivity comparison flow.
+- `--preflight`
+  Validate the case and native support without running a full pricing/XVA pass.
+- `--pack`
+  Run a batch/pack workflow over one or more cases.
+- `--report-examples`
+  Build example report bundles from configured example cases.
+
+If you do not specify a mode, higher-level entrypoints may infer one, but in normal use you should pass the mode you want explicitly.
+
+### Case and output selection
+
+- positional `ore_xml`
+  Path to the root ORE XML file for the case.
+- `--case`
+  Add a case name to a pack/report run. Can be passed multiple times.
+- `--output-root PATH`
+  Root folder for generated artifacts.
+  Default:
+  [`parity_artifacts/ore_snapshot_cli`](/Users/gordonlee/Documents/PythonOreRunner/parity_artifacts/ore_snapshot_cli)
+- `--report-root PATH`
+  Override report output location for report workflows.
+- `--ore-output-only`
+  Restrict some flows to ORE reference output handling rather than full Python recomputation where supported.
+
+### Simulation controls
+
+- `--paths N`
+  Number of Monte Carlo paths to run in Python.
+  If omitted, the loader uses the case sample count from `simulation.xml`.
+- `--seed N`
+  Random seed for the Python RNG mode.
+  Default: `42`
+- `--rng MODE`
+  RNG construction for the Python simulation.
+
+Supported values:
+
+- `numpy`
+  Plain NumPy RNG.
+- `ore_parity`
+  Mersenne Twister parity-style generator.
+- `ore_parity_antithetic`
+  Mersenne Twister antithetic variant.
+- `ore_sobol`
+  Sobol generator without the bridge path used in the main parity flow.
+- `ore_sobol_bridge`
+  Current best ORE-parity Sobol/Brownian-bridge path in Python.
+
+Recommended default for current parity work:
+
+- `--rng ore_sobol_bridge`
+
+### XVA calculation controls
+
+- `--xva-mode MODE`
+  Choose how the Python path interprets XVA exposure handling.
+
+Values:
+
+- `classic`
+  Simpler historical/native mode.
+- `ore`
+  ORE-style exposure and reporting semantics.
+
+Recommended default:
+
+- `--xva-mode ore`
+
+### LGM parameter controls
+
+- `--lgm-param-source SOURCE`
+  Select where LGM parameters come from.
+
+Values:
+
+- `auto`
+- `calibration_xml`
+- `simulation_xml`
+- `ore`
+- `provided`
+
+In CLI use, `provided` is mostly for programmatic entrypoints. The practical CLI choices are:
+
+- `auto` for ORE-compatible default behavior
+- `simulation_xml` for fast Python-only runs
+- `calibration_xml` when you already have a trusted calibration file
+- `ore` when you explicitly want runtime ORE calibration
+
+### Pricing / parity controls
+
+- `--anchor-t0-npv`
+  Apply a float-spread anchoring adjustment so the Python t0 NPV matches ORE more closely in specific setups.
+  Use carefully. It is not universally beneficial for dual-curve parity.
+
+### Credit / XVA assumptions
+
+- `--own-hazard FLOAT`
+  Bank/own hazard rate used in DVA-style logic where relevant.
+  Default: `0.01`
+- `--own-recovery FLOAT`
+  Bank/own recovery assumption.
+  Default: `0.4`
+- `--netting-set ID`
+  Override or target a specific netting set in relevant workflows.
+
+### Sensitivity controls
+
+- `--sensi-metric NAME`
+  Sensitivity metric to compare.
+  Default: `CVA`
+- `--top N`
+  Limit top findings or rows shown in sensitivity/report outputs.
+  Default: `10`
+
+### Parity thresholds
+
+These thresholds affect pass/fail style reporting in comparison workflows.
+
+- `--max-npv-abs-diff FLOAT`
+  Default: `1000.0`
+- `--max-cva-rel FLOAT`
+  Default: `0.05`
+- `--max-dva-rel FLOAT`
+  Default: `0.05`
+- `--max-fba-rel FLOAT`
+  Default: `0.05`
+- `--max-fca-rel FLOAT`
+  Default: `0.05`
+
+These are relative tolerances except for `--max-npv-abs-diff`, which is absolute.
+
+### Reporting / example workflow options
+
+- `--report-workers N`
+  Parallel worker count for report generation.
+  Default: `12`
+- `--report-refresh-every N`
+  Refresh cadence for long-running report output.
+  Default: `1`
+- `--report-top-buckets N`
+  Number of top report buckets to keep.
+  Default: `10`
+- `--example NAME`
+  Run a benchmark/example preset.
+  Choices:
+  `lgm_torch`, `lgm_torch_swap`, `lgm_fx_hybrid`, `lgm_fx_forward`, `lgm_fx_portfolio`, `lgm_fx_portfolio_256`
+- `--example-path-counts N [N ...]`
+  Path counts for example benchmark runs.
+  Default: `10000 50000`
+- `--example-devices DEV [DEV ...]`
+  Devices to use for example benchmark runs.
+- `--tensor-backend`
+  Tensor backend selection.
+  Values:
+  `auto`, `numpy`, `torch-cpu`, `torch-mps`
+- `--example-repeats N`
+  Default: `2`
+- `--example-warmup N`
+  Default: `1`
+- `--example-trades N`
+  Default: `64`
+
+## Practical CLI Recipes
+
+### Fast Python-only parity check
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml \
+  --xva \
+  --paths 2000 \
+  --rng ore_sobol_bridge \
+  --xva-mode ore \
+  --lgm-param-source simulation_xml
+```
+
+### Use an existing calibration file, but do not spawn ORE
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  path/to/ore.xml \
+  --xva \
+  --rng ore_sobol_bridge \
+  --lgm-param-source calibration_xml
+```
+
+### Force ORE runtime calibration
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  path/to/ore.xml \
+  --xva \
+  --lgm-param-source ore
+```
+
+### Pricing-only smoke test
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  path/to/ore.xml \
+  --price \
+  --lgm-param-source simulation_xml
+```
+
+## Programmatic Use
+
+Load an ORE case directly:
+
+```python
+from pythonore.io.ore_snapshot import load_from_ore_xml
+
+snap = load_from_ore_xml(
+    "path/to/ore.xml",
+    lgm_param_source="simulation_xml",
+)
+model = snap.build_model()
+```
+
+Run a Python snapshot case directly:
+
+```python
+from pathlib import Path
+from pythonore.workflows.ore_snapshot_cli import _compute_snapshot_case
+
+result = _compute_snapshot_case(
+    Path("path/to/ore.xml"),
+    paths=2000,
+    seed=42,
+    rng_mode="ore_sobol_bridge",
+    anchor_t0_npv=False,
+    own_hazard=0.01,
+    own_recovery=0.4,
+    xva_mode="ore",
+    lgm_param_source="simulation_xml",
+)
+```
+
+Use pre-supplied params:
+
+```python
+from pythonore.io.ore_snapshot import load_from_ore_xml
+
+base = load_from_ore_xml("path/to/ore.xml", lgm_param_source="simulation_xml")
+
+snap = load_from_ore_xml(
+    "path/to/ore.xml",
+    lgm_param_source="provided",
+    provided_lgm_params=base.lgm_params,
+)
+```
+
+## Tests
+
+Run the main tests:
+
+```bash
+python -m pytest tests -q
+```
+
+Refresh or compare curated example baselines:
 
 ```bash
 python -m pythonore.apps.examples_regression refresh
 python -m pythonore.apps.examples_regression compare
 ```
 
-## Examples
+## Further Reading
 
-- **`example_basic.py`** / **`example.py`** – Run ORE from Python and inspect NPV/XVA. Expects an ORE executable and an ORE input folder (e.g. from an ORE repo).
-- **`example_ore_snapshot.py`** – Load ORE XML into the canonical Python snapshot object and bridge into the Python-first workflow.
-- **`example_systemic.py`** – Uses `OreBasic` with network/graph dependencies.
+- [`example_ore_snapshot.py`](/Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot.py)
+- [`scripts/README.md`](/Users/gordonlee/Documents/PythonOreRunner/scripts/README.md)
+- [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb)
 
-Set `ORE_EXE` to the path of the `ore` binary. Set `ORE_EXAMPLE_DIR` to an ORE example folder (for example `path/to/ORE/Examples/Legacy/Example_1`). If unset, examples will auto-discover `ENGINE_REPO_ROOT` and default to `Examples/Legacy/Example_1`.
+## Notes
 
-For a standalone checkout, set `ENGINE_REPO_ROOT` to your ORE `Engine` repo. The benchmark and example scripts will use that for `Examples/` inputs and the default `ore` binary, while writing any generated benchmark output under this repo's local `parity_artifacts/`.
-
-## Benchmarks
-
-Benchmark implementations live under `src/pythonore/benchmarks/`; historical benchmark content now lives under [`legacy/py_ore_tools/benchmarks/`](/Users/gordonlee/Documents/PythonOreRunner/legacy/py_ore_tools/benchmarks), with `py_ore_tools.benchmarks` left as an import shim. Typical usage from this repo root:
-
-```bash
-export ENGINE_REPO_ROOT=/path/to/Engine
-
-python py_ore_tools/benchmarks/benchmark_discount_factor_extractor.py --runs 10
-python py_ore_tools/benchmarks/benchmark_ore_fx_forwards.py
-python py_ore_tools/benchmarks/benchmark_ore_fx_forwards_xva.py --samples 2000
-python py_ore_tools/benchmarks/benchmark_lgm_ore_multiccy.py --max-cases 2
-python py_ore_tools/benchmarks/benchmark_lgm_fx_hybrid_ore.py --max-cases 2
-python py_ore_tools/benchmarks/benchmark_ore_ir_options.py
-```
-
-These scripts read market/example inputs from `ENGINE_REPO_ROOT/Examples/...` and emit local results under `parity_artifacts/`.
-
-See [`py_ore_tools/benchmarks/README.md`](/Users/gordonlee/Documents/PythonOreRunner/py_ore_tools/benchmarks/README.md) for per-script prerequisites, inputs, and output locations.
-
-## Diagnostics And Utilities
-
-Ad hoc root scripts now live under [`scripts/`](/Users/gordonlee/Documents/PythonOreRunner/scripts), leaving `tests/` and `py_ore_tools/benchmarks/` as the maintained automated surfaces.
-
-## Notebook Series
-
-The main notebook walkthrough lives under [`notebook_series/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series). The helpers prefer local vendored `Examples/` and local `parity_artifacts/`, and fall back to `ENGINE_REPO_ROOT` when a live ORE binary or non-vendored Engine inputs are required.
-
-For the native Python story, start with [`notebook_series/05_1_python_only_workflow.ipynb`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/05_1_python_only_workflow.ipynb). That is the canonical end-to-end in-memory flow: programmatic snapshot build, validation, support preflight, native session run, and incremental updates.
-
-Older one-off demo notebooks now live under [`notebook_series/legacy/`](/Users/gordonlee/Documents/PythonOreRunner/notebook_series/legacy).
-
-To regenerate the notebooks after editing the builder:
-
-```bash
-python3 notebook_series/build_series.py
-```
-
-## License and ORE
-
-ORE itself is separate; build and install it from the [ORE repository](https://github.com/OpenSourceRisk/Engine). This project is an add-on layer and does not replace ORE.
+- ORE itself is a separate project: [Open Risk Engine](https://github.com/OpenSourceRisk/Engine)
+- This repo can integrate with ORE, but the fast Python-native path does not require invoking the ORE executable when you use `--lgm-param-source simulation_xml` or supplied params

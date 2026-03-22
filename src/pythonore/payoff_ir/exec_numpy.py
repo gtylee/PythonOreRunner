@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Tuple
 
@@ -8,6 +9,7 @@ import numpy as np
 from pythonore.payoff_ir.ir import (
     AbsExpr,
     AboveProbExpr,
+    AssignItemStmt,
     AssignStateStmt,
     BelowProbExpr,
     BinaryExpr,
@@ -51,9 +53,14 @@ class NumpyExecutionEnv:
     n_paths: int = 1
     index_at: Any = None
     discount: Any = None
+    pay: Any = None
     above_prob: Any = None
     below_prob: Any = None
     continuation: Any = None
+    reference_date: Any = None
+    discount_t0: Any = None
+    fx_spot_t0: Any = None
+    extract_t0_result: Any = None
 
 
 def _broadcast(value: Any, n_paths: int):
@@ -76,6 +83,122 @@ def _as_scalar(value: Any):
     if arr.ndim == 1 and arr.size:
         return arr[0].item() if hasattr(arr[0], "item") else arr[0]
     return value
+
+
+def _empty_like(value: Any, n_paths: int):
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        if arr.dtype.kind in {"i", "f", "b"}:
+            return np.zeros(n_paths, dtype=float)
+        return np.full((n_paths,), None, dtype=object)
+    return np.zeros_like(arr)
+
+
+def _merge_branch_value(cond: Any, left: Any, right: Any):
+    if isinstance(left, tuple) and isinstance(right, tuple):
+        if len(left) != len(right):
+            raise ValueError("Cannot merge tuple locals with different lengths")
+        return tuple(_merge_branch_value(cond, l, r) for l, r in zip(left, right))
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            raise ValueError("Cannot merge list locals with different lengths")
+        return [_merge_branch_value(cond, l, r) for l, r in zip(left, right)]
+    return np.where(np.asarray(cond, dtype=bool), left, right)
+
+
+def _extract_t0(value: Any, env: NumpyExecutionEnv):
+    if isinstance(value, tuple):
+        return tuple(_extract_t0(v, env) for v in value)
+    if isinstance(value, list):
+        return tuple(_extract_t0(v, env) for v in value)
+    if env.extract_t0_result is not None:
+        return env.extract_t0_result(value)
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        return arr.item()
+    if arr.dtype.kind not in {"i", "f", "b"}:
+        return _as_scalar(arr)
+    return float(np.mean(arr))
+
+
+def _mc_error(value: Any, n_paths: int):
+    if isinstance(value, tuple):
+        errs = tuple(_mc_error(v, n_paths) for v in value)
+        return errs
+    if isinstance(value, list):
+        return tuple(_mc_error(v, n_paths) for v in value)
+    arr = np.asarray(value)
+    if arr.ndim == 0 or arr.dtype.kind not in {"i", "f", "b"}:
+        return None
+    if arr.size <= 1:
+        return 0.0
+    return float(np.sqrt(np.var(arr, ddof=1) / float(n_paths)))
+
+
+def _discount_t0(env: NumpyExecutionEnv, pay_date: Any, currency: Any):
+    if env.discount_t0 is not None:
+        return float(env.discount_t0(pay_date, currency))
+    if env.reference_date is None or env.discount is None:
+        return 1.0
+    return float(_as_scalar(env.discount(env.reference_date, pay_date, currency, 1)))
+
+
+def _pay_value(env: NumpyExecutionEnv, amount: Any, obs_date: Any, pay_date: Any, currency: Any):
+    if env.pay is not None:
+        return _broadcast(env.pay(amount, obs_date, pay_date, currency, env.n_paths), int(env.n_paths))
+    df = _broadcast(
+        env.discount(obs_date, pay_date, currency, env.n_paths) if env.discount is not None else 1.0,
+        int(env.n_paths),
+    )
+    return amount * df
+
+
+def _fx_spot_t0(env: NumpyExecutionEnv, currency: Any):
+    if env.fx_spot_t0 is not None:
+        return float(env.fx_spot_t0(currency))
+    return 1.0
+
+
+def _to_date(value: Any):
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return value
+    return value
+
+
+def _cashflow_results(cashflows: list[CashflowEvent], env: NumpyExecutionEnv):
+    out = []
+    for cf in cashflows:
+        amount_t0 = _extract_t0(cf.amount, env)
+        discount = 1.0
+        fx = 1.0
+        normalized_amount = amount_t0
+        pay_date = cf.pay_date
+        pay_date_cmp = _to_date(pay_date)
+        ref_date_cmp = _to_date(env.reference_date)
+        if ref_date_cmp is not None and isinstance(pay_date_cmp, date) and pay_date_cmp > ref_date_cmp:
+            fx = _fx_spot_t0(env, cf.currency)
+            discount = _discount_t0(env, pay_date, cf.currency)
+            if fx != 0.0 and discount != 0.0:
+                normalized_amount = amount_t0 / (fx * discount)
+        entry = {
+            "amount": normalized_amount,
+            "amount_t0": amount_t0,
+            "obs_date": cf.obs_date,
+            "pay_date": cf.pay_date,
+            "currency": cf.currency,
+            "logged": cf.logged,
+            "flow_type": cf.flow_type,
+            "leg": cf.leg,
+            "discount_factor": discount,
+            "fx_spot_t0": fx,
+        }
+        out.append(entry)
+    return tuple(out)
 
 
 def _eval_expr(expr: Expr, locals_: Dict[str, Any], env: NumpyExecutionEnv):
@@ -166,8 +289,10 @@ def _eval_expr(expr: Expr, locals_: Dict[str, Any], env: NumpyExecutionEnv):
         return _broadcast(env.discount(obs_date, pay_date, ccy, env.n_paths), n)
     if isinstance(expr, CashflowValueExpr):
         amount = _eval_expr(expr.amount, locals_, env)
-        df = _eval_expr(DiscountFactorExpr(expr.obs_date, expr.pay_date, expr.currency), locals_, env)
-        return amount * df
+        obs_date = _as_scalar(_eval_expr(expr.obs_date, locals_, env))
+        pay_date = _as_scalar(_eval_expr(expr.pay_date, locals_, env))
+        currency = _as_scalar(_eval_expr(expr.currency, locals_, env))
+        return _pay_value(env, amount, obs_date, pay_date, currency)
     if isinstance(expr, AboveProbExpr):
         if env.above_prob is None:
             raise ValueError("above_prob callback is required for AboveProbExpr")
@@ -212,6 +337,16 @@ def _execute_block(stmts, locals_: Dict[str, Any], env: NumpyExecutionEnv, cashf
             locals_[stmt.name] = _eval_expr(stmt.expr, locals_, env)
         elif isinstance(stmt, AssignStateStmt):
             locals_[stmt.name] = _eval_expr(stmt.expr, locals_, env)
+        elif isinstance(stmt, AssignItemStmt):
+            idx = int(_as_scalar(_eval_expr(stmt.index, locals_, env))) - 1
+            value = _eval_expr(stmt.expr, locals_, env)
+            current = locals_.get(stmt.target, tuple())
+            if not isinstance(current, list):
+                current = list(current) if isinstance(current, tuple) else []
+            while len(current) <= idx:
+                current.append(_empty_like(value, int(env.n_paths)))
+            current[idx] = value
+            locals_[stmt.target] = tuple(current)
         elif isinstance(stmt, RequireStmt):
             cond = np.asarray(_eval_expr(stmt.condition, locals_, env), dtype=bool)
             if not bool(np.all(cond)):
@@ -228,7 +363,7 @@ def _execute_block(stmts, locals_: Dict[str, Any], env: NumpyExecutionEnv, cashf
                 _execute_block(stmt.then_body, then_locals, env, cashflows, results)
                 _execute_block(stmt.else_body, else_locals, env, cashflows, results)
                 for key in set(then_locals) & set(else_locals):
-                    locals_[key] = np.where(cond, then_locals[key], else_locals[key])
+                    locals_[key] = _merge_branch_value(cond, then_locals[key], else_locals[key])
         elif isinstance(stmt, ForEachDateStmt):
             if isinstance(stmt.schedule, ParamRefExpr):
                 schedule = env.parameters[stmt.schedule.name]
@@ -242,9 +377,17 @@ def _execute_block(stmts, locals_: Dict[str, Any], env: NumpyExecutionEnv, cashf
                     locals_[stmt.index_var] = _broadcast(i, env.n_paths)
                 _execute_block(stmt.body, locals_, env, cashflows, results)
         elif isinstance(stmt, EmitCashflowStmt):
-            cashflows.append(CashflowEvent(_eval_expr(stmt.amount, locals_, env), _as_scalar(_eval_expr(stmt.obs_date, locals_, env)), _as_scalar(_eval_expr(stmt.pay_date, locals_, env)), _as_scalar(_eval_expr(stmt.currency, locals_, env)), logged=False, flow_type=stmt.flow_type, leg=stmt.leg, metadata=stmt.metadata))
+            amount = _eval_expr(stmt.amount, locals_, env)
+            obs_date = _as_scalar(_eval_expr(stmt.obs_date, locals_, env))
+            pay_date = _as_scalar(_eval_expr(stmt.pay_date, locals_, env))
+            currency = _as_scalar(_eval_expr(stmt.currency, locals_, env))
+            cashflows.append(CashflowEvent(_pay_value(env, amount, obs_date, pay_date, currency), obs_date, pay_date, currency, logged=False, flow_type=stmt.flow_type, leg=stmt.leg, metadata=stmt.metadata))
         elif isinstance(stmt, EmitLoggedCashflowStmt):
-            cashflows.append(CashflowEvent(_eval_expr(stmt.amount, locals_, env), _as_scalar(_eval_expr(stmt.obs_date, locals_, env)), _as_scalar(_eval_expr(stmt.pay_date, locals_, env)), _as_scalar(_eval_expr(stmt.currency, locals_, env)), logged=True, flow_type=stmt.flow_type, leg=stmt.leg, metadata=stmt.metadata))
+            amount = _eval_expr(stmt.amount, locals_, env)
+            obs_date = _as_scalar(_eval_expr(stmt.obs_date, locals_, env))
+            pay_date = _as_scalar(_eval_expr(stmt.pay_date, locals_, env))
+            currency = _as_scalar(_eval_expr(stmt.currency, locals_, env))
+            cashflows.append(CashflowEvent(_pay_value(env, amount, obs_date, pay_date, currency), obs_date, pay_date, currency, logged=True, flow_type=stmt.flow_type, leg=stmt.leg, metadata=stmt.metadata))
         elif isinstance(stmt, RecordResultStmt):
             results[stmt.name] = _eval_expr(stmt.expr, locals_, env)
         elif isinstance(stmt, SetNpvStmt):
@@ -261,4 +404,14 @@ def execute_numpy(module: PayoffModuleIR, env: NumpyExecutionEnv) -> ExecutionRe
     npv = _execute_block(mod.regions, locals_, env, cashflows, results)
     if npv is None:
         raise ValueError("Module execution did not produce an NPV")
-    return ExecutionResult(npv=npv, results=results, cashflows=tuple(cashflows), metadata={"backend": "numpy"})
+    result_t0 = {k: _extract_t0(v, env) for k, v in results.items()}
+    result_err = {k: _mc_error(v, int(env.n_paths)) for k, v in results.items() if _mc_error(v, int(env.n_paths)) is not None}
+    metadata = {
+        "backend": "numpy",
+        "npv_t0": _extract_t0(npv, env),
+        "npv_mc_err_est": _mc_error(npv, int(env.n_paths)),
+        "results_t0": result_t0,
+        "results_mc_err_est": result_err,
+        "cashflow_results": _cashflow_results(cashflows, env),
+    }
+    return ExecutionResult(npv=npv, results=results, cashflows=tuple(cashflows), metadata=metadata)

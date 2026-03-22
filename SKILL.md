@@ -208,6 +208,202 @@ If a rerun is materially slower, suspect process overlap, file contention, or ch
 
 ## Number Matching and Parity
 
+### For current Python LGM parity, `ore_sobol_bridge` is the best tested RNG mode
+
+For the current native Python parity work, the best tested Python-side RNG construction is:
+
+- `sequence_type = SobolBrownianBridge`
+- QuantLib `SobolRsg(..., JoeKuoD7)`
+- inverse normal transform
+- `BrownianBridge(actual_times)`
+
+In the current codebase this is exposed as:
+
+- `--rng ore_sobol_bridge`
+
+This outperformed:
+
+- plain Mersenne Twister parity mode
+- MT antithetic on exposure-level parity
+- step-based Brownian bridge ordering
+- direct `SobolBrownianBridgeRsg` binding usage with skip-by-seed interpretation
+
+For the benchmark cases investigated in this repo, `JoeKuoD7 + BrownianBridge(actual_times)` gave the best overall absolute parity on EPE/ENE and the best PFE parity among the Python-accessible variants that were tested.
+
+### Do not treat Sobol seed changes like MT seed changes
+
+For the current Python Sobol parity path, varying the seed did **not** produce a useful empirical MC envelope:
+
+- the current `ore_sobol_bridge` setup is effectively deterministic across seeds in practice for the tested cases
+- naive repeated-seed sigma estimation collapses to zero
+- this makes `diff / sigma` blow up and is not a valid MC-error test
+
+If you need a Python-side MC envelope for Sobol, you need an explicit randomization method such as:
+
+- scrambling
+- digital shifts
+
+Do not assume “different Sobol seeds” gives meaningful MC variability.
+
+### Current QuantLib Python binding behavior: `SobolRsg(..., seed, ...)` does not randomize the sequence here
+
+In this environment, direct checks showed that:
+
+- `ql.SobolRsg(dim, 0, JoeKuoD7)`
+- `ql.SobolRsg(dim, 1, JoeKuoD7)`
+- `ql.SobolRsg(dim, 7, JoeKuoD7)`
+- `ql.SobolRsg(dim, 42, JoeKuoD7)`
+
+all produced the same first sequences through `InvCumulativeSobolGaussianRsg`.
+
+Implications:
+
+- threading `self.seed` into the current Python Sobol generator is semantically cleaner, but it does **not** create distinct runs in this binding
+- the current parity residual is therefore not explained by a dropped Sobol seed argument
+- if you want stochastic Sobol replications, you need explicit scrambling / randomization, not just a different constructor seed
+
+Lock tests should reflect actual binding behavior, not assumed QuantLib C++ semantics.
+
+### `simulation.xml` and supplied `LGMParams` are the fast Python-only parameter paths
+
+The current loader default can be very misleading for performance work.
+
+`load_from_ore_xml()` and the snapshot CLI historically resolved LGM parameters in this order:
+
+1. existing `calibration.xml`
+2. runtime `calibrate_lgm_params_via_ore(...)`
+3. fallback to `simulation.xml`
+
+That means a “Python” parity run could still spend almost all of its wall clock time in an external ORE calibration subprocess.
+
+The loader and CLI now support explicit parameter-source selection:
+
+- `auto`
+- `calibration_xml`
+- `simulation_xml`
+- `ore`
+- `provided`
+
+For pure Python runs, prefer:
+
+- `--lgm-param-source simulation_xml`
+- or `provided_lgm_params` programmatically
+
+This is a major performance switch, not a small detail.
+
+### Current performance bottleneck finding: setup dominated by ORE calibration, not Python simulation
+
+On the flat EUR 5Y parity case, the profiled Python snapshot workflow showed:
+
+- `auto`: about `11.2s`
+- `simulation_xml`: about `0.13s`
+- `provided`: about `0.13s`
+
+The actual Python simulation and exposure assembly were only around `0.1s` to `0.2s`.
+
+The rest was overwhelmingly:
+
+- `load_from_ore_xml()`
+- `resolve_lgm_params()`
+- `calibrate_lgm_params_via_ore()`
+
+So if a “Python” run is taking around `10s+`, check whether it is silently invoking ORE calibration before blaming path simulation performance.
+
+### Current parity interpretation after the RNG work
+
+After aligning the Python parity RNG more closely with ORE, the remaining gap is no longer a big model bug signal.
+
+Current state on the main flat benchmark cases at `2000` paths with the Python-native path:
+
+- EPE/ENE absolute parity is quite tight
+- the remaining gap is concentrated in PFE tail behavior
+- the remaining discrepancy looks like last-mile temporal coupling / low-discrepancy path identity, not a large pricing formula mismatch
+
+So the right escalation order is:
+
+1. RNG / path-coupling diagnostics
+2. scenario-surface diagnostics
+3. only then pricing logic
+
+Do not jump back into coupon-projection debugging unless there is new evidence.
+
+### First-step parity diagnosis on the flat EUR 5Y case
+
+The first non-zero future exposure point on the flat EUR 5Y benchmark was a useful diagnostic anchor.
+
+At the first future date:
+
+- Python and ORE first-step LGM state distributions matched very closely
+- Python and ORE first-step numeraire distributions also matched very closely
+- the remaining gap was already present in the deflated trade NPV distribution
+
+So the first-step miss is **not**:
+
+- a PFE quantile-index bug
+- a report extraction bug
+- a first-step Sobol / state-generation bug
+- a numeraire bug
+
+It is downstream in trade valuation on an already well-aligned scenario surface.
+
+### First-step fixed-vs-float decomposition result
+
+On the flat EUR 5Y case at the first future date:
+
+- the fixed leg was a relatively stable positive offset
+- the total trade distribution was driven almost entirely by the floating leg
+- fixed-vs-float correlation was extremely high
+
+This means visible PFE/EPE differences can come from very small coupon-strip valuation differences because the trade is a near-cancellation of two large legs.
+
+### The first locked floating coupon is not the culprit
+
+The first locked floating coupon on the flat EUR 5Y case matched ORE very closely in mean PV.
+
+So the early-curve parity miss is **not** explained by:
+
+- a bad first fixing
+- a bad first locked coupon amount
+- a bad first locked coupon discounting step
+
+That narrows the residual early miss to the projected floating strip rather than the first coupon.
+
+### Projected-strip diagnosis: close in level, amplified by near-cancellation
+
+On the first two future dates of the flat EUR 5Y case:
+
+- the projected floating strip was close in aggregate mean level
+- the strip was stable from step 1 to step 2
+- the fixed-side offset block was also stable from step 1 to step 2
+
+The apparent jump in inferred strip mismatch between steps was largely an attribution artifact caused by subtracting large, nearly cancelling components from a small residual mean.
+
+Practical interpretation:
+
+- the remaining early-step parity miss is not a single bad coupon bug
+- it is not dominated by the first two projected coupons
+- it is not dominated by the back end of the projected strip either
+- it is a small component-level residual that becomes visible after offsetting large fixed and floating blocks
+
+Do not over-interpret a few-thousand PV gap in the inferred strip when the total trade mean is the residual of offsets around `+941k` and `-940k`.
+
+### Relative ENE tails can be misleading when ORE ENE is near zero
+
+On the flat USD 5Y case, the headline `ENE p95 %` looked much worse than the actual economic mismatch.
+
+The worst relative ENE points were front-end dates where:
+
+- ORE ENE was very small
+- absolute ENE differences were modest
+
+Once you condition on materially non-zero ORE ENE, the relative picture improves substantially.
+
+So when interpreting ENE parity:
+
+- always inspect absolute errors
+- bucket or mask relative errors when ORE ENE is close to zero
+- do not treat a large relative ENE number alone as evidence of a serious valuation bug
+
 ### For parity, prefer fresh ORE reruns over baked `Output/` folders
 
 Several benchmark cases under `Tools/PythonOreRunner/parity_artifacts/...` ship with static `Output/` files. Those are useful for inspection, but they are not authoritative when testing:

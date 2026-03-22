@@ -37,6 +37,8 @@ _EXPORTS = {
     "emit_ore_script": ("pythonore.payoff_ir", "emit_ore_script"),
     "normalize_module": ("pythonore.payoff_ir", "normalize_module"),
     "validate_module": ("pythonore.payoff_ir", "validate_module"),
+    "BlackScholesMonteCarloModel": ("pythonore.payoff_ir", "BlackScholesMonteCarloModel"),
+    "build_equity_ore_black_scholes_model": ("pythonore.payoff_ir", "build_equity_ore_black_scholes_model"),
 }
 
 __all__ = sorted(_EXPORTS)

@@ -411,6 +411,7 @@ class PurePythonRunOptions:
     seed: int = 42
     rng: str = "ore_parity"
     xva_mode: str = "ore"
+    lgm_param_source: str = "auto"
     anchor_t0_npv: bool = False
     own_hazard: float = 0.01
     own_recovery: float = 0.4
@@ -1165,12 +1166,36 @@ def _load_equity_vol_spec(
     )
     if node is None:
         raise ValueError(f"curveconfig.xml missing EquityVolatility with CurveId '{curve_id}'")
+    dimension = (node.findtext("./Dimension") or "ATM").strip()
+    strike_surface = node.find("./StrikeSurface")
+    if strike_surface is not None:
+        dimension = "StrikeSurface"
     return {
         "curve_id": curve_id,
         "currency": (node.findtext("./Currency") or "").strip().upper(),
-        "dimension": (node.findtext("./Dimension") or "ATM").strip(),
-        "expiries": [x.strip() for x in (node.findtext("./Expiries") or "").replace("\n", "").split(",") if x.strip()],
-        "strikes": [x.strip() for x in (node.findtext("./Strikes") or "").replace("\n", "").split(",") if x.strip()],
+        "dimension": dimension,
+        "quote_type": (
+            strike_surface.findtext("./QuoteType")
+            if strike_surface is not None
+            else node.findtext("./QuoteType")
+        ) or "",
+        "exercise_type": (strike_surface.findtext("./ExerciseType") if strike_surface is not None else "") or "",
+        "expiries": [
+            x.strip()
+            for x in (
+                (strike_surface.findtext("./Expiries") if strike_surface is not None else node.findtext("./Expiries"))
+                or ""
+            ).replace("\n", "").split(",")
+            if x.strip()
+        ],
+        "strikes": [
+            x.strip()
+            for x in (
+                (strike_surface.findtext("./Strikes") if strike_surface is not None else node.findtext("./Strikes"))
+                or ""
+            ).replace("\n", "").split(",")
+            if x.strip()
+        ],
     }
 
 
@@ -4556,8 +4581,15 @@ def _compute_snapshot_case(
     own_hazard: float,
     own_recovery: float,
     xva_mode: str,
+    lgm_param_source: str = "auto",
+    provided_lgm_params: object = None,
 ) -> SnapshotComputation:
-    snap = load_from_ore_xml(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    snap = load_from_ore_xml(
+        ore_xml,
+        anchor_t0_npv=anchor_t0_npv,
+        lgm_param_source=lgm_param_source,
+        provided_lgm_params=provided_lgm_params,
+    )
     pfe_quantile = _ore_exposure_quantile(ore_xml)
     effective_paths = int(paths) if paths is not None else int(getattr(snap, "n_samples", 500) or 500)
     model = snap.build_model()
@@ -5711,6 +5743,7 @@ def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: P
         seed=int(options.seed),
         rng=options.rng,
         xva_mode=options.xva_mode,
+        lgm_param_source=options.lgm_param_source,
         anchor_t0_npv=options.anchor_t0_npv,
         own_hazard=float(options.own_hazard),
         own_recovery=float(options.own_recovery),
@@ -6566,6 +6599,7 @@ def _run_case(
                     own_hazard=args.own_hazard,
                     own_recovery=args.own_recovery,
                     xva_mode=args.xva_mode,
+                    lgm_param_source=args.lgm_param_source,
                 )
         except Exception as exc:
             if not _is_reference_fallback_error(exc):
@@ -6794,7 +6828,11 @@ def _run_preflight_case(
     *,
     artifact_root: Path,
 ) -> dict[str, Any]:
-    snapshot = load_from_ore_xml(ore_xml, anchor_t0_npv=args.anchor_t0_npv)
+    snapshot = load_from_ore_xml(
+        ore_xml,
+        anchor_t0_npv=args.anchor_t0_npv,
+        lgm_param_source=args.lgm_param_source,
+    )
     requested_modes = [name for name, enabled in asdict(_infer_modes(args, ore_xml)).items() if enabled]
     validation = validate_ore_input_snapshot(ore_xml, requested_modes=requested_modes)
     support = classify_portfolio_support(snapshot, fallback_to_swig=False)
@@ -7027,6 +7065,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="ore_parity",
     )
     parser.add_argument("--xva-mode", choices=("classic", "ore"), default="ore")
+    parser.add_argument(
+        "--lgm-param-source",
+        choices=("auto", "calibration_xml", "simulation_xml", "ore", "provided"),
+        default="auto",
+    )
     parser.add_argument("--anchor-t0-npv", action="store_true")
     parser.add_argument("--own-hazard", type=float, default=0.01)
     parser.add_argument("--own-recovery", type=float, default=0.4)

@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 from pythonore.payoff_ir.ir import (
     AbsExpr,
     AboveProbExpr,
+    AssignItemStmt,
     AssignStateStmt,
     BelowProbExpr,
     BinaryExpr,
@@ -160,6 +161,13 @@ def _collect_used_locals(stmts: Tuple[Statement, ...]) -> set[str]:
 
     def walk_block(block: Tuple[Statement, ...]):
         for stmt in block:
+            if isinstance(stmt, AssignStateStmt):
+                used.add(stmt.name)
+            elif isinstance(stmt, AssignItemStmt):
+                used.add(stmt.target)
+            elif isinstance(stmt, ForEachDateStmt):
+                used.update(stmt.state_in)
+                used.update(stmt.state_out)
             for attr in getattr(stmt, "__dataclass_fields__", {}):
                 value = getattr(stmt, attr)
                 if isinstance(value, Expr):
@@ -212,6 +220,9 @@ def _rename_block(stmts: Tuple[Statement, ...], mapping: Dict[str, str], counter
         elif isinstance(stmt, AssignStateStmt):
             name = mapping.get(stmt.name, stmt.name)
             out.append(AssignStateStmt(name, remap(stmt.expr)))
+        elif isinstance(stmt, AssignItemStmt):
+            target = mapping.get(stmt.target, stmt.target)
+            out.append(AssignItemStmt(target, remap(stmt.index), remap(stmt.expr)))
         elif isinstance(stmt, IfStmt):
             out.append(
                 IfStmt(
@@ -267,6 +278,8 @@ def normalize_module(module: PayoffModuleIR) -> PayoffModuleIR:
                 out.append(LetStmt(stmt.name, _normalize_expr(stmt.expr, cache)))
             elif isinstance(stmt, AssignStateStmt):
                 out.append(AssignStateStmt(stmt.name, _normalize_expr(stmt.expr, cache)))
+            elif isinstance(stmt, AssignItemStmt):
+                out.append(AssignItemStmt(stmt.target, _normalize_expr(stmt.index, cache), _normalize_expr(stmt.expr, cache)))
             elif isinstance(stmt, IfStmt):
                 out.append(IfStmt(_normalize_expr(stmt.condition, cache), norm_block(stmt.then_body), norm_block(stmt.else_body)))
             elif isinstance(stmt, ForEachDateStmt):

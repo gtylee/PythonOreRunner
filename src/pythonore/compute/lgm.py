@@ -229,6 +229,7 @@ class OreSobolBrownianBridgeGaussianRng:
         self.seed = _coerce_seed(seed)
         self._dimension: Optional[int] = None
         self._generator = None
+        self._bridge = None
         self._bridge_times: Optional[tuple[float, ...]] = None
 
     def _ensure_dimension(self, size: int) -> None:
@@ -237,9 +238,17 @@ class OreSobolBrownianBridgeGaussianRng:
             raise ValueError("size must be positive")
         if self._dimension is None:
             ql = _load_quantlib()
-            self._generator = ql.SobolBrownianBridgeRsg(1, size)
-            for _ in range(self.seed):
-                self._generator.nextSequence()
+            sobol = ql.SobolRsg(size, self.seed, ql.SobolRsg.JoeKuoD7)
+            self._generator = ql.InvCumulativeSobolGaussianRsg(sobol)
+            if self._bridge_times is not None:
+                if len(self._bridge_times) != size:
+                    raise ValueError(
+                        "configured bridge time grid length must match RNG dimension "
+                        f"{size}, got {len(self._bridge_times)}"
+                    )
+                self._bridge = ql.BrownianBridge(list(self._bridge_times))
+            else:
+                self._bridge = ql.BrownianBridge(size)
             self._dimension = size
             return
         if size != self._dimension:
@@ -264,7 +273,8 @@ class OreSobolBrownianBridgeGaussianRng:
     def next_sequence(self, size: int) -> np.ndarray:
         self._ensure_dimension(size)
         assert self._generator is not None
-        return np.asarray(self._generator.nextSequence().value(), dtype=float)
+        assert self._bridge is not None
+        return np.asarray(self._bridge.transform(self._generator.nextSequence().value()), dtype=float)
 
     def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
         if isinstance(size, tuple):

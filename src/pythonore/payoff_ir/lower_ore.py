@@ -5,6 +5,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from pythonore.payoff_ir.ir import (
+    AssignItemStmt,
     AssignStateStmt,
     BinaryExpr,
     BooleanExpr,
@@ -52,7 +53,24 @@ class _State:
     def __init__(self):
         self.parameters: Dict[str, object] = {}
         self.seen: set[str] = set()
+        self.declared_locals: set[str] = set()
+        self.defined_locals: set[str] = set()
         self.cashflow_counter = 0
+
+    def clone(self) -> "_State":
+        other = _State()
+        other.parameters = dict(self.parameters)
+        other.seen = set(self.seen)
+        other.declared_locals = set(self.declared_locals)
+        other.defined_locals = set(self.defined_locals)
+        other.cashflow_counter = self.cashflow_counter
+        return other
+
+    def merge_metadata(self, other: "_State") -> None:
+        self.parameters.update(other.parameters)
+        self.seen |= other.seen
+        self.declared_locals |= other.declared_locals
+        self.cashflow_counter = max(self.cashflow_counter, other.cashflow_counter)
 
     def add_param(self, name: str, kind: str):
         if name in self.parameters:
@@ -116,6 +134,8 @@ def _lower_ast_expr(node: ast.AST, state: _State, loop_schedule: Optional[str] =
         if loop_index and node.id == loop_index:
             return LocalRefExpr(node.id), ()
         if loop_date and node.id == loop_date:
+            return LocalRefExpr(node.id), ()
+        if node.id in state.seen or node.id in state.declared_locals or node.id in state.defined_locals:
             return LocalRefExpr(node.id), ()
         if node.id and node.id[0].isupper():
             kind = "number"
@@ -230,19 +250,12 @@ def _parse_block(lines: List[str], pos: int, state: _State, loop_schedule: Optio
             decl_kind = decl.group(1).upper()
             names = [x.strip() for x in decl.group(2).split(",") if x.strip()]
             for name in names:
-                if name[0].isupper():
-                    if decl_kind == "EVENT":
-                        kind = "date_schedule" if name.endswith("Dates") else "date"
-                    else:
-                        kind = {
-                            "NUMBER": "number",
-                            "INDEX": "index",
-                            "CURRENCY": "currency",
-                            "DAYCOUNTER": "daycount",
-                        }[decl_kind]
-                    state.add_param(name, kind)
-                else:
-                    state.seen.add(name)
+                local_name = name.split("[", 1)[0].strip()
+                if local_name not in state.seen:
+                    state.seen.add(local_name)
+                    state.declared_locals.add(local_name)
+                    state.defined_locals.add(local_name)
+                    out.append(LetStmt(local_name, ConstantExpr(0.0)))
             pos += 1
             continue
         loop = _FOR_RE.match(line)
@@ -259,12 +272,31 @@ def _parse_block(lines: List[str], pos: int, state: _State, loop_schedule: Optio
         if upper.startswith("IF ") and upper.endswith(" THEN"):
             cond_text = line[3:-5].strip()
             cond, prep = _lower_expr_from_str(cond_text, state, loop_schedule, loop_index, loop_date)
-            then_body, pos = _parse_block(lines, pos + 1, state, loop_schedule, loop_index, loop_date)
+            outer_defined = set(state.defined_locals)
+
+            then_state = state.clone()
+            then_body, pos = _parse_block(lines, pos + 1, then_state, loop_schedule, loop_index, loop_date)
             else_body = []
+            else_state = state.clone()
+            else_state.cashflow_counter = then_state.cashflow_counter
             if pos < len(lines) and lines[pos].strip().upper() == "ELSE":
-                else_body, pos = _parse_block(lines, pos + 1, state, loop_schedule, loop_index, loop_date)
+                else_body, pos = _parse_block(lines, pos + 1, else_state, loop_schedule, loop_index, loop_date)
             if pos >= len(lines) or lines[pos].strip().upper() != "END":
                 raise ValueError("IF without matching END")
+
+            state.merge_metadata(then_state)
+            state.merge_metadata(else_state)
+
+            common_new_defs = (then_state.defined_locals - outer_defined) & (else_state.defined_locals - outer_defined) if else_body else set()
+            for name in sorted(common_new_defs):
+                if name not in state.defined_locals:
+                    state.seen.add(name)
+                    state.defined_locals.add(name)
+                    out.append(LetStmt(name, ConstantExpr(0.0)))
+            if common_new_defs:
+                then_body = _rewrite_branch_defs(tuple(then_body), common_new_defs)
+                else_body = _rewrite_branch_defs(tuple(else_body), common_new_defs)
+
             out.extend(prep)
             out.append(IfStmt(cond, tuple(then_body), tuple(else_body)))
             pos += 1
@@ -279,15 +311,57 @@ def _parse_block(lines: List[str], pos: int, state: _State, loop_schedule: Optio
             name, expr_txt = [x.strip() for x in line.split("=", 1)]
             expr, prep = _lower_expr_from_str(expr_txt, state, loop_schedule, loop_index, loop_date)
             out.extend(prep)
-            if name in state.seen:
+            item_match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\[(.+)\]$", name)
+            if item_match:
+                target = item_match.group(1).strip()
+                idx_expr, idx_prep = _lower_expr_from_str(item_match.group(2).strip(), state, loop_schedule, loop_index, loop_date)
+                out.extend(idx_prep)
+                if target not in state.seen:
+                    state.seen.add(target)
+                    state.defined_locals.add(target)
+                    out.append(LetStmt(target, ConstantExpr(tuple())))
+                out.append(AssignItemStmt(target, idx_expr, expr))
+                pos += 1
+                continue
+            if name in state.defined_locals:
                 out.append(AssignStateStmt(name, expr))
             else:
                 state.seen.add(name)
+                state.defined_locals.add(name)
                 out.append(LetStmt(name, expr))
             pos += 1
             continue
         raise ValueError(f"Unsupported ORE statement '{line}'")
     return out, pos
+
+
+def _rewrite_branch_defs(stmts: Tuple, names: set[str]) -> Tuple:
+    out = []
+    for stmt in stmts:
+        if isinstance(stmt, LetStmt) and stmt.name in names:
+            out.append(AssignStateStmt(stmt.name, stmt.expr))
+        elif isinstance(stmt, IfStmt):
+            out.append(
+                IfStmt(
+                    stmt.condition,
+                    _rewrite_branch_defs(stmt.then_body, names),
+                    _rewrite_branch_defs(stmt.else_body, names),
+                )
+            )
+        elif isinstance(stmt, ForEachDateStmt):
+            out.append(
+                ForEachDateStmt(
+                    stmt.schedule,
+                    stmt.loop_var,
+                    _rewrite_branch_defs(stmt.body, names),
+                    stmt.state_in,
+                    stmt.state_out,
+                    stmt.index_var,
+                )
+            )
+        else:
+            out.append(stmt)
+    return tuple(out)
 
 
 def lower_ore_script(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pythonore.payoff_ir.black_scholes import BlackScholesMonteCarloModel, build_equity_ore_black_scholes_model
 from pythonore.payoff_ir.diff import diff_modules, render_module
 from pythonore.payoff_ir.emit_ore import emit_ore_script
 from pythonore.payoff_ir.ir import (
@@ -46,6 +47,8 @@ __all__ = [
     "AboveProbExpr",
     "AssignStateStmt",
     "BelowProbExpr",
+    "BlackScholesMonteCarloModel",
+    "build_equity_ore_black_scholes_model",
     "BinaryExpr",
     "BooleanExpr",
     "CashflowValueExpr",
