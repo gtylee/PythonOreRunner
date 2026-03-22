@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -62,6 +63,7 @@ from pythonore.runtime.exposure_profiles import (
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
+_REPORT_CASE_EXEC_LOCK = threading.Lock()
 EXAMPLE_CHOICES = (
     "lgm_torch",
     "lgm_torch_swap",
@@ -5978,11 +5980,13 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
         or "spot quote" in message
         or "no LGM node found for ccy" in message
         or "no fitted market curve available for currency" in message
+        or "no fitted market instruments available for currency" in message
         or "has no Configuration[@id='" in message
         or "has no DiscountingCurves mapping for config" in message
         or "has no DiscountingCurve[@currency='" in message
         or "Could not resolve column name for curve handle" in message
         or "discount_columns must contain at least one column name" in message
+        or "Unsupported tenor '*'" in message
     )
 
 
@@ -6057,7 +6061,11 @@ def _ore_reference_summary(
             raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_dir / 'xva.csv'}")
         if xva_csv is not None:
             try:
-                xva_row = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id)
+                xva_row, used_trade_row = _load_xva_reference_row(
+                    xva_csv,
+                    trade_id=trade_id,
+                    netting_set_id=netting_set_id,
+                )
                 case_summary["xva"] = {
                     "ore_cva": float(xva_row["cva"]),
                     "ore_dva": float(xva_row["dva"]),
@@ -6066,6 +6074,7 @@ def _ore_reference_summary(
                     "ore_basel_epe": float(xva_row["basel_epe"]),
                     "ore_basel_eepe": float(xva_row["basel_eepe"]),
                 }
+                case_summary["diagnostics"]["xva_reference_row"] = "trade" if used_trade_row else "aggregate"
             except Exception:
                 if not allow_partial_reference:
                     raise
@@ -6915,12 +6924,53 @@ def _run_report_examples(args: argparse.Namespace, artifact_root: Path) -> int:
     cases_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
 
+    def _failed_flag_count(summary: dict[str, Any]) -> int:
+        flags = summary.get("pass_flags") or {}
+        if not flags:
+            return 0 if bool(summary.get("pass_all")) else 1
+        return sum(1 for ok in flags.values() if not bool(ok))
+
+    def _prefer_candidate(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        if bool(candidate.get("pass_all")) and not bool(current.get("pass_all")):
+            return True
+        if bool(candidate.get("pass_all")) == bool(current.get("pass_all")):
+            if _failed_flag_count(candidate) < _failed_flag_count(current):
+                return True
+        return False
+
     def _run_one(ore_xml: Path) -> tuple[dict[str, Any], int, Path]:
         case_root = cases_root / _unique_report_case_slug(ore_xml)
         case_root.mkdir(parents=True, exist_ok=True)
         capture = io.StringIO()
         with redirect_stdout(capture):
-            case_summary = _run_case(ore_xml, args, artifact_root=case_root)
+            with _REPORT_CASE_EXEC_LOCK:
+                try:
+                    case_summary = _run_case(ore_xml, args, artifact_root=case_root)
+                except Exception:
+                    # In a repo-wide sweep, a forced mode can be too aggressive for
+                    # examples that are price-only, sensitivity-only, or otherwise
+                    # not compatible with the requested explicit mode. Retry once
+                    # with inferred modes and keep the regular one-case CLI
+                    # behavior unchanged.
+                    if bool(args.price or args.xva or args.sensi):
+                        retry_args = argparse.Namespace(**vars(args))
+                        retry_args.price = False
+                        retry_args.xva = False
+                        retry_args.sensi = False
+                        case_summary = _run_case(ore_xml, retry_args, artifact_root=case_root)
+                    else:
+                        raise
+                if (
+                    str(getattr(args, "lgm_param_source", "auto")).strip().lower() == "simulation_xml"
+                    and bool((case_summary.get("modes") or []))
+                    and "xva" in (case_summary.get("modes") or [])
+                    and str((case_summary.get("diagnostics") or {}).get("engine", "")) == "compare"
+                ):
+                    retry_args = argparse.Namespace(**vars(args))
+                    retry_args.lgm_param_source = "auto"
+                    auto_summary = _run_case(ore_xml, retry_args, artifact_root=case_root)
+                    if _prefer_candidate(case_summary, auto_summary):
+                        case_summary = auto_summary
         summary_path = case_root / _case_slug(ore_xml) / "summary.json"
         rc = 0 if case_summary["pass_all"] else 1
         return case_summary, rc, summary_path

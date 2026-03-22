@@ -60,6 +60,7 @@ import dataclasses
 import json
 import subprocess
 import tempfile
+import threading
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from functools import lru_cache
@@ -99,6 +100,8 @@ from pythonore.repo_paths import default_ore_bin
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = REPO_ROOT
 LGMParamSource = str
+_RUNTIME_LGM_CALIBRATION_CACHE: dict[tuple[str, ...], dict[str, object]] = {}
+_RUNTIME_LGM_CALIBRATION_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +800,10 @@ def calibrate_lgm_params_via_ore(
         for name, value in (
             ("inputPath", str(input_root)),
             ("outputPath", str((temp_root / "Output").resolve())),
+            # Runtime calibration should be invariant to the caller's logging
+            # configuration; normalize it so example variants that only differ
+            # by log settings resolve the same temporary calibration inputs.
+            ("logMask", "31"),
         ):
             node = setup_params.get(name)
             if node is None:
@@ -898,12 +905,25 @@ def resolve_lgm_params(
             if lgm_param_source in {"calibration", "calibration_xml"}:
                 raise
     if lgm_param_source in {"auto", "ore", "runtime_calibration"}:
-        params_dict = calibrate_lgm_params_via_ore(
-            ore_xml_path=ore_xml_path,
-            input_dir=input_dir,
-            simulation_xml_path=simulation_xml_path,
-            ccy_key=domestic_ccy,
+        runtime_cache_key = (
+            _canonical_example_resource_id(market_data_path),
+            _canonical_example_resource_id(curve_config_path),
+            _canonical_example_resource_id(conventions_path),
+            _canonical_example_resource_id(todaysmarket_xml_path),
+            str(domestic_ccy).strip() or "EUR",
+            _maybe_simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
         )
+        with _RUNTIME_LGM_CALIBRATION_LOCK:
+            params_dict = _RUNTIME_LGM_CALIBRATION_CACHE.get(runtime_cache_key)
+            if params_dict is None:
+                params_dict = calibrate_lgm_params_via_ore(
+                    ore_xml_path=ore_xml_path,
+                    input_dir=input_dir,
+                    simulation_xml_path=simulation_xml_path,
+                    ccy_key=domestic_ccy,
+                )
+                if params_dict is not None:
+                    _RUNTIME_LGM_CALIBRATION_CACHE[runtime_cache_key] = params_dict
         if params_dict is not None:
             return params_dict, "calibration", None
         if lgm_param_source in {"ore", "runtime_calibration"}:
@@ -2574,8 +2594,13 @@ def load_from_ore_xml(
     ore_epe = exposure["epe"]
     ore_ene = exposure["ene"]
 
-    # ORE XVA (aggregate row for netting set: CVA, DVA, FBA, FCA)
-    xva_row = _load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id or cpty)
+    # ORE XVA: prefer the trade row when xva.csv contains one, otherwise fall
+    # back to the aggregate netting-set row.
+    xva_row, _ = _load_ore_xva_reference_row(
+        xva_csv,
+        trade_id=trade_id,
+        netting_set_id=netting_set_id or cpty,
+    )
     ore_cva = xva_row["cva"]
     ore_dva = xva_row["dva"]
     ore_fba = xva_row["fba"]
@@ -3689,11 +3714,8 @@ def _fit_quantlib_helper_eur_nodes(
     return times, zeros
 
 
-def _load_ore_xva_aggregate(xva_csv: Path, cpty_or_netting: str) -> dict:
-    """Read the aggregate XVA row (empty TradeId) for the given netting set.
-
-    Returns dict with keys: cva, dva, fba, fca. Missing columns default to 0.0.
-    """
+def _xva_row_to_metrics(row: dict[str, str]) -> dict[str, float]:
+    """Normalize an ORE xva.csv row into the metric names used by the snapshot."""
     def _float(row: dict, key: str) -> float:
         val = row.get(key, "0") or "0"
         if val.strip() in ("", "#N/A"):
@@ -3702,6 +3724,22 @@ def _load_ore_xva_aggregate(xva_csv: Path, cpty_or_netting: str) -> dict:
             return float(val)
         except ValueError:
             return 0.0
+
+    return {
+        "cva": _float(row, "CVA"),
+        "dva": _float(row, "DVA"),
+        "fba": _float(row, "FBA"),
+        "fca": _float(row, "FCA"),
+        "basel_epe": _float(row, "BaselEPE"),
+        "basel_eepe": _float(row, "BaselEEPE"),
+    }
+
+
+def _load_ore_xva_aggregate(xva_csv: Path, cpty_or_netting: str) -> dict:
+    """Read the aggregate XVA row (empty TradeId) for the given netting set.
+
+    Returns dict with keys: cva, dva, fba, fca. Missing columns default to 0.0.
+    """
 
     with open(xva_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -3715,17 +3753,26 @@ def _load_ore_xva_aggregate(xva_csv: Path, cpty_or_netting: str) -> dict:
                 row.get("NettingSetId", "") == cpty_or_netting
                 and row.get(tid_key, "").strip() == ""
             ):
-                return {
-                    "cva": _float(row, "CVA"),
-                    "dva": _float(row, "DVA"),
-                    "fba": _float(row, "FBA"),
-                    "fca": _float(row, "FCA"),
-                    "basel_epe": _float(row, "BaselEPE"),
-                    "basel_eepe": _float(row, "BaselEEPE"),
-                }
+                return _xva_row_to_metrics(row)
     raise ValueError(
         f"Aggregate XVA row not found for netting set '{cpty_or_netting}' in {xva_csv}"
     )
+
+
+def _load_ore_xva_reference_row(xva_csv: Path, *, trade_id: str, netting_set_id: str) -> tuple[dict[str, float], bool]:
+    """Load the most comparable XVA reference row.
+
+    Prefer the explicit trade row when xva.csv contains one. Fall back to the
+    aggregate netting-set row for cases where ORE only exported aggregate XVA.
+    """
+    with open(xva_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        for row in reader:
+            if (row.get(tid_key, "") or "").strip() != str(trade_id):
+                continue
+            return _xva_row_to_metrics(row), True
+    return _load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(netting_set_id)), False
 
 
 def _load_ore_npv_details(npv_csv: Path, trade_id: str) -> dict:

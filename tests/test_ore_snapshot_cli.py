@@ -1686,6 +1686,30 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(snap.alpha_source, "provided")
         self.assertEqual(tuple(snap.lgm_params.alpha_values), (0.014, 0.014))
 
+    def test_load_ore_xva_reference_row_prefers_trade_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            xva_csv = Path(tmp) / "xva.csv"
+            xva_csv.write_text(
+                "\n".join(
+                    [
+                        "#TradeId,NettingSetId,CVA,DVA,FBA,FCA,BaselEPE,BaselEEPE",
+                        ",CPTY_A,100.0,200.0,300.0,400.0,500.0,600.0",
+                        "Swap_EUR,CPTY_A,10.0,20.0,30.0,40.0,50.0,60.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            row, used_trade_row = ore_snapshot_io._load_ore_xva_reference_row(
+                xva_csv, trade_id="Swap_EUR", netting_set_id="CPTY_A"
+            )
+        self.assertTrue(used_trade_row)
+        self.assertEqual(row["cva"], 10.0)
+        self.assertEqual(row["dva"], 20.0)
+        self.assertEqual(row["fba"], 30.0)
+        self.assertEqual(row["fca"], 40.0)
+        self.assertEqual(row["basel_epe"], 50.0)
+        self.assertEqual(row["basel_eepe"], 60.0)
+
     def test_cli_surface_parses_under_python38_grammar(self):
         files = [
             TOOLS_DIR / "src" / "pythonore" / "apps" / "ore_snapshot_cli.py",
