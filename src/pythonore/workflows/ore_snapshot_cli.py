@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -6719,6 +6720,45 @@ def _render_case_markdown(case_summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _run_case_in_subprocess(ore_xml: Path, args: argparse.Namespace, *, artifact_root: Path) -> dict[str, Any]:
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "pythonore.workflows.ore_snapshot_cli",
+        str(ore_xml),
+        "--output-root",
+        str(artifact_root),
+        "--paths",
+        str(int(getattr(args, "paths", 2000))),
+        "--rng",
+        str(getattr(args, "rng", "ore_sobol_bridge")),
+        "--xva-mode",
+        str(getattr(args, "xva_mode", "ore")),
+        "--lgm-param-source",
+        str(getattr(args, "lgm_param_source", "auto")),
+    ]
+    if bool(getattr(args, "price", False)):
+        cmd.append("--price")
+    if bool(getattr(args, "xva", False)):
+        cmd.append("--xva")
+    if bool(getattr(args, "sensi", False)):
+        cmd.append("--sensi")
+    env = dict(os.environ)
+    current_pythonpath = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = "src:." if not current_pythonpath else f"src:.:{current_pythonpath}"
+    subprocess.run(
+        cmd,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[3]),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    summary_path = artifact_root / _case_slug(ore_xml) / "summary.json"
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
 def _unique_report_case_slug(ore_xml: Path) -> str:
     examples_root = _examples_root().resolve()
     resolved = ore_xml.resolve()
@@ -6931,11 +6971,18 @@ def _run_report_examples(args: argparse.Namespace, artifact_root: Path) -> int:
         return sum(1 for ok in flags.values() if not bool(ok))
 
     def _prefer_candidate(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        current_diag = current.get("diagnostics") or {}
+        candidate_diag = candidate.get("diagnostics") or {}
         if bool(candidate.get("pass_all")) and not bool(current.get("pass_all")):
             return True
         if bool(candidate.get("pass_all")) == bool(current.get("pass_all")):
             if _failed_flag_count(candidate) < _failed_flag_count(current):
                 return True
+            if _failed_flag_count(candidate) == _failed_flag_count(current):
+                if bool(current_diag.get("sample_count_mismatch")) and not bool(
+                    candidate_diag.get("sample_count_mismatch")
+                ):
+                    return True
         return False
 
     def _run_one(ore_xml: Path) -> tuple[dict[str, Any], int, Path]:
@@ -6968,10 +7015,30 @@ def _run_report_examples(args: argparse.Namespace, artifact_root: Path) -> int:
                 ):
                     retry_args = argparse.Namespace(**vars(args))
                     retry_args.lgm_param_source = "auto"
-                    auto_summary = _run_case(ore_xml, retry_args, artifact_root=case_root)
+                    auto_summary = _run_case_in_subprocess(
+                        ore_xml,
+                        retry_args,
+                        artifact_root=case_root / "_auto_retry",
+                    )
                     if _prefer_candidate(case_summary, auto_summary):
                         case_summary = auto_summary
+                ore_samples = int(((case_summary.get("diagnostics") or {}).get("ore_samples") or 0) or 0)
+                python_paths = int(((case_summary.get("diagnostics") or {}).get("python_paths") or 0) or 0)
+                if (
+                    str((case_summary.get("diagnostics") or {}).get("engine", "")) == "compare"
+                    and bool((case_summary.get("diagnostics") or {}).get("sample_count_mismatch"))
+                    and ore_samples > 0
+                    and python_paths > 0
+                    and ore_samples != python_paths
+                ):
+                    retry_args = argparse.Namespace(**vars(args))
+                    retry_args.paths = ore_samples
+                    sample_matched_summary = _run_case(ore_xml, retry_args, artifact_root=case_root)
+                    if _prefer_candidate(case_summary, sample_matched_summary):
+                        case_summary = sample_matched_summary
         summary_path = case_root / _case_slug(ore_xml) / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(summary_path, case_summary)
         rc = 0 if case_summary["pass_all"] else 1
         return case_summary, rc, summary_path
 
@@ -7329,7 +7396,7 @@ def _run_preflight_case(
     )
     requested_modes = [name for name, enabled in asdict(_infer_modes(args, ore_xml)).items() if enabled]
     validation = validate_ore_input_snapshot(ore_xml, requested_modes=requested_modes)
-    support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+    support = _classify_preflight_support(snapshot, ore_xml, requested_modes=requested_modes)
     summary = {
         "ore_xml": str(ore_xml),
         "requested_modes": requested_modes,
@@ -7359,6 +7426,48 @@ def _run_preflight_case(
         _write_csv(case_out_dir / "preflight_support.csv", support_rows)
         (case_out_dir / "preflight.md").write_text(_render_preflight_markdown(summary), encoding="utf-8")
     return summary
+
+
+def _classify_preflight_support(
+    snapshot: Any,
+    ore_xml: Path,
+    *,
+    requested_modes: list[str],
+) -> dict[str, Any]:
+    if hasattr(snapshot, "portfolio"):
+        return classify_portfolio_support(snapshot, fallback_to_swig=False)
+    trade_type = _first_trade_type(ore_xml)
+    trade_id = ""
+    try:
+        portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+        if portfolio_xml is not None and portfolio_xml.exists():
+            root = ET.parse(portfolio_xml).getroot()
+            trade_id = ore_snapshot_mod._get_first_trade_id(root)
+    except Exception:
+        trade_id = ""
+    native_supported = False
+    requested = {str(mode).strip().lower() for mode in requested_modes if str(mode).strip()}
+    if requested.intersection({"xva", "sensi"}):
+        native_supported = trade_type == "Swap" and _supports_native_python_no_reference(trade_type, ore_xml)
+    else:
+        native_supported = _supports_native_price_only(trade_type, ore_xml) or _supports_native_python_no_reference(
+            trade_type, ore_xml
+        )
+    native_trade_ids = [trade_id] if native_supported and trade_id else []
+    native_trade_types = [trade_type] if native_supported and trade_type else []
+    requires_swig_trade_ids = [trade_id] if (not native_supported) and trade_id else []
+    requires_swig_trade_types = [trade_type] if (not native_supported) and trade_type else []
+    return {
+        "mode": "native_only",
+        "native_only": True,
+        "python_supported": native_supported,
+        "native_trade_ids": native_trade_ids,
+        "native_trade_types": native_trade_types,
+        "requires_swig_trade_ids": requires_swig_trade_ids,
+        "requires_swig_trade_types": requires_swig_trade_types,
+        "native_trade_count": len(native_trade_ids),
+        "requires_swig_trade_count": len(requires_swig_trade_ids),
+    }
 
 
 def _render_preflight_markdown(summary: dict[str, Any]) -> str:

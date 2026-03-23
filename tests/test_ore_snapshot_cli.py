@@ -357,7 +357,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                 "summary": {"source_mode": "ore_xml"},
             }
             with patch("py_ore_tools.ore_snapshot_cli.load_from_ore_xml", return_value=SimpleNamespace()):
-                with patch("py_ore_tools.ore_snapshot_cli.classify_portfolio_support", return_value=support):
+                with patch("py_ore_tools.ore_snapshot_cli._classify_preflight_support", return_value=support):
                     with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value=validation):
                         with redirect_stdout(stdout):
                             rc = ore_snapshot_cli.main(
@@ -1396,7 +1396,13 @@ class TestOreSnapshotCli(unittest.TestCase):
                 "shift": 0.0,
                 "scaling": 1.0,
             }
-            with patch("py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None), patch(
+            with patch.dict(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod._RUNTIME_LGM_CALIBRATION_CACHE",
+                {},
+                clear=True,
+            ), patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None
+            ), patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
                 return_value=calibrated,
             ) as calibrate_mock, patch(
@@ -1442,7 +1448,13 @@ class TestOreSnapshotCli(unittest.TestCase):
                 "shift": 0.0,
                 "scaling": 1.0,
             }
-            with patch("py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None), patch(
+            with patch.dict(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod._RUNTIME_LGM_CALIBRATION_CACHE",
+                {},
+                clear=True,
+            ), patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None
+            ), patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
                 return_value=None,
             ) as calibrate_mock, patch(
@@ -1627,7 +1639,11 @@ class TestOreSnapshotCli(unittest.TestCase):
             "shift": 0.0,
             "scaling": 1.0,
         }
-        with patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
+        with patch.dict(
+            "pythonore.io.ore_snapshot._RUNTIME_LGM_CALIBRATION_CACHE",
+            {},
+            clear=True,
+        ), patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
             return_value=calibrated,
         ) as calibrate_mock, patch(
@@ -2411,6 +2427,157 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertNotEqual(rows[0]["case_slug"], rows[1]["case_slug"])
             self.assertTrue(all(row["summary_path"] for row in rows))
+
+    def test_report_examples_mode_retries_compare_xva_cases_with_auto_lgm_params(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            examples_root = root / "Examples"
+            case_dir = examples_root / "FamilyA" / "Input"
+            case_dir.mkdir(parents=True)
+            ore_xml = case_dir / "ore.xml"
+            ore_xml.write_text("<ORE />", encoding="utf-8")
+
+            def fake_run_case(case_ore_xml, run_args, *, artifact_root):
+                out_dir = artifact_root / ore_snapshot_cli._case_slug(case_ore_xml)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                if getattr(run_args, "lgm_param_source", "auto") == "simulation_xml":
+                    payload = {
+                        "ore_xml": str(case_ore_xml),
+                        "trade_id": case_ore_xml.stem,
+                        "counterparty": "CPTY",
+                        "netting_set_id": "NET",
+                        "modes": ["xva"],
+                        "xva": {"cva_rel_diff": 0.50, "dva_rel_diff": 0.25, "fba_rel_diff": 0.0, "fca_rel_diff": 0.0},
+                        "pricing": None,
+                        "parity": {"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"]}},
+                        "diagnostics": {"engine": "compare"},
+                        "input_validation": {"input_links_valid": True, "issues": []},
+                        "pass_flags": {"xva_cva": False, "xva_dva": False},
+                        "pass_all": False,
+                    }
+                else:
+                    payload = {
+                        "ore_xml": str(case_ore_xml),
+                        "trade_id": case_ore_xml.stem,
+                        "counterparty": "CPTY",
+                        "netting_set_id": "NET",
+                        "modes": ["xva"],
+                        "xva": {"cva_rel_diff": 0.02, "dva_rel_diff": 0.01, "fba_rel_diff": 0.0, "fca_rel_diff": 0.0},
+                        "pricing": None,
+                        "parity": {"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"]}},
+                        "diagnostics": {"engine": "compare"},
+                        "input_validation": {"input_links_valid": True, "issues": []},
+                        "pass_flags": {"xva_cva": True, "xva_dva": True},
+                        "pass_all": True,
+                    }
+                (out_dir / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+
+            with patch("py_ore_tools.ore_snapshot_cli._examples_root", return_value=examples_root):
+                with patch("py_ore_tools.ore_snapshot_cli._run_case", side_effect=fake_run_case):
+                    with patch("py_ore_tools.ore_snapshot_cli._run_case_in_subprocess", side_effect=fake_run_case):
+                        rc = ore_snapshot_cli.main(
+                            [
+                                "--report-examples",
+                                "--xva",
+                                "--lgm-param-source",
+                                "simulation_xml",
+                                "--report-root",
+                                str(root / "report"),
+                                "--report-workers",
+                                "1",
+                                "--report-refresh-every",
+                                "1",
+                            ]
+                        )
+            self.assertEqual(rc, 0)
+            rows = list(csv.DictReader((root / "report" / "live_results.csv").open(encoding="utf-8")))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["bucket"], "clean_pass")
+            payload = json.loads(Path(rows[0]["summary_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(payload["pass_all"])
+            self.assertAlmostEqual(payload["xva"]["cva_rel_diff"], 0.02)
+
+    def test_report_examples_mode_retries_sample_mismatch_cases_at_ore_sample_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            examples_root = root / "Examples"
+            case_dir = examples_root / "FamilyA" / "Input"
+            case_dir.mkdir(parents=True)
+            ore_xml = case_dir / "ore.xml"
+            ore_xml.write_text("<ORE />", encoding="utf-8")
+
+            def fake_run_case(case_ore_xml, run_args, *, artifact_root):
+                out_dir = artifact_root / ore_snapshot_cli._case_slug(case_ore_xml)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                paths = int(getattr(run_args, "paths", 0))
+                if paths == 2000:
+                    payload = {
+                        "ore_xml": str(case_ore_xml),
+                        "trade_id": case_ore_xml.stem,
+                        "counterparty": "CPTY",
+                        "netting_set_id": "NET",
+                        "modes": ["xva"],
+                        "xva": {"cva_rel_diff": 0.40, "dva_rel_diff": 0.30, "fba_rel_diff": 0.0, "fca_rel_diff": 0.0},
+                        "pricing": None,
+                        "parity": {"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"]}},
+                        "diagnostics": {
+                            "engine": "compare",
+                            "sample_count_mismatch": True,
+                            "ore_samples": 200,
+                            "python_paths": 2000,
+                        },
+                        "input_validation": {"input_links_valid": True, "issues": []},
+                        "pass_flags": {"xva_cva": False, "xva_dva": False},
+                        "pass_all": False,
+                    }
+                else:
+                    payload = {
+                        "ore_xml": str(case_ore_xml),
+                        "trade_id": case_ore_xml.stem,
+                        "counterparty": "CPTY",
+                        "netting_set_id": "NET",
+                        "modes": ["xva"],
+                        "xva": {"cva_rel_diff": 0.03, "dva_rel_diff": 0.02, "fba_rel_diff": 0.0, "fca_rel_diff": 0.0},
+                        "pricing": None,
+                        "parity": {"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"]}},
+                        "diagnostics": {
+                            "engine": "compare",
+                            "sample_count_mismatch": False,
+                            "ore_samples": 200,
+                            "python_paths": 200,
+                        },
+                        "input_validation": {"input_links_valid": True, "issues": []},
+                        "pass_flags": {"xva_cva": True, "xva_dva": True},
+                        "pass_all": True,
+                    }
+                (out_dir / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+
+            with patch("py_ore_tools.ore_snapshot_cli._examples_root", return_value=examples_root):
+                with patch("py_ore_tools.ore_snapshot_cli._run_case", side_effect=fake_run_case):
+                    rc = ore_snapshot_cli.main(
+                        [
+                            "--report-examples",
+                            "--xva",
+                            "--paths",
+                            "2000",
+                            "--report-root",
+                            str(root / "report"),
+                            "--report-workers",
+                            "1",
+                            "--report-refresh-every",
+                            "1",
+                        ]
+                    )
+            self.assertEqual(rc, 0)
+            rows = list(csv.DictReader((root / "report" / "live_results.csv").open(encoding="utf-8")))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["bucket"], "clean_pass")
+            payload = json.loads(Path(rows[0]["summary_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(payload["pass_all"])
+            self.assertFalse(payload["diagnostics"]["sample_count_mismatch"])
+            self.assertEqual(payload["diagnostics"]["python_paths"], 200)
 
     def test_report_examples_mode_does_not_change_normal_single_case_behavior(self):
         args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--price"])
