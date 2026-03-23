@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,29 @@ from pythonore.runtime.sensitivity import (
     _prune_native_factor_setup_for_portfolio,
     _sample_times_for_legs,
 )
+from pythonore.runtime.runtime import ORESwigAdapter
+
+
+def test_sensitivity_comparator_defaults_to_hybrid_swig_fallback():
+    comparator = OreSnapshotPythonLgmSensitivityComparator()
+    assert comparator.engine.adapter.fallback_to_swig is True
+
+
+def test_ore_swig_adapter_primes_engine_swig_paths(tmp_path, monkeypatch):
+    engine_root = tmp_path / "Engine"
+    swig_root = engine_root / "ORE-SWIG"
+    build_lib = swig_root / "build" / "lib.fake"
+    build_lib.mkdir(parents=True)
+    swig_root.mkdir(exist_ok=True)
+    monkeypatch.setattr("pythonore.runtime.runtime.find_engine_repo_root", lambda: engine_root)
+    original_path = list(sys.path)
+    try:
+        adapter = object.__new__(ORESwigAdapter)
+        adapter._prime_swig_module_search_path()
+        assert str(swig_root) in sys.path
+        assert str(build_lib) in sys.path
+    finally:
+        sys.path[:] = original_path
 
 
 def test_compute_python_sensitivities_uses_fast_npv_path_when_available():

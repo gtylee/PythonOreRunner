@@ -55,7 +55,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
     """Finite-difference XVA sensitivities for ore_snapshot plus ORE comparison."""
 
     def __init__(self, engine: Optional[XVAEngine] = None):
-        self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=False)
+        self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=True)
 
     @classmethod
     def from_case_dir(

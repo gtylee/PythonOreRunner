@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -280,3 +281,27 @@ def test_quote_matches_discount_curve_uses_unique_trade_family_as_fallback():
     assert _quote_matches_discount_curve(quote_6m, "GBP", "GBP", fallback_family="6M") is True
     assert _quote_matches_discount_curve(quote_1d, "GBP", "GBP", fallback_family="6M") is False
     assert _quote_matches_discount_curve(quote_1d, "GBP", "GBP") is True
+
+
+def test_parse_swap_index_forward_tenors_caches_conventions_root():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    conventions_xml = """
+    <Conventions>
+      <Swap>
+        <Id>EUR_SWAP_6M</Id>
+        <Index>EUR-EURIBOR-6M</Index>
+      </Swap>
+      <SwapIndex>
+        <Id>EUR-CMS-10Y</Id>
+        <Conventions>EUR_SWAP_6M</Conventions>
+      </SwapIndex>
+    </Conventions>
+    """.strip()
+
+    with patch("pythonore.runtime.runtime.ET.fromstring", wraps=ET.fromstring) as fromstring:
+        first = adapter._parse_swap_index_forward_tenors(conventions_xml)
+        second = adapter._parse_swap_index_forward_tenors(conventions_xml)
+
+    assert first == {"EUR-CMS-10Y": "6M"}
+    assert second == first
+    assert fromstring.call_count == 1

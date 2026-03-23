@@ -80,6 +80,7 @@ from pythonore.runtime.exposure_profiles import (
 from pythonore.runtime.dim import calculate_python_dim
 from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.results import CubeAccessor, XVAResult
+from pythonore.repo_paths import find_engine_repo_root
 
 
 class RunnerAdapter(Protocol):
@@ -393,8 +394,11 @@ class PythonLgmAdapter:
         self._fixings_cache: Dict[int, Dict[tuple[str, str], float]] = {}
         self._time_date_cache: Dict[tuple[int, float], str] = {}
         self._portfolio_root_cache: Dict[int, ET.Element] = {}
+        self._ore_root_cache: Dict[int, ET.Element] = {}
+        self._todaysmarket_root_cache: Dict[int, ET.Element] = {}
         self._simulation_root_cache: Dict[int, ET.Element] = {}
         self._simulation_tenor_cache: Dict[int, np.ndarray] = {}
+        self._swap_index_forward_tenor_cache: Dict[int, Dict[str, str]] = {}
         self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
 
@@ -943,6 +947,26 @@ class PythonLgmAdapter:
             self._portfolio_root_cache[key] = root
         return root
 
+    def _ore_root_from_xml(self, ore_xml: str) -> Optional[ET.Element]:
+        if not ore_xml.strip():
+            return None
+        key = id(ore_xml)
+        root = self._ore_root_cache.get(key)
+        if root is None:
+            root = ET.fromstring(ore_xml)
+            self._ore_root_cache[key] = root
+        return root
+
+    def _todaysmarket_root_from_xml(self, todaysmarket_xml: str) -> Optional[ET.Element]:
+        if not todaysmarket_xml.strip():
+            return None
+        key = id(todaysmarket_xml)
+        root = self._todaysmarket_root_cache.get(key)
+        if root is None:
+            root = ET.fromstring(todaysmarket_xml)
+            self._todaysmarket_root_cache[key] = root
+        return root
+
     def _simulation_root_from_xml(self, simulation_xml: str) -> ET.Element:
         key = id(simulation_xml)
         root = self._simulation_root_cache.get(key)
@@ -1028,6 +1052,10 @@ class PythonLgmAdapter:
         return curves
 
     def _parse_swap_index_forward_tenors(self, conventions_xml: str) -> Dict[str, str]:
+        key = id(conventions_xml)
+        cached = self._swap_index_forward_tenor_cache.get(key)
+        if cached is not None:
+            return cached
         mapping: Dict[str, str] = {}
         if not conventions_xml.strip():
             return mapping
@@ -1048,6 +1076,7 @@ class PythonLgmAdapter:
             tenor = swap_conv_to_index.get(conv_id, "")
             if index_id and tenor:
                 mapping[index_id] = tenor
+        self._swap_index_forward_tenor_cache[key] = mapping
         return mapping
 
     def _load_inflation_curves(
@@ -1200,8 +1229,8 @@ class PythonLgmAdapter:
                 funding_lend_curve = fitted_curves.funding_lend_curve
                 curve_source = "ore_quote_fit"
             else:
-                ore_root = ET.fromstring(xml["ore.xml"]) if xml.get("ore.xml", "").strip() else None
-                tm_root = ET.fromstring(xml["todaysmarket.xml"]) if xml.get("todaysmarket.xml", "").strip() else None
+                ore_root = self._ore_root_from_xml(xml.get("ore.xml", ""))
+                tm_root = self._todaysmarket_root_from_xml(xml.get("todaysmarket.xml", ""))
                 pricing_config_id = (
                     (ore_root.findtext("./Markets/Parameter[@name='pricing']") if ore_root is not None else None)
                     or "default"
@@ -1465,7 +1494,9 @@ class PythonLgmAdapter:
 
         try:
             ore_root = ET.parse(ore_path).getroot()
-            tm_root = ET.fromstring(todaysmarket_xml)
+            tm_root = self._todaysmarket_root_from_xml(todaysmarket_xml)
+            if tm_root is None:
+                raise EngineRunError("todaysmarket.xml is empty; cannot resolve ORE output curves.")
             sim_config_id = snapshot.config.params.get("market.simulation", "default")
             pricing_config_id = str(snapshot.config.params.get("market.pricing", "")).strip()
             if not pricing_config_id:
@@ -1621,8 +1652,8 @@ class PythonLgmAdapter:
             for spec in trade_specs:
                 ccy_set.add(spec.ccy.upper())
             ore_xml_text = snapshot.config.xml_buffers.get("ore.xml", "")
-            ore_root = ET.fromstring(ore_xml_text) if ore_xml_text.strip() else None
-            tm_root = ET.fromstring(snapshot.config.xml_buffers.get("todaysmarket.xml", ""))
+            ore_root = self._ore_root_from_xml(ore_xml_text)
+            tm_root = self._todaysmarket_root_from_xml(snapshot.config.xml_buffers.get("todaysmarket.xml", ""))
             pricing_config_id = (
                 (ore_root.findtext("./Markets/Parameter[@name='pricing']") if ore_root is not None else None)
                 or "default"
@@ -3542,6 +3573,7 @@ class ORESwigAdapter:
         )
 
     def _discover_module(self) -> Any:
+        self._prime_swig_module_search_path()
         errors = []
         for mod_name in ("ORE", "oreanalytics", "OREAnalytics"):
             try:
@@ -3554,6 +3586,24 @@ class ORESwigAdapter:
             "Could not load ORE-SWIG module with InputParameters/OREApp. "
             + "; ".join(errors)
         )
+
+    def _prime_swig_module_search_path(self) -> None:
+        candidates: list[Path] = []
+        env_root = os.getenv("ORE_SWIG_ROOT", "").strip()
+        if env_root:
+            root = Path(env_root).expanduser().resolve()
+            candidates.append(root)
+            candidates.extend(sorted(root.glob("build/lib.*")))
+        engine_root = find_engine_repo_root()
+        if engine_root is not None:
+            swig_root = engine_root / "ORE-SWIG"
+            candidates.append(swig_root)
+            candidates.extend(sorted(swig_root.glob("build/lib.*")))
+        for candidate in candidates:
+            if candidate.exists():
+                candidate_str = str(candidate)
+                if candidate_str not in sys.path:
+                    sys.path.insert(0, candidate_str)
 
     def _contains_attr(self, obj: Any, name: str) -> bool:
         if hasattr(obj, name):

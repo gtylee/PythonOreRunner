@@ -26,7 +26,7 @@ ASOF_DATE = "2025-02-10"
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a broad USD rates-only ORE snapshot case and optionally run pricing plus XVA."
+        description="Generate a broad USD rates-only ORE snapshot case for pricing, XVA, and sensitivity."
     )
     parser.add_argument("--count-per-type", type=int, default=1)
     parser.add_argument("--case-root", type=Path, default=DEFAULT_CASE_ROOT)
@@ -35,7 +35,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-run", action="store_true")
     parser.add_argument("--paths", type=int, default=32)
     parser.add_argument("--price-only", action="store_true")
-    parser.add_argument("--include-digital-cmsspread", action="store_true")
     parser.add_argument(
         "--lgm-param-source",
         choices=("auto", "calibration_xml", "simulation_xml", "ore"),
@@ -52,7 +51,7 @@ def _ensure_clean_dir(path: Path, *, overwrite: bool) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _trade_blocks(count_per_type: int, *, include_digital_cmsspread: bool) -> list[str]:
+def _trade_blocks(count_per_type: int) -> list[str]:
     blocks: list[str] = []
     for i in range(1, count_per_type + 1):
         suffix = f"{i:04d}"
@@ -60,8 +59,6 @@ def _trade_blocks(count_per_type: int, *, include_digital_cmsspread: bool) -> li
             _irs_trade_xml(suffix),
             _cap_trade_xml(suffix),
             _floor_trade_xml(suffix),
-            _cms_trade_xml(suffix),
-            _cmsspread_trade_xml(suffix),
             _swaption_trade_xml(suffix),
             _basis_libor_3m_6m_trade_xml(suffix),
             _basis_libor_3m_sifma_trade_xml(suffix),
@@ -69,8 +66,6 @@ def _trade_blocks(count_per_type: int, *, include_digital_cmsspread: bool) -> li
             _basis_sofr_3m_libor_3m_trade_xml(suffix),
             _basis_sofr_3m_sifma_trade_xml(suffix),
         ]
-        if include_digital_cmsspread:
-            batch.append(_digital_cmsspread_trade_xml(suffix))
         blocks.extend(batch)
     return blocks
 
@@ -771,8 +766,8 @@ def _basis_sofr_3m_sifma_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
-def _portfolio_xml(count_per_type: int, *, include_digital_cmsspread: bool) -> str:
-    trades = "\n".join(_trade_blocks(count_per_type, include_digital_cmsspread=include_digital_cmsspread))
+def _portfolio_xml(count_per_type: int) -> str:
+    trades = "\n".join(_trade_blocks(count_per_type))
     return f"""<?xml version="1.0"?>
 <Portfolio>
 {trades}
@@ -1007,7 +1002,7 @@ def _sensitivity_xml() -> str:
 """
 
 
-def _write_files(case_root: Path, *, count_per_type: int, include_digital_cmsspread: bool) -> tuple[Path, Path]:
+def _write_files(case_root: Path, *, count_per_type: int) -> tuple[Path, Path]:
     input_dir = case_root / "Input"
     input_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1019,7 +1014,7 @@ def _write_files(case_root: Path, *, count_per_type: int, include_digital_cmsspr
 
     ore_xml.write_text(_ore_xml(), encoding="utf-8")
     portfolio_xml.write_text(
-        _portfolio_xml(count_per_type, include_digital_cmsspread=include_digital_cmsspread),
+        _portfolio_xml(count_per_type),
         encoding="utf-8",
     )
     simulation_xml.write_text(_simulation_xml(), encoding="utf-8")
@@ -1041,14 +1036,10 @@ def _case_slug(ore_xml: Path) -> str:
     return parent or ore_xml.stem
 
 
-def _product_counts(count_per_type: int, *, include_digital_cmsspread: bool) -> Iterable[tuple[str, int]]:
+def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("IRS", count_per_type)
     yield ("Cap", count_per_type)
     yield ("Floor", count_per_type)
-    yield ("CMS", count_per_type)
-    yield ("CMSSpread", count_per_type)
-    if include_digital_cmsspread:
-        yield ("DigitalCMSSpread", count_per_type)
     yield ("Swaption", count_per_type)
     yield ("Basis LIBOR3M/LIBOR6M", count_per_type)
     yield ("Basis LIBOR3M/SIFMA", count_per_type)
@@ -1069,7 +1060,6 @@ def main() -> int:
     ore_xml, portfolio_xml = _write_files(
         case_root,
         count_per_type=args.count_per_type,
-        include_digital_cmsspread=args.include_digital_cmsspread,
     )
 
     print("Generated broad USD rates snapshot example")
@@ -1078,10 +1068,9 @@ def main() -> int:
     print(f"  portfolio_xml  : {portfolio_xml}")
     print(f"  artifact_root  : {artifact_root}")
     print("  product_counts :")
-    for name, count in _product_counts(
-        args.count_per_type, include_digital_cmsspread=args.include_digital_cmsspread
-    ):
+    for name, count in _product_counts(args.count_per_type):
         print(f"    - {name}: {count}")
+    print("  note           : CMS-family trades are excluded to keep native XVA/sensitivity output working")
     print()
     print("Next scale-up:")
     print("  python3 example_ore_snapshot_usd_all_rates_products.py --count-per-type 100 --overwrite")

@@ -103,6 +103,7 @@ PROJECT_ROOT = REPO_ROOT
 LGMParamSource = str
 _RUNTIME_LGM_CALIBRATION_CACHE: dict[tuple[str, ...], dict[str, object]] = {}
 _RUNTIME_LGM_CALIBRATION_LOCK = threading.Lock()
+_PORTFOLIO_TRADE_LOOKUP_CACHE: dict[int, Dict[str, ET.Element]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2798,30 +2799,42 @@ def _get_first_trade_id(portfolio_root: ET.Element) -> str:
     raise ValueError("No trades found in portfolio XML")
 
 
+def _portfolio_trade_lookup(portfolio_root: ET.Element) -> Dict[str, ET.Element]:
+    key = id(portfolio_root)
+    cached = _PORTFOLIO_TRADE_LOOKUP_CACHE.get(key)
+    if cached is None:
+        cached = {}
+        for trade in portfolio_root.findall("./Trade"):
+            trade_id = (trade.attrib.get("id", "") or "").strip()
+            if trade_id:
+                cached[trade_id] = trade
+        _PORTFOLIO_TRADE_LOOKUP_CACHE[key] = cached
+    return cached
+
+
 def _get_cpty_from_portfolio(portfolio_root: ET.Element, trade_id: str) -> str:
-    for trade in portfolio_root.findall("./Trade"):
-        if trade.attrib.get("id", "") == trade_id:
-            cpty = (trade.findtext("./Envelope/CounterParty") or "").strip()
-            if cpty:
-                return cpty
+    trade = _portfolio_trade_lookup(portfolio_root).get(trade_id)
+    if trade is not None:
+        cpty = (trade.findtext("./Envelope/CounterParty") or "").strip()
+        if cpty:
+            return cpty
     raise ValueError(f"CounterParty not found for trade '{trade_id}'")
 
 
 def _get_netting_set_from_portfolio(portfolio_root: ET.Element, trade_id: str) -> str:
-    for trade in portfolio_root.findall("./Trade"):
-        if trade.attrib.get("id", "") == trade_id:
-            ns = (trade.findtext("./Envelope/NettingSetId") or "").strip()
-            return ns
+    trade = _portfolio_trade_lookup(portfolio_root).get(trade_id)
+    if trade is not None:
+        ns = (trade.findtext("./Envelope/NettingSetId") or "").strip()
+        return ns
     return ""
 
 
 def _get_trade_type(portfolio_root: ET.Element, trade_id: str) -> str:
-    for trade in portfolio_root.findall("./Trade"):
-        if trade.attrib.get("id", "") == trade_id:
-            trade_type = (trade.findtext("./TradeType") or "").strip()
-            if trade_type:
-                return trade_type
-            break
+    trade = _portfolio_trade_lookup(portfolio_root).get(trade_id)
+    if trade is not None:
+        trade_type = (trade.findtext("./TradeType") or "").strip()
+        if trade_type:
+            return trade_type
     raise ValueError(f"TradeType not found for trade '{trade_id}'")
 
 
@@ -2830,11 +2843,11 @@ def _get_float_index(portfolio_root: ET.Element, trade_id: str) -> str:
 
     This name is also the column header in curves.csv for the forwarding curve.
     """
-    for trade in portfolio_root.findall("./Trade"):
-        if trade.attrib.get("id", "") == trade_id:
-            idx = trade.findtext("./SwapData/LegData/FloatingLegData/Index")
-            if idx is not None:
-                return idx.strip()
+    trade = _portfolio_trade_lookup(portfolio_root).get(trade_id)
+    if trade is not None:
+        idx = trade.findtext("./SwapData/LegData/FloatingLegData/Index")
+        if idx is not None:
+            return idx.strip()
     raise ValueError(
         f"FloatingLegData/Index not found for trade '{trade_id}' in portfolio XML"
     )

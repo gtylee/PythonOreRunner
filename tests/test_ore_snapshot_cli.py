@@ -221,6 +221,37 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(parsed["tenor"], "20270320")
         self.assertAlmostEqual(float(parsed["maturity"]), 1.0, places=6)
 
+    def test_portfolio_trade_lookup_caches_trade_index(self):
+        portfolio_root = ore_snapshot_io.ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="T1">
+                <TradeType>Swap</TradeType>
+                <Envelope>
+                  <CounterParty>CP_A</CounterParty>
+                  <NettingSetId>NS_A</NettingSetId>
+                </Envelope>
+                <SwapData>
+                  <LegData>
+                    <FloatingLegData>
+                      <Index>EUR-EURIBOR-6M</Index>
+                    </FloatingLegData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        first = ore_snapshot_io._portfolio_trade_lookup(portfolio_root)
+        second = ore_snapshot_io._portfolio_trade_lookup(portfolio_root)
+
+        self.assertIs(first, second)
+        self.assertEqual(ore_snapshot_io._get_trade_type(portfolio_root, "T1"), "Swap")
+        self.assertEqual(ore_snapshot_io._get_cpty_from_portfolio(portfolio_root, "T1"), "CP_A")
+        self.assertEqual(ore_snapshot_io._get_netting_set_from_portfolio(portfolio_root, "T1"), "NS_A")
+        self.assertEqual(ore_snapshot_io._get_float_index(portfolio_root, "T1"), "EUR-EURIBOR-6M")
+
     def test_parse_market_instrument_key_rejects_invalid_dated_zero(self):
         parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/2027-13-40", asof_date="2026-03-20")
         self.assertIsNone(parsed)
