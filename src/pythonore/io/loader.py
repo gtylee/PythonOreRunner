@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 import csv
 import re
@@ -357,7 +358,7 @@ def _resolve_ref(ref: str, ore_file: Path, input_path: str) -> Path:
 
 def _load_market_quotes(path: Path) -> Tuple[MarketQuote, ...]:
     if path.suffix.lower() == ".csv":
-        return _load_market_csv(path)
+        return _load_market_csv_cached(str(path.resolve()))
     quotes: List[MarketQuote] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -372,6 +373,12 @@ def _load_market_quotes(path: Path) -> Tuple[MarketQuote, ...]:
 
 
 def _load_market_csv(path: Path) -> Tuple[MarketQuote, ...]:
+    return _load_market_csv_cached(str(path.resolve()))
+
+
+@lru_cache(maxsize=16)
+def _load_market_csv_cached(path_text: str) -> Tuple[MarketQuote, ...]:
+    path = Path(path_text)
     quotes: List[MarketQuote] = []
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -394,7 +401,7 @@ def _load_market_csv(path: Path) -> Tuple[MarketQuote, ...]:
 
 def _load_fixings(path: Path) -> Tuple[FixingPoint, ...]:
     if path.suffix.lower() == ".csv":
-        return _load_fixings_csv(path)
+        return _load_fixings_csv_cached(str(path.resolve()))
 
     out: List[FixingPoint] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -410,6 +417,12 @@ def _load_fixings(path: Path) -> Tuple[FixingPoint, ...]:
 
 
 def _load_fixings_csv(path: Path) -> Tuple[FixingPoint, ...]:
+    return _load_fixings_csv_cached(str(path.resolve()))
+
+
+@lru_cache(maxsize=16)
+def _load_fixings_csv_cached(path_text: str) -> Tuple[FixingPoint, ...]:
+    path = Path(path_text)
     out: List[FixingPoint] = []
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -968,6 +981,11 @@ def _to_dt(s: str) -> datetime:
 
 
 def _normalize_date(s: str) -> str:
+    return _normalize_date_cached(str(s).strip())
+
+
+@lru_cache(maxsize=131072)
+def _normalize_date_cached(s: str) -> str:
     s = s.strip()
     for fmt in ("%Y-%m-%d", "%Y%m%d"):
         try:

@@ -1,16 +1,19 @@
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
+import numpy as np
+from pythonore.domain.dataclasses import GenericProduct
 
 from pythonore.domain.dataclasses import MarketQuote
 from pythonore.runtime.sensitivity import (
     OreSnapshotPythonLgmSensitivityComparator,
     PythonSensitivityEntry,
+    _portfolio_has_irs_trades,
     _portfolio_factor_predicate,
     _prune_native_factor_setup_for_portfolio,
     _sample_times_for_legs,
 )
-from pythonore.runtime.runtime import ORESwigAdapter
+from pythonore.runtime.runtime import ORESwigAdapter, PythonLgmAdapter
 
 
 def test_sensitivity_comparator_defaults_to_hybrid_swig_fallback():
@@ -117,6 +120,51 @@ def test_supports_fast_npv_sensitivity_for_native_rate_option_kinds():
         assert comparator._supports_fast_npv_sensitivity(snapshot) is True
 
 
+def test_resolve_swap_npv_backend_skips_torch_for_small_irs_books():
+    comparator = OreSnapshotPythonLgmSensitivityComparator(engine=SimpleNamespace())
+    inputs = SimpleNamespace(trade_specs=(SimpleNamespace(kind="IRS"),))
+    assert comparator._resolve_swap_npv_backend(inputs) is None
+
+
+def test_resolve_swap_npv_backend_skips_torch_when_no_irs_are_present():
+    comparator = OreSnapshotPythonLgmSensitivityComparator(engine=SimpleNamespace())
+    inputs = SimpleNamespace(trade_specs=(SimpleNamespace(kind="RateSwap"),))
+    assert comparator._resolve_swap_npv_backend(inputs) is None
+
+
+def test_portfolio_has_irs_trades_detects_native_irs_products():
+    snapshot = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            trades=(SimpleNamespace(product=SimpleNamespace(product_type="IRS")),)
+        )
+    )
+    assert _portfolio_has_irs_trades(snapshot) is True
+
+
+def test_parse_model_params_honors_simulation_xml_source_for_ore_case():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    snapshot = SimpleNamespace(
+        config=SimpleNamespace(
+            params={"python.lgm_param_source": "simulation_xml"},
+            source_meta=SimpleNamespace(path="/tmp/fake/ore.xml"),
+        )
+    )
+    expected = {
+        "alpha_times": np.array([], dtype=float),
+        "alpha_values": np.array([0.01], dtype=float),
+        "kappa_times": np.array([], dtype=float),
+        "kappa_values": np.array([0.03], dtype=float),
+        "shift": 0.0,
+        "scaling": 1.0,
+    }
+    with patch.object(adapter, "_is_ore_case_snapshot", return_value=True):
+        with patch("pythonore.runtime.runtime._parse_lgm_params_from_simulation_xml_text", return_value=expected) as mocked:
+            params, source = adapter._parse_model_params({"simulation.xml": "<Simulation/>"}, "USD", snapshot)
+    assert source == "simulation"
+    assert params is expected
+    mocked.assert_called_once_with("<Simulation/>", ccy_key="USD")
+
+
 def test_sample_times_for_legs_collects_relevant_curve_points():
     legs = {
         "fixed_pay_time": [1.0, 2.0],
@@ -180,3 +228,52 @@ def test_prune_native_factor_setup_for_portfolio_keeps_only_relevant_factors():
     assert set(pruned_specs) == {"zero:EUR:5Y", "fwd:EUR:6M:5Y"}
     assert set(pruned_labels) == {"zero:EUR:5Y", "fwd:EUR:6M:5Y"}
     assert pruned_count == 1
+
+
+def test_portfolio_factor_predicate_prunes_tenors_beyond_trade_horizon():
+    trade = SimpleNamespace(
+        counterparty="CPTY_A",
+        product=SimpleNamespace(ccy="USD", float_index="USD-LIBOR-3M", maturity_years=10.0),
+    )
+    snapshot = SimpleNamespace(
+        portfolio=SimpleNamespace(trades=(trade,)),
+        config=SimpleNamespace(base_currency="USD", asof="2025-02-10"),
+    )
+    keep = _portfolio_factor_predicate(snapshot)
+    assert keep("zero:USD:10Y") is True
+    assert keep("fwd:USD:3M:10Y") is True
+    assert keep("zero:USD:30Y") is False
+    assert keep("fwd:USD:3M:30Y") is False
+
+
+def test_portfolio_factor_predicate_parses_generic_product_horizon_and_index():
+    payload = {
+        "xml": """
+<SwapData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>USD</Currency>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2025-02-10</StartDate>
+        <EndDate>2030-02-10</EndDate>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SOFR-3M</Index>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""",
+    }
+    trade = SimpleNamespace(
+        counterparty="CPTY_A",
+        product=GenericProduct(payload=payload),
+    )
+    snapshot = SimpleNamespace(
+        portfolio=SimpleNamespace(trades=(trade,)),
+        config=SimpleNamespace(base_currency="USD", asof="2025-02-10"),
+    )
+    keep = _portfolio_factor_predicate(snapshot)
+    assert keep("fwd:USD:3M:5Y") is True
+    assert keep("fwd:USD:3M:10Y") is False

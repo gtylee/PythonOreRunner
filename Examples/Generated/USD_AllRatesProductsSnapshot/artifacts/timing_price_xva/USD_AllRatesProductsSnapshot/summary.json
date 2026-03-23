@@ -6,10 +6,8 @@
     "fallback_reason": "missing_native_output",
     "missing_reference_pricing": true,
     "missing_reference_xva": true,
-    "reference_output_dirs": [
-      "/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_AllRatesProductsSnapshot/Output"
-    ],
-    "using_expected_output": false
+    "reference_output_dirs": [],
+    "using_expected_output": true
   },
   "input_validation": {
     "action_items": [

@@ -1,0 +1,33 @@
+         7761189 function calls (7506454 primitive calls) in 3.070 seconds
+
+   Ordered by: cumulative time
+   List reduced from 9415 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       20    0.000    0.000    3.544    0.177 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_jit_internal.py:1022(_overload)
+   182/84    0.001    0.000    3.166    0.038 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:316(fallthrough)
+        1    0.000    0.000    0.655    0.655 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/sensitivity.py:65(from_case_dir)
+        1    0.000    0.000    0.654    0.654 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:61(from_files)
+        1    0.000    0.000    0.576    0.576 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:359(_load_market_quotes)
+        1    0.093    0.093    0.576    0.576 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:379(_load_market_csv_cached)
+    55827    0.018    0.000    0.418    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/domain/dataclasses.py:1035(_validate_date_like)
+    56280    0.021    0.000    0.408    0.000 {built-in method strptime}
+    52322    0.010    0.000    0.400    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/domain/dataclasses.py:66(__post_init__)
+        2    0.002    0.001    0.389    0.194 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:1495(validate_ore_input_snapshot)
+    56280    0.028    0.000    0.379    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/_strptime.py:671(_strptime_datetime)
+   152/57    0.007    0.000    0.379    0.007 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:296(py_impl)
+        2    0.059    0.029    0.366    0.183 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/sensitivity.py:702(_discover_supported_quotes)
+    56280    0.189    0.000    0.351    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/_strptime.py:413(_strptime)
+        1    0.000    0.000    0.339    0.339 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/functional.py:1(<module>)
+        4    0.071    0.018    0.336    0.084 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:2475(_load_ore_csv_keys_by_date)
+        1    0.000    0.000    0.336    0.336 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/nn/__init__.py:1(<module>)
+1356/1350    0.001    0.000    0.324    0.000 <frozen importlib._bootstrap>:806(module_from_spec)
+        1    0.000    0.000    0.322    0.322 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/nn/modules/__init__.py:1(<module>)
+    94/93    0.000    0.000    0.310    0.003 <frozen importlib._bootstrap_external>:1318(create_module)
+    94/93    0.308    0.003    0.309    0.003 {built-in method _imp.create_dynamic}
+        1    0.000    0.000    0.290    0.290 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:2023(ore_input_validation_dataframe)
+        1    0.000    0.000    0.290    0.290 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/__init__.py:1(<module>)
+     11/7    0.000    0.000    0.274    0.039 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:161(py_functionalize_impl)
+        1    0.002    0.002    0.238    0.238 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/runtime.py:122(create_session)
+
+

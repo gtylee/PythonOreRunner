@@ -7,6 +7,7 @@ import argparse
 import shutil
 from pathlib import Path
 import sys
+import time
 from typing import Iterable
 
 
@@ -35,6 +36,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-run", action="store_true")
     parser.add_argument("--paths", type=int, default=32)
     parser.add_argument("--price-only", action="store_true")
+    parser.add_argument("--timing-breakdown", action="store_true")
     parser.add_argument(
         "--lgm-param-source",
         choices=("auto", "calibration_xml", "simulation_xml", "ore"),
@@ -1023,12 +1025,35 @@ def _write_files(case_root: Path, *, count_per_type: int) -> tuple[Path, Path]:
     return ore_xml, portfolio_xml
 
 
-def _run_cli(ore_xml: Path, artifact_root: Path, *, price_only: bool, paths: int, lgm_param_source: str) -> int:
+def _run_cli(
+    ore_xml: Path,
+    artifact_root: Path,
+    *,
+    price: bool = True,
+    xva: bool = True,
+    sensi: bool = True,
+    sensi_metric: str = "CVA",
+    sensi_progress: bool = True,
+    paths: int,
+    lgm_param_source: str,
+) -> int:
     argv = [str(ore_xml), "--price"]
-    if not price_only:
-        argv.extend(["--xva", "--sensi", "--sensi-progress", "--paths", str(paths)])
+    if xva:
+        argv.append("--xva")
+    if sensi:
+        argv.extend(["--sensi", "--sensi-metric", str(sensi_metric)])
+        if sensi_progress:
+            argv.append("--sensi-progress")
+    if xva or sensi:
+        argv.extend(["--paths", str(paths)])
     argv.extend(["--lgm-param-source", str(lgm_param_source), "--output-root", str(artifact_root)])
     return ore_snapshot_cli.main(argv)
+
+
+def _timed_run(label: str, fn) -> tuple[int, float]:
+    started = time.perf_counter()
+    rc = int(fn())
+    return rc, time.perf_counter() - started
 
 
 def _case_slug(ore_xml: Path) -> str:
@@ -1076,6 +1101,8 @@ def main() -> int:
     print("  python3 example_ore_snapshot_usd_all_rates_products.py --count-per-type 100 --overwrite")
     if args.price_only:
         print("  run_mode       : price only")
+    elif args.timing_breakdown:
+        print(f"  run_mode       : timing breakdown (paths={args.paths})")
     else:
         print(f"  run_mode       : price + xva + sensitivity (paths={args.paths}, live sensi progress)")
     print(f"  lgm_param_src  : {args.lgm_param_source}")
@@ -1086,26 +1113,81 @@ def main() -> int:
     print()
     if args.price_only:
         print("Running ore_snapshot_cli --price ...")
+        rc = _run_cli(
+            ore_xml,
+            artifact_root,
+            xva=False,
+            sensi=False,
+            paths=args.paths,
+            lgm_param_source=args.lgm_param_source,
+        )
+    elif args.timing_breakdown:
+        print(f"Running timing breakdown with paths={args.paths} ...")
+        runs = [
+            (
+                "price+xva",
+                artifact_root / "timing_price_xva",
+                dict(xva=True, sensi=False, sensi_progress=False),
+            ),
+            (
+                "price+sensi(npv)",
+                artifact_root / "timing_price_sensi_npv",
+                dict(xva=False, sensi=True, sensi_metric="NPV", sensi_progress=False),
+            ),
+            (
+                "price+xva+sensi(cva)",
+                artifact_root / "timing_price_xva_sensi_cva",
+                dict(xva=True, sensi=True, sensi_metric="CVA", sensi_progress=True),
+            ),
+        ]
+        timing_rows: list[tuple[str, int, float, Path]] = []
+        rc = 0
+        for label, run_artifact_root, kwargs in runs:
+            print()
+            print(f"  timing_run     : {label}")
+            run_rc, elapsed = _timed_run(
+                label,
+                lambda run_artifact_root=run_artifact_root, kwargs=kwargs: _run_cli(
+                    ore_xml,
+                    run_artifact_root,
+                    paths=args.paths,
+                    lgm_param_source=args.lgm_param_source,
+                    **kwargs,
+                ),
+            )
+            timing_rows.append((label, run_rc, elapsed, run_artifact_root))
+            if run_rc != 0 and rc == 0:
+                rc = run_rc
+        print()
+        print("Timing summary")
+        for label, run_rc, elapsed, run_artifact_root in timing_rows:
+            print(f"  {label:<22} rc={run_rc} elapsed={elapsed:.6f} sec artifacts={run_artifact_root}")
     else:
         print(f"Running ore_snapshot_cli --price --xva --sensi --sensi-progress --paths {args.paths} ...")
-    rc = _run_cli(
-        ore_xml,
-        artifact_root,
-        price_only=args.price_only,
-        paths=args.paths,
-        lgm_param_source=args.lgm_param_source,
-    )
+        rc = _run_cli(
+            ore_xml,
+            artifact_root,
+            xva=True,
+            sensi=True,
+            sensi_metric="CVA",
+            sensi_progress=True,
+            paths=args.paths,
+            lgm_param_source=args.lgm_param_source,
+        )
     if rc == 0:
         case_dir = artifact_root / _case_slug(ore_xml)
         print()
         if args.price_only:
             print("Pricing run completed")
+        elif args.timing_breakdown:
+            print("Timing breakdown completed")
         else:
             print("Pricing, XVA, and sensitivity run completed")
-        print(f"  report_dir     : {case_dir}")
-        print(f"  summary_json   : {case_dir / 'summary.json'}")
-        print(f"  report_md      : {case_dir / 'report.md'}")
-        print(f"  compare_csv    : {case_dir / 'comparison.csv'}")
+        if not args.timing_breakdown:
+            print(f"  report_dir     : {case_dir}")
+            print(f"  summary_json   : {case_dir / 'summary.json'}")
+            print(f"  report_md      : {case_dir / 'report.md'}")
+            print(f"  compare_csv    : {case_dir / 'comparison.csv'}")
     return rc
 
 

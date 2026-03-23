@@ -17,7 +17,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from contextlib import redirect_stdout
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from importlib import import_module
 from pathlib import Path
@@ -89,6 +89,15 @@ REPORT_BUCKET_HINTS = {
     "missing_reference_xva": "Provide or regenerate XVA reference artifacts (`xva.csv` / exposure files) before XVA parity work.",
     "hard_error": "Inspect the recorded error/parse failure before any parity debugging.",
 }
+
+
+def _skipped_input_validation() -> dict[str, Any]:
+    return {
+        "skipped": True,
+        "input_links_valid": True,
+        "checks": {},
+        "action_items": [],
+    }
 
 
 def _bond_pricing_mod():
@@ -5250,6 +5259,7 @@ def _run_sensitivity_case(
     metric: str,
     netting_set: str | None,
     top: int,
+    lgm_param_source: str = "auto",
     progress_callback: Any = None,
 ) -> dict[str, Any]:
     from pythonore.runtime.sensitivity import OreSnapshotPythonLgmSensitivityComparator
@@ -5264,6 +5274,16 @@ def _run_sensitivity_case(
         ore_xml, sensi_params=sensi_params
     )
     comparator, snapshot = OreSnapshotPythonLgmSensitivityComparator.from_case_dir(case_dir, ore_file=ore_xml.name)
+    snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            params={
+                **dict(snapshot.config.params),
+                "python.lgm_param_source": str(lgm_param_source or "auto"),
+            },
+        ),
+    )
     result = comparator.compare(
         snapshot,
         metric=resolved_metric,
@@ -6226,6 +6246,7 @@ def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: P
         cases=[],
         output_root=output_root,
         ore_output_only=options.ore_output_only,
+        skip_input_validation=False,
         paths=None if options.paths is None else int(options.paths),
         seed=int(options.seed),
         rng=options.rng,
@@ -6333,6 +6354,73 @@ def _fmt_float(value: float, digits: int = 6) -> str:
     return f"{float(value):.{digits}f}"
 
 
+def _report_context_from_case_summary(case_summary: dict[str, Any]) -> dict[str, Any]:
+    ore_xml = Path(case_summary.get("ore_xml", "."))
+    base_currency = ""
+    trade_count = 0
+    total_notional = 0.0
+    notional_ccy = ""
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml) if ore_xml.is_file() else None
+    if portfolio_xml is not None and portfolio_xml.exists():
+        try:
+            portfolio_root = ET.parse(portfolio_xml).getroot()
+            trades = list(portfolio_root.findall("./Trade"))
+            trade_count = len(trades)
+            notionals: list[float] = []
+            currencies: list[str] = []
+            for trade in trades:
+                for leg in trade.findall(".//LegData"):
+                    ccy = (leg.findtext("./Currency") or "").strip().upper()
+                    notional_text = (leg.findtext("./Notionals/Notional") or "").strip()
+                    if ccy:
+                        currencies.append(ccy)
+                    if notional_text:
+                        try:
+                            notionals.append(abs(float(notional_text)))
+                        except ValueError:
+                            pass
+                    break
+            total_notional = float(sum(notionals)) if notionals else 0.0
+            unique_ccys = sorted({ccy for ccy in currencies if ccy})
+            if len(unique_ccys) == 1:
+                notional_ccy = unique_ccys[0]
+        except Exception:
+            pass
+    if ore_xml.is_file():
+        try:
+            ore_root = ET.parse(ore_xml).getroot()
+            base_currency = (
+                (ore_root.findtext("./Setup/Parameter[@name='baseCurrency']") or "").strip().upper()
+                or (ore_root.findtext("./Analytics/Analytic[@type='npv']/Parameter[@name='baseCurrency']") or "").strip().upper()
+            )
+        except Exception:
+            pass
+    pricing = case_summary.get("pricing") or {}
+    report_ccy = str(
+        pricing.get("currency")
+        or pricing.get("report_ccy")
+        or base_currency
+        or "USD"
+    ).upper()
+    entity_id = str(case_summary.get("trade_id", "") or "")
+    entity_type = "Trade"
+    if trade_count > 1:
+        entity_id = "PORTFOLIO"
+        entity_type = "Portfolio"
+    elif not entity_id:
+        entity_id = "PORTFOLIO"
+        entity_type = "Portfolio"
+    return {
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "trade_count": trade_count,
+        "report_ccy": report_ccy,
+        "base_currency": base_currency or report_ccy,
+        "total_notional": total_notional,
+        "notional_ccy": notional_ccy or report_ccy,
+    }
+
+
 def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, Any]) -> None:
     pricing = case_summary.get("pricing") or {}
     xva = case_summary.get("xva") or {}
@@ -6344,9 +6432,10 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
     py_epe = list(trade_profile.get("closeout_epe") or case_summary.get("py_epe") or [])
     py_ene = list(trade_profile.get("closeout_ene") or case_summary.get("py_ene") or [])
     py_pfe = list(trade_profile.get("pfe") or case_summary.get("py_pfe") or [])
-    trade_id = str(case_summary.get("trade_id", ""))
     netting_set_id = str(case_summary.get("netting_set_id", ""))
     counterparty = str(case_summary.get("counterparty", ""))
+    report_ctx = _report_context_from_case_summary(case_summary)
+    entity_id = str(report_ctx["entity_id"])
     if pricing:
         maturity_date = str(case_summary.get("maturity_date") or "")
         maturity_time = float(case_summary.get("maturity_time") or 0.0)
@@ -6357,17 +6446,17 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             "NettingSet", "CounterParty",
         ]
         npv_row = [
-            trade_id,
-            str(pricing.get("trade_type", "Swap")),
+            entity_id,
+            str(pricing.get("trade_type", report_ctx["entity_type"])),
             maturity_date,
             _fmt_float(maturity_time),
             _fmt_float(npv_value),
-            "EUR",
+            str(report_ctx["report_ccy"]),
             _fmt_float(npv_value),
-            "EUR",
-            "10000000.00",
-            "EUR",
-            "10000000.00",
+            str(report_ctx["base_currency"]),
+            _fmt_float(float(report_ctx["total_notional"]), digits=2),
+            str(report_ctx["notional_ccy"]),
+            _fmt_float(float(report_ctx["total_notional"]), digits=2),
             netting_set_id,
             counterparty,
         ]
@@ -6391,13 +6480,13 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
                 for row in sensitivity_rows:
                     writer.writerow(
                         [
-                            trade_id,
+                            entity_id,
                             "false",
                             str(row.get("ore_factor") or row.get("normalized_factor") or ""),
                             _fmt_float(float(row.get("shift_size") or 0.0)),
                             "",
                             _fmt_float(0.0),
-                            str(pricing.get("currency") or pricing.get("report_ccy") or "EUR"),
+                            str(report_ctx["report_ccy"]),
                             _fmt_float(float(row.get("base_metric_value") or 0.0), digits=2),
                             _fmt_float(float(row.get("delta") or 0.0), digits=2),
                             _fmt_float(0.0, digits=2),
@@ -6415,7 +6504,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
                     shift_size_2 = row.get("shift_size_2", "#N/A")
                     writer.writerow(
                         [
-                            trade_id,
+                            entity_id,
                             str(row.get("factor") or ""),
                             str(row.get("direction") or ""),
                             _fmt_float(float(row.get("base_metric_value") or 0.0), digits=2),
@@ -7135,7 +7224,11 @@ def _run_case(
         "ore_xml": str(ore_xml),
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
     }
-    validation = validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
+    validation = (
+        _skipped_input_validation()
+        if getattr(args, "skip_input_validation", False)
+        else validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
+    )
     case_summary["input_validation"] = validation
 
     if modes.xva:
@@ -7320,6 +7413,7 @@ def _run_case(
                 metric=args.sensi_metric,
                 netting_set=args.netting_set,
                 top=args.top,
+                lgm_param_source=args.lgm_param_source,
                 progress_callback=None if sensi_progress is None else sensi_progress.update,
             )
         except Exception as exc:
@@ -7343,6 +7437,32 @@ def _run_case(
         finally:
             if sensi_progress is not None:
                 sensi_progress.finish()
+    if (
+        modes.price
+        and not case_summary.get("pricing")
+        and isinstance(case_summary.get("sensitivity"), dict)
+        and str((case_summary.get("sensitivity") or {}).get("metric", "")).strip().upper() in {"NPV", "PV"}
+    ):
+        sensitivity_rows = list((case_summary.get("sensitivity") or {}).get("python_rows") or [])
+        if sensitivity_rows:
+            base_metric_value = float(sensitivity_rows[0].get("base_metric_value") or 0.0)
+            case_summary["pricing"] = {
+                "py_t0_npv": base_metric_value,
+                "trade_type": _first_trade_type(ore_xml),
+                "pricing_mode": "python_native_from_sensitivity",
+                "report_ccy": (
+                    (ET.parse(ore_xml).getroot().findtext("./Setup/Parameter[@name='baseCurrency']") or "").strip().upper()
+                    or "USD"
+                ),
+            }
+            diagnostics = dict(case_summary.get("diagnostics") or {})
+            diagnostics["engine"] = "python_native"
+            diagnostics["pricing_mode"] = "python_native_from_sensitivity"
+            diagnostics["missing_native_pricing_reference"] = True
+            if diagnostics.get("fallback_reason") == "missing_native_output":
+                diagnostics.pop("fallback_reason", None)
+                diagnostics.pop("fallback_error", None)
+            case_summary["diagnostics"] = diagnostics
     parity_summary = (case_summary.get("parity") or {}).get("summary", {})
     requested_xva_metrics = {
         str(metric).upper()
@@ -7387,8 +7507,9 @@ def _run_case(
         _write_json(case_out_dir / "summary.json", case_summary)
         _write_csv(case_out_dir / "comparison.csv", _flatten_summary_rows(case_summary))
         (case_out_dir / "report.md").write_text(_render_case_markdown(case_summary), encoding="utf-8")
-        validation_df = ore_input_validation_dataframe(validation)
-        validation_df.to_csv(case_out_dir / "input_validation.csv", index=False)
+        if not validation.get("skipped", False):
+            validation_df = ore_input_validation_dataframe(validation)
+            validation_df.to_csv(case_out_dir / "input_validation.csv", index=False)
     return case_summary
 
 
@@ -7710,6 +7831,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-refresh-every", type=int, default=1)
     parser.add_argument("--report-top-buckets", type=int, default=10)
     parser.add_argument("--ore-output-only", action="store_true")
+    parser.add_argument("--skip-input-validation", action="store_true")
     parser.add_argument("--engine", choices=("compare", "python", "ore"), default="compare")
     parser.add_argument("--paths", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)

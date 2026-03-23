@@ -743,10 +743,19 @@ class PythonLgmAdapter:
     ) -> tuple[Dict[str, object], str]:
         """Return (lgm_params, param_source)."""
         param_source = "simulation"
+        requested_source = str(
+            snapshot.config.params.get(
+                "python.lgm_param_source",
+                snapshot.config.params.get("lgm_param_source", "auto"),
+            )
+            or "auto"
+        ).strip().lower()
         use_ore_output_lgm = str(snapshot.config.params.get("python.use_ore_output_lgm_params", "N")).strip().upper() not in ("N", "FALSE", "0", "")
         if use_ore_output_lgm and "calibration.xml" in xml:
             lgm_params = _parse_lgm_params_from_calibration_xml_text(xml["calibration.xml"], ccy_key=model_ccy)
             param_source = "calibration"
+        elif requested_source in {"simulation", "simulation_xml"} and "simulation.xml" in xml:
+            lgm_params = _parse_lgm_params_from_simulation_xml_text(xml["simulation.xml"], ccy_key=model_ccy)
         elif self._is_ore_case_snapshot(snapshot):
             ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
             try:
@@ -785,25 +794,27 @@ class PythonLgmAdapter:
                     setup.get("outputPath", "Output"),
                     ore_path.parent.parent,
                 )
-                lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_in_python(
-                    ore_xml_path=ore_path,
-                    input_dir=input_dir,
-                    output_path=output_path,
-                    market_data_path=market_data_path,
-                    curve_config_path=curve_config_path,
-                    conventions_path=conventions_path,
-                    todaysmarket_xml_path=todaysmarket_xml_path,
-                    simulation_xml_path=simulation_xml_path,
-                    ccy_key=model_ccy,
-                )
-                if lgm_params is None:
-                    lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_via_ore(
+                lgm_params = None
+                if requested_source in {"auto", "python", "ore", "runtime_calibration"}:
+                    lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_in_python(
                         ore_xml_path=ore_path,
                         input_dir=input_dir,
                         output_path=output_path,
+                        market_data_path=market_data_path,
+                        curve_config_path=curve_config_path,
+                        conventions_path=conventions_path,
+                        todaysmarket_xml_path=todaysmarket_xml_path,
                         simulation_xml_path=simulation_xml_path,
                         ccy_key=model_ccy,
                     )
+                    if lgm_params is None and requested_source in {"auto", "ore", "runtime_calibration"}:
+                        lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_via_ore(
+                            ore_xml_path=ore_path,
+                            input_dir=input_dir,
+                            output_path=output_path,
+                            simulation_xml_path=simulation_xml_path,
+                            ccy_key=model_ccy,
+                        )
                 if lgm_params is not None:
                     param_source = "calibration"
                 elif "simulation.xml" in xml:
@@ -976,7 +987,7 @@ class PythonLgmAdapter:
         return trade_specs, unsupported, ccy_set
 
     def _normalized_asof(self, snapshot: XVASnapshot) -> str:
-        key = id(snapshot)
+        key = str(snapshot.config.asof)
         cached = self._asof_cache.get(key)
         if cached is None:
             cached = _normalize_asof_date(snapshot.config.asof)
@@ -984,7 +995,7 @@ class PythonLgmAdapter:
         return cached
 
     def _fixings_lookup(self, snapshot: XVASnapshot) -> Dict[tuple[str, str], float]:
-        key = id(snapshot)
+        key = (self._normalized_asof(snapshot), id(snapshot.fixings.points), len(snapshot.fixings.points))
         cached = self._fixings_cache.get(key)
         if cached is None:
             cached = {
@@ -995,12 +1006,21 @@ class PythonLgmAdapter:
         return cached
 
     def _date_from_time_cached(self, snapshot: XVASnapshot, t: float) -> str:
-        cache_key = (id(snapshot), float(t))
+        cache_key = (self._normalized_asof(snapshot), float(t))
         cached = self._time_date_cache.get(cache_key)
         if cached is None:
             cached = _date_from_time(self._normalized_asof(snapshot), float(t))
             self._time_date_cache[cache_key] = cached
         return cached
+
+    def _portfolio_cache_key(self, trade: Trade, snapshot: XVASnapshot, portfolio_xml: str = "") -> tuple[object, ...]:
+        return (
+            trade.trade_id,
+            self._normalized_asof(snapshot),
+            id(snapshot.portfolio.trades),
+            id(snapshot.fixings.points),
+            id(portfolio_xml) if portfolio_xml else 0,
+        )
 
     def _portfolio_root_from_xml(self, portfolio_xml: str) -> ET.Element:
         key = id(portfolio_xml)
@@ -2241,7 +2261,8 @@ class PythonLgmAdapter:
         return out
 
     def _build_irs_legs(self, trade: Trade, mapped: MappedInputs, snapshot: XVASnapshot) -> Dict[str, np.ndarray]:
-        cache_key = (trade.trade_id, id(snapshot))
+        portfolio_xml = mapped.xml_buffers.get("portfolio.xml", "")
+        cache_key = self._portfolio_cache_key(trade, snapshot, portfolio_xml)
         cached_legs = self._irs_leg_cache.get(cache_key)
         if cached_legs is not None:
             return cached_legs
@@ -2283,7 +2304,6 @@ class PythonLgmAdapter:
                     UserWarning,
                     stacklevel=2,
                 )
-        portfolio_xml = mapped.xml_buffers.get("portfolio.xml")
         if portfolio_xml:
             asof = self._normalized_asof(snapshot)
             try:
@@ -2321,7 +2341,7 @@ class PythonLgmAdapter:
         trade: Trade,
         snapshot: XVASnapshot,
     ) -> Optional[Dict[str, object]]:
-        cache_key = (trade.trade_id, id(snapshot))
+        cache_key = self._portfolio_cache_key(trade, snapshot)
         if cache_key in self._generic_rate_swap_legs_cache:
             return self._generic_rate_swap_legs_cache[cache_key]
         product = trade.product
@@ -2725,6 +2745,27 @@ class PythonLgmAdapter:
         n_cf = s.size
         n_paths = x_paths_on_sim_grid.shape[1]
         out = np.zeros((n_cf, n_paths), dtype=float)
+
+        # Fast t=0 sensitivity path: when the simulation grid only contains the
+        # valuation time, future coupons reduce to deterministic forward rates.
+        # This benchmark calls the method repeatedly under node shocks, so avoid
+        # the generic per-coupon grid search / bond revaluation branch.
+        if (
+            sim_times.ndim == 1
+            and sim_times.size == 1
+            and abs(float(sim_times[0])) <= 1.0e-12
+            and x_paths_on_sim_grid.ndim == 2
+            and x_paths_on_sim_grid.shape[0] == 1
+        ):
+            for i in range(n_cf):
+                if fixed_mask[i] or tau[i] <= 0.0:
+                    out[i, :] = quoted_coupon[i]
+                    continue
+                ps = float(p0_fwd(max(0.0, float(s[i]))))
+                pe = float(p0_fwd(float(e[i])))
+                fwd = (ps / pe - 1.0) / float(tau[i])
+                out[i, :] = fwd + float(spr[i])
+            return out
 
         for i in range(n_cf):
             if fixed_mask[i]:
@@ -4864,9 +4905,13 @@ def _build_zero_rate_shocked_curve(
             None,
         )
     )
+    scalar_cache: Dict[float, float] = {}
 
     def shocked_curve(t: float) -> float:
         tt = max(float(t), 0.0)
+        cached = scalar_cache.get(tt)
+        if cached is not None:
+            return cached
         if tt <= 1.0e-12:
             return 1.0
 
@@ -4875,13 +4920,19 @@ def _build_zero_rate_shocked_curve(
         # shocked discount factors in log-discount space between nodes.
         if tt <= times[0]:
             base_df = float(base_curve(tt))
-            return float(base_df * np.exp(-shifts[0] * tt))
+            out = float(base_df * np.exp(-shifts[0] * tt))
+            scalar_cache[tt] = out
+            return out
         if tt >= times[-1]:
             base_df = float(base_curve(tt))
-            return float(base_df * np.exp(-shifts[-1] * tt))
+            out = float(base_df * np.exp(-shifts[-1] * tt))
+            scalar_cache[tt] = out
+            return out
 
         shocked_log_df = float(np.interp(tt, times, shocked_node_logs))
-        return float(np.exp(shocked_log_df))
+        out = float(np.exp(shocked_log_df))
+        scalar_cache[tt] = out
+        return out
 
     return shocked_curve
 

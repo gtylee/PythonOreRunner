@@ -8,11 +8,12 @@ import math
 import numpy as np
 import warnings
 import xml.etree.ElementTree as ET
+from datetime import datetime
 
-from pythonore.domain.dataclasses import MarketData, MarketQuote, XVASnapshot
-from pythonore.mapping.mapper import map_snapshot
+from pythonore.domain.dataclasses import IRS, MarketData, MarketQuote, XVASnapshot
+from pythonore.mapping.mapper import MappedInputs, map_snapshot
 from pythonore.runtime.exceptions import EngineRunError
-from pythonore.runtime.runtime import XVAEngine
+from pythonore.runtime.runtime import XVAEngine, _PythonLgmInputs, _apply_curve_node_shocks
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
 
     def __init__(self, engine: Optional[XVAEngine] = None):
         self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=True)
+        self._swap_npv_backend_cache = None
 
     @classmethod
     def from_case_dir(
@@ -119,9 +121,10 @@ class OreSnapshotPythonLgmSensitivityComparator:
             snapshot,
             curve_fit_mode="ore_fit",
             use_ore_output_curves=False,
-            freeze_float_spreads=True,
+            freeze_float_spreads=_portfolio_has_irs_trades(snapshot),
         )
         frozen_float_spreads = native_snapshot.config.params.get("python.frozen_float_spreads")
+        quote_map = self._discover_supported_quotes(native_snapshot)
         base_result = self.engine.create_session(native_snapshot).run(return_cubes=False)
         base_metric_value = self._result_metric_value(base_result, metric)
 
@@ -386,16 +389,18 @@ class OreSnapshotPythonLgmSensitivityComparator:
             snapshot,
             curve_fit_mode="ore_fit",
             use_ore_output_curves=False,
-            freeze_float_spreads=True,
+            freeze_float_spreads=_portfolio_has_irs_trades(snapshot),
         )
         frozen_float_spreads = native_snapshot.config.params.get("python.frozen_float_spreads")
-        base_metric_value = self._price_snapshot_t0_npv(native_snapshot)
+        base_mapped = map_snapshot(native_snapshot)
+        quote_map = self._discover_supported_quotes(native_snapshot)
+        base_inputs = self._extract_fast_npv_inputs(native_snapshot, mapped=base_mapped)
+        base_metric_value = self._price_snapshot_t0_npv(native_snapshot, inputs=base_inputs)
 
         entries: List[PythonSensitivityEntry] = []
         self._emit_progress(progress_callback, 0, len(requested), "")
         for normalized_factor in requested:
             curve_spec = curve_factor_specs.get(normalized_factor)
-            quote_map = self._discover_supported_quotes(native_snapshot)
             quote_entries = quote_map.get(normalized_factor, [])
             bump_mode = bump_modes.get(normalized_factor, "quote_value")
             if bump_mode == "survival_probability":
@@ -410,6 +415,14 @@ class OreSnapshotPythonLgmSensitivityComparator:
                 down_snapshot = self._bump_snapshot_curve(native_snapshot, curve_spec, -shift_size, frozen_float_spreads)
                 raw_label = f"curve:{curve_spec.get('ore_factor', normalized_factor)}"
                 base_value = 0.0
+                up_metric = self._price_snapshot_t0_npv(
+                    up_snapshot,
+                    inputs=self._inputs_with_curve_shock(up_snapshot, base_inputs),
+                )
+                down_metric = self._price_snapshot_t0_npv(
+                    down_snapshot,
+                    inputs=self._inputs_with_curve_shock(down_snapshot, base_inputs),
+                )
             else:
                 if quote is None:
                     continue
@@ -433,8 +446,14 @@ class OreSnapshotPythonLgmSensitivityComparator:
                 )
                 raw_label = _quote_label([q for _, q in quote_entries])
                 base_value = float(quote.value)
-            up_metric = self._price_snapshot_t0_npv(up_snapshot)
-            down_metric = self._price_snapshot_t0_npv(down_snapshot)
+                up_metric = self._price_snapshot_t0_npv(
+                    up_snapshot,
+                    mapped=self._mapped_inputs_with_market(up_snapshot, base_mapped),
+                )
+                down_metric = self._price_snapshot_t0_npv(
+                    down_snapshot,
+                    mapped=self._mapped_inputs_with_market(down_snapshot, base_mapped),
+                )
             if output_mode == "bump_change":
                 delta = up_metric - base_metric_value
             else:
@@ -490,25 +509,65 @@ class OreSnapshotPythonLgmSensitivityComparator:
         supported_kinds = {"IRS", "RateSwap", "CapFloor", "Swaption"}
         return all(spec.kind in supported_kinds for spec in inputs.trade_specs)
 
-    def _price_snapshot_t0_npv(self, snapshot: XVASnapshot) -> float:
+    def _mapped_inputs_with_market(self, snapshot: XVASnapshot, template: MappedInputs) -> MappedInputs:
+        return MappedInputs(
+            asof=template.asof,
+            base_currency=template.base_currency,
+            analytics=list(template.analytics),
+            market_data_lines=[f"{q.date.replace('-', '')} {q.key} {q.value}" for q in snapshot.market.raw_quotes],
+            fixing_data_lines=list(template.fixing_data_lines),
+            xml_buffers=template.xml_buffers,
+        )
+
+    def _extract_fast_npv_inputs(
+        self,
+        snapshot: XVASnapshot,
+        *,
+        mapped: Optional[MappedInputs] = None,
+    ) -> _PythonLgmInputs:
         adapter = self.engine.adapter
         adapter._ensure_py_lgm_imports()
-        mapped = map_snapshot(snapshot)
-        inputs = adapter._extract_inputs(snapshot, mapped)
+        mapped = mapped or map_snapshot(snapshot)
+        return adapter._extract_inputs(snapshot, mapped)
+
+    def _inputs_with_curve_shock(self, snapshot: XVASnapshot, base_inputs: _PythonLgmInputs) -> _PythonLgmInputs:
+        (
+            discount_curves,
+            forward_curves,
+            forward_curves_by_tenor,
+            forward_curves_by_name,
+            xva_discount_curve,
+        ) = _apply_curve_node_shocks(
+            snapshot,
+            base_inputs.discount_curves,
+            base_inputs.forward_curves,
+            base_inputs.forward_curves_by_tenor,
+            base_inputs.forward_curves_by_name,
+            base_inputs.xva_discount_curve,
+        )
+        return replace(
+            base_inputs,
+            discount_curves=discount_curves,
+            forward_curves=forward_curves,
+            forward_curves_by_tenor=forward_curves_by_tenor,
+            forward_curves_by_name=forward_curves_by_name,
+            xva_discount_curve=xva_discount_curve,
+        )
+
+    def _price_snapshot_t0_npv(
+        self,
+        snapshot: XVASnapshot,
+        *,
+        mapped: Optional[MappedInputs] = None,
+        inputs: Optional[_PythonLgmInputs] = None,
+    ) -> float:
+        adapter = self.engine.adapter
+        inputs = inputs or self._extract_fast_npv_inputs(snapshot, mapped=mapped)
         if inputs.unsupported:
             bad = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in inputs.unsupported}))
             raise EngineRunError(f"Fast NPV sensitivity path only supports IRS portfolios, got unsupported trades: {bad}")
-        model = adapter._lgm_mod.LGM1F(
-            adapter._lgm_mod.LGMParams(
-                alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
-                alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
-                kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
-                kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
-                shift=float(inputs.lgm_params["shift"]),
-                scaling=float(inputs.lgm_params["scaling"]),
-            )
-        )
-        pricing_backend = self._resolve_swap_npv_backend()
+        model = None
+        pricing_backend = self._resolve_swap_npv_backend(inputs)
         total = 0.0
         for spec in inputs.trade_specs:
             p_disc = inputs.discount_curves[spec.ccy]
@@ -529,18 +588,19 @@ class OreSnapshotPythonLgmSensitivityComparator:
                     x_paths_on_sim_grid=np.asarray([[0.0]], dtype=float),
                 )
                 if pricing_backend is None:
-                    value = float(
-                        adapter._irs_utils.swap_npv_from_ore_legs_dual_curve(
-                            model,
-                            p_disc,
-                            p_fwd,
-                            spec.legs,
-                            0.0,
-                            np.asarray([0.0], dtype=float),
-                            realized_float_coupon=realized_coupon,
-                        )[0]
-                    )
+                    value = _price_irs_t0_from_curves(spec.legs, p_disc, p_fwd, realized_coupon)
                 else:
+                    if model is None:
+                        model = adapter._lgm_mod.LGM1F(
+                            adapter._lgm_mod.LGMParams(
+                                alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                                alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                                kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                                kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                                shift=float(inputs.lgm_params["shift"]),
+                                scaling=float(inputs.lgm_params["scaling"]),
+                            )
+                        )
                     torch_curve_ctor, torch_pricer, device = pricing_backend
                     sample_disc = _sample_times_for_legs(spec.legs, include_float_coupon_dates=False)
                     sample_fwd = _sample_times_for_legs(spec.legs, include_float_coupon_dates=True)
@@ -567,9 +627,31 @@ class OreSnapshotPythonLgmSensitivityComparator:
                         )[0]
                     )
             elif spec.kind == "RateSwap":
+                if model is None:
+                    model = adapter._lgm_mod.LGM1F(
+                        adapter._lgm_mod.LGMParams(
+                            alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                            alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                            kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                            kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                            shift=float(inputs.lgm_params["shift"]),
+                            scaling=float(inputs.lgm_params["scaling"]),
+                        )
+                    )
                 zero_paths = np.zeros((int(inputs.times.size), 1), dtype=float)
                 value = float(adapter._price_generic_rate_swap(spec, inputs, model, zero_paths)[0, 0])
             elif spec.kind == "CapFloor":
+                if model is None:
+                    model = adapter._lgm_mod.LGM1F(
+                        adapter._lgm_mod.LGMParams(
+                            alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                            alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                            kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                            kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                            shift=float(inputs.lgm_params["shift"]),
+                            scaling=float(inputs.lgm_params["scaling"]),
+                        )
+                    )
                 state = dict(spec.sticky_state or {})
                 definition = state.get("definition")
                 index_name = str(state.get("index_name", "")).upper()
@@ -585,6 +667,17 @@ class OreSnapshotPythonLgmSensitivityComparator:
                     )[0]
                 )
             elif spec.kind == "Swaption":
+                if model is None:
+                    model = adapter._lgm_mod.LGM1F(
+                        adapter._lgm_mod.LGMParams(
+                            alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                            alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                            kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                            kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                            shift=float(inputs.lgm_params["shift"]),
+                            scaling=float(inputs.lgm_params["scaling"]),
+                        )
+                    )
                 state = dict(spec.sticky_state or {})
                 definition = state.get("definition")
                 index_name = str(state.get("index_name", "")).upper()
@@ -602,14 +695,28 @@ class OreSnapshotPythonLgmSensitivityComparator:
             total += value
         return float(total)
 
-    def _resolve_swap_npv_backend(self):
+    def _resolve_swap_npv_backend(self, inputs: Optional[_PythonLgmInputs] = None):
+        irs_count = 0
+        if inputs is not None:
+            irs_count = sum(1 for spec in inputs.trade_specs if spec.kind == "IRS")
+        if irs_count == 0:
+            return None
+        if irs_count < 8:
+            return None
+        if self._swap_npv_backend_cache is not None:
+            return self._swap_npv_backend_cache
         try:
             import torch
             from pythonore.compute.lgm_torch_xva import TorchDiscountCurve, swap_npv_from_ore_legs_dual_curve_torch
         except Exception:
+            self._swap_npv_backend_cache = None
             return None
         device = "mps" if bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()) else "cpu"
-        return TorchDiscountCurve, swap_npv_from_ore_legs_dual_curve_torch, device
+        if device == "cpu" and irs_count < 2048:
+            self._swap_npv_backend_cache = None
+            return None
+        self._swap_npv_backend_cache = (TorchDiscountCurve, swap_npv_from_ore_legs_dual_curve_torch, device)
+        return self._swap_npv_backend_cache
 
     def _resolve_ore_sensitivity_file(self, output_dir: str | Path, file_name: str) -> Path:
         output_dir = Path(output_dir)
@@ -872,18 +979,31 @@ def _portfolio_factor_predicate(snapshot: XVASnapshot):
     relevant_forward_keys: set[Tuple[str, str]] = set()
     relevant_fx_pairs: set[str] = set()
     relevant_credit_names: set[str] = set()
+    max_curve_tenor_by_ccy: Dict[str, float] = {}
+    max_curve_tenor_by_forward: Dict[Tuple[str, str], float] = {}
+    max_credit_tenor_years = 0.0
+
+    asof_date = _parse_iso_date(getattr(snapshot.config, "asof", ""))
 
     for trade in getattr(snapshot.portfolio, "trades", ()):
         relevant_credit_names.add(str(getattr(trade, "counterparty", "")).strip().upper())
+        trade_horizon = _trade_relevant_horizon_years(trade, asof_date)
+        if trade_horizon is not None and trade_horizon > 0.0:
+            max_credit_tenor_years = max(max_credit_tenor_years, trade_horizon)
         product = getattr(trade, "product", None)
         ccy = str(getattr(product, "ccy", "") or getattr(product, "currency", "")).strip().upper()
         if ccy:
             relevant_ccys.add(ccy)
+            if trade_horizon is not None and trade_horizon > 0.0:
+                max_curve_tenor_by_ccy[ccy] = max(max_curve_tenor_by_ccy.get(ccy, 0.0), trade_horizon)
         float_index = str(getattr(product, "float_index", "")).strip().upper()
         if ccy and float_index:
             tenor = float_index.split("-")[-1]
             if tenor:
                 relevant_forward_keys.add((ccy, tenor))
+                if trade_horizon is not None and trade_horizon > 0.0:
+                    key = (ccy, tenor)
+                    max_curve_tenor_by_forward[key] = max(max_curve_tenor_by_forward.get(key, 0.0), trade_horizon)
         if product is not None and product.__class__.__name__ == "FXForward":
             bought = str(getattr(product, "base_ccy", "")).strip().upper()
             sold = str(getattr(product, "quote_ccy", "")).strip().upper()
@@ -894,10 +1014,27 @@ def _portfolio_factor_predicate(snapshot: XVASnapshot):
             if bought and sold:
                 relevant_fx_pairs.add(f"{bought}{sold}")
                 relevant_fx_pairs.add(f"{sold}{bought}")
+        for ccy_name, tenor, horizon in _generic_product_curve_usage(product, asof_date):
+            relevant_ccys.add(ccy_name)
+            if horizon > 0.0:
+                max_curve_tenor_by_ccy[ccy_name] = max(max_curve_tenor_by_ccy.get(ccy_name, 0.0), horizon)
+            if tenor:
+                key = (ccy_name, tenor)
+                relevant_forward_keys.add(key)
+                if horizon > 0.0:
+                    max_curve_tenor_by_forward[key] = max(max_curve_tenor_by_forward.get(key, 0.0), horizon)
 
     base_ccy = str(getattr(snapshot.config, "base_currency", "")).strip().upper()
     if base_ccy:
         relevant_ccys.add(base_ccy)
+        if max_curve_tenor_by_ccy:
+            base_horizon = max(max_curve_tenor_by_ccy.values())
+            max_curve_tenor_by_ccy[base_ccy] = max(max_curve_tenor_by_ccy.get(base_ccy, 0.0), base_horizon)
+
+    def _within_horizon(target_years: Optional[float], max_years: float) -> bool:
+        if target_years is None or max_years <= 0.0:
+            return True
+        return target_years <= max_years + 0.51
 
     def _keep(normalized_factor: str) -> bool:
         parts = str(normalized_factor).strip().split(":")
@@ -905,18 +1042,109 @@ def _portfolio_factor_predicate(snapshot: XVASnapshot):
             return True
         head = parts[0].lower()
         if head == "zero" and len(parts) >= 3:
-            return parts[1].upper() in relevant_ccys
+            ccy = parts[1].upper()
+            return ccy in relevant_ccys and _within_horizon(
+                _tenor_years_from_normalized_factor(normalized_factor),
+                max_curve_tenor_by_ccy.get(ccy, 0.0),
+            )
         if head == "fwd" and len(parts) >= 4:
             key = (parts[1].upper(), parts[2].upper())
-            return key in relevant_forward_keys or parts[1].upper() in relevant_ccys
+            if key not in relevant_forward_keys and parts[1].upper() not in relevant_ccys:
+                return False
+            return _within_horizon(
+                _tenor_years_from_normalized_factor(normalized_factor),
+                max_curve_tenor_by_forward.get(key, max_curve_tenor_by_ccy.get(parts[1].upper(), 0.0)),
+            )
         if head == "fx" and len(parts) >= 2:
             pair = parts[1].upper()
             return not relevant_fx_pairs or pair in relevant_fx_pairs
         if head in {"hazard", "recovery"} and len(parts) >= 2:
-            return not relevant_credit_names or parts[1].upper() in relevant_credit_names
+            if relevant_credit_names and parts[1].upper() not in relevant_credit_names:
+                return False
+            return _within_horizon(_tenor_years_from_normalized_factor(normalized_factor), max_credit_tenor_years)
         return True
 
     return _keep
+
+
+def _parse_iso_date(value: object) -> Optional[datetime.date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _years_between(start, end) -> Optional[float]:
+    if start is None or end is None:
+        return None
+    return max((end - start).days / 365.25, 0.0)
+
+
+def _trade_relevant_horizon_years(trade, asof_date) -> Optional[float]:
+    product = getattr(trade, "product", None)
+    maturity_years = getattr(product, "maturity_years", None)
+    if maturity_years is not None:
+        try:
+            return float(maturity_years)
+        except Exception:
+            pass
+    end_date = _parse_iso_date(getattr(product, "end_date", None))
+    if end_date is not None:
+        years = _years_between(asof_date, end_date)
+        if years is not None:
+            return years
+    if getattr(product, "__class__", None).__name__ == "GenericProduct":
+        return _generic_product_horizon_years(product, asof_date)
+    return None
+
+
+def _generic_product_horizon_years(product, asof_date) -> Optional[float]:
+    usages = _generic_product_curve_usage(product, asof_date)
+    if not usages:
+        return None
+    return max(horizon for _, _, horizon in usages)
+
+
+def _generic_product_curve_usage(product, asof_date) -> List[Tuple[str, str, float]]:
+    if getattr(product, "__class__", None).__name__ != "GenericProduct":
+        return []
+    payload = getattr(product, "payload", {}) or {}
+    xml_text = str(payload.get("xml", "")).strip()
+    if not xml_text:
+        return []
+    try:
+        root = ET.fromstring(f"<Trade>{xml_text}</Trade>")
+    except ET.ParseError:
+        return []
+    horizon = 0.0
+    for tag in (".//EndDate", ".//ExerciseDate", ".//StartDate"):
+        for node in root.findall(tag):
+            dt = _parse_iso_date(node.text)
+            years = _years_between(asof_date, dt)
+            if years is not None:
+                horizon = max(horizon, years)
+    usages: List[Tuple[str, str, float]] = []
+    for tag in (".//FloatingLegData/Index", ".//CMSLegData/Index", ".//CMSSpreadLegData/Index1", ".//CMSSpreadLegData/Index2"):
+        for node in root.findall(tag):
+            index_name = (node.text or "").strip().upper()
+            if not index_name:
+                continue
+            parts = index_name.split("-")
+            ccy = parts[0] if parts else ""
+            tenor = parts[-1] if len(parts) > 1 else ""
+            if ccy:
+                usages.append((ccy, tenor, horizon))
+    for node in root.findall(".//Currency"):
+        ccy = (node.text or "").strip().upper()
+        if ccy:
+            usages.append((ccy, "", horizon))
+    deduped: Dict[Tuple[str, str], float] = {}
+    for ccy, tenor, years in usages:
+        deduped[(ccy, tenor)] = max(deduped.get((ccy, tenor), 0.0), years)
+    return [(ccy, tenor, years) for (ccy, tenor), years in deduped.items()]
 
 
 def _curve_factor_specs_from_ore_entries(
@@ -1232,6 +1460,76 @@ def _ore_bucket_weight(shift_times: Sequence[float], bucket: int, t: float) -> f
     if tt > t1 and tt <= t2:
         return (t2 - tt) / max(t2 - t1, 1.0e-12)
     return 0.0
+
+
+def _price_irs_t0_from_curves(
+    legs: Mapping[str, np.ndarray],
+    p_disc: Callable[[float], float],
+    p_fwd: Callable[[float], float],
+    realized_float_coupon: Optional[np.ndarray],
+) -> float:
+    pv = 0.0
+    fixed_pay = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+    if fixed_pay.size:
+        fixed_amount = np.asarray(legs.get("fixed_amount", []), dtype=float)
+        pv += float(np.sum(fixed_amount * np.fromiter((float(p_disc(float(t))) for t in fixed_pay), dtype=float, count=fixed_pay.size)))
+
+    pay_all = np.asarray(legs.get("float_pay_time", []), dtype=float)
+    if pay_all.size == 0:
+        return pv
+    live = pay_all > 1.0e-12
+    if not np.any(live):
+        return pv
+    s = np.asarray(legs.get("float_start_time", []), dtype=float)[live]
+    e = np.asarray(legs.get("float_end_time", []), dtype=float)[live]
+    pay = pay_all[live]
+    tau = np.asarray(legs.get("float_accrual", []), dtype=float)[live]
+    index_tau = np.asarray(legs.get("float_index_accrual", legs.get("float_accrual", [])), dtype=float)[live]
+    n = np.asarray(legs.get("float_notional", []), dtype=float)[live]
+    sign = np.asarray(legs.get("float_sign", []), dtype=float)[live]
+    spread = np.asarray(legs.get("float_spread", np.zeros_like(pay_all)), dtype=float)[live]
+    fix_t = np.asarray(legs.get("float_fixing_time", legs.get("float_start_time", [])), dtype=float)[live]
+    fixed = fix_t <= 1.0e-12
+    disc_pay = np.fromiter((float(p_disc(float(t))) for t in pay), dtype=float, count=pay.size)
+
+    if np.any(fixed):
+        if realized_float_coupon is not None:
+            coupons = np.asarray(realized_float_coupon, dtype=float)[live][fixed]
+            amounts = sign[fixed] * n[fixed] * coupons * tau[fixed]
+        elif "float_amount" in legs:
+            amounts = np.asarray(legs["float_amount"], dtype=float)[live][fixed]
+        else:
+            coupons = np.asarray(legs.get("float_coupon", np.zeros_like(pay_all)), dtype=float)[live][fixed]
+            amounts = sign[fixed] * n[fixed] * coupons * tau[fixed]
+        pv += float(np.sum(amounts * disc_pay[fixed]))
+
+    if np.any(~fixed):
+        s2 = s[~fixed]
+        e2 = e[~fixed]
+        tau2 = tau[~fixed]
+        index_tau2 = index_tau[~fixed]
+        n2 = n[~fixed]
+        sign2 = sign[~fixed]
+        spread2 = spread[~fixed]
+        disc_pay2 = disc_pay[~fixed]
+        ps = np.fromiter((float(p_fwd(max(0.0, float(t)))) for t in s2), dtype=float, count=s2.size)
+        pe = np.fromiter((float(p_fwd(float(t))) for t in e2), dtype=float, count=e2.size)
+        fwd = (ps / pe - 1.0) / index_tau2
+        amounts = sign2 * n2 * (fwd + spread2) * tau2
+        pv += float(np.sum(amounts * disc_pay2))
+    return pv
+
+
+def _portfolio_has_irs_trades(snapshot: XVASnapshot) -> bool:
+    portfolio = getattr(snapshot, "portfolio", None)
+    trades = getattr(portfolio, "trades", ()) or ()
+    for trade in trades:
+        product = getattr(trade, "product", None)
+        if isinstance(product, IRS):
+            return True
+        if str(getattr(product, "product_type", "")).strip().upper() == "IRS":
+            return True
+    return False
 
 
 def _survival_from_piecewise_hazard(

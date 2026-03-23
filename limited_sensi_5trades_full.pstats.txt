@@ -1,0 +1,33 @@
+         7476977 function calls (7231177 primitive calls) in 2.848 seconds
+
+   Ordered by: cumulative time
+   List reduced from 8063 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       20    0.000    0.000    3.443    0.172 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_jit_internal.py:1022(_overload)
+   182/84    0.001    0.000    3.312    0.039 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:316(fallthrough)
+        1    0.000    0.000    0.665    0.665 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/sensitivity.py:65(from_case_dir)
+        1    0.000    0.000    0.664    0.664 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:61(from_files)
+        1    0.000    0.000    0.583    0.583 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:359(_load_market_quotes)
+        1    0.095    0.095    0.582    0.582 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/loader.py:379(_load_market_csv_cached)
+    55835    0.018    0.000    0.424    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/domain/dataclasses.py:1035(_validate_date_like)
+    56296    0.022    0.000    0.414    0.000 {built-in method strptime}
+   152/57    0.008    0.000    0.406    0.007 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:296(py_impl)
+    52322    0.010    0.000    0.405    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/domain/dataclasses.py:66(__post_init__)
+        2    0.005    0.002    0.400    0.200 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:6060(_ore_reference_summary)
+        2    0.002    0.001    0.391    0.196 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:1495(validate_ore_input_snapshot)
+    56296    0.029    0.000    0.385    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/_strptime.py:671(_strptime_datetime)
+        2    0.059    0.030    0.370    0.185 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/sensitivity.py:702(_discover_supported_quotes)
+    56296    0.190    0.000    0.356    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/_strptime.py:413(_strptime)
+        4    0.071    0.018    0.341    0.085 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:2475(_load_ore_csv_keys_by_date)
+        1    0.000    0.000    0.325    0.325 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/functional.py:1(<module>)
+        1    0.000    0.000    0.322    0.322 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/nn/__init__.py:1(<module>)
+        1    0.000    0.000    0.309    0.309 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/nn/modules/__init__.py:1(<module>)
+     11/7    0.000    0.000    0.294    0.042 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/torch/_ops.py:161(py_functionalize_impl)
+   998/10    0.003    0.000    0.266    0.027 <frozen importlib._bootstrap>:1349(_find_and_load)
+   998/10    0.003    0.000    0.266    0.027 <frozen importlib._bootstrap>:1304(_find_and_load_unlocked)
+   971/11    0.002    0.000    0.265    0.024 <frozen importlib._bootstrap>:911(_load_unlocked)
+   926/11    0.001    0.000    0.265    0.024 <frozen importlib._bootstrap_external>:1020(exec_module)
+  2285/19    0.001    0.000    0.263    0.014 <frozen importlib._bootstrap>:480(_call_with_frames_removed)
+
+
