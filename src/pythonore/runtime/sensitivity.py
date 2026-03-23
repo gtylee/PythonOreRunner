@@ -569,6 +569,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         model = None
         pricing_backend = self._resolve_swap_npv_backend(inputs)
         total = 0.0
+        irs_t0_curve_cache: dict[tuple[object, ...], dict[str, np.ndarray]] = {}
         for spec in inputs.trade_specs:
             p_disc = inputs.discount_curves[spec.ccy]
             if spec.kind == "IRS":
@@ -588,7 +589,13 @@ class OreSnapshotPythonLgmSensitivityComparator:
                     x_paths_on_sim_grid=np.asarray([[0.0]], dtype=float),
                 )
                 if pricing_backend is None:
-                    value = _price_irs_t0_from_curves(spec.legs, p_disc, p_fwd, realized_coupon)
+                    value = _price_irs_t0_from_curves(
+                        spec.legs,
+                        p_disc,
+                        p_fwd,
+                        realized_coupon,
+                        curve_cache=irs_t0_curve_cache,
+                    )
                 else:
                     if model is None:
                         model = adapter._lgm_mod.LGM1F(
@@ -1467,30 +1474,69 @@ def _price_irs_t0_from_curves(
     p_disc: Callable[[float], float],
     p_fwd: Callable[[float], float],
     realized_float_coupon: Optional[np.ndarray],
+    *,
+    curve_cache: Optional[dict[tuple[object, ...], dict[str, np.ndarray]]] = None,
 ) -> float:
-    pv = 0.0
     fixed_pay = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+    pay_all = np.asarray(legs.get("float_pay_time", []), dtype=float)
+    float_start = np.asarray(legs.get("float_start_time", []), dtype=float)
+    float_end = np.asarray(legs.get("float_end_time", []), dtype=float)
+    float_fix_t = np.asarray(legs.get("float_fixing_time", legs.get("float_start_time", [])), dtype=float)
+    float_accrual = np.asarray(legs.get("float_accrual", []), dtype=float)
+    float_index_accrual = np.asarray(legs.get("float_index_accrual", legs.get("float_accrual", [])), dtype=float)
+    cache_key = (
+        id(p_disc),
+        id(p_fwd),
+        tuple(fixed_pay.tolist()),
+        tuple(pay_all.tolist()),
+        tuple(float_start.tolist()),
+        tuple(float_end.tolist()),
+        tuple(float_fix_t.tolist()),
+        tuple(float_accrual.tolist()),
+        tuple(float_index_accrual.tolist()),
+    )
+    pre = curve_cache.get(cache_key) if curve_cache is not None else None
+    if pre is None:
+        live = pay_all > 1.0e-12
+        disc_fixed = np.fromiter((float(p_disc(float(t))) for t in fixed_pay), dtype=float, count=fixed_pay.size)
+        pay_live = pay_all[live]
+        disc_pay = np.fromiter((float(p_disc(float(t))) for t in pay_live), dtype=float, count=pay_live.size)
+        fixed = float_fix_t[live] <= 1.0e-12
+        ps = np.empty(0, dtype=float)
+        pe = np.empty(0, dtype=float)
+        if np.any(~fixed):
+            s2 = float_start[live][~fixed]
+            e2 = float_end[live][~fixed]
+            ps = np.fromiter((float(p_fwd(max(0.0, float(t)))) for t in s2), dtype=float, count=s2.size)
+            pe = np.fromiter((float(p_fwd(float(t))) for t in e2), dtype=float, count=e2.size)
+        pre = {
+            "live": live,
+            "disc_fixed": disc_fixed,
+            "disc_pay": disc_pay,
+            "fixed": fixed,
+            "ps": ps,
+            "pe": pe,
+        }
+        if curve_cache is not None:
+            curve_cache[cache_key] = pre
+
+    pv = 0.0
     if fixed_pay.size:
         fixed_amount = np.asarray(legs.get("fixed_amount", []), dtype=float)
-        pv += float(np.sum(fixed_amount * np.fromiter((float(p_disc(float(t))) for t in fixed_pay), dtype=float, count=fixed_pay.size)))
+        pv += float(np.sum(fixed_amount * np.asarray(pre["disc_fixed"], dtype=float)))
 
-    pay_all = np.asarray(legs.get("float_pay_time", []), dtype=float)
     if pay_all.size == 0:
         return pv
-    live = pay_all > 1.0e-12
+    live = np.asarray(pre["live"], dtype=bool)
     if not np.any(live):
         return pv
-    s = np.asarray(legs.get("float_start_time", []), dtype=float)[live]
-    e = np.asarray(legs.get("float_end_time", []), dtype=float)[live]
-    pay = pay_all[live]
-    tau = np.asarray(legs.get("float_accrual", []), dtype=float)[live]
-    index_tau = np.asarray(legs.get("float_index_accrual", legs.get("float_accrual", [])), dtype=float)[live]
+    tau = float_accrual[live]
+    index_tau = float_index_accrual[live]
     n = np.asarray(legs.get("float_notional", []), dtype=float)[live]
     sign = np.asarray(legs.get("float_sign", []), dtype=float)[live]
     spread = np.asarray(legs.get("float_spread", np.zeros_like(pay_all)), dtype=float)[live]
-    fix_t = np.asarray(legs.get("float_fixing_time", legs.get("float_start_time", [])), dtype=float)[live]
-    fixed = fix_t <= 1.0e-12
-    disc_pay = np.fromiter((float(p_disc(float(t))) for t in pay), dtype=float, count=pay.size)
+    fixed = np.asarray(pre["fixed"], dtype=bool)
+    disc_pay = np.asarray(pre["disc_pay"], dtype=float)
 
     if np.any(fixed):
         if realized_float_coupon is not None:
@@ -1504,16 +1550,14 @@ def _price_irs_t0_from_curves(
         pv += float(np.sum(amounts * disc_pay[fixed]))
 
     if np.any(~fixed):
-        s2 = s[~fixed]
-        e2 = e[~fixed]
         tau2 = tau[~fixed]
         index_tau2 = index_tau[~fixed]
         n2 = n[~fixed]
         sign2 = sign[~fixed]
         spread2 = spread[~fixed]
         disc_pay2 = disc_pay[~fixed]
-        ps = np.fromiter((float(p_fwd(max(0.0, float(t)))) for t in s2), dtype=float, count=s2.size)
-        pe = np.fromiter((float(p_fwd(float(t))) for t in e2), dtype=float, count=e2.size)
+        ps = np.asarray(pre["ps"], dtype=float)
+        pe = np.asarray(pre["pe"], dtype=float)
         fwd = (ps / pe - 1.0) / index_tau2
         amounts = sign2 * n2 * (fwd + spread2) * tau2
         pv += float(np.sum(amounts * disc_pay2))

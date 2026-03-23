@@ -8,7 +8,7 @@
 
 ## Pricing
 
-- py_t0_npv: `4509321487944.548`
+- py_t0_npv: `1702209820.4057944`
 - trade_type: `Swap`
 - pricing_mode: `python_native_from_sensitivity`
 - report_ccy: `USD`
