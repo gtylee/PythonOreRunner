@@ -1,13 +1,11 @@
 {
   "counterparty": "CPTY_A",
   "diagnostics": {
-    "engine": "ore_reference_expected_output",
-    "fallback_error": "ORE output file not found (run ORE first): /Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_OneTradeLimitedSensi/Output/npv.csv",
-    "fallback_reason": "missing_native_output",
+    "engine": "python_native",
+    "missing_native_pricing_reference": true,
     "missing_reference_pricing": true,
+    "pricing_mode": "python_native_from_sensitivity",
     "reference_output_dirs": [],
-    "sensitivity_fallback_error": "unhashable type: 'dict'",
-    "sensitivity_fallback_reason": "unsupported_python_sensitivity",
     "using_expected_output": true
   },
   "input_validation": {
@@ -33,18 +31,580 @@
     "xva_fba": true,
     "xva_fca": true
   },
-  "pricing": null,
+  "pricing": {
+    "pricing_mode": "python_native_from_sensitivity",
+    "py_t0_npv": 3411011575.2197237,
+    "report_ccy": "USD",
+    "trade_type": "Swap"
+  },
   "sensitivity": {
     "matched_factor_count": 0,
     "metric": "NPV",
     "notes": [
-      "sensitivity fallback: unhashable type: 'dict'"
+      "Pruned 11 native sensitivity factors that are outside the portfolio currencies/index families."
     ],
     "ore_factor_count": 0,
-    "python_factor_count": 0,
+    "python_factor_count": 19,
+    "python_rows": [
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -1248618.2125005722,
+        "down_metric_value": 3409843771.290758,
+        "normalized_factor": "zero:USD:1Y",
+        "ore_factor": "DiscountCurve/USD/0/1Y",
+        "python_quote_key": "curve:DiscountCurve/USD/0/1Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3409762957.007223
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -1361537.0303058624,
+        "down_metric_value": 3409956708.504849,
+        "normalized_factor": "zero:USD:2Y",
+        "ore_factor": "DiscountCurve/USD/1/2Y",
+        "python_quote_key": "curve:DiscountCurve/USD/1/2Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3409650038.189418
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -1877740.2196159363,
+        "down_metric_value": 3410473116.676371,
+        "normalized_factor": "zero:USD:5Y",
+        "ore_factor": "DiscountCurve/USD/2/5Y",
+        "python_quote_key": "curve:DiscountCurve/USD/2/5Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3409133835.000108
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -2014661.9597172737,
+        "down_metric_value": 3410610365.061178,
+        "normalized_factor": "zero:USD:10Y",
+        "ore_factor": "DiscountCurve/USD/3/10Y",
+        "python_quote_key": "curve:DiscountCurve/USD/3/10Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3408996913.2600064
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -391384.9992656708,
+        "down_metric_value": 3410730873.5442977,
+        "normalized_factor": "fwd:USD:3M:1Y",
+        "ore_factor": "IndexCurve/USD-SOFR-3M/0/1Y",
+        "python_quote_key": "curve:IndexCurve/USD-SOFR-3M/0/1Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3410620190.220458
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -356604.83038282394,
+        "down_metric_value": 3410696084.69654,
+        "normalized_factor": "fwd:USD:3M:2Y",
+        "ore_factor": "IndexCurve/USD-SOFR-3M/1/2Y",
+        "python_quote_key": "curve:IndexCurve/USD-SOFR-3M/1/2Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3410654970.389341
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 180390.38039970398,
+        "down_metric_value": 3410159054.7315855,
+        "normalized_factor": "fwd:USD:3M:5Y",
+        "ore_factor": "IndexCurve/USD-SOFR-3M/2/5Y",
+        "python_quote_key": "curve:IndexCurve/USD-SOFR-3M/2/5Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411191965.6001234
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": -2512733.706544876,
+        "down_metric_value": 3412852121.2094874,
+        "normalized_factor": "fwd:USD:3M:10Y",
+        "ore_factor": "IndexCurve/USD-SOFR-3M/3/10Y",
+        "python_quote_key": "curve:IndexCurve/USD-SOFR-3M/3/10Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3408498841.513179
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:6M:1Y",
+        "ore_factor": "IndexCurve/USD-LIBOR-6M/0/1Y",
+        "python_quote_key": "curve:IndexCurve/USD-LIBOR-6M/0/1Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:6M:2Y",
+        "ore_factor": "IndexCurve/USD-LIBOR-6M/1/2Y",
+        "python_quote_key": "curve:IndexCurve/USD-LIBOR-6M/1/2Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:6M:5Y",
+        "ore_factor": "IndexCurve/USD-LIBOR-6M/2/5Y",
+        "python_quote_key": "curve:IndexCurve/USD-LIBOR-6M/2/5Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:6M:10Y",
+        "ore_factor": "IndexCurve/USD-LIBOR-6M/3/10Y",
+        "python_quote_key": "curve:IndexCurve/USD-LIBOR-6M/3/10Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:FEDFUNDS:1Y",
+        "ore_factor": "IndexCurve/USD-FEDFUNDS/0/1Y",
+        "python_quote_key": "curve:IndexCurve/USD-FEDFUNDS/0/1Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:FEDFUNDS:2Y",
+        "ore_factor": "IndexCurve/USD-FEDFUNDS/1/2Y",
+        "python_quote_key": "curve:IndexCurve/USD-FEDFUNDS/1/2Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:FEDFUNDS:5Y",
+        "ore_factor": "IndexCurve/USD-FEDFUNDS/2/5Y",
+        "python_quote_key": "curve:IndexCurve/USD-FEDFUNDS/2/5Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:SIFMA:1Y",
+        "ore_factor": "IndexCurve/USD-SIFMA/0/1Y",
+        "python_quote_key": "curve:IndexCurve/USD-SIFMA/0/1Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:SIFMA:2Y",
+        "ore_factor": "IndexCurve/USD-SIFMA/1/2Y",
+        "python_quote_key": "curve:IndexCurve/USD-SIFMA/1/2Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:SIFMA:5Y",
+        "ore_factor": "IndexCurve/USD-SIFMA/2/5Y",
+        "python_quote_key": "curve:IndexCurve/USD-SIFMA/2/5Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "base_value": 0.0,
+        "delta": 0.0,
+        "down_metric_value": 3411011575.2197237,
+        "normalized_factor": "fwd:USD:SIFMA:10Y",
+        "ore_factor": "IndexCurve/USD-SIFMA/3/10Y",
+        "python_quote_key": "curve:IndexCurve/USD-SIFMA/3/10Y",
+        "shift_size": 0.0001,
+        "up_metric_value": 3411011575.2197237
+      }
+    ],
+    "scenario_output_file": "scenario.csv",
+    "scenario_rows": [
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -1248618.2125005722,
+        "direction": "Up",
+        "factor": "DiscountCurve/USD/0/1Y",
+        "scenario_metric_value": 3409762957.007223,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -1167803.9289655685,
+        "direction": "Down",
+        "factor": "DiscountCurve/USD/0/1Y",
+        "scenario_metric_value": 3409843771.290758,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -1361537.0303058624,
+        "direction": "Up",
+        "factor": "DiscountCurve/USD/1/2Y",
+        "scenario_metric_value": 3409650038.189418,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -1054866.7148747444,
+        "direction": "Down",
+        "factor": "DiscountCurve/USD/1/2Y",
+        "scenario_metric_value": 3409956708.504849,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -1877740.2196159363,
+        "direction": "Up",
+        "factor": "DiscountCurve/USD/2/5Y",
+        "scenario_metric_value": 3409133835.000108,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -538458.5433526039,
+        "direction": "Down",
+        "factor": "DiscountCurve/USD/2/5Y",
+        "scenario_metric_value": 3410473116.676371,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -2014661.9597172737,
+        "direction": "Up",
+        "factor": "DiscountCurve/USD/3/10Y",
+        "scenario_metric_value": 3408996913.2600064,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -401210.1585454941,
+        "direction": "Down",
+        "factor": "DiscountCurve/USD/3/10Y",
+        "scenario_metric_value": 3410610365.061178,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -391384.9992656708,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SOFR-3M/0/1Y",
+        "scenario_metric_value": 3410620190.220458,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -280701.6754260063,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SOFR-3M/0/1Y",
+        "scenario_metric_value": 3410730873.5442977,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -356604.83038282394,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SOFR-3M/1/2Y",
+        "scenario_metric_value": 3410654970.389341,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -315490.52318382263,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SOFR-3M/1/2Y",
+        "scenario_metric_value": 3410696084.69654,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 180390.38039970398,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SOFR-3M/2/5Y",
+        "scenario_metric_value": 3411191965.6001234,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -852520.4881381989,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SOFR-3M/2/5Y",
+        "scenario_metric_value": 3410159054.7315855,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": -2512733.706544876,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SOFR-3M/3/10Y",
+        "scenario_metric_value": 3408498841.513179,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 1840545.9897637367,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SOFR-3M/3/10Y",
+        "scenario_metric_value": 3412852121.2094874,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-LIBOR-6M/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-LIBOR-6M/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-LIBOR-6M/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-LIBOR-6M/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-LIBOR-6M/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-LIBOR-6M/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-LIBOR-6M/3/10Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-LIBOR-6M/3/10Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-FEDFUNDS/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-FEDFUNDS/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-FEDFUNDS/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-FEDFUNDS/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-FEDFUNDS/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-FEDFUNDS/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SIFMA/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SIFMA/0/1Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SIFMA/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SIFMA/1/2Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SIFMA/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SIFMA/2/5Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Up",
+        "factor": "IndexCurve/USD-SIFMA/3/10Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      },
+      {
+        "base_metric_value": 3411011575.2197237,
+        "difference": 0.0,
+        "direction": "Down",
+        "factor": "IndexCurve/USD-SIFMA/3/10Y",
+        "scenario_metric_value": 3411011575.2197237,
+        "shift_size_1": 0.0001,
+        "shift_size_2": "#N/A"
+      }
+    ],
+    "sensitivity_output_file": "sensitivity.csv",
     "top_comparisons": [],
     "unmatched_ore_count": 0,
-    "unmatched_python_count": 0,
+    "unmatched_python_count": 19,
     "unsupported_factor_count": 0
   },
   "trade_id": "IRS_USD_0001",

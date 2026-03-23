@@ -8,6 +8,10 @@
 
 ## Pricing
 
+- py_t0_npv: `3411011575.2197237`
+- trade_type: `Swap`
+- pricing_mode: `python_native_from_sensitivity`
+- report_ccy: `USD`
 
 ## XVA
 
@@ -19,13 +23,15 @@
 ## Sensitivity
 
 - metric: `NPV`
-- python_factor_count: `0`
+- python_factor_count: `19`
 - ore_factor_count: `0`
 - matched_factor_count: `0`
 - unmatched_ore_count: `0`
-- unmatched_python_count: `0`
+- unmatched_python_count: `19`
 - unsupported_factor_count: `0`
-- notes: `["sensitivity fallback: unhashable type: 'dict'"]`
+- notes: `['Pruned 11 native sensitivity factors that are outside the portfolio currencies/index families.']`
+- sensitivity_output_file: `sensitivity.csv`
+- scenario_output_file: `scenario.csv`
 
 ## Input Validation
 

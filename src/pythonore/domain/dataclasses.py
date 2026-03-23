@@ -787,13 +787,10 @@ class XVASnapshot:
         return _snapshot_from_dict(data)
 
     def stable_key(self) -> str:
-        xml_buffers = {
-            key: (
-                id(value),
-                len(value) if isinstance(value, str) else None,
-            )
+        xml_buffers = tuple(
+            (key, id(value), len(value) if isinstance(value, str) else None)
             for key, value in sorted(self.config.xml_buffers.items())
-        }
+        )
         runtime = self.config.runtime
         runtime_key = None
         if runtime is not None:
