@@ -389,6 +389,7 @@ class PythonLgmAdapter:
         self._irs_utils = None
         self._fx_utils = None
         self._inflation_mod = None
+        self._ir_options_mod = None
         self._ore_snapshot_mod = None
         self._asof_cache: Dict[int, str] = {}
         self._fixings_cache: Dict[int, Dict[tuple[str, str], float]] = {}
@@ -700,13 +701,14 @@ class PythonLgmAdapter:
         if self._loaded:
             return
         try:
-            from pythonore.compute import inflation, irs_xva_utils, lgm, lgm_fx_xva_utils
+            from pythonore.compute import inflation, irs_xva_utils, lgm, lgm_fx_xva_utils, lgm_ir_options
             from pythonore.io import ore_snapshot
 
             self._inflation_mod = inflation
             self._lgm_mod = lgm
             self._irs_utils = irs_xva_utils
             self._fx_utils = lgm_fx_xva_utils
+            self._ir_options_mod = lgm_ir_options
             self._ore_snapshot_mod = ore_snapshot
             self._loaded = True
             return
@@ -723,12 +725,14 @@ class PythonLgmAdapter:
             import inflation as inflation_local
             import lgm as lgm_local
             import lgm_fx_xva_utils as lgm_fx_xva_utils_local
+            import lgm_ir_options as lgm_ir_options_local
             import ore_snapshot as ore_snapshot_local
 
             self._inflation_mod = inflation_local
             self._lgm_mod = lgm_local
             self._irs_utils = irs_xva_utils_local
             self._fx_utils = lgm_fx_xva_utils_local
+            self._ir_options_mod = lgm_ir_options_local
             self._ore_snapshot_mod = ore_snapshot_local
             self._loaded = True
         except Exception as exc:
@@ -761,12 +765,45 @@ class PythonLgmAdapter:
                     ).strip()
                 _, _, input_dir = self._ore_snapshot_mod._resolve_case_dirs(ore_path)
                 simulation_xml_path = self._ore_snapshot_mod._resolve_ore_path(sim_cfg, input_dir)
-                lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_via_ore(
+                market_data_path = self._ore_snapshot_mod._resolve_ore_path(
+                    setup.get("marketDataFile", ""),
+                    input_dir,
+                )
+                curve_config_path = self._ore_snapshot_mod._resolve_ore_path(
+                    setup.get("curveConfigFile", ""),
+                    input_dir,
+                )
+                conventions_path = self._ore_snapshot_mod._resolve_ore_path(
+                    setup.get("conventionsFile", ""),
+                    input_dir,
+                )
+                todaysmarket_xml_path = self._ore_snapshot_mod._resolve_ore_path(
+                    setup.get("marketConfigFile", "todaysmarket.xml"),
+                    input_dir,
+                )
+                output_path = self._ore_snapshot_mod._resolve_output_ore_path(
+                    setup.get("outputPath", "Output"),
+                    ore_path.parent.parent,
+                )
+                lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_in_python(
                     ore_xml_path=ore_path,
                     input_dir=input_dir,
+                    output_path=output_path,
+                    market_data_path=market_data_path,
+                    curve_config_path=curve_config_path,
+                    conventions_path=conventions_path,
+                    todaysmarket_xml_path=todaysmarket_xml_path,
                     simulation_xml_path=simulation_xml_path,
                     ccy_key=model_ccy,
                 )
+                if lgm_params is None:
+                    lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_via_ore(
+                        ore_xml_path=ore_path,
+                        input_dir=input_dir,
+                        output_path=output_path,
+                        simulation_xml_path=simulation_xml_path,
+                        ccy_key=model_ccy,
+                    )
                 if lgm_params is not None:
                     param_source = "calibration"
                 elif "simulation.xml" in xml:
@@ -878,24 +915,50 @@ class PythonLgmAdapter:
                     )
                 )
             elif isinstance(t.product, GenericProduct):
-                generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
-                if generic_legs is not None:
-                    notionals = [
-                        abs(float(leg.get("notional", 0.0)))
-                        for leg in generic_legs.get("rate_legs", [])
-                    ]
-                    generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+                generic_capfloor = self._build_generic_capfloor_state(t, snapshot)
+                if generic_capfloor is not None:
+                    notionals = np.asarray(generic_capfloor["definition"].notional, dtype=float)
                     trade_specs.append(
                         _TradeSpec(
                             trade=t,
-                            kind="RateSwap",
-                            notional=max(notionals) if notionals else 0.0,
-                            ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
-                            legs=generic_legs,
+                            kind="CapFloor",
+                            notional=float(np.max(np.abs(notionals))) if notionals.size else 0.0,
+                            ccy=str(generic_capfloor["ccy"]).upper(),
+                            sticky_state=generic_capfloor,
                         )
                     )
                 else:
-                    unsupported.append(t)
+                    generic_swaption = self._build_generic_swaption_state(t, snapshot)
+                    if generic_swaption is not None:
+                        trade_specs.append(
+                            _TradeSpec(
+                                trade=t,
+                                kind="Swaption",
+                                notional=float(generic_swaption["notional"]),
+                                ccy=str(generic_swaption["ccy"]).upper(),
+                                legs=generic_swaption.get("underlying_legs"),
+                                sticky_state=generic_swaption,
+                            )
+                        )
+                    else:
+                        generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
+                        if generic_legs is not None:
+                            notionals = [
+                                abs(float(leg.get("notional", 0.0)))
+                                for leg in generic_legs.get("rate_legs", [])
+                            ]
+                            generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+                            trade_specs.append(
+                                _TradeSpec(
+                                    trade=t,
+                                    kind="RateSwap",
+                                    notional=max(notionals) if notionals else 0.0,
+                                    ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
+                                    legs=generic_legs,
+                                )
+                            )
+                        else:
+                            unsupported.append(t)
             else:
                 unsupported.append(t)
         ccy_set: set[str] = {snapshot.config.base_currency.upper()}
@@ -2439,6 +2502,154 @@ class PythonLgmAdapter:
         )
         self._generic_rate_swap_legs_cache[cache_key] = result
         return result
+
+    def _build_generic_capfloor_state(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+    ) -> Optional[Dict[str, object]]:
+        product = trade.product
+        if not isinstance(product, GenericProduct):
+            return None
+        if str(product.payload.get("trade_type", "")).strip() != "CapFloor":
+            return None
+        xml = str(product.payload.get("xml", "")).strip()
+        if "<CapFloorData" not in xml:
+            return None
+        try:
+            trade_root = ET.fromstring(f"<Trade>{xml}</Trade>")
+        except Exception:
+            return None
+        data = trade_root.find("./CapFloorData")
+        leg = data.find("./LegData") if data is not None else None
+        if data is None or leg is None:
+            return None
+        if (leg.findtext("./LegType") or "").strip().upper() != "FLOATING":
+            return None
+        asof = datetime.strptime(self._normalized_asof(snapshot), "%Y-%m-%d").date()
+        parse_date = self._irs_utils._parse_yyyymmdd
+        build_schedule = self._irs_utils._build_schedule
+        time_from_dates = self._irs_utils._time_from_dates
+        year_fraction = self._irs_utils._year_fraction
+        advance_business_days = self._irs_utils._advance_business_days
+        rules = leg.find("./ScheduleData/Rules")
+        fld = leg.find("./FloatingLegData")
+        if rules is None or fld is None:
+            return None
+        start = parse_date((rules.findtext("./StartDate") or "").strip())
+        end = parse_date((rules.findtext("./EndDate") or "").strip())
+        tenor = (rules.findtext("./Tenor") or "").strip()
+        cal = (rules.findtext("./Calendar") or "TARGET").strip()
+        pay_conv = (leg.findtext("./PaymentConvention") or "F").strip()
+        conv = (rules.findtext("./Convention") or pay_conv).strip()
+        s_dates, e_dates, p_dates = build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
+        dc = (leg.findtext("./DayCounter") or "A365").strip()
+        start_t = np.asarray([time_from_dates(asof, d, "A365F") for d in s_dates], dtype=float)
+        end_t = np.asarray([time_from_dates(asof, d, "A365F") for d in e_dates], dtype=float)
+        pay_t = np.asarray([time_from_dates(asof, d, "A365F") for d in p_dates], dtype=float)
+        accr = np.asarray([year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
+        fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
+        in_arrears = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
+        fixing_base = e_dates if in_arrears else s_dates
+        fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
+        fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
+        notional = float((leg.findtext("./Notionals/Notional") or "0").strip() or 0.0)
+        spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
+        gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+        cap_text = (data.findtext("./Caps/Cap") or "").strip()
+        floor_text = (data.findtext("./Floors/Floor") or "").strip()
+        if cap_text:
+            option_type = "cap"
+            strike = float(cap_text)
+        elif floor_text:
+            option_type = "floor"
+            strike = float(floor_text)
+        else:
+            return None
+        long_short = (data.findtext("./LongShort") or "Long").strip().lower()
+        position = -1.0 if long_short == "short" else 1.0
+        ccy = (leg.findtext("./Currency") or snapshot.config.base_currency).strip().upper()
+        index_name = (fld.findtext("./Index") or "").strip().upper()
+        definition = self._ir_options_mod.CapFloorDef(
+            trade_id=trade.trade_id,
+            ccy=ccy,
+            option_type=option_type,
+            start_time=start_t,
+            end_time=end_t,
+            pay_time=pay_t,
+            accrual=accr,
+            notional=np.full_like(accr, notional),
+            strike=np.full_like(accr, strike),
+            gearing=np.full_like(accr, gearing),
+            spread=np.full_like(accr, spread),
+            fixing_time=fixing_t,
+            position=position,
+        )
+        return {"definition": definition, "ccy": ccy, "index_name": index_name}
+
+    def _build_generic_swaption_state(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+    ) -> Optional[Dict[str, object]]:
+        product = trade.product
+        if not isinstance(product, GenericProduct):
+            return None
+        if str(product.payload.get("trade_type", "")).strip() != "Swaption":
+            return None
+        xml = str(product.payload.get("xml", "")).strip()
+        if "<SwaptionData" not in xml:
+            return None
+        try:
+            trade_root = ET.fromstring(f"<Trade id=\"{trade.trade_id}\"><TradeType>Swaption</TradeType>{xml}</Trade>")
+        except Exception:
+            return None
+        style = (trade_root.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
+        if style != "european":
+            return None
+        asof = self._normalized_asof(snapshot)
+        fake_root = ET.fromstring(f"<Portfolio>{ET.tostring(trade_root, encoding='unicode')}</Portfolio>")
+        try:
+            underlying_legs = self._irs_utils.load_swap_legs_from_portfolio_root(fake_root, trade.trade_id, asof)
+        except Exception:
+            return None
+        exercise_nodes = trade_root.findall("./SwaptionData/OptionData/ExerciseDates/ExerciseDate")
+        exercise_dates = [
+            self._irs_utils._parse_yyyymmdd((node.text or "").strip())
+            for node in exercise_nodes
+            if (node.text or "").strip()
+        ]
+        if len(exercise_dates) != 1:
+            return None
+        asof_date = datetime.strptime(asof, "%Y-%m-%d").date()
+        exercise_time = float(self._irs_utils._time_from_dates(asof_date, exercise_dates[0], "A365F"))
+        fixed_leg = next((leg for leg in trade_root.findall("./SwaptionData/LegData") if (leg.findtext("./LegType") or "").strip().lower() == "fixed"), None)
+        float_index = str(underlying_legs.get("float_index", "")).upper()
+        ccy = (
+            (fixed_leg.findtext("./Currency") if fixed_leg is not None else None)
+            or trade_root.findtext("./SwaptionData/LegData/Currency")
+            or snapshot.config.base_currency
+        ).strip().upper()
+        pay_fixed = (fixed_leg.findtext("./Payer") or "true").strip().lower() == "true" if fixed_leg is not None else True
+        long_short = (trade_root.findtext("./SwaptionData/OptionData/LongShort") or "Long").strip().lower()
+        exercise_sign = 1.0 if pay_fixed else -1.0
+        if long_short == "short":
+            exercise_sign *= -1.0
+        bermudan = self._ir_options_mod.BermudanSwaptionDef(
+            trade_id=trade.trade_id,
+            exercise_times=np.asarray([exercise_time], dtype=float),
+            underlying_legs=underlying_legs,
+            exercise_sign=exercise_sign,
+            settlement=(trade_root.findtext("./SwaptionData/OptionData/Settlement") or "Physical").strip().lower(),
+        )
+        notional = float(np.max(np.abs(np.asarray(underlying_legs.get("fixed_notional", [0.0]), dtype=float))))
+        return {
+            "definition": bermudan,
+            "ccy": ccy,
+            "notional": notional,
+            "underlying_legs": underlying_legs,
+            "index_name": float_index,
+        }
 
     def _apply_historical_fixings_to_generic_rate_legs(
         self,

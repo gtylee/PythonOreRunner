@@ -258,7 +258,7 @@ class TestLgmCalibration(unittest.TestCase):
         self.assertEqual(model.calls[0][0], "calibrate")
         self.assertEqual(model.calls[0][2], [True, False, False])
 
-    def test_hagan_volatility_fails_fast_without_quantext_bindings(self):
+    def test_hagan_volatility_uses_quantlib_gsr_backend(self):
         config = CurrencyLgmConfig.from_dict(
             "EUR",
             {
@@ -268,8 +268,10 @@ class TestLgmCalibration(unittest.TestCase):
                 "calibration_swaptions": [{"expiry": "1Y", "term": "5Y", "strike": "ATM"}],
             },
         )
-        with self.assertRaises(NotImplementedError):
-            calibrate_lgm_currency(config, _build_market())
+        result = calibrate_lgm_currency(config, _build_market())
+        self.assertTrue(result.valid)
+        self.assertEqual(result.backend, "quantlib_gsr")
+        self.assertGreater(len(result.points), 0)
 
     def test_continue_on_error_controls_invalid_result_vs_exception(self):
         base = {

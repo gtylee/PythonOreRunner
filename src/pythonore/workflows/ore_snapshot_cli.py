@@ -5244,7 +5244,14 @@ def _compute_snapshot_case(
     )
 
 
-def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None, top: int) -> dict[str, Any]:
+def _run_sensitivity_case(
+    ore_xml: Path,
+    *,
+    metric: str,
+    netting_set: str | None,
+    top: int,
+    progress_callback: Any = None,
+) -> dict[str, Any]:
     from pythonore.runtime.sensitivity import OreSnapshotPythonLgmSensitivityComparator
 
     case_dir = ore_xml.resolve().parents[1]
@@ -5265,6 +5272,7 @@ def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None
         curve_factor_specs=curve_factor_specs,
         factor_labels=factor_labels,
         native_only_output_mode="bump_change",
+        progress_callback=progress_callback,
     )
     comparisons = result.get("comparisons", [])
     python_rows = [
@@ -5308,6 +5316,32 @@ def _run_sensitivity_case(ore_xml: Path, *, metric: str, netting_set: str | None
         "sensitivity_output_file": str(sensi_params.get("sensitivityOutputFile") or "sensitivity.csv"),
         "scenario_output_file": str(sensi_params.get("scenarioOutputFile") or "scenario.csv"),
     }
+
+
+class _SensitivityProgressBar:
+    def __init__(self, *, stream=None, width: int = 32):
+        self.stream = stream or sys.stdout
+        self.width = max(int(width), 10)
+        self._last_line = ""
+
+    def update(self, completed: int, total: int, normalized_factor: str) -> None:
+        total = max(int(total), 0)
+        completed = min(max(int(completed), 0), total) if total else 0
+        ratio = 1.0 if total == 0 else completed / total
+        filled = min(self.width, int(round(ratio * self.width)))
+        bar = "#" * filled + "-" * (self.width - filled)
+        percent = int(round(ratio * 100.0))
+        suffix = f" {normalized_factor}" if normalized_factor else ""
+        line = f"\rSensitivity [{bar}] {completed}/{total} {percent:3d}%{suffix}"
+        self.stream.write(line)
+        self.stream.flush()
+        self._last_line = line
+
+    def finish(self) -> None:
+        if self._last_line:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._last_line = ""
 
 
 def _parse_analytics(ore_xml: Path) -> dict[str, bool]:
@@ -6202,6 +6236,7 @@ def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: P
         own_recovery=float(options.own_recovery),
         netting_set=options.netting_set,
         sensi_metric=options.sensi_metric,
+        sensi_progress=False,
         top=int(options.top),
         max_npv_abs_diff=float(options.max_npv_abs_diff),
         max_cva_rel=float(options.max_cva_rel),
@@ -7092,6 +7127,7 @@ def _run_case(
     *,
     artifact_root: Path,
 ) -> dict[str, Any]:
+    engine = _normalize_buffer_engine(getattr(args, "engine", "compare"))
     explicit_mode_request = bool(args.price or args.xva or args.sensi)
     modes = _infer_modes(args, ore_xml)
     first_trade_type = _first_trade_type(ore_xml)
@@ -7104,6 +7140,8 @@ def _run_case(
 
     if modes.xva:
         try:
+            if engine == "ore":
+                raise FileNotFoundError("ORE reference engine explicitly requested")
             if first_trade_type == "FxOption":
                 base_summary = _compute_fx_option_snapshot_case(
                     ore_xml,
@@ -7162,6 +7200,8 @@ def _run_case(
                     lgm_param_source=args.lgm_param_source,
                 )
         except Exception as exc:
+            if engine == "python":
+                raise
             if not _is_reference_fallback_error(exc):
                 raise
             reference_summary = _ore_reference_summary(
@@ -7201,6 +7241,8 @@ def _run_case(
             )
     elif modes.price:
         try:
+            if engine == "ore":
+                raise FileNotFoundError("ORE reference engine explicitly requested")
             if _supports_native_price_only(first_trade_type, ore_xml) or (
                 _has_active_simulation_analytic(ore_xml)
                 and first_trade_type == "Swap"
@@ -7219,6 +7261,8 @@ def _run_case(
             else:
                 price_summary = _price_reference_summary(ore_xml)
         except Exception as exc:
+            if engine == "python":
+                raise
             if not _is_reference_fallback_error(exc):
                 raise
             if isinstance(exc, FileNotFoundError):
@@ -7269,12 +7313,14 @@ def _run_case(
             }
         )
     if modes.sensi:
+        sensi_progress = _SensitivityProgressBar() if getattr(args, "sensi_progress", False) else None
         try:
             case_summary["sensitivity"] = _run_sensitivity_case(
                 ore_xml,
                 metric=args.sensi_metric,
                 netting_set=args.netting_set,
                 top=args.top,
+                progress_callback=None if sensi_progress is None else sensi_progress.update,
             )
         except Exception as exc:
             case_summary["sensitivity"] = {
@@ -7294,6 +7340,9 @@ def _run_case(
             if diagnostics.get("engine") is None:
                 diagnostics["engine"] = "non_pricing"
             case_summary["diagnostics"] = diagnostics
+        finally:
+            if sensi_progress is not None:
+                sensi_progress.finish()
     parity_summary = (case_summary.get("parity") or {}).get("summary", {})
     requested_xva_metrics = {
         str(metric).upper()
@@ -7661,6 +7710,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-refresh-every", type=int, default=1)
     parser.add_argument("--report-top-buckets", type=int, default=10)
     parser.add_argument("--ore-output-only", action="store_true")
+    parser.add_argument("--engine", choices=("compare", "python", "ore"), default="compare")
     parser.add_argument("--paths", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -7671,7 +7721,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xva-mode", choices=("classic", "ore"), default="ore")
     parser.add_argument(
         "--lgm-param-source",
-        choices=("auto", "calibration_xml", "simulation_xml", "ore", "provided"),
+        choices=("auto", "python", "calibration_xml", "simulation_xml", "ore", "provided"),
         default="auto",
     )
     parser.add_argument("--anchor-t0-npv", action="store_true")
@@ -7679,6 +7729,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--own-recovery", type=float, default=0.4)
     parser.add_argument("--netting-set", default=None)
     parser.add_argument("--sensi-metric", default="CVA")
+    parser.add_argument("--sensi-progress", action="store_true")
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--max-npv-abs-diff", type=float, default=1000.0)
     parser.add_argument("--max-cva-rel", type=float, default=0.05)

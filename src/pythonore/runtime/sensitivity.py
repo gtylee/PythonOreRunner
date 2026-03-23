@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import csv
 import math
 import numpy as np
@@ -51,6 +51,9 @@ class SensitivityComparisonEntry:
     delta_rel_diff: float
 
 
+SensitivityProgressCallback = Callable[[int, int, str], None]
+
+
 class OreSnapshotPythonLgmSensitivityComparator:
     """Finite-difference XVA sensitivities for ore_snapshot plus ORE comparison."""
 
@@ -80,6 +83,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         factor_labels: Optional[Dict[str, str]] = None,
         apply_portfolio_pruning: bool = False,
         output_mode: str = "derivative",
+        progress_callback: Optional[SensitivityProgressCallback] = None,
     ) -> List[PythonSensitivityEntry]:
         factor_shifts = factor_shifts or {}
         bump_modes = bump_modes or {}
@@ -106,6 +110,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
             curve_factor_specs=curve_factor_specs,
             factor_labels=factor_labels,
             output_mode=output_mode,
+            progress_callback=progress_callback,
         )
         if fast_entries is not None:
             return fast_entries
@@ -121,6 +126,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         base_metric_value = self._result_metric_value(base_result, metric)
 
         entries: List[PythonSensitivityEntry] = []
+        self._emit_progress(progress_callback, 0, len(requested), "")
         for normalized_factor in requested:
             curve_spec = curve_factor_specs.get(normalized_factor)
             quote_entries = quote_map.get(normalized_factor, [])
@@ -188,6 +194,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
                     delta=delta,
                 )
             )
+            self._emit_progress(progress_callback, len(entries), len(requested), normalized_factor)
         return entries
 
     def load_ore_zero_sensitivities(
@@ -241,6 +248,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         curve_factor_specs: Optional[Dict[str, Dict[str, object]]] = None,
         factor_labels: Optional[Dict[str, str]] = None,
         native_only_output_mode: str = "bump_change",
+        progress_callback: Optional[SensitivityProgressCallback] = None,
     ) -> Dict[str, object]:
         if output_dir is None:
             output_dir = snapshot.config.params.get("outputPath", "")
@@ -293,6 +301,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
             factor_labels=factor_labels,
             apply_portfolio_pruning=not ore_entries,
             output_mode="bump_change" if ore_entries else native_only_output_mode,
+            progress_callback=progress_callback,
         )
         unsupported_prefixes = ("recovery:",)
         unsupported_factors = sorted(
@@ -365,6 +374,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         curve_factor_specs: Dict[str, Dict[str, object]],
         factor_labels: Dict[str, str],
         output_mode: str,
+        progress_callback: Optional[SensitivityProgressCallback],
     ) -> Optional[List[PythonSensitivityEntry]]:
         metric_name = str(metric or "").strip().upper()
         if metric_name not in {"NPV", "PV"}:
@@ -382,6 +392,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         base_metric_value = self._price_snapshot_t0_npv(native_snapshot)
 
         entries: List[PythonSensitivityEntry] = []
+        self._emit_progress(progress_callback, 0, len(requested), "")
         for normalized_factor in requested:
             curve_spec = curve_factor_specs.get(normalized_factor)
             quote_map = self._discover_supported_quotes(native_snapshot)
@@ -448,7 +459,19 @@ class OreSnapshotPythonLgmSensitivityComparator:
                     delta=delta,
                 )
             )
+            self._emit_progress(progress_callback, len(entries), len(requested), normalized_factor)
         return entries
+
+    def _emit_progress(
+        self,
+        callback: Optional[SensitivityProgressCallback],
+        completed: int,
+        total: int,
+        normalized_factor: str,
+    ) -> None:
+        if callback is None:
+            return
+        callback(int(completed), int(total), str(normalized_factor))
 
     def _supports_fast_npv_sensitivity(self, snapshot: XVASnapshot) -> bool:
         adapter = getattr(self.engine, "adapter", None)
@@ -464,7 +487,8 @@ class OreSnapshotPythonLgmSensitivityComparator:
             return False
         if not inputs.trade_specs:
             return False
-        return all(spec.kind == "IRS" and spec.legs is not None for spec in inputs.trade_specs)
+        supported_kinds = {"IRS", "RateSwap", "CapFloor", "Swaption"}
+        return all(spec.kind in supported_kinds for spec in inputs.trade_specs)
 
     def _price_snapshot_t0_npv(self, snapshot: XVASnapshot) -> float:
         adapter = self.engine.adapter
@@ -487,60 +511,94 @@ class OreSnapshotPythonLgmSensitivityComparator:
         pricing_backend = self._resolve_swap_npv_backend()
         total = 0.0
         for spec in inputs.trade_specs:
-            if spec.kind != "IRS" or spec.legs is None:
-                raise EngineRunError(f"Fast NPV sensitivity path does not support trade kind '{spec.kind}'")
             p_disc = inputs.discount_curves[spec.ccy]
-            fwd_tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-            p_fwd = inputs.forward_curves_by_tenor.get(spec.ccy, {}).get(
-                fwd_tenor,
-                inputs.forward_curves.get(spec.ccy, p_disc),
-            )
-            realized_coupon = adapter._compute_realized_float_coupons(
-                model=model,
-                p0_disc=p_disc,
-                p0_fwd=p_fwd,
-                legs=spec.legs,
-                sim_times=np.asarray([0.0], dtype=float),
-                x_paths_on_sim_grid=np.asarray([[0.0]], dtype=float),
-            )
-            if pricing_backend is None:
+            if spec.kind == "IRS":
+                if spec.legs is None:
+                    raise EngineRunError("IRS fast NPV sensitivity path requires leg data")
+                fwd_tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+                p_fwd = inputs.forward_curves_by_tenor.get(spec.ccy, {}).get(
+                    fwd_tenor,
+                    inputs.forward_curves.get(spec.ccy, p_disc),
+                )
+                realized_coupon = adapter._compute_realized_float_coupons(
+                    model=model,
+                    p0_disc=p_disc,
+                    p0_fwd=p_fwd,
+                    legs=spec.legs,
+                    sim_times=np.asarray([0.0], dtype=float),
+                    x_paths_on_sim_grid=np.asarray([[0.0]], dtype=float),
+                )
+                if pricing_backend is None:
+                    value = float(
+                        adapter._irs_utils.swap_npv_from_ore_legs_dual_curve(
+                            model,
+                            p_disc,
+                            p_fwd,
+                            spec.legs,
+                            0.0,
+                            np.asarray([0.0], dtype=float),
+                            realized_float_coupon=realized_coupon,
+                        )[0]
+                    )
+                else:
+                    torch_curve_ctor, torch_pricer, device = pricing_backend
+                    sample_disc = _sample_times_for_legs(spec.legs, include_float_coupon_dates=False)
+                    sample_fwd = _sample_times_for_legs(spec.legs, include_float_coupon_dates=True)
+                    disc_curve = torch_curve_ctor(
+                        times=sample_disc,
+                        dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
+                        device=device,
+                    )
+                    fwd_curve = torch_curve_ctor(
+                        times=sample_fwd,
+                        dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
+                        device=device,
+                    )
+                    value = float(
+                        torch_pricer(
+                            model,
+                            disc_curve,
+                            fwd_curve,
+                            spec.legs,
+                            0.0,
+                            np.asarray([0.0], dtype=float),
+                            realized_float_coupon=realized_coupon,
+                            return_numpy=True,
+                        )[0]
+                    )
+            elif spec.kind == "RateSwap":
+                zero_paths = np.zeros((int(inputs.times.size), 1), dtype=float)
+                value = float(adapter._price_generic_rate_swap(spec, inputs, model, zero_paths)[0, 0])
+            elif spec.kind == "CapFloor":
+                state = dict(spec.sticky_state or {})
+                definition = state.get("definition")
+                index_name = str(state.get("index_name", "")).upper()
+                p_fwd = adapter._resolve_index_curve(inputs, spec.ccy, index_name)
                 value = float(
-                    adapter._irs_utils.swap_npv_from_ore_legs_dual_curve(
+                    adapter._ir_options_mod.capfloor_npv(
                         model,
                         p_disc,
                         p_fwd,
-                        spec.legs,
+                        definition,
                         0.0,
                         np.asarray([0.0], dtype=float),
-                        realized_float_coupon=realized_coupon,
                     )[0]
+                )
+            elif spec.kind == "Swaption":
+                state = dict(spec.sticky_state or {})
+                definition = state.get("definition")
+                index_name = str(state.get("index_name", "")).upper()
+                p_fwd = adapter._resolve_index_curve(inputs, spec.ccy, index_name)
+                value = float(
+                    adapter._ir_options_mod.bermudan_backward_price(
+                        model,
+                        p_disc,
+                        p_fwd,
+                        definition,
+                    ).price
                 )
             else:
-                torch_curve_ctor, torch_pricer, device = pricing_backend
-                sample_disc = _sample_times_for_legs(spec.legs, include_float_coupon_dates=False)
-                sample_fwd = _sample_times_for_legs(spec.legs, include_float_coupon_dates=True)
-                disc_curve = torch_curve_ctor(
-                    times=sample_disc,
-                    dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
-                    device=device,
-                )
-                fwd_curve = torch_curve_ctor(
-                    times=sample_fwd,
-                    dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
-                    device=device,
-                )
-                value = float(
-                    torch_pricer(
-                        model,
-                        disc_curve,
-                        fwd_curve,
-                        spec.legs,
-                        0.0,
-                        np.asarray([0.0], dtype=float),
-                        realized_float_coupon=realized_coupon,
-                        return_numpy=True,
-                    )[0]
-                )
+                raise EngineRunError(f"Fast NPV sensitivity path does not support trade kind '{spec.kind}'")
             total += value
         return float(total)
 

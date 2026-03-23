@@ -252,6 +252,33 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(ore_snapshot_io._get_netting_set_from_portfolio(portfolio_root, "T1"), "NS_A")
         self.assertEqual(ore_snapshot_io._get_float_index(portfolio_root, "T1"), "EUR-EURIBOR-6M")
 
+    def test_portfolio_trade_lookup_cache_is_guarded_by_root_identity(self):
+        portfolio_root_a = ore_snapshot_io.ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="T1"><TradeType>Swap</TradeType></Trade>
+            </Portfolio>
+            """
+        )
+        portfolio_root_b = ore_snapshot_io.ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="FXNDF"><TradeType>FxForward</TradeType></Trade>
+            </Portfolio>
+            """
+        )
+        cache_key = id(portfolio_root_b)
+        original = dict(ore_snapshot_io._PORTFOLIO_TRADE_LOOKUP_CACHE)
+        try:
+            ore_snapshot_io._PORTFOLIO_TRADE_LOOKUP_CACHE[cache_key] = (
+                portfolio_root_a,
+                {"T1": portfolio_root_a.find("./Trade")},
+            )
+            self.assertEqual(ore_snapshot_io._get_trade_type(portfolio_root_b, "FXNDF"), "FxForward")
+        finally:
+            ore_snapshot_io._PORTFOLIO_TRADE_LOOKUP_CACHE.clear()
+            ore_snapshot_io._PORTFOLIO_TRADE_LOOKUP_CACHE.update(original)
+
     def test_parse_market_instrument_key_rejects_invalid_dated_zero(self):
         parsed = ore_snapshot_io._parse_market_instrument_key("ZERO/RATE/USD/2027-13-40", asof_date="2026-03-20")
         self.assertIsNone(parsed)
@@ -417,6 +444,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                 [
                     str(FX_NDF_CASE_XML),
                     "--price",
+                    "--engine",
+                    "python",
                     "--output-root",
                     str(root / "artifacts"),
                 ]
@@ -1434,9 +1463,12 @@ class TestOreSnapshotCli(unittest.TestCase):
             ), patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None
             ), patch(
-                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_in_python",
                 return_value=calibrated,
-            ) as calibrate_mock, patch(
+            ) as python_calibrate_mock, patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
+                side_effect=AssertionError("ORE calibration should not be used when Python calibration succeeds"),
+            ) as ore_calibrate_mock, patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.parse_lgm_params_from_simulation_xml",
                 side_effect=AssertionError("simulation fallback should not be used"),
             ):
@@ -1451,7 +1483,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                     ]
                 )
             self.assertIn(rc, (0, 1))
-            self.assertEqual(calibrate_mock.call_count, 1)
+            self.assertEqual(python_calibrate_mock.call_count, 1)
+            self.assertEqual(ore_calibrate_mock.call_count, 0)
             payload = json.loads(
                 (tmp_root / "artifacts" / "swap_calibration_case" / "summary.json").read_text(encoding="utf-8")
             )
@@ -1486,9 +1519,12 @@ class TestOreSnapshotCli(unittest.TestCase):
             ), patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.resolve_calibration_xml_path", return_value=None
             ), patch(
+                "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_in_python",
+                return_value=None,
+            ) as python_calibrate_mock, patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.calibrate_lgm_params_via_ore",
                 return_value=None,
-            ) as calibrate_mock, patch(
+            ) as ore_calibrate_mock, patch(
                 "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod.parse_lgm_params_from_simulation_xml",
                 return_value=sim_params,
             ) as simulation_mock:
@@ -1503,7 +1539,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                     ]
                 )
             self.assertIn(rc, (0, 1))
-            self.assertEqual(calibrate_mock.call_count, 1)
+            self.assertEqual(python_calibrate_mock.call_count, 1)
+            self.assertEqual(ore_calibrate_mock.call_count, 1)
             self.assertEqual(simulation_mock.call_count, 1)
             payload = json.loads(
                 (tmp_root / "artifacts" / "swap_simulation_fallback_case" / "summary.json").read_text(encoding="utf-8")
@@ -1597,6 +1634,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                     str(input_dir / "ore_E0.xml"),
                     "--price",
                     "--xva",
+                    "--engine",
+                    "python",
                     "--output-root",
                     str(tmp_root / "artifacts"),
                 ]
@@ -1675,14 +1714,18 @@ class TestOreSnapshotCli(unittest.TestCase):
             {},
             clear=True,
         ), patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
-            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python",
             return_value=calibrated,
-        ) as calibrate_mock, patch(
+        ) as python_calibrate_mock, patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            side_effect=AssertionError("ORE calibration should not be used when Python calibration succeeds"),
+        ) as ore_calibrate_mock, patch(
             "pythonore.io.ore_snapshot.parse_lgm_params_from_simulation_xml",
             side_effect=AssertionError("simulation fallback should not be used"),
         ):
             snap = ore_snapshot_io.load_from_ore_xml(REAL_CASE_XML)
-        self.assertEqual(calibrate_mock.call_count, 1)
+        self.assertEqual(python_calibrate_mock.call_count, 1)
+        self.assertEqual(ore_calibrate_mock.call_count, 0)
         self.assertEqual(snap.alpha_source, "calibration")
 
     def test_load_from_ore_xml_can_force_simulation_xml_params(self):
@@ -1695,6 +1738,9 @@ class TestOreSnapshotCli(unittest.TestCase):
             "scaling": 1.0,
         }
         with patch("pythonore.io.ore_snapshot.resolve_calibration_xml_path", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python",
+            side_effect=AssertionError("Python calibration should not be used"),
+        ) as python_calibrate_mock, patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
             side_effect=AssertionError("ORE calibration should not be used"),
         ) as calibrate_mock, patch(
@@ -1702,6 +1748,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             return_value=simulated,
         ) as simulation_mock:
             snap = ore_snapshot_io.load_from_ore_xml(REAL_CASE_XML, lgm_param_source="simulation_xml")
+        self.assertEqual(python_calibrate_mock.call_count, 0)
         self.assertEqual(calibrate_mock.call_count, 0)
         self.assertEqual(simulation_mock.call_count, 1)
         self.assertEqual(snap.alpha_source, "simulation")
@@ -1717,6 +1764,9 @@ class TestOreSnapshotCli(unittest.TestCase):
             scaling=1.0,
         )
         with patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python",
+            side_effect=AssertionError("Python calibration should not be used"),
+        ) as python_calibrate_mock, patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
             side_effect=AssertionError("ORE calibration should not be used"),
         ) as calibrate_mock, patch(
@@ -1728,6 +1778,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                 lgm_param_source="provided",
                 provided_lgm_params=provided,
             )
+        self.assertEqual(python_calibrate_mock.call_count, 0)
         self.assertEqual(calibrate_mock.call_count, 0)
         self.assertEqual(simulation_mock.call_count, 0)
         self.assertEqual(snap.alpha_source, "provided")

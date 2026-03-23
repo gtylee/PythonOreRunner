@@ -1026,7 +1026,7 @@ def _write_files(case_root: Path, *, count_per_type: int) -> tuple[Path, Path]:
 def _run_cli(ore_xml: Path, artifact_root: Path, *, price_only: bool, paths: int, lgm_param_source: str) -> int:
     argv = [str(ore_xml), "--price"]
     if not price_only:
-        argv.extend(["--xva", "--sensi", "--paths", str(paths)])
+        argv.extend(["--xva", "--sensi", "--sensi-progress", "--paths", str(paths)])
     argv.extend(["--lgm-param-source", str(lgm_param_source), "--output-root", str(artifact_root)])
     return ore_snapshot_cli.main(argv)
 
@@ -1077,7 +1077,7 @@ def main() -> int:
     if args.price_only:
         print("  run_mode       : price only")
     else:
-        print(f"  run_mode       : price + xva + sensitivity (paths={args.paths})")
+        print(f"  run_mode       : price + xva + sensitivity (paths={args.paths}, live sensi progress)")
     print(f"  lgm_param_src  : {args.lgm_param_source}")
 
     if args.no_run:
@@ -1087,7 +1087,7 @@ def main() -> int:
     if args.price_only:
         print("Running ore_snapshot_cli --price ...")
     else:
-        print(f"Running ore_snapshot_cli --price --xva --sensi --paths {args.paths} ...")
+        print(f"Running ore_snapshot_cli --price --xva --sensi --sensi-progress --paths {args.paths} ...")
     rc = _run_cli(
         ore_xml,
         artifact_root,

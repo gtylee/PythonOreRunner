@@ -26,7 +26,9 @@ def _load_case(case_dir: str, ore_file: str = "ore.xml"):
 
 
 def _run_python(snapshot, run_id: str):
-    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
         return XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
             snapshot,
             mapped=map_snapshot(snapshot),
@@ -268,8 +270,11 @@ def test_native_runtime_ignores_residual_output_curves_and_calibration_by_defaul
             "pythonore.runtime.runtime._parse_lgm_params_from_calibration_xml_text",
             side_effect=AssertionError("residual calibration.xml should not be used"),
         ), patch(
-            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python",
             return_value=runtime_params,
+        ), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore",
+            side_effect=AssertionError("ORE calibration should not be used when Python calibration succeeds"),
         ):
             result = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
                 snapshot,

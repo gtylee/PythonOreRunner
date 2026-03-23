@@ -71,8 +71,18 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
+try:
+    import QuantLib as ql
+except ImportError:  # pragma: no cover - optional at runtime
+    ql = None
 
 from pythonore.compute.lgm import LGM1F, LGMParams
+from pythonore.compute.lgm_calibration import (
+    CurrencyLgmConfig,
+    LgmCalibrationError,
+    LgmMarketInputs,
+    calibrate_lgm_currency,
+)
 from pythonore.compute.rate_futures import (
     RateFutureModelParams,
     build_rate_future_quote,
@@ -103,7 +113,8 @@ PROJECT_ROOT = REPO_ROOT
 LGMParamSource = str
 _RUNTIME_LGM_CALIBRATION_CACHE: dict[tuple[str, ...], dict[str, object]] = {}
 _RUNTIME_LGM_CALIBRATION_LOCK = threading.Lock()
-_PORTFOLIO_TRADE_LOOKUP_CACHE: dict[int, Dict[str, ET.Element]] = {}
+_PORTFOLIO_TRADE_LOOKUP_CACHE: dict[int, tuple[ET.Element, Dict[str, ET.Element]]] = {}
+_CONVENTIONS_SWAP_INDEX_TENOR_CACHE: dict[str, Dict[str, str]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +789,490 @@ def _runtime_calibration_failure_marker(output_path: str | Path) -> Path:
     return Path(output_path).resolve() / "calibration.failed"
 
 
+def _split_csv_text(text: str | None) -> list[str]:
+    return [x.strip() for x in str(text or "").replace("\n", "").split(",") if x.strip()]
+
+
+def _parse_bool_text(text: str | None, default: bool = False) -> bool:
+    if text is None:
+        return default
+    norm = str(text).strip().upper()
+    if norm in {"Y", "YES", "TRUE", "1"}:
+        return True
+    if norm in {"N", "NO", "FALSE", "0"}:
+        return False
+    return default
+
+
+def _ql_calendar_from_name(name: str):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    norm = str(name or "").strip().upper()
+    if norm in {"TARGET", "EUR"}:
+        return ql.TARGET()
+    if norm in {"GBP", "UNITEDKINGDOM", "LONDON"}:
+        return ql.UnitedKingdom(ql.UnitedKingdom.Exchange)
+    if norm in {"USD", "UNITEDSTATES", "US"}:
+        return ql.UnitedStates(ql.UnitedStates.GovernmentBond)
+    if norm in {"CHF", "SWITZERLAND"}:
+        return ql.Switzerland()
+    if norm in {"JPY", "JAPAN"}:
+        return ql.Japan()
+    return ql.TARGET()
+
+
+def _ql_bdc_from_name(name: str):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    norm = str(name or "").strip().upper()
+    if norm in {"MF", "MODIFIEDFOLLOWING", "MODIFIED FOLLOWING"}:
+        return ql.ModifiedFollowing
+    if norm in {"PRECEDING"}:
+        return ql.Preceding
+    if norm in {"MODIFIEDPRECEDING", "MODIFIED PRECEDING"}:
+        return ql.ModifiedPreceding
+    if norm in {"UNADJUSTED"}:
+        return ql.Unadjusted
+    return ql.Following
+
+
+def _ql_day_counter_from_name(name: str):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    norm = str(name or "").strip().upper().replace(" ", "")
+    if norm in {"A360", "ACTUAL/360", "ACT/360", "ACTUAL360"}:
+        return ql.Actual360()
+    if norm in {"A365", "A365F", "ACT/365(FIXED)", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"}:
+        return ql.Actual365Fixed()
+    if norm in {"30/360", "30E/360"}:
+        return ql.Thirty360(ql.Thirty360.BondBasis)
+    return ql.Actual365Fixed()
+
+
+def _ql_currency_from_code(ccy: str):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    code = str(ccy or "").strip().upper()
+    if code == "EUR":
+        return ql.EURCurrency()
+    if code == "USD":
+        return ql.USDCurrency()
+    if code == "GBP":
+        return ql.GBPCurrency()
+    if code == "CHF":
+        return ql.CHFCurrency()
+    if code == "JPY":
+        return ql.JPYCurrency()
+    raise ValueError(f"Unsupported currency '{ccy}' for Python LGM calibration")
+
+
+def _ql_ibor_index_for_currency(ccy: str, tenor: str, curve_handle):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    period = ql.Period(str(tenor))
+    code = str(ccy or "").strip().upper()
+    if code == "EUR":
+        return ql.Euribor(period, curve_handle)
+    if code == "USD":
+        return ql.USDLibor(period, curve_handle)
+    if code == "GBP":
+        return ql.GBPLibor(period, curve_handle)
+    if code == "CHF":
+        return ql.CHFLibor(period, curve_handle)
+    if code == "JPY":
+        return ql.JPYLibor(period, curve_handle)
+    raise ValueError(f"Unsupported ibor currency '{ccy}' for Python LGM calibration")
+
+
+def _build_ql_curve_handle_from_fit(asof_date: str, fit: Dict[str, object]):
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+    asof = str(asof_date).strip()
+    if len(asof) == 8 and asof.isdigit():
+        asof = f"{asof[:4]}-{asof[4:6]}-{asof[6:8]}"
+    ref = ql.DateParser.parseISO(asof)
+    ql.Settings.instance().evaluationDate = ref
+    times = [float(x) for x in np.asarray(fit.get("times", []), dtype=float)]
+    dfs = [float(x) for x in np.asarray(fit.get("dfs", []), dtype=float)]
+    dates = [ref]
+    out_dfs = [1.0]
+    for t, df in zip(times, dfs):
+        if t <= 0.0:
+            continue
+        qd = ref + int(round(float(t) * 365.0))
+        if qd <= dates[-1]:
+            continue
+        dates.append(qd)
+        out_dfs.append(float(df))
+    curve = ql.DiscountCurve(dates, out_dfs, ql.Actual365Fixed())
+    return ql.YieldTermStructureHandle(curve)
+
+
+def _swap_index_forward_tenors_from_conventions(conventions_path: str | Path) -> Dict[str, str]:
+    path = str(Path(conventions_path).resolve())
+    cached = _CONVENTIONS_SWAP_INDEX_TENOR_CACHE.get(path)
+    if cached is not None:
+        return cached
+    out: Dict[str, str] = {}
+    root = ET.parse(path).getroot()
+    swap_conv_to_tenor: Dict[str, str] = {}
+    for node in root.findall("./Swap"):
+        conv_id = (node.findtext("./Id") or "").strip()
+        ibor_index = (node.findtext("./Index") or "").strip().upper()
+        match = re.search(r"(\d+[YMWD])$", ibor_index)
+        if conv_id and match is not None:
+            swap_conv_to_tenor[conv_id] = match.group(1).upper()
+    for node in root.findall("./SwapIndex"):
+        index_id = (node.findtext("./Id") or "").strip().upper()
+        conv_id = (node.findtext("./Conventions") or "").strip()
+        tenor = swap_conv_to_tenor.get(conv_id, "")
+        if index_id and tenor:
+            out[index_id] = tenor
+    _CONVENTIONS_SWAP_INDEX_TENOR_CACHE[path] = out
+    return out
+
+
+def _parse_lgm_calibration_config_from_simulation_xml(
+    simulation_xml_path: str | Path,
+    *,
+    ccy_key: str,
+) -> CurrencyLgmConfig | None:
+    root = ET.parse(simulation_xml_path).getroot()
+    models = root.find("./CrossAssetModel/InterestRateModels")
+    if models is None:
+        return None
+    node = models.find(f"./LGM[@ccy='{ccy_key}']")
+    if node is None:
+        node = models.find("./LGM[@ccy='default']")
+    if node is None:
+        return None
+
+    vol_node = node.find("./Volatility")
+    rev_node = node.find("./Reversion")
+    if vol_node is None or rev_node is None:
+        return None
+
+    calibrate_vol = _parse_bool_text(vol_node.findtext("./Calibrate"))
+    calibrate_rev = _parse_bool_text(rev_node.findtext("./Calibrate"))
+    if not calibrate_vol and not calibrate_rev:
+        return None
+
+    expiries = _split_csv_text(node.findtext("./CalibrationSwaptions/Expiries"))
+    terms = _split_csv_text(node.findtext("./CalibrationSwaptions/Terms"))
+    strikes = _split_csv_text(node.findtext("./CalibrationSwaptions/Strikes"))
+    if not expiries or not terms:
+        return None
+    if not strikes:
+        strikes = ["ATM"] * len(expiries)
+
+    cross_asset = root.find("./CrossAssetModel")
+    bootstrap_tolerance = 1.0e-3
+    if cross_asset is not None:
+        try:
+            bootstrap_tolerance = float((cross_asset.findtext("./BootstrapTolerance") or "0.001").strip())
+        except Exception:
+            bootstrap_tolerance = 1.0e-3
+
+    return CurrencyLgmConfig.from_dict(
+        str(ccy_key).strip().upper() or "EUR",
+        {
+            "calibration_type": (node.findtext("./CalibrationType") or "None").strip(),
+            "volatility": {
+                "calibrate": calibrate_vol,
+                "type": (vol_node.findtext("./VolatilityType") or "HullWhite").strip(),
+                "param_type": (vol_node.findtext("./ParamType") or "Constant").strip(),
+                "time_grid": [float(x) for x in _split_csv_text(vol_node.findtext("./TimeGrid"))],
+                "initial_values": [float(x) for x in _split_csv_text(vol_node.findtext("./InitialValue"))],
+            },
+            "reversion": {
+                "calibrate": calibrate_rev,
+                "type": (rev_node.findtext("./ReversionType") or "HullWhite").strip(),
+                "param_type": (rev_node.findtext("./ParamType") or "Constant").strip(),
+                "time_grid": [float(x) for x in _split_csv_text(rev_node.findtext("./TimeGrid"))],
+                "initial_values": [float(x) for x in _split_csv_text(rev_node.findtext("./InitialValue"))],
+            },
+            "calibration_swaptions": {
+                "expiries": expiries,
+                "terms": terms,
+                "strikes": strikes,
+            },
+            "parameter_transformation": {
+                "shift_horizon": float((node.findtext("./ParameterTransformation/ShiftHorizon") or "0").strip() or 0.0),
+                "scaling": float((node.findtext("./ParameterTransformation/Scaling") or "1").strip() or 1.0),
+            },
+            "float_spread_mapping": (node.findtext("./FloatSpreadMapping") or "proRata").strip() or "proRata",
+            "reference_calibration_grid": (node.findtext("./ReferenceCalibrationGrid") or "").strip(),
+            "bootstrap_tolerance": bootstrap_tolerance,
+        },
+    )
+
+
+def _load_lgm_swaption_surface_spec(
+    *,
+    todaysmarket_xml_path: str | Path,
+    curve_config_path: str | Path,
+    config_id: str,
+    currency: str,
+) -> Dict[str, object]:
+    tm_root = ET.parse(todaysmarket_xml_path).getroot()
+    section_id = _resolve_todaysmarket_section_id(
+        tm_root,
+        config_id,
+        "SwaptionVolatilitiesId",
+        "SwaptionVolatilities",
+    ) or config_id or "default"
+    mapping = tm_root.find(f"./SwaptionVolatilities[@id='{section_id}']")
+    if mapping is None:
+        mapping = tm_root.find("./SwaptionVolatilities[@id='default']")
+    if mapping is None:
+        mapping = tm_root.find("./SwaptionVolatilities")
+    if mapping is None:
+        raise ValueError("todaysmarket.xml missing SwaptionVolatilities")
+    handle = mapping.findtext(f"./SwaptionVolatility[@currency='{currency}']")
+    if not handle:
+        raise ValueError(f"todaysmarket.xml missing swaption volatility mapping for currency '{currency}'")
+    curve_id = handle.strip().split("/")[-1]
+    cfg_root = ET.parse(curve_config_path).getroot()
+    node = next(
+        (
+            candidate
+            for candidate in cfg_root.findall(".//SwaptionVolatility")
+            if (candidate.findtext("./CurveId") or "").strip() == curve_id
+        ),
+        None,
+    )
+    if node is None:
+        raise ValueError(f"curveconfig.xml missing SwaptionVolatility with CurveId '{curve_id}'")
+    return {
+        "curve_id": curve_id,
+        "dimension": (node.findtext("./Dimension") or "ATM").strip(),
+        "volatility_type": (node.findtext("./VolatilityType") or "Normal").strip(),
+        "day_counter": (node.findtext("./DayCounter") or "Actual/365 (Fixed)").strip(),
+        "calendar": (node.findtext("./Calendar") or "TARGET").strip(),
+        "business_day_convention": (node.findtext("./BusinessDayConvention") or "Following").strip(),
+        "option_tenors": _split_csv_text(node.findtext("./OptionTenors")),
+        "swap_tenors": _split_csv_text(node.findtext("./SwapTenors")),
+        "short_swap_index_base": (node.findtext("./ShortSwapIndexBase") or "").strip(),
+        "swap_index_base": (node.findtext("./SwapIndexBase") or "").strip(),
+    }
+
+
+def _load_lgm_swaption_quotes(
+    *,
+    market_data_path: str | Path,
+    asof_date: str,
+    currency: str,
+    option_tenors: list[str],
+    swap_tenors: list[str],
+    volatility_type: str,
+) -> np.ndarray:
+    quote_kind = "RATE_NVOL" if str(volatility_type).strip().lower() == "normal" else "RATE_LNVOL"
+    asof_compact = str(asof_date).replace("-", "")
+    asof_dash = str(asof_date)
+    prefix = f"SWAPTION/{quote_kind}/{currency}/"
+    quotes: Dict[Tuple[str, str], float] = {}
+    with open(market_data_path, encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split()
+            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                continue
+            key = parts[1]
+            if not key.startswith(prefix):
+                continue
+            tokens = key.split("/")
+            if len(tokens) < 6 or tokens[5].strip().upper() != "ATM":
+                continue
+            quotes[(tokens[3].strip(), tokens[4].strip())] = float(parts[2])
+    matrix = np.empty((len(option_tenors), len(swap_tenors)), dtype=float)
+    for i, expiry in enumerate(option_tenors):
+        for j, term in enumerate(swap_tenors):
+            value = quotes.get((expiry, term))
+            if value is None:
+                raise ValueError(f"missing swaption quote for {currency} {expiry} x {term}")
+            matrix[i, j] = float(value)
+    return matrix
+
+
+def _build_python_lgm_market_inputs(
+    *,
+    ore_xml_path: str | Path,
+    todaysmarket_xml_path: str | Path,
+    market_data_path: str | Path,
+    curve_config_path: str | Path,
+    conventions_path: str | Path,
+    simulation_xml_path: str | Path,
+    ccy_key: str,
+) -> Tuple[CurrencyLgmConfig, LgmMarketInputs]:
+    if ql is None:  # pragma: no cover
+        raise ImportError("QuantLib Python bindings are required for Python LGM calibration")
+
+    ore_root = ET.parse(ore_xml_path).getroot()
+    setup_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Setup/Parameter")
+    }
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    asof_date = (setup_params.get("asofDate", "") or "").strip()
+    if not asof_date:
+        raise ValueError("ORE setup is missing asofDate")
+
+    config = _parse_lgm_calibration_config_from_simulation_xml(
+        simulation_xml_path,
+        ccy_key=ccy_key,
+    )
+    if config is None:
+        raise ValueError(f"simulation.xml does not define a Python-calibratable LGM block for {ccy_key}")
+
+    spec = _load_lgm_swaption_surface_spec(
+        todaysmarket_xml_path=todaysmarket_xml_path,
+        curve_config_path=curve_config_path,
+        config_id=markets_params.get("lgmcalibration", "default"),
+        currency=ccy_key,
+    )
+    if str(spec.get("dimension", "ATM")).strip().upper() != "ATM":
+        raise NotImplementedError("Python LGM calibration currently supports ATM swaption surfaces only")
+
+    swap_index_tenors = _swap_index_forward_tenors_from_conventions(conventions_path)
+    long_base = str(spec.get("swap_index_base", "") or "").strip().upper()
+    short_base = str(spec.get("short_swap_index_base", "") or "").strip().upper()
+    long_fwd_tenor = swap_index_tenors.get(long_base, "6M")
+    short_fwd_tenor = swap_index_tenors.get(short_base, long_fwd_tenor or "6M")
+    long_swap_tenor = (long_base.split("-")[-1] if long_base else "30Y").strip()
+    short_swap_tenor = (short_base.split("-")[-1] if short_base else "1Y").strip()
+
+    long_curve_fit = _fit_discount_and_forward_curves_from_market(
+        ore_xml_path,
+        asof_date=asof_date,
+        currency=ccy_key,
+        forward_index=f"{ccy_key}-{long_fwd_tenor}",
+    )
+    short_curve_fit = _fit_discount_and_forward_curves_from_market(
+        ore_xml_path,
+        asof_date=asof_date,
+        currency=ccy_key,
+        forward_index=f"{ccy_key}-{short_fwd_tenor}",
+    )
+
+    discount_curve = _build_ql_curve_handle_from_fit(asof_date, long_curve_fit["discount_fit"])
+    long_forward_curve = _build_ql_curve_handle_from_fit(asof_date, long_curve_fit["forward_fit"])
+    short_forward_curve = _build_ql_curve_handle_from_fit(asof_date, short_curve_fit["forward_fit"])
+
+    option_tenors = list(spec.get("option_tenors", []))
+    swap_tenors = list(spec.get("swap_tenors", []))
+    quotes = _load_lgm_swaption_quotes(
+        market_data_path=market_data_path,
+        asof_date=asof_date,
+        currency=ccy_key,
+        option_tenors=option_tenors,
+        swap_tenors=swap_tenors,
+        volatility_type=str(spec.get("volatility_type", "Normal")),
+    )
+    option_periods = ql.PeriodVector()
+    for tenor in option_tenors:
+        option_periods.push_back(ql.Period(str(tenor)))
+    swap_periods = ql.PeriodVector()
+    for tenor in swap_tenors:
+        swap_periods.push_back(ql.Period(str(tenor)))
+    vols = ql.Matrix(quotes.shape[0], quotes.shape[1])
+    for i in range(quotes.shape[0]):
+        for j in range(quotes.shape[1]):
+            vols[i][j] = float(quotes[i, j])
+    vol_type = ql.Normal if str(spec.get("volatility_type", "Normal")).strip().lower() == "normal" else ql.ShiftedLognormal
+    vol_surface = ql.SwaptionVolatilityMatrix(
+        _ql_calendar_from_name(str(spec.get("calendar", "TARGET"))),
+        _ql_bdc_from_name(str(spec.get("business_day_convention", "Following"))),
+        option_periods,
+        swap_periods,
+        vols,
+        _ql_day_counter_from_name(str(spec.get("day_counter", "Actual/365 (Fixed)"))),
+        False,
+        vol_type,
+    )
+
+    long_ibor = _ql_ibor_index_for_currency(ccy_key, long_fwd_tenor, long_forward_curve)
+    short_ibor = _ql_ibor_index_for_currency(ccy_key, short_fwd_tenor, short_forward_curve)
+    fixed_leg_tenor = ql.Period("1Y")
+    fixed_bdc = ql.ModifiedFollowing
+    fixed_day_counter = ql.Thirty360(ql.Thirty360.BondBasis)
+    currency = _ql_currency_from_code(ccy_key)
+    calendar = long_ibor.fixingCalendar()
+    settlement_days = int(long_ibor.fixingDays())
+
+    long_swap_index = ql.SwapIndex(
+        f"{ccy_key}-PY-LGM-{long_swap_tenor}",
+        ql.Period(long_swap_tenor),
+        settlement_days,
+        currency,
+        calendar,
+        fixed_leg_tenor,
+        fixed_bdc,
+        fixed_day_counter,
+        long_ibor,
+        discount_curve,
+    )
+    short_swap_index = ql.SwapIndex(
+        f"{ccy_key}-PY-LGM-{short_swap_tenor}",
+        ql.Period(short_swap_tenor),
+        settlement_days,
+        currency,
+        short_ibor.fixingCalendar(),
+        fixed_leg_tenor,
+        fixed_bdc,
+        fixed_day_counter,
+        short_ibor,
+        discount_curve,
+    )
+
+    return config, LgmMarketInputs(
+        swaption_vol_surface=ql.SwaptionVolatilityStructureHandle(vol_surface),
+        swap_index=long_swap_index,
+        short_swap_index=short_swap_index,
+        calibration_discount_curve=discount_curve,
+        model_discount_curve=discount_curve,
+    )
+
+
+def calibrate_lgm_params_in_python(
+    *,
+    ore_xml_path: Union[str, Path],
+    input_dir: Union[str, Path],
+    output_path: Union[str, Path],
+    market_data_path: Union[str, Path],
+    curve_config_path: Union[str, Path],
+    conventions_path: Union[str, Path],
+    todaysmarket_xml_path: Union[str, Path],
+    simulation_xml_path: Union[str, Path],
+    ccy_key: str,
+) -> Optional[Dict[str, object]]:
+    del input_dir, output_path
+    if ql is None:
+        return None
+    try:
+        config, market_inputs = _build_python_lgm_market_inputs(
+            ore_xml_path=ore_xml_path,
+            todaysmarket_xml_path=todaysmarket_xml_path,
+            market_data_path=market_data_path,
+            curve_config_path=curve_config_path,
+            conventions_path=conventions_path,
+            simulation_xml_path=simulation_xml_path,
+            ccy_key=ccy_key,
+        )
+        result = calibrate_lgm_currency(config, market_inputs)
+    except (ImportError, NotImplementedError, LgmCalibrationError, ValueError, RuntimeError):
+        return None
+    return {
+        "alpha_times": np.asarray(result.volatility.time_grid, dtype=float),
+        "alpha_values": np.asarray(result.volatility.values, dtype=float),
+        "kappa_times": np.asarray(result.reversion.time_grid, dtype=float),
+        "kappa_values": np.asarray(result.reversion.values, dtype=float),
+        "shift": 0.0,
+        "scaling": float(config.parameter_transformation.scaling),
+    }
+
+
 def calibrate_lgm_params_via_ore(
     *,
     ore_xml_path: Union[str, Path],
@@ -951,7 +1446,7 @@ def resolve_lgm_params(
         except Exception:
             if lgm_param_source in {"calibration", "calibration_xml"}:
                 raise
-    if lgm_param_source in {"auto", "ore", "runtime_calibration"}:
+    if lgm_param_source in {"auto", "python", "ore", "runtime_calibration"}:
         failure_marker = _runtime_calibration_failure_marker(output_path)
         runtime_cache_key = (
             _canonical_example_resource_id(market_data_path),
@@ -964,6 +1459,18 @@ def resolve_lgm_params(
         with _RUNTIME_LGM_CALIBRATION_LOCK:
             params_dict = _RUNTIME_LGM_CALIBRATION_CACHE.get(runtime_cache_key)
             if params_dict is None and not failure_marker.exists():
+                params_dict = calibrate_lgm_params_in_python(
+                    ore_xml_path=ore_xml_path,
+                    input_dir=input_dir,
+                    output_path=output_path,
+                    market_data_path=market_data_path,
+                    curve_config_path=curve_config_path,
+                    conventions_path=conventions_path,
+                    todaysmarket_xml_path=todaysmarket_xml_path,
+                    simulation_xml_path=simulation_xml_path,
+                    ccy_key=domestic_ccy,
+                )
+            if params_dict is None and not failure_marker.exists() and lgm_param_source in {"auto", "ore", "runtime_calibration"}:
                 params_dict = calibrate_lgm_params_via_ore(
                     ore_xml_path=ore_xml_path,
                     input_dir=input_dir,
@@ -975,7 +1482,7 @@ def resolve_lgm_params(
                     _RUNTIME_LGM_CALIBRATION_CACHE[runtime_cache_key] = params_dict
         if params_dict is not None:
             return params_dict, "calibration", None
-        if lgm_param_source in {"ore", "runtime_calibration"}:
+        if lgm_param_source in {"python", "ore", "runtime_calibration"}:
             raise ValueError("ORE runtime calibration failed to produce LGM params")
     if lgm_param_source not in {"auto", "simulation", "simulation_xml"}:
         raise ValueError(f"Unsupported lgm_param_source: {lgm_param_source}")
@@ -2802,14 +3309,15 @@ def _get_first_trade_id(portfolio_root: ET.Element) -> str:
 def _portfolio_trade_lookup(portfolio_root: ET.Element) -> Dict[str, ET.Element]:
     key = id(portfolio_root)
     cached = _PORTFOLIO_TRADE_LOOKUP_CACHE.get(key)
-    if cached is None:
-        cached = {}
-        for trade in portfolio_root.findall("./Trade"):
-            trade_id = (trade.attrib.get("id", "") or "").strip()
-            if trade_id:
-                cached[trade_id] = trade
-        _PORTFOLIO_TRADE_LOOKUP_CACHE[key] = cached
-    return cached
+    if cached is not None and cached[0] is portfolio_root:
+        return cached[1]
+    lookup: Dict[str, ET.Element] = {}
+    for trade in portfolio_root.findall("./Trade"):
+        trade_id = (trade.attrib.get("id", "") or "").strip()
+        if trade_id:
+            lookup[trade_id] = trade
+    _PORTFOLIO_TRADE_LOOKUP_CACHE[key] = (portfolio_root, lookup)
+    return lookup
 
 
 def _get_cpty_from_portfolio(portfolio_root: ET.Element, trade_id: str) -> str:

@@ -73,6 +73,50 @@ def test_compute_python_sensitivities_uses_fast_npv_path_when_available():
     mocked_fast.assert_called_once()
 
 
+def test_compute_python_sensitivities_passes_progress_callback_to_fast_path():
+    comparator = OreSnapshotPythonLgmSensitivityComparator(engine=SimpleNamespace())
+    snapshot = SimpleNamespace(
+        market=SimpleNamespace(
+            raw_quotes=(MarketQuote(date="2026-03-21", key="ZERO/RATE/EUR/1Y", value=0.01),)
+        ),
+        config=SimpleNamespace(xml_buffers={}, params={}),
+    )
+    callback = lambda completed, total, factor: None
+    with patch.object(
+        comparator,
+        "_compute_python_npv_sensitivities_fast",
+        return_value=[],
+    ) as mocked_fast:
+        comparator.compute_python_sensitivities(
+            snapshot,
+            metric="NPV",
+            factor_shifts={"zero:EUR:1Y": 1.0e-4},
+            output_mode="bump_change",
+            progress_callback=callback,
+        )
+    assert mocked_fast.call_args.kwargs["progress_callback"] is callback
+
+
+def test_supports_fast_npv_sensitivity_for_native_rate_option_kinds():
+    comparator = OreSnapshotPythonLgmSensitivityComparator(engine=SimpleNamespace())
+    snapshot = SimpleNamespace()
+    fake_inputs = SimpleNamespace(
+        unsupported=(),
+        trade_specs=(
+            SimpleNamespace(kind="IRS"),
+            SimpleNamespace(kind="RateSwap"),
+            SimpleNamespace(kind="CapFloor"),
+            SimpleNamespace(kind="Swaption"),
+        ),
+    )
+    comparator.engine.adapter = SimpleNamespace(
+        _ensure_py_lgm_imports=lambda: None,
+        _extract_inputs=lambda snapshot, mapped: fake_inputs,
+    )
+    with patch("pythonore.runtime.sensitivity.map_snapshot", return_value=object()):
+        assert comparator._supports_fast_npv_sensitivity(snapshot) is True
+
+
 def test_sample_times_for_legs_collects_relevant_curve_points():
     legs = {
         "fixed_pay_time": [1.0, 2.0],

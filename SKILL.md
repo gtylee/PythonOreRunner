@@ -208,6 +208,64 @@ If a rerun is materially slower, suspect process overlap, file contention, or ch
 
 ## Number Matching and Parity
 
+### Use `--engine python` when you need to prove the native path
+
+The file-based ORE CLI now accepts:
+
+```bash
+--engine compare|python|ore
+```
+
+Use it deliberately:
+
+- `--engine compare`
+  - default behavior
+  - native Python path runs first where supported
+  - may fall back to ORE reference / ExpectedOutput if native pricing or snapshot setup is unsupported or missing artifacts
+- `--engine python`
+  - force the native Python path
+  - do **not** silently mask regressions with local `ore` output or vendored `ExpectedOutput`
+  - best choice for regression tests that are supposed to validate native pricing/XVA behavior
+- `--engine ore`
+  - force reference-style ORE / ExpectedOutput reporting
+
+This matters especially for test cases like FX NDF and FX option XVA where:
+
+- a local `ore` binary may be present
+- vendored `ExpectedOutput` may exist
+- the default compare path can legitimately choose a reference fallback if the native path throws a fallback-class error
+
+If the goal is "did Python really do the work?", use `--engine python`.
+
+### Python LGM calibration is now input-first
+
+The native LGM parameter resolution order is now:
+
+1. explicit `calibration.xml` if the caller requested it
+2. Python-native calibration from:
+   - `ore.xml`
+   - `simulation.xml`
+   - `todaysmarket.xml`
+   - `curveconfig.xml`
+   - `conventions.xml`
+   - `market_data.txt`
+3. ORE subprocess calibration only as fallback
+4. simulation XML initial parameters as the final fallback
+
+Important implications:
+
+- Native runtime calibration must not depend on residual `Output/calibration.xml`.
+- Native runtime calibration must not depend on `oreapp` outputs like `curves.csv`, `npv.csv`, or `flows.csv`.
+- Common ORE cases labeled with `VolatilityType=Hagan` should still go through the Python QuantLib/GSR calibration path; do not reject them just because the XML label says `Hagan`.
+
+Current known smoke result:
+
+- `Examples/Legacy/Example_25/Input/ore.xml`
+  - Python-native calibration succeeds from input files only
+  - produced `11` alpha values
+  - `alpha0 = 0.01036648762548679`
+  - `kappa0 = 0.03`
+
 ### For current Python LGM parity, `ore_sobol_bridge` is the best tested RNG mode
 
 For the current native Python parity work, the best tested Python-side RNG construction is:
