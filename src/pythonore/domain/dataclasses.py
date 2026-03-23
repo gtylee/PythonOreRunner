@@ -787,20 +787,46 @@ class XVASnapshot:
         return _snapshot_from_dict(data)
 
     def stable_key(self) -> str:
-        payload = self.to_dict()
-        config = dict(payload.get("config", {}))
-        xml_buffers = config.get("xml_buffers", {})
-        if isinstance(xml_buffers, dict):
-            config["xml_buffers"] = {
-                key: {
-                    "id": id(value),
-                    "length": len(value) if isinstance(value, str) else None,
-                }
-                for key, value in sorted(xml_buffers.items())
-            }
-        payload["config"] = config
-        stable = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return str(abs(hash(stable)))
+        xml_buffers = {
+            key: (
+                id(value),
+                len(value) if isinstance(value, str) else None,
+            )
+            for key, value in sorted(self.config.xml_buffers.items())
+        }
+        runtime = self.config.runtime
+        runtime_key = None
+        if runtime is not None:
+            simulation = runtime.simulation
+            xva = runtime.xva_analytic
+            runtime_key = (
+                int(simulation.samples),
+                int(simulation.seed),
+                tuple(str(x) for x in simulation.grid),
+                str(xva.cpty if xva is not None else ""),
+                str(xva.own if xva is not None else ""),
+                str(xva.netting_set if xva is not None else ""),
+            )
+        payload = (
+            self.market.asof,
+            id(self.market.raw_quotes),
+            len(self.market.raw_quotes),
+            id(self.fixings.points),
+            len(self.fixings.points),
+            id(self.portfolio.trades),
+            len(self.portfolio.trades),
+            tuple((t.trade_id, t.trade_type) for t in self.portfolio.trades),
+            self.config.asof,
+            self.config.base_currency,
+            tuple(self.config.analytics),
+            int(self.config.num_paths),
+            float(self.config.horizon_years),
+            tuple(sorted((str(k), repr(v)) for k, v in self.config.params.items() if k != "xml_buffers")),
+            xml_buffers,
+            runtime_key,
+            tuple(sorted((str(k), getattr(v, "path", None), getattr(v, "origin", None)) for k, v in self.source_meta.items())),
+        )
+        return str(abs(hash(payload)))
 
 
 def _parse_product(data: Dict[str, Any]) -> ProductSpec:

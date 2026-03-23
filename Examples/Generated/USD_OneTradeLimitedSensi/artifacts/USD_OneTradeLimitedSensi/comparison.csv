@@ -1,21 +1,17 @@
 section,field,value
-pricing,py_t0_npv,15233312.40835896
-pricing,trade_type,Swap
-pricing,pricing_mode,python_native_from_sensitivity
-pricing,report_ccy,USD
-diagnostics,engine,python_native
+diagnostics,engine,ore_reference_expected_output
 diagnostics,reference_output_dirs,[]
 diagnostics,using_expected_output,True
 diagnostics,missing_reference_pricing,True
-diagnostics,pricing_mode,python_native_from_sensitivity
-diagnostics,missing_native_pricing_reference,True
+diagnostics,fallback_reason,missing_native_output
+diagnostics,fallback_error,ORE output file not found (run ORE first): /Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_OneTradeLimitedSensi/Output/npv.csv
+diagnostics,sensitivity_fallback_reason,unsupported_python_sensitivity
+diagnostics,sensitivity_fallback_error,unhashable type: 'dict'
 sensitivity,metric,NPV
-sensitivity,python_factor_count,10
+sensitivity,python_factor_count,0
 sensitivity,ore_factor_count,0
 sensitivity,matched_factor_count,0
 sensitivity,unmatched_ore_count,0
-sensitivity,unmatched_python_count,10
+sensitivity,unmatched_python_count,0
 sensitivity,unsupported_factor_count,0
-sensitivity,notes,[]
-sensitivity,sensitivity_output_file,sensitivity.csv
-sensitivity,scenario_output_file,scenario.csv
+sensitivity,notes,"[""sensitivity fallback: unhashable type: 'dict'""]"

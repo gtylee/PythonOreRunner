@@ -61,6 +61,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
     def __init__(self, engine: Optional[XVAEngine] = None):
         self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=True)
         self._swap_npv_backend_cache = None
+        self._supported_quotes_cache: Dict[tuple[int, int], Dict[str, List[Tuple[int, MarketQuote]]]] = {}
 
     @classmethod
     def from_case_dir(
@@ -751,6 +752,10 @@ class OreSnapshotPythonLgmSensitivityComparator:
         return candidates[0]
 
     def _discover_supported_quotes(self, snapshot: XVASnapshot) -> Dict[str, List[Tuple[int, MarketQuote]]]:
+        cache_key = (id(snapshot.market.raw_quotes), id(snapshot.config.xml_buffers.get("todaysmarket.xml", "")))
+        cached = self._supported_quotes_cache.get(cache_key)
+        if cached is not None:
+            return cached
         out: Dict[str, List[Tuple[int, MarketQuote]]] = {}
         discount_family_by_ccy = _discount_curve_family_by_currency(snapshot)
         for idx, quote in enumerate(snapshot.market.raw_quotes):
@@ -765,6 +770,9 @@ class OreSnapshotPythonLgmSensitivityComparator:
             discount_normalized = normalize_raw_discount_quote_key(key, discount_family_by_ccy)
             if discount_normalized is not None and discount_normalized not in seen:
                 out.setdefault(discount_normalized, []).append((idx, quote))
+        self._supported_quotes_cache[cache_key] = out
+        if len(self._supported_quotes_cache) > 16:
+            self._supported_quotes_cache.pop(next(iter(self._supported_quotes_cache)))
         return out
 
     def _bump_snapshot_quotes(
