@@ -8,7 +8,7 @@
 
 ## Pricing
 
-- py_t0_npv: `1702209820.4057944`
+- py_t0_npv: `15233312.40835896`
 - trade_type: `Swap`
 - pricing_mode: `python_native_from_sensitivity`
 - report_ccy: `USD`
@@ -23,13 +23,13 @@
 ## Sensitivity
 
 - metric: `NPV`
-- python_factor_count: `18`
+- python_factor_count: `10`
 - ore_factor_count: `0`
 - matched_factor_count: `0`
 - unmatched_ore_count: `0`
-- unmatched_python_count: `18`
+- unmatched_python_count: `10`
 - unsupported_factor_count: `0`
-- notes: `['Pruned 14 native sensitivity factors that are outside the portfolio currencies/index families.']`
+- notes: `[]`
 - sensitivity_output_file: `sensitivity.csv`
 - scenario_output_file: `scenario.csv`
 

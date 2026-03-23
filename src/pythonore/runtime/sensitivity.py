@@ -570,6 +570,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
         pricing_backend = self._resolve_swap_npv_backend(inputs)
         total = 0.0
         irs_t0_curve_cache: dict[tuple[object, ...], dict[str, np.ndarray]] = {}
+        generic_rate_t0_curve_cache: dict[tuple[object, ...], dict[str, np.ndarray]] = {}
         for spec in inputs.trade_specs:
             p_disc = inputs.discount_curves[spec.ccy]
             if spec.kind == "IRS":
@@ -634,19 +635,28 @@ class OreSnapshotPythonLgmSensitivityComparator:
                         )[0]
                     )
             elif spec.kind == "RateSwap":
-                if model is None:
-                    model = adapter._lgm_mod.LGM1F(
-                        adapter._lgm_mod.LGMParams(
-                            alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
-                            alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
-                            kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
-                            kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
-                            shift=float(inputs.lgm_params["shift"]),
-                            scaling=float(inputs.lgm_params["scaling"]),
+                value = _price_generic_rate_swap_t0_from_curves(
+                    adapter,
+                    spec.legs or {},
+                    spec.ccy,
+                    inputs,
+                    p_disc,
+                    curve_cache=generic_rate_t0_curve_cache,
+                )
+                if value is None:
+                    if model is None:
+                        model = adapter._lgm_mod.LGM1F(
+                            adapter._lgm_mod.LGMParams(
+                                alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+                                alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+                                kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+                                kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+                                shift=float(inputs.lgm_params["shift"]),
+                                scaling=float(inputs.lgm_params["scaling"]),
+                            )
                         )
-                    )
-                zero_paths = np.zeros((int(inputs.times.size), 1), dtype=float)
-                value = float(adapter._price_generic_rate_swap(spec, inputs, model, zero_paths)[0, 0])
+                    zero_paths = np.zeros((int(inputs.times.size), 1), dtype=float)
+                    value = float(adapter._price_generic_rate_swap(spec, inputs, model, zero_paths)[0, 0])
             elif spec.kind == "CapFloor":
                 if model is None:
                     model = adapter._lgm_mod.LGM1F(
@@ -704,11 +714,15 @@ class OreSnapshotPythonLgmSensitivityComparator:
 
     def _resolve_swap_npv_backend(self, inputs: Optional[_PythonLgmInputs] = None):
         irs_count = 0
+        total_count = 0
         if inputs is not None:
+            total_count = len(inputs.trade_specs)
             irs_count = sum(1 for spec in inputs.trade_specs if spec.kind == "IRS")
         if irs_count == 0:
             return None
         if irs_count < 8:
+            return None
+        if total_count and irs_count != total_count and irs_count < 2048:
             return None
         if self._swap_npv_backend_cache is not None:
             return self._swap_npv_backend_cache
@@ -1561,6 +1575,111 @@ def _price_irs_t0_from_curves(
         fwd = (ps / pe - 1.0) / index_tau2
         amounts = sign2 * n2 * (fwd + spread2) * tau2
         pv += float(np.sum(amounts * disc_pay2))
+    return pv
+
+
+def _price_generic_rate_swap_t0_from_curves(
+    adapter: XVAEngine | object,
+    legs_payload: Mapping[str, object],
+    ccy: str,
+    inputs: _PythonLgmInputs,
+    p_disc: Callable[[float], float],
+    *,
+    curve_cache: Optional[dict[tuple[object, ...], dict[str, np.ndarray]]] = None,
+) -> Optional[float]:
+    rate_legs = list(legs_payload.get("rate_legs", []))
+    if not rate_legs:
+        return 0.0
+    pv = 0.0
+    for leg in rate_legs:
+        kind = str(leg.get("kind", "")).upper()
+        if kind not in {"FIXED", "FLOATING"}:
+            return None
+        pay = np.asarray(leg.get("pay_time", []), dtype=float)
+        if pay.size == 0:
+            continue
+        live = pay > 1.0e-12
+        if not np.any(live):
+            continue
+        pay_live = pay[live]
+        if kind == "FIXED":
+            cache_key = (
+                "fixed",
+                id(p_disc),
+                tuple(pay.tolist()),
+            )
+            pre = curve_cache.get(cache_key) if curve_cache is not None else None
+            if pre is None:
+                pre = {
+                    "live": live,
+                    "disc_pay": np.fromiter((float(p_disc(float(t))) for t in pay_live), dtype=float, count=pay_live.size),
+                }
+                if curve_cache is not None:
+                    curve_cache[cache_key] = pre
+            amount = np.asarray(leg.get("amount", np.zeros(pay.shape)), dtype=float)[np.asarray(pre["live"], dtype=bool)]
+            pv += float(np.sum(amount * np.asarray(pre["disc_pay"], dtype=float)))
+            continue
+
+        index_name = str(leg.get("index_name", "")).upper()
+        p_fwd = adapter._resolve_index_curve(inputs, ccy, index_name)
+        start = np.asarray(leg.get("start_time", []), dtype=float)
+        end = np.asarray(leg.get("end_time", []), dtype=float)
+        fixing = np.asarray(leg.get("fixing_time", start), dtype=float)
+        quoted = np.asarray(leg.get("quoted_coupon", np.zeros(start.shape)), dtype=float)
+        fixed_mask = np.asarray(leg.get("is_historically_fixed", np.zeros(start.shape, dtype=bool)), dtype=bool)
+        spread = np.asarray(leg.get("spread", np.zeros(start.shape)), dtype=float)
+        gearing = np.asarray(leg.get("gearing", np.ones(start.shape)), dtype=float)
+        accrual = np.asarray(leg.get("accrual", np.zeros(start.shape)), dtype=float)
+        index_accrual = np.asarray(leg.get("index_accrual", accrual), dtype=float)
+        sign = float(leg.get("sign", 1.0))
+        notional = float(leg.get("notional", 0.0))
+        cache_key = (
+            "float",
+            id(p_disc),
+            id(p_fwd),
+            tuple(pay.tolist()),
+            tuple(start.tolist()),
+            tuple(end.tolist()),
+            tuple(fixing.tolist()),
+            tuple(accrual.tolist()),
+            tuple(index_accrual.tolist()),
+            tuple(fixed_mask.tolist()),
+        )
+        pre = curve_cache.get(cache_key) if curve_cache is not None else None
+        if pre is None:
+            fixed_live = fixed_mask[live] | (fixing[live] <= 1.0e-12)
+            pre = {
+                "live": live,
+                "fixed_live": fixed_live,
+                "disc_pay": np.fromiter((float(p_disc(float(t))) for t in pay_live), dtype=float, count=pay_live.size),
+            }
+            if np.any(~fixed_live):
+                start_live = start[live][~fixed_live]
+                end_live = end[live][~fixed_live]
+                pre["ps"] = np.fromiter((float(p_fwd(max(0.0, float(t)))) for t in start_live), dtype=float, count=start_live.size)
+                pre["pe"] = np.fromiter((float(p_fwd(float(t))) for t in end_live), dtype=float, count=end_live.size)
+            else:
+                pre["ps"] = np.empty(0, dtype=float)
+                pre["pe"] = np.empty(0, dtype=float)
+            if curve_cache is not None:
+                curve_cache[cache_key] = pre
+        live_mask = np.asarray(pre["live"], dtype=bool)
+        fixed_live = np.asarray(pre["fixed_live"], dtype=bool)
+        disc_pay = np.asarray(pre["disc_pay"], dtype=float)
+        tau_live = accrual[live_mask]
+        fixed_coupon = gearing[live_mask] * quoted[live_mask] + spread[live_mask]
+        if np.any(fixed_live):
+            amounts = sign * notional * tau_live[fixed_live] * fixed_coupon[fixed_live]
+            pv += float(np.sum(amounts * disc_pay[fixed_live]))
+        if np.any(~fixed_live):
+            idx_tau_live = index_accrual[live_mask][~fixed_live]
+            tau_float = tau_live[~fixed_live]
+            float_coupon = (np.asarray(pre["ps"], dtype=float) / np.asarray(pre["pe"], dtype=float) - 1.0) / np.maximum(
+                idx_tau_live,
+                1.0e-8,
+            )
+            amounts = sign * notional * tau_float * (gearing[live_mask][~fixed_live] * float_coupon + spread[live_mask][~fixed_live])
+            pv += float(np.sum(amounts * disc_pay[~fixed_live]))
     return pv
 
 

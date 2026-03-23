@@ -1,5 +1,5 @@
 section,field,value
-pricing,py_t0_npv,1702209820.4057944
+pricing,py_t0_npv,15233312.40835896
 pricing,trade_type,Swap
 pricing,pricing_mode,python_native_from_sensitivity
 pricing,report_ccy,USD
@@ -10,12 +10,12 @@ diagnostics,missing_reference_pricing,True
 diagnostics,pricing_mode,python_native_from_sensitivity
 diagnostics,missing_native_pricing_reference,True
 sensitivity,metric,NPV
-sensitivity,python_factor_count,18
+sensitivity,python_factor_count,10
 sensitivity,ore_factor_count,0
 sensitivity,matched_factor_count,0
 sensitivity,unmatched_ore_count,0
-sensitivity,unmatched_python_count,18
+sensitivity,unmatched_python_count,10
 sensitivity,unsupported_factor_count,0
-sensitivity,notes,['Pruned 14 native sensitivity factors that are outside the portfolio currencies/index families.']
+sensitivity,notes,[]
 sensitivity,sensitivity_output_file,sensitivity.csv
 sensitivity,scenario_output_file,scenario.csv

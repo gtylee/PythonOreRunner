@@ -16,16 +16,19 @@ from example_ore_snapshot_usd_one_trade_limited_sensi import main as _benchmark_
 
 def main() -> int:
     argv = list(sys.argv[1:])
-    if not argv:
-        argv = [
-            "--trade-count",
-            "1000",
-            "--paths",
-            "2000",
-            "--sensi-tenors",
-            "1Y,2Y,5Y,10Y,20Y,30Y",
-        ]
-    sys.argv = [sys.argv[0], *argv]
+    defaults = {
+        "--trade-count": "1000",
+        "--trade-mix": "mixed",
+        "--paths": "2000",
+        "--sensi-tenors": "1Y,2Y,5Y,10Y,20Y,30Y",
+    }
+    present = {arg for arg in argv if arg.startswith("--")}
+    merged: list[str] = []
+    for flag, value in defaults.items():
+        if flag not in present:
+            merged.extend([flag, value])
+    merged.extend(argv)
+    sys.argv = [sys.argv[0], *merged]
     return _benchmark_main()
 
 

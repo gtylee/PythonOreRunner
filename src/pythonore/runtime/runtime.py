@@ -402,6 +402,10 @@ class PythonLgmAdapter:
         self._swap_index_forward_tenor_cache: Dict[int, Dict[str, str]] = {}
         self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
+        self._market_overlay_cache: Dict[int, Dict[str, Any]] = {}
+        self._quote_dict_cache: Dict[int, Tuple[Dict[str, object], ...]] = {}
+        self._extract_inputs_cache: Dict[str, _PythonLgmInputs] = {}
+        self._curve_fit_cache: Dict[tuple[object, ...], Optional[_CurveBundle]] = {}
 
     def classify_portfolio_support(self, snapshot: XVASnapshot) -> Dict[str, Any]:
         """Classify a portfolio into Python-native and SWIG-only buckets."""
@@ -677,11 +681,12 @@ class PythonLgmAdapter:
     def compute_frozen_float_spreads(self, snapshot: XVASnapshot) -> Dict[str, List[float]]:
         self._ensure_py_lgm_imports()
         try:
-            inputs = self._extract_inputs(snapshot, map_snapshot(snapshot))
+            mapped = map_snapshot(snapshot)
+            trade_specs, _, _ = self._classify_portfolio_trades(snapshot, mapped)
         except Exception:
             return {}
         out: Dict[str, List[float]] = {}
-        for spec in inputs.trade_specs:
+        for spec in trade_specs:
             if spec.kind != "IRS" or spec.legs is None:
                 continue
             spread = np.asarray(spec.legs.get("float_spread", []), dtype=float)
@@ -1208,6 +1213,10 @@ class PythonLgmAdapter:
         the hazard-rate term structures, and returns a fully-populated
         :class:`_PythonLgmInputs` ready for simulation.
         """
+        snapshot_key = snapshot.stable_key()
+        cached_inputs = self._extract_inputs_cache.get(snapshot_key)
+        if cached_inputs is not None:
+            return cached_inputs
         xml = snapshot.config.xml_buffers
         model_ccy = snapshot.config.base_currency.upper()
 
@@ -1231,7 +1240,11 @@ class PythonLgmAdapter:
         valuation_times, observation_times, grid_source = self._build_exposure_grid(snapshot, xml)
         mpor = _resolve_mpor_config(snapshot, xml)
 
-        overlay = _parse_market_overlay(snapshot.market.raw_quotes)
+        market_cache_key = id(snapshot.market.raw_quotes)
+        overlay = self._market_overlay_cache.get(market_cache_key)
+        if overlay is None:
+            overlay = _parse_market_overlay(snapshot.market.raw_quotes)
+            self._market_overlay_cache[market_cache_key] = overlay
         fx_spots = overlay["fx"]
         fx_vols = overlay.get("fx_vol", {})
         swaption_normal_vols = overlay.get("swaption_normal_vols", {})
@@ -1499,7 +1512,7 @@ class PythonLgmAdapter:
                 + ", ".join(sorted(set(input_fallbacks)))
             )
 
-        return _PythonLgmInputs(
+        result = _PythonLgmInputs(
             asof=_normalize_asof_date(snapshot.config.asof),
             times=times,
             valuation_times=valuation_times,
@@ -1538,6 +1551,10 @@ class PythonLgmAdapter:
             },
             input_fallbacks=tuple(sorted(set(input_fallbacks))),
         )
+        self._extract_inputs_cache[snapshot_key] = result
+        if len(self._extract_inputs_cache) > 16:
+            self._extract_inputs_cache.pop(next(iter(self._extract_inputs_cache)))
+        return result
 
     def _load_ore_output_curves(
         self,
@@ -1730,7 +1747,6 @@ class PythonLgmAdapter:
         overlay path.
         """
         try:
-            quote_dicts = [{"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes]
             ccy_set = {snapshot.config.base_currency.upper()}
             for spec in trade_specs:
                 ccy_set.add(spec.ccy.upper())
@@ -1745,6 +1761,11 @@ class PythonLgmAdapter:
                 (ore_root.findtext("./Markets/Parameter[@name='simulation']") if ore_root is not None else None)
                 or pricing_config_id
             ).strip() or pricing_config_id
+            market_cache_key = id(snapshot.market.raw_quotes)
+            quote_dicts = self._quote_dict_cache.get(market_cache_key)
+            if quote_dicts is None:
+                quote_dicts = tuple({"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes)
+                self._quote_dict_cache[market_cache_key] = quote_dicts
             discount_meta = {
                 ccy: {
                     "source_column": self._ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, ccy),
@@ -1773,6 +1794,17 @@ class PythonLgmAdapter:
                             tenor = swap_index_forward_tenors.get(index_name, "")
                             if tenor:
                                 needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+            cache_key = (
+                market_cache_key,
+                snapshot.config.asof,
+                pricing_config_id,
+                sim_config_id,
+                tuple(sorted(ccy_set)),
+                tuple((ccy, tuple(sorted(tenors))) for ccy, tenors in sorted(needed_tenors.items())),
+            )
+            cached_bundle = self._curve_fit_cache.get(cache_key)
+            if cached_bundle is not None:
+                return cached_bundle
             discount_family_fallbacks = {
                 ccy: (sorted(tenors)[0] if len(tenors) == 1 else "")
                 for ccy, tenors in needed_tenors.items()
@@ -1851,7 +1883,7 @@ class PythonLgmAdapter:
                 forward_curves_by_tenor.setdefault(ccy, {})
 
             base_curve = discount_curves.get(snapshot.config.base_currency.upper())
-            return _CurveBundle(
+            result = _CurveBundle(
                 discount_curves=discount_curves,
                 forward_curves=forward_curves,
                 forward_curves_by_tenor=forward_curves_by_tenor,
@@ -1861,6 +1893,10 @@ class PythonLgmAdapter:
                 funding_borrow_curve=None,
                 funding_lend_curve=None,
             )
+            self._curve_fit_cache[cache_key] = result
+            if len(self._curve_fit_cache) > 16:
+                self._curve_fit_cache.pop(next(iter(self._curve_fit_cache)))
+            return result
         except Exception:
             return None
 

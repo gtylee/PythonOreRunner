@@ -43,6 +43,22 @@ from pythonore.runtime.exceptions import ConflictError, ValidationError
 ConflictPolicy = Literal["override", "error"]
 
 
+def _market_quote_fast(date: str, key: str, value: float) -> MarketQuote:
+    quote = object.__new__(MarketQuote)
+    object.__setattr__(quote, "date", date)
+    object.__setattr__(quote, "key", key)
+    object.__setattr__(quote, "value", float(value))
+    return quote
+
+
+def _fixing_point_fast(date: str, index: str, value: float) -> FixingPoint:
+    point = object.__new__(FixingPoint)
+    object.__setattr__(point, "date", date)
+    object.__setattr__(point, "index", index)
+    object.__setattr__(point, "value", float(value))
+    return point
+
+
 def _first_samples_count_from_simulation_xml(xml: str) -> Optional[int]:
     """Return the first ``<Samples>N</Samples>`` from simulation config XML, if present."""
     if not xml:
@@ -395,7 +411,13 @@ def _load_market_csv_cached(path_text: str) -> Tuple[MarketQuote, ...]:
             date_text = str(row[date_i]).strip()
             if not date_text or date_text.startswith("#"):
                 continue
-            quotes.append(MarketQuote(date=_normalize_date(row[date_i]), key=row[key_i].strip(), value=float(row[val_i])))
+            quotes.append(
+                _market_quote_fast(
+                    _normalize_date(date_text),
+                    row[key_i].strip(),
+                    float(row[val_i]),
+                )
+            )
     return tuple(quotes)
 
 
@@ -436,7 +458,13 @@ def _load_fixings_csv_cached(path_text: str) -> Tuple[FixingPoint, ...]:
         for row in reader:
             if len(row) <= max(date_i, idx_i, val_i):
                 continue
-            out.append(FixingPoint(date=_normalize_date(row[date_i]), index=row[idx_i].strip(), value=float(row[val_i])))
+            out.append(
+                _fixing_point_fast(
+                    _normalize_date(str(row[date_i]).strip()),
+                    row[idx_i].strip(),
+                    float(row[val_i]),
+                )
+            )
     return tuple(out)
 
 

@@ -16,7 +16,14 @@ for path in (REPO_ROOT, SRC_ROOT):
         sys.path.insert(0, str(path))
 
 from pythonore.apps import ore_snapshot_cli
-from example_ore_snapshot_usd_all_rates_products import _simulation_xml as _full_simulation_xml
+from example_ore_snapshot_usd_all_rates_products import (
+    _basis_fedfunds_libor_3m_trade_xml,
+    _basis_libor_3m_6m_trade_xml,
+    _basis_libor_3m_sifma_trade_xml,
+    _basis_sofr_3m_libor_3m_trade_xml,
+    _basis_sofr_3m_sifma_trade_xml,
+    _simulation_xml as _full_simulation_xml,
+)
 
 
 PRODUCTS_INPUT = REPO_ROOT / "Examples" / "Products" / "Input"
@@ -27,6 +34,7 @@ ASOF_DATE = "2025-02-10"
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a one-trade USD case with a tiny sensitivity grid.")
     parser.add_argument("--trade-count", type=int, default=300)
+    parser.add_argument("--trade-mix", choices=("irs", "mixed"), default="irs")
     parser.add_argument("--sensi-tenors", default="6M,1Y,18M,2Y,3Y,4Y,5Y,7Y,10Y,12Y,15Y,20Y,25Y,30Y,35Y,40Y")
     parser.add_argument("--case-root", type=Path, default=DEFAULT_CASE_ROOT)
     parser.add_argument("--artifact-root", type=Path, default=None)
@@ -113,6 +121,22 @@ def _portfolio_xml(trade_count: int) -> str:
     return f"<Portfolio>\n{trades}\n</Portfolio>\n"
 
 
+def _mixed_portfolio_xml(trade_count: int) -> str:
+    builders = (
+        ("IRS", lambda i: _irs_trade_xml(i)),
+        ("BASIS_L36", lambda i: _basis_libor_3m_6m_trade_xml(f"{i:04d}")),
+        ("BASIS_L3S", lambda i: _basis_libor_3m_sifma_trade_xml(f"{i:04d}")),
+        ("BASIS_FF3", lambda i: _basis_fedfunds_libor_3m_trade_xml(f"{i:04d}")),
+        ("BASIS_S3L", lambda i: _basis_sofr_3m_libor_3m_trade_xml(f"{i:04d}")),
+        ("BASIS_S3S", lambda i: _basis_sofr_3m_sifma_trade_xml(f"{i:04d}")),
+    )
+    trades: list[str] = []
+    for idx in range(1, trade_count + 1):
+        _, builder = builders[(idx - 1) % len(builders)]
+        trades.append(builder(idx))
+    return f"<Portfolio>\n{'\n'.join(trades)}\n</Portfolio>\n"
+
+
 def _ore_xml() -> str:
     return f"""<?xml version="1.0"?>
 <ORE>
@@ -172,7 +196,44 @@ def _ore_xml() -> str:
 """
 
 
-def _sensitivity_xml(sensi_tenors: str) -> str:
+def _sensitivity_xml(sensi_tenors: str, *, trade_mix: str) -> str:
+    index_blocks = [
+        """  <IndexCurve index="USD-LIBOR-3M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>{tenors}</ShiftTenors>
+    </IndexCurve>""",
+    ]
+    if trade_mix == "mixed":
+        index_blocks.extend(
+            [
+                """  <IndexCurve index="USD-LIBOR-6M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>{tenors}</ShiftTenors>
+    </IndexCurve>""",
+                """  <IndexCurve index="USD-FedFunds">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>{tenors}</ShiftTenors>
+    </IndexCurve>""",
+                """  <IndexCurve index="USD-SIFMA">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>{tenors}</ShiftTenors>
+    </IndexCurve>""",
+                """  <IndexCurve index="USD-SOFR-3M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>{tenors}</ShiftTenors>
+    </IndexCurve>""",
+            ]
+        )
     return """<?xml version="1.0"?>
 <SensitivityAnalysis>
   <DiscountCurves>
@@ -184,25 +245,21 @@ def _sensitivity_xml(sensi_tenors: str) -> str:
     </DiscountCurve>
   </DiscountCurves>
   <IndexCurves>
-    <IndexCurve index="USD-LIBOR-3M">
-      <ShiftType>Absolute</ShiftType>
-      <ShiftSize>0.0001</ShiftSize>
-      <ShiftScheme>Forward</ShiftScheme>
-      <ShiftTenors>{tenors}</ShiftTenors>
-    </IndexCurve>
+{index_curves}
   </IndexCurves>
 </SensitivityAnalysis>
-""".format(tenors=sensi_tenors)
+""".format(tenors=sensi_tenors, index_curves="\n".join(block.format(tenors=sensi_tenors) for block in index_blocks))
 
 
-def _write_case(case_root: Path, *, trade_count: int, sensi_tenors: str) -> Path:
+def _write_case(case_root: Path, *, trade_count: int, trade_mix: str, sensi_tenors: str) -> Path:
     input_dir = case_root / "Input"
     input_dir.mkdir(parents=True, exist_ok=True)
     (input_dir / "ore.xml").write_text(_ore_xml(), encoding="utf-8")
-    (input_dir / "portfolio.xml").write_text(_portfolio_xml(trade_count), encoding="utf-8")
+    portfolio_xml = _portfolio_xml(trade_count) if trade_mix == "irs" else _mixed_portfolio_xml(trade_count)
+    (input_dir / "portfolio.xml").write_text(portfolio_xml, encoding="utf-8")
     (input_dir / "simulation.xml").write_text(_full_simulation_xml(), encoding="utf-8")
     (input_dir / "netting.xml").write_text("<NettingSetDefinitions/>\n", encoding="utf-8")
-    (input_dir / "sensitivity.xml").write_text(_sensitivity_xml(sensi_tenors), encoding="utf-8")
+    (input_dir / "sensitivity.xml").write_text(_sensitivity_xml(sensi_tenors, trade_mix=trade_mix), encoding="utf-8")
     return input_dir / "ore.xml"
 
 
@@ -213,13 +270,15 @@ def main() -> int:
     _ensure_clean_dir(case_root, overwrite=args.overwrite)
     if args.trade_count <= 0:
         raise ValueError("--trade-count must be > 0")
-    ore_xml = _write_case(case_root, trade_count=args.trade_count, sensi_tenors=args.sensi_tenors)
+    ore_xml = _write_case(case_root, trade_count=args.trade_count, trade_mix=args.trade_mix, sensi_tenors=args.sensi_tenors)
     print(f"case_root      : {case_root}")
     print(f"ore_xml        : {ore_xml}")
     print(f"artifact_root  : {artifact_root}")
     print(f"trade_count    : {args.trade_count}")
+    print(f"trade_mix      : {args.trade_mix}")
     tenor_count = len([t for t in str(args.sensi_tenors).split(",") if t.strip()])
-    print(f"sensi_factors  : {2 * tenor_count} (USD discount + USD-LIBOR-3M across {args.sensi_tenors})")
+    curve_count = 2 if args.trade_mix == "irs" else 5
+    print(f"sensi_factors  : {curve_count * tenor_count} ({args.trade_mix} benchmark across {args.sensi_tenors})")
     argv = [
         str(ore_xml),
         "--price",
