@@ -92,11 +92,15 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
             xml_buffers[k] = v
 
     if "portfolio.xml" not in xml_buffers:
-        xml_buffers["portfolio.xml"] = _portfolio_to_xml(
-            snapshot.portfolio,
-            snapshot.config.asof,
-            snapshot.config.runtime or RuntimeConfig(),
-        )
+        preserved = _filtered_loaded_portfolio_xml(snapshot, xml_buffers)
+        if preserved is not None:
+            xml_buffers["portfolio.xml"] = preserved
+        else:
+            xml_buffers["portfolio.xml"] = _portfolio_to_xml(
+                snapshot.portfolio,
+                snapshot.config.asof,
+                snapshot.config.runtime or RuntimeConfig(),
+            )
     if "netting.xml" not in xml_buffers:
         xml_buffers["netting.xml"] = _netting_to_xml(snapshot.netting)
     if "collateralbalances.xml" not in xml_buffers:
@@ -141,6 +145,7 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     input_parameters.setPricingEngine(mapped.xml_buffers["pricingengine.xml"])
     input_parameters.setTodaysMarketParams(mapped.xml_buffers["todaysmarket.xml"])
     input_parameters.setCurveConfigs(mapped.xml_buffers["curveconfig.xml"], "")
+    _maybe_set(input_parameters, "setCurrencyConfig", mapped.xml_buffers.get("currencyconfig.xml") or _currency_config_xml(snapshot))
 
     _maybe_set(input_parameters, "setConventions", mapped.xml_buffers.get("conventions.xml"))
     refdata_xml = mapped.xml_buffers.get("referencedata.xml") or mapped.xml_buffers.get("reference_data.xml")
@@ -174,6 +179,67 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     _apply_xva_analytic_overrides(snapshot, input_parameters)
     _apply_credit_simulation(snapshot, mapped, input_parameters)
     return input_parameters
+
+
+def _currency_config_xml(snapshot: XVASnapshot) -> str:
+    currencies = sorted(_snapshot_currencies(snapshot))
+    lines = ["<CurrencyConfig>"]
+    for ccy in currencies:
+        lines.extend(
+            [
+                "  <Currency>",
+                f"    <Name>{ccy}</Name>",
+                f"    <ISOCode>{ccy}</ISOCode>",
+                "    <MinorUnitCodes/>",
+                "    <NumericCode>999</NumericCode>",
+                f"    <Symbol>{ccy}</Symbol>",
+                f"    <FractionSymbol>{ccy}</FractionSymbol>",
+                "    <FractionsPerUnit>100</FractionsPerUnit>",
+                "    <RoundingType>Closest</RoundingType>",
+                "    <RoundingPrecision>0</RoundingPrecision>",
+                "    <CurrencyType>Major</CurrencyType>",
+                "  </Currency>",
+            ]
+        )
+    lines.append("</CurrencyConfig>")
+    return "\n".join(lines)
+
+
+def _snapshot_currencies(snapshot: XVASnapshot) -> set[str]:
+    out = {str(snapshot.config.base_currency).upper()}
+    for trade in snapshot.portfolio.trades:
+        product = getattr(trade, "product", None)
+        ccy = getattr(product, "ccy", None)
+        if ccy:
+            out.add(str(ccy).upper())
+        if isinstance(product, GenericProduct):
+            out.update(_currencies_from_generic_payload(product.payload))
+    return {ccy for ccy in out if ccy}
+
+
+def _currencies_from_generic_payload(payload: Mapping[str, Any]) -> set[str]:
+    xml_text = str(payload.get("xml", "")).strip()
+    if not xml_text:
+        return set()
+    try:
+        root = ET.fromstring(f"<Trade>{xml_text}</Trade>")
+    except ET.ParseError:
+        return set()
+    tags = (
+        ".//Currency",
+        ".//BoughtCurrency",
+        ".//SoldCurrency",
+        ".//StrikeCurrency",
+        ".//PayCurrency",
+        ".//ReceiveCurrency",
+    )
+    out: set[str] = set()
+    for path in tags:
+        for node in root.findall(path):
+            text = (node.text or "").strip().upper()
+            if len(text) == 3 and text.isalpha():
+                out.add(text)
+    return out
 
 
 def _portfolio_to_xml(portfolio: Portfolio, asof: str, runtime: RuntimeConfig) -> str:
@@ -488,6 +554,32 @@ def _product_xml(trade: Trade, asof: str, runtime: RuntimeConfig | None = None) 
         if payload_xml:
             return [f"    {line}" if line else "" for line in payload_xml.splitlines()]
     return ["    <Data/>", f"    <!-- Generic product payload omitted for {type(p).__name__} -->"]
+
+
+def _filtered_loaded_portfolio_xml(snapshot: XVASnapshot, xml_buffers: Mapping[str, str]) -> str | None:
+    trade_ids = {str(t.trade_id) for t in snapshot.portfolio.trades if str(t.trade_id).strip()}
+    if not trade_ids:
+        return None
+    candidates = [
+        text
+        for name, text in xml_buffers.items()
+        if "portfolio" in str(name).lower() and str(text).strip()
+    ]
+    for text in candidates:
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            continue
+        if root.tag != "Portfolio":
+            continue
+        kept = [trade for trade in root.findall("./Trade") if str(trade.attrib.get("id", "")).strip() in trade_ids]
+        if not kept:
+            continue
+        filtered_root = ET.Element("Portfolio")
+        for trade in kept:
+            filtered_root.append(trade)
+        return ET.tostring(filtered_root, encoding="unicode")
+    return None
 
 
 def _additional_fields_xml(fields: Dict[str, str]) -> List[str]:
