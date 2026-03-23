@@ -65,8 +65,11 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+_SRC_ROOT = REPO_ROOT / "src"
+for _p in (REPO_ROOT, _SRC_ROOT):
+    _ps = str(_p)
+    if _p.exists() and _ps not in sys.path:
+        sys.path.insert(0, _ps)
 
 from pythonore.io.ore_snapshot import load_from_ore_xml
 

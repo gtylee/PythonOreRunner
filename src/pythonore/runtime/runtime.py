@@ -389,6 +389,14 @@ class PythonLgmAdapter:
         self._fx_utils = None
         self._inflation_mod = None
         self._ore_snapshot_mod = None
+        self._asof_cache: Dict[int, str] = {}
+        self._fixings_cache: Dict[int, Dict[tuple[str, str], float]] = {}
+        self._time_date_cache: Dict[tuple[int, float], str] = {}
+        self._portfolio_root_cache: Dict[int, ET.Element] = {}
+        self._simulation_root_cache: Dict[int, ET.Element] = {}
+        self._simulation_tenor_cache: Dict[int, np.ndarray] = {}
+        self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
+        self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
 
     def classify_portfolio_support(self, snapshot: XVASnapshot) -> Dict[str, Any]:
         """Classify a portfolio into Python-native and SWIG-only buckets."""
@@ -826,6 +834,7 @@ class PythonLgmAdapter:
         """Return (trade_specs, unsupported, ccy_set)."""
         trade_specs: List[_TradeSpec] = []
         unsupported: List[Trade] = []
+        generic_ccys: set[str] = set()
         for t in snapshot.portfolio.trades:
             if isinstance(t.product, IRS):
                 trade_specs.append(
@@ -871,6 +880,7 @@ class PythonLgmAdapter:
                         abs(float(leg.get("notional", 0.0)))
                         for leg in generic_legs.get("rate_legs", [])
                     ]
+                    generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
                     trade_specs.append(
                         _TradeSpec(
                             trade=t,
@@ -895,11 +905,61 @@ class PythonLgmAdapter:
                 ccy_set.add(t.product.ccy.upper())
             if isinstance(t.product, InflationCapFloor):
                 ccy_set.add(t.product.ccy.upper())
-            if isinstance(t.product, GenericProduct):
-                generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
-                if generic_legs is not None:
-                    ccy_set.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+        ccy_set.update(generic_ccys)
         return trade_specs, unsupported, ccy_set
+
+    def _normalized_asof(self, snapshot: XVASnapshot) -> str:
+        key = id(snapshot)
+        cached = self._asof_cache.get(key)
+        if cached is None:
+            cached = _normalize_asof_date(snapshot.config.asof)
+            self._asof_cache[key] = cached
+        return cached
+
+    def _fixings_lookup(self, snapshot: XVASnapshot) -> Dict[tuple[str, str], float]:
+        key = id(snapshot)
+        cached = self._fixings_cache.get(key)
+        if cached is None:
+            cached = {
+                (str(p.index).upper(), _normalize_asof_date(p.date)): float(p.value)
+                for p in snapshot.fixings.points
+            }
+            self._fixings_cache[key] = cached
+        return cached
+
+    def _date_from_time_cached(self, snapshot: XVASnapshot, t: float) -> str:
+        cache_key = (id(snapshot), float(t))
+        cached = self._time_date_cache.get(cache_key)
+        if cached is None:
+            cached = _date_from_time(self._normalized_asof(snapshot), float(t))
+            self._time_date_cache[cache_key] = cached
+        return cached
+
+    def _portfolio_root_from_xml(self, portfolio_xml: str) -> ET.Element:
+        key = id(portfolio_xml)
+        root = self._portfolio_root_cache.get(key)
+        if root is None:
+            root = ET.fromstring(portfolio_xml)
+            self._portfolio_root_cache[key] = root
+        return root
+
+    def _simulation_root_from_xml(self, simulation_xml: str) -> ET.Element:
+        key = id(simulation_xml)
+        root = self._simulation_root_cache.get(key)
+        if root is None:
+            root = ET.fromstring(simulation_xml)
+            self._simulation_root_cache[key] = root
+        return root
+
+    def _simulation_node_tenors_from_xml(self, simulation_xml: str) -> np.ndarray:
+        key = id(simulation_xml)
+        tenors = self._simulation_tenor_cache.get(key)
+        if tenors is None:
+            tenors = self._irs_utils.load_simulation_yield_tenors_from_root(
+                self._simulation_root_from_xml(simulation_xml)
+            )
+            self._simulation_tenor_cache[key] = tenors
+        return np.asarray(tenors, dtype=float)
 
     def _build_hazard_rates(
         self, snapshot: "XVASnapshot", hazards: Dict, recoveries: Dict
@@ -1734,7 +1794,7 @@ class PythonLgmAdapter:
     def _day_counter_from_sim_xml(self, sim_xml: str) -> str:
         """Return the normalised day-counter string from simulation.xml text."""
         try:
-            root = ET.fromstring(sim_xml)
+            root = self._simulation_root_from_xml(sim_xml)
             raw = (root.findtext("./DayCounter") or "A365F").strip()
             return self._ore_snapshot_mod._normalize_day_counter_name(raw)
         except Exception:
@@ -2038,6 +2098,10 @@ class PythonLgmAdapter:
         return out
 
     def _build_irs_legs(self, trade: Trade, mapped: MappedInputs, snapshot: XVASnapshot) -> Dict[str, np.ndarray]:
+        cache_key = (trade.trade_id, id(snapshot))
+        cached_legs = self._irs_leg_cache.get(cache_key)
+        if cached_legs is not None:
+            return cached_legs
         ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
         if ore_path_txt:
             try:
@@ -2045,7 +2109,7 @@ class PythonLgmAdapter:
                 output_dir = (ore_path.parent.parent / snapshot.config.params.get("outputPath", "Output")).resolve()
                 flows_csv = output_dir / "flows.csv"
                 if flows_csv.exists():
-                    asof = _normalize_asof_date(snapshot.config.asof)
+                    asof = self._normalized_asof(snapshot)
                     model_day_counter = "A365F"
                     sim_xml = mapped.xml_buffers.get("simulation.xml")
                     if sim_xml:
@@ -2058,8 +2122,7 @@ class PythonLgmAdapter:
                     )
                     if sim_xml:
                         try:
-                            with _tmp_xml_path(sim_xml) as path:
-                                legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(path)
+                            legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
                         except Exception:
                             pass
                     idx = str(trade.additional_fields.get("index", "")).upper()
@@ -2067,7 +2130,9 @@ class PythonLgmAdapter:
                         legs.setdefault("float_index", idx)
                         if "float_index_tenor" not in legs or not str(legs.get("float_index_tenor", "")).strip():
                             legs["float_index_tenor"] = idx.split("-")[-1].upper() if "-" in idx else ""
-                    return self._apply_historical_fixings_to_legs(snapshot, trade, legs)
+                    result = self._apply_historical_fixings_to_legs(snapshot, trade, legs)
+                    self._irs_leg_cache[cache_key] = result
+                    return result
             except Exception as exc:
                 import warnings as _warnings
                 _warnings.warn(
@@ -2077,18 +2142,22 @@ class PythonLgmAdapter:
                 )
         portfolio_xml = mapped.xml_buffers.get("portfolio.xml")
         if portfolio_xml:
-            asof = _normalize_asof_date(snapshot.config.asof)
+            asof = self._normalized_asof(snapshot)
             try:
-                with _tmp_xml_path(portfolio_xml) as path:
-                    legs = self._irs_utils.load_swap_legs_from_portfolio(path, trade.trade_id, asof)
+                legs = self._irs_utils.load_swap_legs_from_portfolio_root(
+                    self._portfolio_root_from_xml(portfolio_xml),
+                    trade.trade_id,
+                    asof,
+                )
                 sim_xml = mapped.xml_buffers.get("simulation.xml")
                 if sim_xml:
                     try:
-                        with _tmp_xml_path(sim_xml) as path:
-                            legs["node_tenors"] = self._irs_utils.load_simulation_yield_tenors(path)
+                        legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
                     except Exception:
                         pass
-                return self._apply_historical_fixings_to_legs(snapshot, trade, legs)
+                result = self._apply_historical_fixings_to_legs(snapshot, trade, legs)
+                self._irs_leg_cache[cache_key] = result
+                return result
             except Exception as exc:
                 import warnings as _warnings
                 _warnings.warn(
@@ -2096,13 +2165,22 @@ class PythonLgmAdapter:
                     UserWarning,
                     stacklevel=2,
                 )
-        return self._apply_historical_fixings_to_legs(snapshot, trade, _build_irs_legs_from_trade(trade, snapshot.config.asof))
+        result = self._apply_historical_fixings_to_legs(
+            snapshot,
+            trade,
+            _build_irs_legs_from_trade(trade, snapshot.config.asof),
+        )
+        self._irs_leg_cache[cache_key] = result
+        return result
 
     def _build_generic_rate_swap_legs(
         self,
         trade: Trade,
         snapshot: XVASnapshot,
     ) -> Optional[Dict[str, object]]:
+        cache_key = (trade.trade_id, id(snapshot))
+        if cache_key in self._generic_rate_swap_legs_cache:
+            return self._generic_rate_swap_legs_cache[cache_key]
         product = trade.product
         if not isinstance(product, GenericProduct):
             return None
@@ -2122,7 +2200,7 @@ class PythonLgmAdapter:
         if not leg_nodes:
             return None
 
-        asof = datetime.strptime(_normalize_asof_date(snapshot.config.asof), "%Y-%m-%d").date()
+        asof = datetime.strptime(self._normalized_asof(snapshot), "%Y-%m-%d").date()
         parse_date = self._irs_utils._parse_yyyymmdd
         build_schedule = self._irs_utils._build_schedule
         time_from_dates = self._irs_utils._time_from_dates
@@ -2275,21 +2353,20 @@ class PythonLgmAdapter:
                 leg_info["quoted_coupon"] = np.zeros_like(accr)
             rate_legs.append(leg_info)
 
-        return self._apply_historical_fixings_to_generic_rate_legs(
+        result = self._apply_historical_fixings_to_generic_rate_legs(
             snapshot,
             {"ccy": ccy or snapshot.config.base_currency.upper(), "rate_legs": rate_legs},
         )
+        self._generic_rate_swap_legs_cache[cache_key] = result
+        return result
 
     def _apply_historical_fixings_to_generic_rate_legs(
         self,
         snapshot: XVASnapshot,
         legs: Dict[str, object],
     ) -> Dict[str, object]:
-        asof = _normalize_asof_date(snapshot.config.asof)
-        fixings = {
-            (str(p.index).upper(), _normalize_asof_date(p.date)): float(p.value)
-            for p in snapshot.fixings.points
-        }
+        asof = self._normalized_asof(snapshot)
+        fixings = self._fixings_lookup(snapshot)
         for leg in legs.get("rate_legs", []):
             fixing_time = np.asarray(leg.get("fixing_time", []), dtype=float)
             if fixing_time.size == 0:
@@ -2299,7 +2376,7 @@ class PythonLgmAdapter:
             if leg.get("kind") in {"FLOATING", "CMS"}:
                 index_name = str(leg.get("index_name", "")).upper()
                 for i, ft in enumerate(fixing_time):
-                    fixing_date = _date_from_time(asof, float(ft))
+                    fixing_date = self._date_from_time_cached(snapshot, float(ft))
                     key = (index_name, fixing_date)
                     if fixing_date <= asof and key in fixings:
                         coupon[i] = fixings[key]
@@ -2314,18 +2391,15 @@ class PythonLgmAdapter:
         fix_t = np.asarray(legs.get("float_fixing_time", []), dtype=float)
         if fix_t.size == 0:
             return legs
-        asof = _normalize_asof_date(snapshot.config.asof)
-        fixings = {
-            (str(p.index).upper(), _normalize_asof_date(p.date)): float(p.value)
-            for p in snapshot.fixings.points
-        }
+        asof = self._normalized_asof(snapshot)
+        fixings = self._fixings_lookup(snapshot)
         p = trade.product
         assert isinstance(p, IRS)
         index_name = str(legs.get("float_index", trade.additional_fields.get("index", _default_index_for_ccy(p.ccy)))).upper()
         coupons = np.asarray(legs.get("float_coupon", np.zeros_like(fix_t)), dtype=float).copy()
         fixed_mask = np.asarray(legs.get("float_is_historically_fixed", np.zeros(fix_t.shape, dtype=bool)), dtype=bool).copy()
         for i, ft in enumerate(fix_t):
-            fixing_date = _date_from_time(asof, float(ft))
+            fixing_date = self._date_from_time_cached(snapshot, float(ft))
             if fixing_date <= asof:
                 key = (index_name, fixing_date)
                 if key in fixings:

@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""Generate and run a USD rates-only ORE snapshot example.
+"""Generate and run a USD floating-vs-floating ORE snapshot example.
 
-This example writes a small self-contained ORE input case with:
+This example writes a USD-only ORE input case with:
 
-- IRS
-- Cap
-- Floor
-- CMS swap
-- CMS spread swap
-- Digital CMS spread swap
-- European swaption
+- USD-LIBOR-3M vs USD-LIBOR-6M tenor basis swaps
+- USD-LIBOR-3M vs USD-SIFMA basis swaps
 
 It defaults to one trade of each type so the first run stays easy to validate.
-The run mode defaults to pricing plus XVA via `ore_snapshot_cli`.
-Once that works, scale with `--count-per-type 100`.
+The run mode defaults to pricing plus XVA via ``ore_snapshot_cli``.
 
 Example:
-    python3 example_ore_snapshot_usd_rates.py
-    python3 example_ore_snapshot_usd_rates.py --count-per-type 100
-    python3 example_ore_snapshot_usd_rates.py --price-only
-    python3 example_ore_snapshot_usd_rates.py --no-run
+    python3 example_ore_snapshot_usd_basis_swaps.py
+    python3 example_ore_snapshot_usd_basis_swaps.py --count-per-type 100
 """
 
 from __future__ import annotations
@@ -41,12 +33,12 @@ from pythonore.apps import ore_snapshot_cli
 
 
 COMMON_INPUT = REPO_ROOT / "Examples" / "Input"
-DEFAULT_CASE_ROOT = REPO_ROOT / "Examples" / "Generated" / "USD_RatesSnapshot"
+DEFAULT_CASE_ROOT = REPO_ROOT / "Examples" / "Generated" / "USD_BasisSwapsSnapshot"
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a USD rates-only ORE snapshot case and optionally price it with the snapshot CLI."
+        description="Generate a USD floating-vs-floating ORE snapshot case and optionally price it with the snapshot CLI."
     )
     parser.add_argument(
         "--count-per-type",
@@ -88,9 +80,9 @@ def _parse_args() -> argparse.Namespace:
         help="Run pricing only. By default the script runs pricing plus XVA.",
     )
     parser.add_argument(
-        "--include-digital-cmsspread",
+        "--include-fedfunds",
         action="store_true",
-        help="Include Digital CMSSpread swaps in the generated portfolio.",
+        help="Also include USD-FedFunds averaged vs USD-LIBOR-3M swaps.",
     )
     return parser.parse_args()
 
@@ -105,26 +97,23 @@ def _ensure_clean_dir(path: Path, *, overwrite: bool) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _trade_blocks(count_per_type: int, *, include_digital_cmsspread: bool) -> list[str]:
+def _trade_blocks(count_per_type: int, *, include_fedfunds: bool) -> list[str]:
     blocks: list[str] = []
     for i in range(1, count_per_type + 1):
         suffix = f"{i:03d}"
-        batch = [
-            _irs_trade_xml(suffix),
-            _cap_trade_xml(suffix),
-            _floor_trade_xml(suffix),
-            _cms_trade_xml(suffix),
-            _cmsspread_trade_xml(suffix),
-            _swaption_trade_xml(suffix),
-        ]
-        if include_digital_cmsspread:
-            batch.append(_digital_cmsspread_trade_xml(suffix))
-        blocks.extend(batch)
+        blocks.extend(
+            [
+                _libor_3m_6m_basis_trade_xml(suffix),
+                _libor_3m_sifma_basis_trade_xml(suffix),
+            ]
+        )
+        if include_fedfunds:
+            blocks.append(_fedfunds_libor_basis_trade_xml(suffix))
     return blocks
 
 
-def _irs_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="IRS_USD_{suffix}">
+def _libor_3m_6m_basis_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="BASIS_USD_LIB3M_LIB6M_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>
@@ -133,19 +122,22 @@ def _irs_trade_xml(suffix: str) -> str:
     </Envelope>
     <SwapData>
       <LegData>
-        <LegType>Fixed</LegType>
-        <Payer>false</Payer>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
           <Notional>10000000</Notional>
         </Notionals>
-        <DayCounter>30/360</DayCounter>
-        <PaymentConvention>F</PaymentConvention>
-        <FixedLegData>
-          <Rates>
-            <Rate>0.025</Rate>
-          </Rates>
-        </FixedLegData>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-LIBOR-6M</Index>
+          <Spreads>
+            <Spread>0.0000</Spread>
+          </Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
         <ScheduleData>
           <Rules>
             <StartDate>20160209</StartDate>
@@ -161,7 +153,7 @@ def _irs_trade_xml(suffix: str) -> str:
       </LegData>
       <LegData>
         <LegType>Floating</LegType>
-        <Payer>true</Payer>
+        <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
           <Notional>10000000</Notional>
@@ -171,7 +163,7 @@ def _irs_trade_xml(suffix: str) -> str:
         <FloatingLegData>
           <Index>USD-LIBOR-3M</Index>
           <Spreads>
-            <Spread>0.0</Spread>
+            <Spread>0.0015</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
@@ -193,104 +185,8 @@ def _irs_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
-def _cap_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="CAP_USD_{suffix}">
-    <TradeType>CapFloor</TradeType>
-    <Envelope>
-      <CounterParty>CPTY_A</CounterParty>
-      <NettingSetId>CPTY_A</NettingSetId>
-      <AdditionalFields/>
-    </Envelope>
-    <CapFloorData>
-      <LongShort>Long</LongShort>
-      <LegData>
-        <LegType>Floating</LegType>
-        <Payer>true</Payer>
-        <Currency>USD</Currency>
-        <DayCounter>ACT/360</DayCounter>
-        <PaymentConvention>MF</PaymentConvention>
-        <Notionals>
-          <Notional>1000000</Notional>
-        </Notionals>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
-            <Tenor>3M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-        <FloatingLegData>
-          <Index>USD-LIBOR-3M</Index>
-          <Spreads>
-            <Spread>0</Spread>
-          </Spreads>
-          <IsInArrears>false</IsInArrears>
-          <FixingDays>2</FixingDays>
-        </FloatingLegData>
-      </LegData>
-      <Caps>
-        <Cap>0.04</Cap>
-      </Caps>
-      <Floors/>
-    </CapFloorData>
-  </Trade>"""
-
-
-def _floor_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="FLOOR_USD_{suffix}">
-    <TradeType>CapFloor</TradeType>
-    <Envelope>
-      <CounterParty>CPTY_A</CounterParty>
-      <NettingSetId>CPTY_A</NettingSetId>
-      <AdditionalFields/>
-    </Envelope>
-    <CapFloorData>
-      <LongShort>Long</LongShort>
-      <LegData>
-        <LegType>Floating</LegType>
-        <Payer>true</Payer>
-        <Currency>USD</Currency>
-        <DayCounter>ACT/360</DayCounter>
-        <PaymentConvention>MF</PaymentConvention>
-        <Notionals>
-          <Notional>1000000</Notional>
-        </Notionals>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
-            <Tenor>3M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-        <FloatingLegData>
-          <Index>USD-LIBOR-3M</Index>
-          <Spreads>
-            <Spread>0</Spread>
-          </Spreads>
-          <IsInArrears>false</IsInArrears>
-          <FixingDays>2</FixingDays>
-        </FloatingLegData>
-      </LegData>
-      <Caps/>
-      <Floors>
-        <Floor>0.01</Floor>
-      </Floors>
-    </CapFloorData>
-  </Trade>"""
-
-
-def _cms_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="CMS_SWAP_USD_{suffix}">
+def _libor_3m_sifma_basis_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="BASIS_USD_LIB3M_SIFMA_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>
@@ -299,34 +195,7 @@ def _cms_trade_xml(suffix: str) -> str:
     </Envelope>
     <SwapData>
       <LegData>
-        <LegType>Fixed</LegType>
-        <Payer>false</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>30/360</DayCounter>
-        <PaymentConvention>F</PaymentConvention>
-        <FixedLegData>
-          <Rates>
-            <Rate>0.028</Rate>
-          </Rates>
-        </FixedLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20360209</EndDate>
-            <Tenor>1Y</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-      <LegData>
-        <LegType>CMS</LegType>
+        <LegType>Floating</LegType>
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
@@ -334,108 +203,53 @@ def _cms_trade_xml(suffix: str) -> str:
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
-        <CMSLegData>
-          <Index>USD-CMS-30Y</Index>
-          <Spreads>
-            <Spread>0.0</Spread>
-          </Spreads>
-          <IsInArrears>false</IsInArrears>
-          <FixingDays>2</FixingDays>
-        </CMSLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20360209</EndDate>
-            <Tenor>6M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-    </SwapData>
-  </Trade>"""
-
-
-def _cmsspread_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="CMSSPREAD_USD_{suffix}">
-    <TradeType>Swap</TradeType>
-    <Envelope>
-      <CounterParty>CPTY_A</CounterParty>
-      <NettingSetId>CPTY_A</NettingSetId>
-      <AdditionalFields/>
-    </Envelope>
-    <SwapData>
-      <LegData>
-        <LegType>CMSSpread</LegType>
-        <Payer>false</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>30/360</DayCounter>
-        <PaymentConvention>F</PaymentConvention>
-        <CMSSpreadLegData>
-          <Index1>USD-CMS-10Y</Index1>
-          <Index2>USD-CMS-1Y</Index2>
-          <IsInArrears>false</IsInArrears>
-          <FixingDays>2</FixingDays>
-          <Caps>
-            <Cap>0.06</Cap>
-          </Caps>
-          <Floors>
-            <Floor>0.00</Floor>
-          </Floors>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads/>
           <Gearings>
-            <Gearing>2.0</Gearing>
+            <Gearing>0.8</Gearing>
           </Gearings>
-          <Spreads>
-            <Spread>0.001</Spread>
-          </Spreads>
-          <NakedOption>false</NakedOption>
-        </CMSSpreadLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20310209</EndDate>
-            <Tenor>1Y</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-      <LegData>
-        <LegType>Floating</LegType>
-        <Payer>true</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>A360</DayCounter>
-        <PaymentConvention>MF</PaymentConvention>
-        <FloatingLegData>
-          <Index>USD-LIBOR-6M</Index>
-          <Spreads>
-            <Spread>0.002</Spread>
-          </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20310209</EndDate>
-            <Tenor>6M</Tenor>
-            <Calendar>US</Calendar>
+            <StartDate>2016-02-08</StartDate>
+            <EndDate>2026-02-08</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>US with Libor impact</Calendar>
             <Convention>MF</Convention>
             <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
+            <Rule>Backward</Rule>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>10000000</Notional>
+        </Notionals>
+        <DayCounter>ACT/ACT</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SIFMA</Index>
+          <Spreads>
+            <Spread>0.0005</Spread>
+          </Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>1</FixingDays>
+        </FloatingLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>2016-02-08</StartDate>
+            <EndDate>2026-02-08</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>US-NYSE</Calendar>
+            <Convention>MF</Convention>
+            <TermConvention>MF</TermConvention>
+            <Rule>Backward</Rule>
           </Rules>
         </ScheduleData>
       </LegData>
@@ -443,8 +257,8 @@ def _cmsspread_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
-def _digital_cmsspread_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="DIGITAL_CMSSPREAD_USD_{suffix}">
+def _fedfunds_libor_basis_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="BASIS_USD_FEDFUNDS_LIB3M_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>
@@ -453,58 +267,6 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
     </Envelope>
     <SwapData>
       <LegData>
-        <LegType>DigitalCMSSpread</LegType>
-        <Payer>false</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>30/360</DayCounter>
-        <PaymentConvention>F</PaymentConvention>
-        <DigitalCMSSpreadLegData>
-          <CMSSpreadLegData>
-            <Index1>USD-CMS-10Y</Index1>
-            <Index2>USD-CMS-1Y</Index2>
-            <IsInArrears>false</IsInArrears>
-            <FixingDays>2</FixingDays>
-            <Gearings>
-              <Gearing>2.0</Gearing>
-            </Gearings>
-            <Spreads>
-              <Spread>0.001</Spread>
-            </Spreads>
-          </CMSSpreadLegData>
-          <CallPosition>Long</CallPosition>
-          <IsCallATMIncluded>false</IsCallATMIncluded>
-          <CallStrikes>
-            <Strike>0.002</Strike>
-          </CallStrikes>
-          <CallPayoffs>
-            <Payoff>0.002</Payoff>
-          </CallPayoffs>
-          <PutPosition>Long</PutPosition>
-          <IsPutATMIncluded>false</IsPutATMIncluded>
-          <PutStrikes>
-            <Strike>0.0005</Strike>
-          </PutStrikes>
-          <PutPayoffs>
-            <Payoff>0.001</Payoff>
-          </PutPayoffs>
-        </DigitalCMSSpreadLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
-            <Tenor>6M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>MF</Convention>
-            <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-      <LegData>
         <LegType>Floating</LegType>
         <Payer>true</Payer>
         <Currency>USD</Currency>
@@ -514,9 +276,39 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <FloatingLegData>
-          <Index>USD-LIBOR-6M</Index>
+          <Index>USD-FedFunds</Index>
           <Spreads>
-            <Spread>0.002</Spread>
+            <Spread>0.0002</Spread>
+          </Spreads>
+          <IsAveraged>true</IsAveraged>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>20160209</StartDate>
+            <EndDate>20210209</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>US</Calendar>
+            <Convention>MF</Convention>
+            <TermConvention>MF</TermConvention>
+            <Rule>Backward</Rule>
+            <EndOfMonth>false</EndOfMonth>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>10000000</Notional>
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0010</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
@@ -524,13 +316,13 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         <ScheduleData>
           <Rules>
             <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
-            <Tenor>6M</Tenor>
+            <EndDate>20210209</EndDate>
+            <Tenor>3M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
             <TermConvention>MF</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
+            <Rule>Backward</Rule>
+            <EndOfMonth>false</EndOfMonth>
           </Rules>
         </ScheduleData>
       </LegData>
@@ -538,86 +330,8 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
-def _swaption_trade_xml(suffix: str) -> str:
-    return f"""  <Trade id="SWAPTION_USD_{suffix}">
-    <TradeType>Swaption</TradeType>
-    <Envelope>
-      <CounterParty>CPTY_A</CounterParty>
-      <NettingSetId>CPTY_A</NettingSetId>
-      <AdditionalFields/>
-    </Envelope>
-    <SwaptionData>
-      <OptionData>
-        <LongShort>Long</LongShort>
-        <OptionType>Call</OptionType>
-        <Style>European</Style>
-        <Settlement>Physical</Settlement>
-        <PayOffAtExpiry>false</PayOffAtExpiry>
-        <ExerciseDates>
-          <ExerciseDate>2021-02-09</ExerciseDate>
-        </ExerciseDates>
-      </OptionData>
-      <LegData>
-        <LegType>Floating</LegType>
-        <Payer>true</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>A360</DayCounter>
-        <PaymentConvention>ModifiedFollowing</PaymentConvention>
-        <FloatingLegData>
-          <Index>USD-LIBOR-3M</Index>
-          <Spreads>
-            <Spread>0.0</Spread>
-          </Spreads>
-        </FloatingLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>2021-02-09</StartDate>
-            <EndDate>2031-02-09</EndDate>
-            <Tenor>3M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>ModifiedFollowing</Convention>
-            <TermConvention>ModifiedFollowing</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-      <LegData>
-        <LegType>Fixed</LegType>
-        <Payer>false</Payer>
-        <Currency>USD</Currency>
-        <Notionals>
-          <Notional>10000000</Notional>
-        </Notionals>
-        <DayCounter>30/360</DayCounter>
-        <PaymentConvention>Following</PaymentConvention>
-        <FixedLegData>
-          <Rates>
-            <Rate>0.03</Rate>
-          </Rates>
-        </FixedLegData>
-        <ScheduleData>
-          <Rules>
-            <StartDate>2021-02-09</StartDate>
-            <EndDate>2031-02-09</EndDate>
-            <Tenor>6M</Tenor>
-            <Calendar>US</Calendar>
-            <Convention>Following</Convention>
-            <TermConvention>Following</TermConvention>
-            <Rule>Forward</Rule>
-            <EndOfMonth/>
-          </Rules>
-        </ScheduleData>
-      </LegData>
-    </SwaptionData>
-  </Trade>"""
-
-
-def _portfolio_xml(count_per_type: int, *, include_digital_cmsspread: bool) -> str:
-    trades = "\n".join(_trade_blocks(count_per_type, include_digital_cmsspread=include_digital_cmsspread))
+def _portfolio_xml(count_per_type: int, *, include_fedfunds: bool) -> str:
+    trades = "\n".join(_trade_blocks(count_per_type, include_fedfunds=include_fedfunds))
     return f"""<?xml version="1.0"?>
 <Portfolio>
 {trades}
@@ -625,8 +339,9 @@ def _portfolio_xml(count_per_type: int, *, include_digital_cmsspread: bool) -> s
 """
 
 
-def _simulation_xml() -> str:
-    return """<?xml version="1.0"?>
+def _simulation_xml(*, include_fedfunds: bool) -> str:
+    extra_indices = "      <Index>USD-FedFunds</Index>\n" if include_fedfunds else ""
+    return f"""<?xml version="1.0"?>
 <Simulation>
   <Parameters>
     <Discretization>Exact</Discretization>
@@ -689,21 +404,8 @@ def _simulation_xml() -> str:
     <Indices>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
-    </Indices>
-    <SwapIndices>
-      <SwapIndex>
-        <Name>USD-CMS-1Y</Name>
-        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
-      </SwapIndex>
-      <SwapIndex>
-        <Name>USD-CMS-10Y</Name>
-        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
-      </SwapIndex>
-      <SwapIndex>
-        <Name>USD-CMS-30Y</Name>
-        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
-      </SwapIndex>
-    </SwapIndices>
+      <Index>USD-SIFMA</Index>
+{extra_indices}    </Indices>
     <DefaultCurves>
       <Names/>
       <Tenors>6M,1Y,2Y</Tenors>
@@ -722,13 +424,14 @@ def _simulation_xml() -> str:
     <AggregationScenarioDataIndices>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
-    </AggregationScenarioDataIndices>
+      <Index>USD-SIFMA</Index>
+{extra_indices}    </AggregationScenarioDataIndices>
   </Market>
 </Simulation>
 """
 
 
-def _ore_xml(case_input_dir: Path) -> str:
+def _ore_xml() -> str:
     return f"""<?xml version="1.0"?>
 <ORE>
   <Setup>
@@ -744,7 +447,7 @@ def _ore_xml(case_input_dir: Path) -> str:
     <Parameter name="conventionsFile">{COMMON_INPUT / "conventions.xml"}</Parameter>
     <Parameter name="marketConfigFile">{COMMON_INPUT / "todaysmarket.xml"}</Parameter>
     <Parameter name="pricingEnginesFile">{COMMON_INPUT / "pricingengine.xml"}</Parameter>
-    <Parameter name="portfolioFile">portfolio_usd_rates.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio_usd_basis_swaps.xml</Parameter>
     <Parameter name="observationModel">Disable</Parameter>
   </Setup>
   <Markets>
@@ -790,22 +493,22 @@ def _write_files(
     case_root: Path,
     *,
     count_per_type: int,
-    include_digital_cmsspread: bool,
+    include_fedfunds: bool,
 ) -> tuple[Path, Path]:
     input_dir = case_root / "Input"
     input_dir.mkdir(parents=True, exist_ok=True)
 
     ore_xml = input_dir / "ore.xml"
-    portfolio_xml = input_dir / "portfolio_usd_rates.xml"
+    portfolio_xml = input_dir / "portfolio_usd_basis_swaps.xml"
     simulation_xml = input_dir / "simulation.xml"
     netting_xml = input_dir / "netting.xml"
 
-    ore_xml.write_text(_ore_xml(input_dir), encoding="utf-8")
+    ore_xml.write_text(_ore_xml(), encoding="utf-8")
     portfolio_xml.write_text(
-        _portfolio_xml(count_per_type, include_digital_cmsspread=include_digital_cmsspread),
+        _portfolio_xml(count_per_type, include_fedfunds=include_fedfunds),
         encoding="utf-8",
     )
-    simulation_xml.write_text(_simulation_xml(), encoding="utf-8")
+    simulation_xml.write_text(_simulation_xml(include_fedfunds=include_fedfunds), encoding="utf-8")
     netting_xml.write_text("<NettingSetDefinitions/>\n", encoding="utf-8")
 
     return ore_xml, portfolio_xml
@@ -824,15 +527,11 @@ def _case_slug(ore_xml: Path) -> str:
     return parent or ore_xml.stem
 
 
-def _product_counts(count_per_type: int, *, include_digital_cmsspread: bool) -> Iterable[tuple[str, int]]:
-    yield ("IRS", count_per_type)
-    yield ("Cap", count_per_type)
-    yield ("Floor", count_per_type)
-    yield ("CMS", count_per_type)
-    yield ("CMSSpread", count_per_type)
-    if include_digital_cmsspread:
-        yield ("DigitalCMSSpread", count_per_type)
-    yield ("Swaption", count_per_type)
+def _product_counts(count_per_type: int, *, include_fedfunds: bool) -> Iterable[tuple[str, int]]:
+    yield ("USD-LIBOR-3M vs USD-LIBOR-6M", count_per_type)
+    yield ("USD-LIBOR-3M vs USD-SIFMA", count_per_type)
+    if include_fedfunds:
+        yield ("USD-FedFunds vs USD-LIBOR-3M", count_per_type)
 
 
 def main() -> int:
@@ -847,23 +546,20 @@ def main() -> int:
     ore_xml, portfolio_xml = _write_files(
         case_root,
         count_per_type=args.count_per_type,
-        include_digital_cmsspread=args.include_digital_cmsspread,
+        include_fedfunds=args.include_fedfunds,
     )
 
-    print("Generated USD rates snapshot example")
+    print("Generated USD floating-vs-floating rates snapshot example")
     print(f"  case_root      : {case_root}")
     print(f"  ore_xml        : {ore_xml}")
     print(f"  portfolio_xml  : {portfolio_xml}")
     print(f"  artifact_root  : {artifact_root}")
     print("  product_counts :")
-    for name, count in _product_counts(
-        args.count_per_type,
-        include_digital_cmsspread=args.include_digital_cmsspread,
-    ):
+    for name, count in _product_counts(args.count_per_type, include_fedfunds=args.include_fedfunds):
         print(f"    - {name}: {count}")
     print()
     print("Next scale-up:")
-    print("  python3 example_ore_snapshot_usd_rates.py --count-per-type 100 --overwrite")
+    print("  python3 example_ore_snapshot_usd_basis_swaps.py --count-per-type 100 --overwrite")
     if args.price_only:
         print("  run_mode       : price only")
     else:

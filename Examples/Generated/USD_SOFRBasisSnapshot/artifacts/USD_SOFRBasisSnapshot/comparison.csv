@@ -1,0 +1,8 @@
+section,field,value
+diagnostics,engine,ore_reference_expected_output
+diagnostics,reference_output_dirs,['/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_SOFRBasisSnapshot/Output']
+diagnostics,using_expected_output,False
+diagnostics,missing_reference_pricing,True
+diagnostics,missing_reference_xva,True
+diagnostics,fallback_reason,missing_native_output
+diagnostics,fallback_error,ORE output file not found (run ORE first): /Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_SOFRBasisSnapshot/Output/exposure_trade_BASIS_USD_SOFR3M_LIB3M_001.csv

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parent
+_SRC_ROOT = _REPO_ROOT / "src"
+if _SRC_ROOT.exists():
+    _src_s = str(_SRC_ROOT)
+    if _src_s not in sys.path:
+        sys.path.insert(0, _src_s)
 
 from native_xva_interface import EngineRunError
 

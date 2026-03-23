@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2016-02-05</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="logFile">log.txt</Parameter>
+    <Parameter name="logMask">31</Parameter>
+    <Parameter name="marketDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/market_20160205_flat.txt</Parameter>
+    <Parameter name="fixingDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/fixings_20160205.txt</Parameter>
+    <Parameter name="implyTodaysFixings">Y</Parameter>
+    <Parameter name="curveConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/todaysmarket.xml</Parameter>
+    <Parameter name="pricingEnginesFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/pricingengine.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio_usd_basis_swaps.xml</Parameter>
+    <Parameter name="observationModel">Disable</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="lgmcalibration">libor</Parameter>
+    <Parameter name="fxcalibration">libor</Parameter>
+    <Parameter name="eqcalibration">libor</Parameter>
+    <Parameter name="pricing">libor</Parameter>
+    <Parameter name="simulation">libor</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="npv">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+      <Parameter name="outputFileName">npv.csv</Parameter>
+    </Analytic>
+    <Analytic type="cashflow">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="outputFileName">flows.csv</Parameter>
+    </Analytic>
+    <Analytic type="curves">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="configuration">default</Parameter>
+      <Parameter name="grid">240,1M</Parameter>
+      <Parameter name="outputFileName">curves.csv</Parameter>
+    </Analytic>
+    <Analytic type="simulation">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
+      <Parameter name="pricingEnginesFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/pricingengine.xml</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+    <Analytic type="xva">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="csaFile">netting.xml</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>

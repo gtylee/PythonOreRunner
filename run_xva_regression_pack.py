@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from dataclasses import replace
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,8 +21,13 @@ from typing import Optional
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
+_SRC_ROOT = THIS_DIR / "src"
+if _SRC_ROOT.exists():
+    _src_text = str(_SRC_ROOT)
+    if _src_text not in sys.path:
+        sys.path.insert(0, _src_text)
 
-from example_ore_snapshot import _simulate_with_fixing_grid
+from pythonore.workflows.ore_snapshot_cli import _simulate_with_fixing_grid
 from native_xva_interface import XVALoader, XVAEngine, PythonLgmAdapter
 from py_ore_tools.irs_xva_utils import (
     compute_realized_float_coupons,
@@ -254,7 +260,7 @@ def _run_irs_snapshot_case(case: CaseDef, paths: int, seed: int) -> dict[str, ob
     model = snap.build_model()
     use_ore_rng = case.name.startswith("measure_lgm")
     rng = make_ore_gaussian_rng(seed) if use_ore_rng else np.random.default_rng(seed)
-    x, x_all, sim_times = _simulate_with_fixing_grid(
+    x, x_all, sim_times, _, _ = _simulate_with_fixing_grid(
         model=model,
         exposure_times=snap.exposure_model_times,
         fixing_times=np.asarray(snap.legs.get("float_fixing_time", []), dtype=float),

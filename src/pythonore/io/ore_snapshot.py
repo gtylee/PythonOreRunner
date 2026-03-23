@@ -58,6 +58,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -772,10 +773,15 @@ def resolve_calibration_xml_path(
     return None
 
 
+def _runtime_calibration_failure_marker(output_path: str | Path) -> Path:
+    return Path(output_path).resolve() / "calibration.failed"
+
+
 def calibrate_lgm_params_via_ore(
     *,
     ore_xml_path: Union[str, Path],
     input_dir: Union[str, Path],
+    output_path: Union[str, Path],
     simulation_xml_path: Union[str, Path],
     ccy_key: str,
 ) -> Optional[Dict[str, object]]:
@@ -784,6 +790,8 @@ def calibrate_lgm_params_via_ore(
         return None
     ore_xml = Path(ore_xml_path).resolve()
     input_root = Path(input_dir).resolve()
+    output_root = Path(output_path).resolve()
+    failure_marker = _runtime_calibration_failure_marker(output_root)
     simulation_xml = Path(simulation_xml_path).resolve()
     with tempfile.TemporaryDirectory(prefix="ore_cli_calibration_") as td:
         temp_root = Path(td)
@@ -838,11 +846,49 @@ def calibrate_lgm_params_via_ore(
         )
         calibration_xml = temp_root / "Output" / "calibration.xml"
         if cp.returncode != 0 or not calibration_xml.exists():
+            try:
+                output_root.mkdir(parents=True, exist_ok=True)
+                failure_marker.write_text(
+                    json.dumps(
+                        {
+                            "returncode": int(cp.returncode),
+                            "reason": "calibration_xml_missing",
+                            "stdout_tail": cp.stdout.splitlines()[-20:],
+                            "stderr_tail": cp.stderr.splitlines()[-20:],
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             return None
         try:
-            return parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy_key)
+            params = parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=ccy_key)
         except Exception:
+            try:
+                output_root.mkdir(parents=True, exist_ok=True)
+                failure_marker.write_text(
+                    json.dumps(
+                        {
+                            "returncode": int(cp.returncode),
+                            "reason": "calibration_xml_parse_failed",
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             return None
+        try:
+            output_root.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(calibration_xml, output_root / "calibration.xml")
+            if failure_marker.exists():
+                failure_marker.unlink()
+        except Exception:
+            pass
+        return params
 
 
 def resolve_lgm_params(
@@ -905,6 +951,7 @@ def resolve_lgm_params(
             if lgm_param_source in {"calibration", "calibration_xml"}:
                 raise
     if lgm_param_source in {"auto", "ore", "runtime_calibration"}:
+        failure_marker = _runtime_calibration_failure_marker(output_path)
         runtime_cache_key = (
             _canonical_example_resource_id(market_data_path),
             _canonical_example_resource_id(curve_config_path),
@@ -915,10 +962,11 @@ def resolve_lgm_params(
         )
         with _RUNTIME_LGM_CALIBRATION_LOCK:
             params_dict = _RUNTIME_LGM_CALIBRATION_CACHE.get(runtime_cache_key)
-            if params_dict is None:
+            if params_dict is None and not failure_marker.exists():
                 params_dict = calibrate_lgm_params_via_ore(
                     ore_xml_path=ore_xml_path,
                     input_dir=input_dir,
+                    output_path=output_path,
                     simulation_xml_path=simulation_xml_path,
                     ccy_key=domestic_ccy,
                 )

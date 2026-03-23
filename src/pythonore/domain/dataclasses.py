@@ -788,6 +788,17 @@ class XVASnapshot:
 
     def stable_key(self) -> str:
         payload = self.to_dict()
+        config = dict(payload.get("config", {}))
+        xml_buffers = config.get("xml_buffers", {})
+        if isinstance(xml_buffers, dict):
+            config["xml_buffers"] = {
+                key: {
+                    "id": id(value),
+                    "length": len(value) if isinstance(value, str) else None,
+                }
+                for key, value in sorted(xml_buffers.items())
+            }
+        payload["config"] = config
         stable = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return str(abs(hash(stable)))
 

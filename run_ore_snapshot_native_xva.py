@@ -15,6 +15,14 @@ import re
 import sys
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent
+_SRC_ROOT = _REPO_ROOT / "src"
+if _SRC_ROOT.exists():
+    _src_s = str(_SRC_ROOT)
+    if _src_s not in sys.path:
+        sys.path.insert(0, _src_s)
+
+
 def _default_case_dir() -> Path:
     return Path(__file__).resolve().parent / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
 

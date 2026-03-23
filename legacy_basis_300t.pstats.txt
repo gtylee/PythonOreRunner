@@ -1,0 +1,90 @@
+Mon Mar 23 20:21:34 2026    /tmp/usd_basis.prof
+
+         1310957 function calls (1293575 primitive calls) in 1.962 seconds
+
+   Ordered by: cumulative time
+   List reduced from 6044 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    614/1    0.039    0.000    1.963    1.963 {built-in method builtins.exec}
+        1    0.000    0.000    1.963    1.963 /Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot_usd_basis_swaps.py:1(<module>)
+        1    0.000    0.000    1.780    1.780 /Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot_usd_basis_swaps.py:537(main)
+        1    0.000    0.000    1.777    1.777 /Users/gordonlee/Documents/PythonOreRunner/example_ore_snapshot_usd_basis_swaps.py:517(_run_cli)
+        1    0.000    0.000    1.777    1.777 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:7704(main)
+        1    0.003    0.003    1.775    1.775 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:7089(_run_case)
+        1    0.000    0.000    1.334    1.334 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:5019(_compute_snapshot_case)
+        1    0.000    0.000    1.334    1.334 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:2288(load_from_ore_xml)
+        1    0.000    0.000    1.324    1.324 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:848(resolve_lgm_params)
+        1    0.000    0.000    1.015    1.015 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:775(calibrate_lgm_params_via_ore)
+        1    0.000    0.000    1.011    1.011 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:512(run)
+        1    0.000    0.000    1.008    1.008 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:1178(communicate)
+        1    0.000    0.000    1.008    1.008 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/subprocess.py:2072(_communicate)
+       19    0.000    0.000    1.008    0.053 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/selectors.py:385(select)
+       19    1.007    0.053    1.007    0.053 {method 'poll' of 'select.poll' objects}
+   610/10    0.002    0.000    0.482    0.048 <frozen importlib._bootstrap>:1349(_find_and_load)
+   610/10    0.001    0.000    0.482    0.048 <frozen importlib._bootstrap>:1304(_find_and_load_unlocked)
+   578/10    0.001    0.000    0.481    0.048 <frozen importlib._bootstrap>:911(_load_unlocked)
+   483/10    0.001    0.000    0.481    0.048 <frozen importlib._bootstrap_external>:1020(exec_module)
+  1392/19    0.000    0.000    0.480    0.025 <frozen importlib._bootstrap>:480(_call_with_frames_removed)
+        1    0.000    0.000    0.309    0.309 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:730(resolve_calibration_xml_path)
+   439/46    0.000    0.000    0.308    0.007 {built-in method builtins.__import__}
+        1    0.006    0.006    0.306    0.306 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:691(_candidate_ore_xmls_with_calibration)
+        1    0.000    0.000    0.299    0.299 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:1467(ore_input_validation_dataframe)
+        1    0.000    0.000    0.298    0.298 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/__init__.py:1(<module>)
+      405    0.006    0.000    0.265    0.001 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:611(_parse_ore_setup_context)
+  777/368    0.001    0.000    0.263    0.001 <frozen importlib._bootstrap>:1390(_handle_fromlist)
+        1    0.000    0.000    0.201    0.201 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/api.py:1(<module>)
+        1    0.000    0.000    0.175    0.175 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/apps/ore_snapshot_cli.py:1(<module>)
+        1    0.000    0.000    0.173    0.173 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:1(<module>)
+     1250    0.002    0.000    0.153    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/xml/etree/ElementTree.py:1194(parse)
+     1250    0.013    0.000    0.150    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/xml/etree/ElementTree.py:545(parse)
+  578/572    0.001    0.000    0.128    0.000 <frozen importlib._bootstrap>:806(module_from_spec)
+    89/88    0.000    0.000    0.122    0.001 <frozen importlib._bootstrap_external>:1318(create_module)
+    89/88    0.120    0.001    0.122    0.001 {built-in method _imp.create_dynamic}
+     2027    0.004    0.000    0.110    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:569(_resolve_ore_path)
+     1144    0.109    0.000    0.109    0.000 {method '_parse_whole' of 'xml.etree.ElementTree.XMLParser' objects}
+        2    0.002    0.001    0.108    0.054 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:939(validate_ore_input_snapshot)
+     2813    0.002    0.000    0.091    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/pathlib/_local.py:664(resolve)
+     2815    0.018    0.000    0.083    0.000 <frozen posixpath>:391(realpath)
+      408    0.003    0.000    0.082    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:598(_resolve_case_dirs)
+    89/55    0.000    0.000    0.081    0.001 <frozen importlib._bootstrap_external>:1326(exec_module)
+    89/55    0.013    0.000    0.081    0.001 {built-in method _imp.exec_dynamic}
+      483    0.002    0.000    0.075    0.000 <frozen importlib._bootstrap_external>:1093(get_code)
+        4    0.017    0.004    0.073    0.018 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:1919(_load_ore_csv_keys_by_date)
+        1    0.000    0.000    0.069    0.069 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/arrays/__init__.py:1(<module>)
+      128    0.000    0.000    0.067    0.001 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/dataclasses.py:1294(wrap)
+      128    0.004    0.000    0.067    0.001 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/dataclasses.py:929(_process_class)
+        1    0.001    0.001    0.065    0.065 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/workflows/ore_snapshot_cli.py:6006(_ore_reference_summary)
+        1    0.000    0.000    0.064    0.064 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/groupby/__init__.py:1(<module>)
+        1    0.000    0.000    0.064    0.064 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/groupby/generic.py:1(<module>)
+        1    0.000    0.000    0.057    0.057 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/arrays/arrow/__init__.py:1(<module>)
+9202/8848    0.001    0.000    0.057    0.000 {built-in method builtins.hasattr}
+        1    0.000    0.000    0.056    0.056 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/_libs/__init__.py:1(<module>)
+        1    0.000    0.000    0.053    0.053 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/frame.py:1(<module>)
+        5    0.000    0.000    0.052    0.010 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/importlib/__init__.py:71(import_module)
+        5    0.000    0.000    0.051    0.010 <frozen importlib._bootstrap>:1375(_gcd_import)
+        1    0.000    0.000    0.051    0.051 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/__init__.py:42(__getattr__)
+2448/2435    0.015    0.000    0.050    0.000 {built-in method builtins.__build_class__}
+    24868    0.050    0.000    0.050    0.000 {built-in method posix.lstat}
+        1    0.000    0.000    0.050    0.050 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/runtime/runtime.py:1(<module>)
+      483    0.008    0.000    0.049    0.000 <frozen importlib._bootstrap_external>:782(_compile_bytecode)
+        1    0.000    0.000    0.047    0.047 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/_libs/tslibs/__init__.py:1(<module>)
+    26670    0.009    0.000    0.046    0.000 /Users/gordonlee/Documents/PythonOreRunner/src/pythonore/io/ore_snapshot.py:1915(_split_ore_loader_line)
+     5236    0.019    0.000    0.043    0.000 {built-in method posix.stat}
+        1    0.000    0.000    0.042    0.042 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/compat/__init__.py:1(<module>)
+        1    0.000    0.000    0.042    0.042 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/numpy/__init__.py:1(<module>)
+      483    0.041    0.000    0.041    0.000 {built-in method marshal.loads}
+        1    0.000    0.000    0.041    0.041 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/arrays/arrow/accessors.py:1(<module>)
+        1    0.000    0.000    0.040    0.040 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pyarrow/compute.py:1(<module>)
+      128    0.001    0.000    0.039    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/dataclasses.py:470(add_fns_to_class)
+        1    0.000    0.000    0.038    0.038 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/core/generic.py:1(<module>)
+     2674    0.001    0.000    0.037    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/pathlib/_abc.py:442(exists)
+        1    0.000    0.000    0.037    0.037 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pandas/compat/pyarrow.py:1(<module>)
+     6756    0.002    0.000    0.036    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/pathlib/_local.py:166(__fspath__)
+        1    0.000    0.000    0.036    0.036 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pyarrow/__init__.py:1(<module>)
+    26686    0.007    0.000    0.035    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/re/__init__.py:241(split)
+     2675    0.001    0.000    0.035    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/pathlib/_local.py:510(stat)
+     7710    0.005    0.000    0.035    0.000 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/pathlib/_local.py:227(__str__)
+        1    0.000    0.000    0.031    0.031 /Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pyarrow/compute.py:312(_make_global_functions)
+
+
