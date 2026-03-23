@@ -943,8 +943,67 @@ def _ore_xml() -> str:
       <Parameter name="csaFile">netting.xml</Parameter>
       <Parameter name="baseCurrency">USD</Parameter>
     </Analytic>
+    <Analytic type="sensitivity">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="sensitivityConfigFile">sensitivity.xml</Parameter>
+      <Parameter name="sensitivityOutputFile">sensitivity.csv</Parameter>
+      <Parameter name="scenarioOutputFile">scenario.csv</Parameter>
+    </Analytic>
   </Analytics>
 </ORE>
+"""
+
+
+def _sensitivity_xml() -> str:
+    return """<?xml version="1.0"?>
+<SensitivityAnalysis>
+  <DiscountCurves>
+    <DiscountCurve ccy="USD">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </DiscountCurve>
+  </DiscountCurves>
+  <IndexCurves>
+    <IndexCurve index="USD-FedFunds">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+    <IndexCurve index="USD-LIBOR-3M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+    <IndexCurve index="USD-LIBOR-6M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+    <IndexCurve index="USD-SIFMA">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+    <IndexCurve index="USD-SOFR">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+    <IndexCurve index="USD-SOFR-3M">
+      <ShiftType>Absolute</ShiftType>
+      <ShiftSize>0.0001</ShiftSize>
+      <ShiftScheme>Forward</ShiftScheme>
+      <ShiftTenors>1M,3M,6M,1Y,2Y,5Y,10Y,30Y</ShiftTenors>
+    </IndexCurve>
+  </IndexCurves>
+</SensitivityAnalysis>
 """
 
 
@@ -956,6 +1015,7 @@ def _write_files(case_root: Path, *, count_per_type: int, include_digital_cmsspr
     portfolio_xml = input_dir / "portfolio_usd_all_rates_products.xml"
     simulation_xml = input_dir / "simulation.xml"
     netting_xml = input_dir / "netting.xml"
+    sensitivity_xml = input_dir / "sensitivity.xml"
 
     ore_xml.write_text(_ore_xml(), encoding="utf-8")
     portfolio_xml.write_text(
@@ -964,13 +1024,14 @@ def _write_files(case_root: Path, *, count_per_type: int, include_digital_cmsspr
     )
     simulation_xml.write_text(_simulation_xml(), encoding="utf-8")
     netting_xml.write_text("<NettingSetDefinitions/>\n", encoding="utf-8")
+    sensitivity_xml.write_text(_sensitivity_xml(), encoding="utf-8")
     return ore_xml, portfolio_xml
 
 
 def _run_cli(ore_xml: Path, artifact_root: Path, *, price_only: bool, paths: int, lgm_param_source: str) -> int:
     argv = [str(ore_xml), "--price"]
     if not price_only:
-        argv.extend(["--xva", "--paths", str(paths)])
+        argv.extend(["--xva", "--sensi", "--paths", str(paths)])
     argv.extend(["--lgm-param-source", str(lgm_param_source), "--output-root", str(artifact_root)])
     return ore_snapshot_cli.main(argv)
 
@@ -1027,7 +1088,7 @@ def main() -> int:
     if args.price_only:
         print("  run_mode       : price only")
     else:
-        print(f"  run_mode       : price + xva (paths={args.paths})")
+        print(f"  run_mode       : price + xva + sensitivity (paths={args.paths})")
     print(f"  lgm_param_src  : {args.lgm_param_source}")
 
     if args.no_run:
@@ -1037,7 +1098,7 @@ def main() -> int:
     if args.price_only:
         print("Running ore_snapshot_cli --price ...")
     else:
-        print(f"Running ore_snapshot_cli --price --xva --paths {args.paths} ...")
+        print(f"Running ore_snapshot_cli --price --xva --sensi --paths {args.paths} ...")
     rc = _run_cli(
         ore_xml,
         artifact_root,
@@ -1051,7 +1112,7 @@ def main() -> int:
         if args.price_only:
             print("Pricing run completed")
         else:
-            print("Pricing and XVA run completed")
+            print("Pricing, XVA, and sensitivity run completed")
         print(f"  report_dir     : {case_dir}")
         print(f"  summary_json   : {case_dir / 'summary.json'}")
         print(f"  report_md      : {case_dir / 'report.md'}")

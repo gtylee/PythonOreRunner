@@ -28,6 +28,7 @@ from pythonore.runtime.runtime import (
     DeterministicToyAdapter,
     PythonLgmAdapter,
     XVAEngine,
+    _quote_matches_discount_curve,
     classify_portfolio_support,
 )
 
@@ -270,3 +271,12 @@ def test_python_lgm_runtime_attaches_dim_reports_and_metadata():
     assert "dim_cube" in result.cubes
     assert result.metadata["support_classification"]["mode"] == "native_only"
     assert result.metadata["fallback_mode"] == "native_only"
+
+
+def test_quote_matches_discount_curve_uses_unique_trade_family_as_fallback():
+    quote_6m = "IR_SWAP/RATE/GBP/0D/6M/10Y"
+    quote_1d = "IR_SWAP/RATE/GBP/0D/1D/10Y"
+
+    assert _quote_matches_discount_curve(quote_6m, "GBP", "GBP", fallback_family="6M") is True
+    assert _quote_matches_discount_curve(quote_1d, "GBP", "GBP", fallback_family="6M") is False
+    assert _quote_matches_discount_curve(quote_1d, "GBP", "GBP") is True

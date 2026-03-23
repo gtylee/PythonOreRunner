@@ -1138,6 +1138,19 @@ class PythonLgmAdapter:
             model_ccy=model_ccy,
             trade_specs=trade_specs,
         )
+        needed_tenors: Dict[str, set[str]] = {}
+        for spec in trade_specs:
+            if spec.kind == "IRS" and spec.legs is not None:
+                tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+                if tenor:
+                    needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+            elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
+                for leg in spec.legs.get("rate_legs", []):
+                    for field in ("index_name", "index_name_1", "index_name_2"):
+                        index_name = str(leg.get(field, "")).upper()
+                        tenor = swap_index_forward_tenors.get(index_name, "")
+                        if tenor:
+                            needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
         input_fallbacks: List[str] = []
         strict_ore_inputs = self._is_ore_case_snapshot(snapshot)
 
@@ -1187,9 +1200,36 @@ class PythonLgmAdapter:
                 funding_lend_curve = fitted_curves.funding_lend_curve
                 curve_source = "ore_quote_fit"
             else:
+                ore_root = ET.fromstring(xml["ore.xml"]) if xml.get("ore.xml", "").strip() else None
+                tm_root = ET.fromstring(xml["todaysmarket.xml"]) if xml.get("todaysmarket.xml", "").strip() else None
+                pricing_config_id = (
+                    (ore_root.findtext("./Markets/Parameter[@name='pricing']") if ore_root is not None else None)
+                    or "default"
+                ).strip() or "default"
+                discount_source_columns: Dict[str, str] = {}
+                if tm_root is not None:
+                    for ccy in sorted(ccy_set):
+                        try:
+                            discount_source_columns[ccy] = self._ore_snapshot_mod._resolve_discount_column(
+                                tm_root,
+                                pricing_config_id,
+                                ccy,
+                            )
+                        except Exception:
+                            discount_source_columns[ccy] = ""
                 for ccy, pts in zero_curves.items():
+                    preferred_discount_family = _curve_family_from_source_column(
+                        discount_source_columns.get(ccy, "")
+                    )
+                    if not preferred_discount_family:
+                        tenors = needed_tenors.get(ccy, set())
+                        if len(tenors) == 1:
+                            preferred_discount_family = sorted(tenors)[0]
+                    discount_pts = pts
+                    if preferred_discount_family and preferred_discount_family not in ("", "1D", "ON", "O/N"):
+                        discount_pts = fwd_curves_raw.get(ccy, {}).get(preferred_discount_family, pts)
                     by_time: Dict[float, List[float]] = {}
-                    for t, r in pts:
+                    for t, r in discount_pts:
                         by_time.setdefault(float(t), []).append(float(r))
                     dedup: Dict[float, float] = {}
                     for t, vals in by_time.items():
@@ -1606,6 +1646,23 @@ class PythonLgmAdapter:
             swap_index_forward_tenors = self._parse_swap_index_forward_tenors(
                 snapshot.config.xml_buffers.get("conventions.xml", "")
             )
+            needed_tenors: Dict[str, set[str]] = {}
+            for spec in trade_specs:
+                if spec.kind == "IRS" and spec.legs is not None:
+                    tenor = str(spec.legs.get("float_index_tenor", "")).upper()
+                    if tenor:
+                        needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+                elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
+                    for leg in spec.legs.get("rate_legs", []):
+                        for field in ("index_name", "index_name_1", "index_name_2"):
+                            index_name = str(leg.get(field, "")).upper()
+                            tenor = swap_index_forward_tenors.get(index_name, "")
+                            if tenor:
+                                needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+            discount_family_fallbacks = {
+                ccy: (sorted(tenors)[0] if len(tenors) == 1 else "")
+                for ccy, tenors in needed_tenors.items()
+            }
 
             discount_curves: Dict[str, Callable[[float], float]] = {}
             for ccy in sorted(ccy_set):
@@ -1617,7 +1674,12 @@ class PythonLgmAdapter:
                 discount_quotes = [
                     q
                     for q in quote_dicts
-                    if _quote_matches_discount_curve(str(q["key"]), ccy, source_column)
+                    if _quote_matches_discount_curve(
+                        str(q["key"]),
+                        ccy,
+                        source_column,
+                        fallback_family=discount_family_fallbacks.get(ccy, ""),
+                    )
                 ]
                 if not discount_quotes:
                     continue
@@ -1637,19 +1699,6 @@ class PythonLgmAdapter:
             forward_curves: Dict[str, Callable[[float], float]] = {}
             forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]] = {}
             forward_curves_by_name: Dict[str, Callable[[float], float]] = {}
-            needed_tenors: Dict[str, set[str]] = {}
-            for spec in trade_specs:
-                if spec.kind == "IRS" and spec.legs is not None:
-                    tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-                    if tenor:
-                        needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
-                elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
-                    for leg in spec.legs.get("rate_legs", []):
-                        for field in ("index_name", "index_name_1", "index_name_2"):
-                            index_name = str(leg.get(field, "")).upper()
-                            tenor = swap_index_forward_tenors.get(index_name, "")
-                            if tenor:
-                                needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
             for ccy, tenors in needed_tenors.items():
                 tenor_curves: Dict[str, Callable[[float], float]] = {}
                 for tenor in sorted(tenors):
@@ -4635,11 +4684,18 @@ def _apply_curve_node_shocks(
     return discount_curves, forward_curves, forward_curves_by_tenor, forward_curves_by_name, xva_discount_curve
 
 
-def _quote_matches_discount_curve(key: str, ccy: str, source_column: str) -> bool:
+def _quote_matches_discount_curve(
+    key: str,
+    ccy: str,
+    source_column: str,
+    fallback_family: str = "",
+) -> bool:
     parts = str(key).strip().upper().split("/")
     if len(parts) < 3 or parts[2] != ccy.upper():
         return False
     family = _curve_family_from_source_column(source_column)
+    if not family:
+        family = str(fallback_family).strip().upper()
     if parts[0] == "MM" and parts[1] == "RATE":
         return True
     if parts[0] == "IR_SWAP" and parts[1] == "RATE":

@@ -7,6 +7,8 @@
     "missing_reference_pricing": true,
     "missing_reference_xva": true,
     "reference_output_dirs": [],
+    "sensitivity_fallback_error": "Unsupported by PythonLgmAdapter in native-only mode: CAP_USD_SOFR3M_0001:CapFloor, FLOOR_USD_SOFR3M_0001:CapFloor, SWAPTION_USD_0001:Swaption. These trades are supported only through the ORE SWIG fallback.",
+    "sensitivity_fallback_reason": "unsupported_python_sensitivity",
     "using_expected_output": true
   },
   "input_validation": {
@@ -492,7 +494,8 @@
   "maturity_time": 0.0,
   "modes": [
     "price",
-    "xva"
+    "xva",
+    "sensi"
   ],
   "netting_set_id": "CPTY_A",
   "ore_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_AllRatesProductsSnapshot/Input/ore.xml",
@@ -506,6 +509,19 @@
     "xva_fca": true
   },
   "pricing": null,
+  "sensitivity": {
+    "matched_factor_count": 0,
+    "metric": "CVA",
+    "notes": [
+      "sensitivity fallback: Unsupported by PythonLgmAdapter in native-only mode: CAP_USD_SOFR3M_0001:CapFloor, FLOOR_USD_SOFR3M_0001:CapFloor, SWAPTION_USD_0001:Swaption. These trades are supported only through the ORE SWIG fallback."
+    ],
+    "ore_factor_count": 0,
+    "python_factor_count": 0,
+    "top_comparisons": [],
+    "unmatched_ore_count": 0,
+    "unmatched_python_count": 0,
+    "unsupported_factor_count": 0
+  },
   "trade_id": "IRS_USD_0001",
   "xva": null
 }

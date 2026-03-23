@@ -53,5 +53,11 @@
       <Parameter name="csaFile">netting.xml</Parameter>
       <Parameter name="baseCurrency">USD</Parameter>
     </Analytic>
+    <Analytic type="sensitivity">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="sensitivityConfigFile">sensitivity.xml</Parameter>
+      <Parameter name="sensitivityOutputFile">sensitivity.csv</Parameter>
+      <Parameter name="scenarioOutputFile">scenario.csv</Parameter>
+    </Analytic>
   </Analytics>
 </ORE>
