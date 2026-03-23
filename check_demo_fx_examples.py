@@ -1,15 +1,9 @@
 import numpy as np
-import sys
-from pathlib import Path
 
-TOOLS_DIR = Path(__file__).resolve().parent / "py_ore_tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-from lgm import LGMParams
-from lgm_fx_hybrid import MultiCcyLgmParams, LgmFxHybrid
-from lgm_fx_xva_utils import FxForwardDef, fx_forward_npv
-from irs_xva_utils import build_discount_curve_from_zero_rate_pairs
+from py_ore_tools.irs_xva_utils import build_discount_curve_from_zero_rate_pairs
+from py_ore_tools.lgm import LGMParams
+from py_ore_tools.lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams
+from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, fx_forward_npv
 
 
 def run_fx_forward_example(name, pair, maturity, spot0, strike, notional_base,
@@ -95,41 +89,49 @@ def run_fx_forward_example(name, pair, maturity, spot0, strike, notional_base,
     }
 
 
-fx_ex_1 = run_fx_forward_example(
-    name='FXFWD_GBPUSD_1Y',
-    pair='GBP/USD',
-    maturity=1.0,
-    spot0=1.2700,
-    strike=1.2850,
-    notional_base=10_000_000,
-    dom_zero_rate=0.0475,
-    for_zero_rate=0.0400,
-    fx_vol=0.115,
-    corr_dom_fx=-0.15,
-    corr_for_fx=0.10,
-    n_paths=20000,
-    seed=1234,
-)
+def main() -> None:
+    fx_ex_1 = run_fx_forward_example(
+        name='FXFWD_GBPUSD_1Y',
+        pair='GBP/USD',
+        maturity=1.0,
+        spot0=1.2700,
+        strike=1.2850,
+        notional_base=10_000_000,
+        dom_zero_rate=0.0475,
+        for_zero_rate=0.0400,
+        fx_vol=0.115,
+        corr_dom_fx=-0.15,
+        corr_for_fx=0.10,
+        n_paths=20000,
+        seed=1234,
+    )
 
-fx_ex_2 = run_fx_forward_example(
-    name='FXFWD_USDCAD_2Y',
-    pair='USD/CAD',
-    maturity=2.0,
-    spot0=1.3400,
-    strike=1.3600,
-    notional_base=10_000_000,
-    dom_zero_rate=0.0360,
-    for_zero_rate=0.0475,
-    fx_vol=0.105,
-    corr_dom_fx=-0.05,
-    corr_for_fx=0.05,
-    n_paths=20000,
-    seed=5678,
-)
+    fx_ex_2 = run_fx_forward_example(
+        name='FXFWD_USDCAD_2Y',
+        pair='USD/CAD',
+        maturity=2.0,
+        spot0=1.3400,
+        strike=1.3600,
+        notional_base=10_000_000,
+        dom_zero_rate=0.0360,
+        for_zero_rate=0.0475,
+        fx_vol=0.105,
+        corr_dom_fx=-0.05,
+        corr_for_fx=0.05,
+        n_paths=20000,
+        seed=5678,
+    )
 
-for r in (fx_ex_1, fx_ex_2):
-    print(f"{r['name']} ({r['pair']}, {r['maturity']}Y)")
-    print(f"  spot0={r['spot0']:.6f} strike={r['strike']:.6f} fwd0={r['fwd0']:.6f}")
-    print(f"  t0 NPV (deterministic): {r['npv0']:,.2f}")
-    print(f"  terminal MTM mean:      {r['mtm_at_maturity_mean']:,.2f}")
-    print(f"  terminal MTM P05/P95:   {r['mtm_at_maturity_p05']:,.2f} / {r['mtm_at_maturity_p95']:,.2f}")
+    for result in (fx_ex_1, fx_ex_2):
+        print(f"{result['name']} ({result['pair']}, {result['maturity']}Y)")
+        print(f"  spot0={result['spot0']:.6f} strike={result['strike']:.6f} fwd0={result['fwd0']:.6f}")
+        print(f"  t0 NPV (deterministic): {result['npv0']:,.2f}")
+        print(f"  terminal MTM mean:      {result['mtm_at_maturity_mean']:,.2f}")
+        print(
+            f"  terminal MTM P05/P95:   {result['mtm_at_maturity_p05']:,.2f} / "
+            f"{result['mtm_at_maturity_p95']:,.2f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

@@ -9,6 +9,7 @@ from pathlib import Path
 _PKG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_DIR.parent
 _LEGACY_DIR = _REPO_ROOT / "legacy" / "py_ore_tools"
+_SRC_ROOT = _REPO_ROOT / "src"
 _SRC = _REPO_ROOT / "src" / "pythonore"
 
 _CACHE_ROOT = _REPO_ROOT / ".cache" / "py_ore_tools"
@@ -19,6 +20,11 @@ _FONTCONFIG_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT))
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 os.environ.setdefault("MPLBACKEND", "Agg")
+
+if _SRC_ROOT.exists():
+    src_root_text = str(_SRC_ROOT)
+    if src_root_text not in sys.path:
+        sys.path.insert(0, src_root_text)
 
 __path__ = [str(_PKG_DIR)]
 for extra in (

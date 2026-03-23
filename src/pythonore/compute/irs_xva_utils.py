@@ -296,8 +296,7 @@ def parse_tenor_to_years(tenor: str) -> float:
     return n / 365.0
 
 
-def load_simulation_yield_tenors(simulation_xml: str) -> np.ndarray:
-    root = ET.parse(simulation_xml).getroot()
+def load_simulation_yield_tenors_from_root(root: ET.Element) -> np.ndarray:
     ten = root.findtext("./Market/YieldCurves/Configuration/Tenors")
     if ten is None:
         raise ValueError("simulation xml missing Market/YieldCurves/Configuration/Tenors")
@@ -306,6 +305,11 @@ def load_simulation_yield_tenors(simulation_xml: str) -> np.ndarray:
     if arr.size == 0:
         raise ValueError("no yield tenors parsed from simulation xml")
     return arr
+
+
+def load_simulation_yield_tenors(simulation_xml: str) -> np.ndarray:
+    root = ET.parse(simulation_xml).getroot()
+    return load_simulation_yield_tenors_from_root(root)
 
 
 def _build_schedule(
@@ -600,8 +604,8 @@ def load_ore_legs_from_flows(
     return out
 
 
-def load_swap_legs_from_portfolio(
-    portfolio_xml: str,
+def load_swap_legs_from_portfolio_root(
+    root: ET.Element,
     trade_id: str,
     asof_date: str,
     time_day_counter: str = "ActualActual(ISDA)",
@@ -612,14 +616,13 @@ def load_swap_legs_from_portfolio(
     useful when flow reports are unavailable or when a schedule needs to be rebuilt
     from the canonical ORE trade description.
     """
-    root = ET.parse(portfolio_xml).getroot()
     trade = None
     for t in root.findall("./Trade"):
         if t.attrib.get("id", "") == trade_id:
             trade = t
             break
     if trade is None:
-        raise ValueError(f"trade '{trade_id}' not found in {portfolio_xml}")
+        raise ValueError(f"trade '{trade_id}' not found in portfolio XML")
     trade_type = (trade.findtext("./TradeType") or "").strip()
     if trade_type == "Swap":
         swap = trade.find("./SwapData")
@@ -721,6 +724,21 @@ def load_swap_legs_from_portfolio(
         if k not in out:
             raise ValueError(f"incomplete swap leg data, missing '{k}'")
     return out
+
+
+def load_swap_legs_from_portfolio(
+    portfolio_xml: str,
+    trade_id: str,
+    asof_date: str,
+    time_day_counter: str = "ActualActual(ISDA)",
+) -> Dict[str, np.ndarray]:
+    root = ET.parse(portfolio_xml).getroot()
+    return load_swap_legs_from_portfolio_root(
+        root,
+        trade_id=trade_id,
+        asof_date=asof_date,
+        time_day_counter=time_day_counter,
+    )
 
 
 def remaining_schedule(dates: np.ndarray, t: float) -> np.ndarray:

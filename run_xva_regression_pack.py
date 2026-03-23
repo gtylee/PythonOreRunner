@@ -21,10 +21,6 @@ import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
 
-import sys
-
-sys.path.insert(0, str(THIS_DIR))
-
 from example_ore_snapshot import _simulate_with_fixing_grid
 from native_xva_interface import XVALoader, XVAEngine, PythonLgmAdapter
 from py_ore_tools.irs_xva_utils import (
@@ -37,8 +33,12 @@ from py_ore_tools.irs_xva_utils import (
 from py_ore_tools.lgm import make_ore_gaussian_rng
 from py_ore_tools.ore_snapshot import load_from_ore_xml
 
+REPO_ROOT = THIS_DIR
+ARTIFACT_ROOT = REPO_ROOT / "parity_artifacts"
 
-REPO_ROOT = THIS_DIR.parents[1]
+
+def _repo_file(*parts: str) -> str:
+    return str((REPO_ROOT.joinpath(*parts)).resolve())
 
 
 @dataclass(frozen=True)
@@ -50,102 +50,108 @@ class CaseDef:
 
 
 DEFAULT_CASES: tuple[CaseDef, ...] = (
-    CaseDef("measure_lgm", "Examples/Exposure/Input/ore_measure_lgm.xml"),
-    CaseDef("measure_lgm_fixed", "Examples/Exposure/Input/ore_measure_lgm_fixed.xml"),
-    CaseDef("measure_lgm_with_calibration", "Examples/Exposure/Input/ore_measure_lgm_with_calibration.xml"),
+    CaseDef("measure_lgm", _repo_file("Examples", "Exposure", "Input", "ore_measure_lgm.xml")),
+    CaseDef("measure_lgm_fixed", _repo_file("Examples", "Exposure", "Input", "ore_measure_lgm_fixed.xml")),
+    CaseDef("measure_lgm_with_calibration", _repo_file("Examples", "Exposure", "Input", "ore_measure_lgm_with_calibration.xml")),
     CaseDef(
         "flat_eur_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_EUR_5Y_A", "Input", "ore.xml"),
     ),
     CaseDef(
         "flat_eur_5y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_5Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_EUR_5Y_B", "Input", "ore.xml"),
     ),
     CaseDef(
         "flat_eur_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_EUR_10Y_A", "Input", "ore.xml"),
     ),
     CaseDef(
         "flat_eur_10y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_EUR_10Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_EUR_10Y_B", "Input", "ore.xml"),
     ),
     CaseDef(
         "full_eur_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_EUR_5Y_A", "Input", "ore.xml"),
     ),
     CaseDef(
         "full_eur_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_EUR_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_EUR_10Y_A", "Input", "ore.xml"),
     ),
     CaseDef(
         "flat_usd_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_USD_5Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_usd_5y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_5Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_USD_5Y_B", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_usd_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_USD_10Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_usd_10y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_USD_10Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_USD_10Y_B", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "full_usd_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_USD_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_USD_5Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "full_usd_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_USD_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_USD_10Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_gbp_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_GBP_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_GBP_5Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_gbp_5y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_GBP_5Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_GBP_5Y_B", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_gbp_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_GBP_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_GBP_10Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "flat_gbp_10y_b",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/flat_GBP_10Y_B/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "flat_GBP_10Y_B", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "full_gbp_5y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_GBP_5Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_GBP_5Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "full_gbp_10y_a",
-        "Tools/PythonOreRunner/parity_artifacts/multiccy_benchmark_final/cases/full_GBP_10Y_A/Input/ore.xml",
+        _repo_file("parity_artifacts", "multiccy_benchmark_final", "cases", "full_GBP_10Y_A", "Input", "ore.xml"),
         case_type="native_ore_case",
     ),
     CaseDef(
         "fxfwd_gbpusd_1y",
         case_type="artifact_summary",
-        summary_json="Tools/PythonOreRunner/parity_artifacts/fxfwd_ore_xva_benchmark/FXFWD_GBPUSD_1Y/python_compare/FXFWD_GBPUSD_1Y_summary.json",
+        summary_json=_repo_file(
+            "parity_artifacts", "fxfwd_ore_xva_benchmark", "FXFWD_GBPUSD_1Y", "python_compare",
+            "FXFWD_GBPUSD_1Y_summary.json"
+        ),
     ),
     CaseDef(
         "fxfwd_usdcad_2y",
         case_type="artifact_summary",
-        summary_json="Tools/PythonOreRunner/parity_artifacts/fxfwd_ore_xva_benchmark/FXFWD_USDCAD_2Y/python_compare/FXFWD_USDCAD_2Y_summary.json",
+        summary_json=_repo_file(
+            "parity_artifacts", "fxfwd_ore_xva_benchmark", "FXFWD_USDCAD_2Y", "python_compare",
+            "FXFWD_USDCAD_2Y_summary.json"
+        ),
     ),
 )
 
@@ -157,7 +163,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=REPO_ROOT / "Tools" / "PythonOreRunner" / "parity_artifacts" / "xva_regression_pack_latest",
+        default=ARTIFACT_ROOT / "xva_regression_pack_latest",
     )
     p.add_argument(
         "--cases",

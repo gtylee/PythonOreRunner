@@ -1,15 +1,9 @@
 import numpy as np
-import sys
-from pathlib import Path
 
-TOOLS_DIR = Path(__file__).resolve().parent / "py_ore_tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-from lgm import LGMParams
-from lgm_fx_hybrid import MultiCcyLgmParams, LgmFxHybrid
-from lgm_fx_xva_utils import FxForwardDef, fx_forward_npv, aggregate_exposure_profile
-from irs_xva_utils import build_discount_curve_from_zero_rate_pairs, survival_probability_from_hazard
+from py_ore_tools.irs_xva_utils import build_discount_curve_from_zero_rate_pairs, survival_probability_from_hazard
+from py_ore_tools.lgm import LGMParams
+from py_ore_tools.lgm_fx_hybrid import LgmFxHybrid, MultiCcyLgmParams
+from py_ore_tools.lgm_fx_xva_utils import FxForwardDef, aggregate_exposure_profile, fx_forward_npv
 
 
 def run_fx_forward_profile_xva(

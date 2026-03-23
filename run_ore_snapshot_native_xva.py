@@ -4,7 +4,7 @@ Run ore_snapshot case (flat_EUR_5Y_A) via native_xva_interface (XVALoader + Pyth
 then compare Python vs ORE: CVA, DVA, EPE/ENE, PV.
 
 Usage (from repo root):
-  PYTHONPATH=Tools/PythonOreRunner python Tools/PythonOreRunner/run_ore_snapshot_native_xva.py [--paths 2000] [--seed 42]
+  python3 run_ore_snapshot_native_xva.py [--paths 2000] [--seed 42]
 
 ORE output is read from the case Output/ folder (xva.csv, exposure_trade_*.csv, npv.csv).
 """
@@ -15,16 +15,8 @@ import re
 import sys
 from pathlib import Path
 
-def _repo_tools() -> Path:
-    here = Path(__file__).resolve()
-    tools = here.parent
-    if str(tools) not in sys.path:
-        sys.path.insert(0, str(tools))
-    return tools
-
-
 def _default_case_dir() -> Path:
-    return _repo_tools() / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
+    return Path(__file__).resolve().parent / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
 
 
 def _read_ore_xva(csv_path: Path) -> dict:
@@ -105,7 +97,6 @@ def _samples_from_simulation_xml(xml: str) -> int | None:
 
 
 def main() -> None:
-    _repo_tools()
     parser = argparse.ArgumentParser(description="Run ore_snapshot via native_xva_interface and compare PY vs ORE")
     parser.add_argument("--case-dir", type=Path, default=None, help="Case dir (default: flat_EUR_5Y_A)")
     parser.add_argument("--paths", type=int, default=None, help="Override num_paths (default: from simulation.xml)")

@@ -2,23 +2,14 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 
-def _tools_dir() -> Path:
-    here = Path(__file__).resolve().parent
-    if str(here) not in sys.path:
-        sys.path.insert(0, str(here))
-    return here
-
-
 def _default_case_dir() -> Path:
-    return _tools_dir() / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
+    return Path(__file__).resolve().parent / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
 
 
 def main() -> None:
-    _tools_dir()
     from native_xva_interface import OreSnapshotPythonLgmSensitivityComparator
 
     parser = argparse.ArgumentParser(description="Run Python-LGM ore_snapshot sensitivities and compare with ORE zero-sensitivity CSVs.")

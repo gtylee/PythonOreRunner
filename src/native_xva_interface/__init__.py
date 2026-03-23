@@ -8,7 +8,13 @@ from pathlib import Path
 _PKG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_DIR.parents[1]
 _LEGACY_DIR = _REPO_ROOT / "legacy" / "native_xva_interface"
+_SRC_ROOT = _REPO_ROOT / "src"
 _SRC = _REPO_ROOT / "src" / "pythonore"
+
+if _SRC_ROOT.exists():
+    src_root_text = str(_SRC_ROOT)
+    if src_root_text not in sys.path:
+        sys.path.insert(0, src_root_text)
 
 __path__ = [str(_PKG_DIR)]
 for extra in (

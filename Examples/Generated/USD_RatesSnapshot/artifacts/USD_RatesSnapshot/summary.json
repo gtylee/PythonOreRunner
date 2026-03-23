@@ -1,0 +1,282 @@
+{
+  "counterparty": "CPTY_A",
+  "diagnostics": {
+    "engine": "ore_reference_expected_output",
+    "fallback_error": "ORE output file not found (run ORE first): /Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_RatesSnapshot/Output/exposure_trade_IRS_USD_001.csv",
+    "fallback_reason": "missing_native_output",
+    "missing_reference_pricing": true,
+    "missing_reference_xva": true,
+    "reference_output_dirs": [],
+    "using_expected_output": true
+  },
+  "input_validation": {
+    "action_items": [
+      {
+        "code": "missing_mandatory_quotes",
+        "detail_count": 54,
+        "details": [
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/10Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/12Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/15Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/20Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/25Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/2Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/30Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/3Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/4Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/5Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/6Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/7Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/8Y",
+          "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/9Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/10Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/15Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/20Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/2Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/30Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/3Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/40Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/4Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/50Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/5Y",
+          "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/7Y",
+          "FRA/RATE/USD/1Y/3M",
+          "FRA/RATE/USD/1Y/6M",
+          "FRA/RATE/USD/3M/3M",
+          "FRA/RATE/USD/6M/3M",
+          "FRA/RATE/USD/6M/6M",
+          "FRA/RATE/USD/9M/3M",
+          "FXFWD/RATE/EUR/USD/12M",
+          "FXFWD/RATE/EUR/USD/3M",
+          "FXFWD/RATE/EUR/USD/6M",
+          "FXFWD/RATE/EUR/USD/9M",
+          "IR_SWAP/RATE/USD/2D/3M/10Y",
+          "IR_SWAP/RATE/USD/2D/3M/12Y",
+          "IR_SWAP/RATE/USD/2D/3M/15Y",
+          "IR_SWAP/RATE/USD/2D/3M/20Y",
+          "IR_SWAP/RATE/USD/2D/3M/25Y",
+          "IR_SWAP/RATE/USD/2D/3M/2Y",
+          "IR_SWAP/RATE/USD/2D/3M/30Y",
+          "IR_SWAP/RATE/USD/2D/3M/3Y",
+          "IR_SWAP/RATE/USD/2D/3M/4Y",
+          "IR_SWAP/RATE/USD/2D/3M/5Y",
+          "IR_SWAP/RATE/USD/2D/3M/6Y",
+          "IR_SWAP/RATE/USD/2D/3M/7Y",
+          "IR_SWAP/RATE/USD/2D/3M/8Y",
+          "IR_SWAP/RATE/USD/2D/3M/9Y",
+          "MM/RATE/USD/2D/1M"
+        ],
+        "severity": "error",
+        "what_failed": "The active curve build requests mandatory quote ids that are not present in the market data on the asof date.",
+        "what_to_fix": "Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml.",
+        "where_to_fix": [
+          "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/curveconfig.xml",
+          "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/market_20160205_flat.txt"
+        ]
+      }
+    ],
+    "checks": {
+      "conventions_exist": true,
+      "curve_specs_resolve": true,
+      "market_configurations_exist": true,
+      "quotes_exist_for_asof": false,
+      "referenced_todaysmarket_sections_exist": true,
+      "yield_index_names_distinct": true
+    },
+    "conventions": {
+      "missing_ids": [],
+      "used_ids": [
+        "EUR-USD-FX-CONVENTIONS",
+        "EUR-USD-XCCY-BASIS-CONVENTIONS",
+        "USD-3M-FRA-CONVENTIONS",
+        "USD-3M-SWAP-CONVENTIONS",
+        "USD-6M-FRA-CONVENTIONS",
+        "USD-LIBOR-3M-6M-BASIS-CONVENTIONS",
+        "USD-LIBOR-CONVENTIONS"
+      ],
+      "valid": true
+    },
+    "curve_specs": {
+      "active_curve_ids_by_section": {
+        "YieldCurves": [
+          "BANK_EUR_BORROW",
+          "BANK_EUR_LEND",
+          "BENCHMARK_EUR",
+          "BOND_YIELD_EUR",
+          "CHF-IN-EUR",
+          "CHF1D",
+          "CHF3M",
+          "CHF6M",
+          "EUR12M",
+          "EUR1D",
+          "EUR1M",
+          "EUR3M",
+          "EUR6M",
+          "EURBMB",
+          "GBP-IN-EUR",
+          "GBP1D",
+          "GBP3M",
+          "GBP6M",
+          "JPY1D",
+          "JPY6M",
+          "USD-IN-EUR",
+          "USD1D",
+          "USD3M",
+          "USD6M",
+          "USDBMA"
+        ]
+      },
+      "invalid": [],
+      "quote_scope_curve_ids_by_section": {
+        "YieldCurves": [
+          "USD-IN-EUR",
+          "USD3M",
+          "USD6M"
+        ]
+      },
+      "valid": true
+    },
+    "files": {
+      "conventions_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/conventions.xml",
+      "curveconfig_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/curveconfig.xml",
+      "fixing_data_file": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/fixings_20160205.txt",
+      "market_data_file": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/market_20160205_flat.txt",
+      "portfolio_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_RatesSnapshot/Input/portfolio_usd_rates.xml",
+      "todaysmarket_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/todaysmarket.xml"
+    },
+    "fixings": {
+      "imply_todays_fixings": true,
+      "potential_issue": false,
+      "today_fixing_count": 0
+    },
+    "fx_dominance": {
+      "pair_count_with_both_directions": 0,
+      "pairs_with_both_directions": []
+    },
+    "input_links_valid": false,
+    "issues": [
+      "some active mandatory curve-config quotes are missing on the asof date"
+    ],
+    "market_configurations": {
+      "available": [
+        "collateral_inccy",
+        "default",
+        "libor",
+        "xois_eur",
+        "xois_usd"
+      ],
+      "missing_requested": [],
+      "requested": [
+        "libor",
+        "default"
+      ],
+      "valid": true
+    },
+    "quotes": {
+      "asof_quote_count": 0,
+      "mandatory_required_count": 54,
+      "missing_mandatory": [
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/10Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/12Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/15Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/20Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/25Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/2Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/30Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/3Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/4Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/5Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/6Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/7Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/8Y",
+        "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/9Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/10Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/15Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/20Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/2Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/30Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/3Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/40Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/4Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/50Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/5Y",
+        "CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/7Y",
+        "FRA/RATE/USD/1Y/3M",
+        "FRA/RATE/USD/1Y/6M",
+        "FRA/RATE/USD/3M/3M",
+        "FRA/RATE/USD/6M/3M",
+        "FRA/RATE/USD/6M/6M",
+        "FRA/RATE/USD/9M/3M",
+        "FXFWD/RATE/EUR/USD/12M",
+        "FXFWD/RATE/EUR/USD/3M",
+        "FXFWD/RATE/EUR/USD/6M",
+        "FXFWD/RATE/EUR/USD/9M",
+        "IR_SWAP/RATE/USD/2D/3M/10Y",
+        "IR_SWAP/RATE/USD/2D/3M/12Y",
+        "IR_SWAP/RATE/USD/2D/3M/15Y",
+        "IR_SWAP/RATE/USD/2D/3M/20Y",
+        "IR_SWAP/RATE/USD/2D/3M/25Y",
+        "IR_SWAP/RATE/USD/2D/3M/2Y",
+        "IR_SWAP/RATE/USD/2D/3M/30Y",
+        "IR_SWAP/RATE/USD/2D/3M/3Y",
+        "IR_SWAP/RATE/USD/2D/3M/4Y",
+        "IR_SWAP/RATE/USD/2D/3M/5Y",
+        "IR_SWAP/RATE/USD/2D/3M/6Y",
+        "IR_SWAP/RATE/USD/2D/3M/7Y",
+        "IR_SWAP/RATE/USD/2D/3M/8Y",
+        "IR_SWAP/RATE/USD/2D/3M/9Y",
+        "MM/RATE/USD/2D/1M",
+        "MM/RATE/USD/2D/1W",
+        "MM/RATE/USD/2D/2M",
+        "MM/RATE/USD/2D/3M",
+        "MM/RATE/USD/2D/6M"
+      ],
+      "missing_optional": [],
+      "optional_required_count": 0,
+      "valid": false
+    },
+    "summary": {
+      "asof_date": "2016-02-05",
+      "market_contexts": {
+        "eqcalibration": "libor",
+        "fxcalibration": "libor",
+        "lgmcalibration": "libor",
+        "pricing": "libor",
+        "simulation": "libor"
+      },
+      "ore_xml_path": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_RatesSnapshot/Input/ore.xml",
+      "selected_market_configs": [
+        "libor",
+        "default"
+      ]
+    },
+    "todaysmarket_names": {
+      "distinct": true,
+      "yield_index_overlaps": []
+    },
+    "todaysmarket_sections": {
+      "missing_references": [],
+      "valid": true
+    }
+  },
+  "maturity_date": "",
+  "maturity_time": 0.0,
+  "modes": [
+    "price",
+    "xva"
+  ],
+  "netting_set_id": "CPTY_A",
+  "ore_xml": "/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_RatesSnapshot/Input/ore.xml",
+  "parity": null,
+  "pass_all": true,
+  "pass_flags": {
+    "pricing": true,
+    "xva_cva": true,
+    "xva_dva": true,
+    "xva_fba": true,
+    "xva_fca": true
+  },
+  "pricing": null,
+  "trade_id": "IRS_USD_001",
+  "xva": null
+}

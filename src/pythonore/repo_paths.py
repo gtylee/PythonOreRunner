@@ -38,9 +38,13 @@ def require_examples_repo_root() -> Path:
 
 def find_engine_repo_root() -> Optional[Path]:
     env_root = os.getenv("ENGINE_REPO_ROOT")
-    candidates: List[Path] = []
     if env_root:
-        candidates.append(Path(env_root).expanduser())
+        candidate = Path(env_root).expanduser().resolve()
+        if (candidate / "Examples").exists():
+            return candidate
+        return None
+
+    candidates: List[Path] = []
 
     candidates.extend(
         [
@@ -68,6 +72,41 @@ def require_engine_repo_root() -> Path:
 
 def default_ore_bin() -> Path:
     return require_engine_repo_root() / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore"
+
+
+def find_ore_bin() -> Optional[Path]:
+    env_exe = os.getenv("ORE_EXE")
+    candidates: List[Path] = []
+    if env_exe:
+        candidate = Path(env_exe).expanduser().resolve()
+        if candidate.exists():
+            return candidate
+        return None
+
+    engine_root = find_engine_repo_root()
+    if engine_root is not None:
+        candidates.extend(
+            [
+                engine_root / "build" / "apple-make-relwithdebinfo-arm64" / "App" / "ore",
+                engine_root / "App" / "ore",
+            ]
+        )
+
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def require_ore_bin() -> Path:
+    ore_bin = find_ore_bin()
+    if ore_bin is None:
+        raise FileNotFoundError(
+            "Could not locate an ORE executable. "
+            "Set ORE_EXE or provide an Engine checkout with a built App/ore binary."
+        )
+    return ore_bin
 
 
 def local_parity_artifacts_root() -> Path:

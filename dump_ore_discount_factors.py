@@ -11,11 +11,16 @@ from py_ore_tools.ore_snapshot import (
     dump_discount_factors_json,
     extract_discount_factors_by_currency,
 )
-from py_ore_tools.repo_paths import require_engine_repo_root
+from py_ore_tools.repo_paths import local_examples_root
 
 
 def _parse_args() -> argparse.Namespace:
-    default_xml = require_engine_repo_root() / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"
+    examples_root = local_examples_root()
+    default_xml = (
+        examples_root / "Exposure" / "Input" / "ore_measure_lgm.xml"
+        if examples_root is not None
+        else Path("Examples/Exposure/Input/ore_measure_lgm.xml")
+    )
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(

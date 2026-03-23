@@ -1,0 +1,36 @@
+section,field,value
+market_configurations,requested,"['libor', 'default']"
+market_configurations,available,"['collateral_inccy', 'default', 'libor', 'xois_eur', 'xois_usd']"
+market_configurations,missing_requested,[]
+market_configurations,valid,True
+todaysmarket_sections,missing_references,[]
+todaysmarket_sections,valid,True
+curve_specs,active_curve_ids_by_section,"{'YieldCurves': ['BANK_EUR_BORROW', 'BANK_EUR_LEND', 'BENCHMARK_EUR', 'BOND_YIELD_EUR', 'CHF-IN-EUR', 'CHF1D', 'CHF3M', 'CHF6M', 'EUR12M', 'EUR1D', 'EUR1M', 'EUR3M', 'EUR6M', 'EURBMB', 'GBP-IN-EUR', 'GBP1D', 'GBP3M', 'GBP6M', 'JPY1D', 'JPY6M', 'USD-IN-EUR', 'USD1D', 'USD3M', 'USD6M', 'USDBMA']}"
+curve_specs,quote_scope_curve_ids_by_section,"{'YieldCurves': ['USD-IN-EUR', 'USD3M', 'USD6M']}"
+curve_specs,invalid,[]
+curve_specs,valid,True
+conventions,used_ids,"['EUR-USD-FX-CONVENTIONS', 'EUR-USD-XCCY-BASIS-CONVENTIONS', 'USD-3M-FRA-CONVENTIONS', 'USD-3M-SWAP-CONVENTIONS', 'USD-6M-FRA-CONVENTIONS', 'USD-LIBOR-3M-6M-BASIS-CONVENTIONS', 'USD-LIBOR-CONVENTIONS']"
+conventions,missing_ids,[]
+conventions,valid,True
+quotes,mandatory_required_count,54
+quotes,optional_required_count,0
+quotes,asof_quote_count,0
+quotes,missing_mandatory,"['BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/10Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/12Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/15Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/20Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/25Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/2Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/30Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/3Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/4Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/5Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/6Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/7Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/8Y', 'BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/9Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/10Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/15Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/20Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/2Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/30Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/3Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/40Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/4Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/50Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/5Y', 'CC_BASIS_SWAP/BASIS_SPREAD/USD/3M/EUR/3M/7Y', 'FRA/RATE/USD/1Y/3M', 'FRA/RATE/USD/1Y/6M', 'FRA/RATE/USD/3M/3M', 'FRA/RATE/USD/6M/3M', 'FRA/RATE/USD/6M/6M', 'FRA/RATE/USD/9M/3M', 'FXFWD/RATE/EUR/USD/12M', 'FXFWD/RATE/EUR/USD/3M', 'FXFWD/RATE/EUR/USD/6M', 'FXFWD/RATE/EUR/USD/9M', 'IR_SWAP/RATE/USD/2D/3M/10Y', 'IR_SWAP/RATE/USD/2D/3M/12Y', 'IR_SWAP/RATE/USD/2D/3M/15Y', 'IR_SWAP/RATE/USD/2D/3M/20Y', 'IR_SWAP/RATE/USD/2D/3M/25Y', 'IR_SWAP/RATE/USD/2D/3M/2Y', 'IR_SWAP/RATE/USD/2D/3M/30Y', 'IR_SWAP/RATE/USD/2D/3M/3Y', 'IR_SWAP/RATE/USD/2D/3M/4Y', 'IR_SWAP/RATE/USD/2D/3M/5Y', 'IR_SWAP/RATE/USD/2D/3M/6Y', 'IR_SWAP/RATE/USD/2D/3M/7Y', 'IR_SWAP/RATE/USD/2D/3M/8Y', 'IR_SWAP/RATE/USD/2D/3M/9Y', 'MM/RATE/USD/2D/1M', 'MM/RATE/USD/2D/1W', 'MM/RATE/USD/2D/2M', 'MM/RATE/USD/2D/3M', 'MM/RATE/USD/2D/6M']"
+quotes,missing_optional,[]
+quotes,valid,False
+todaysmarket_names,yield_index_overlaps,[]
+todaysmarket_names,distinct,True
+fixings,imply_todays_fixings,True
+fixings,today_fixing_count,0
+fixings,potential_issue,False
+checks,market_configurations_exist,True
+checks,referenced_todaysmarket_sections_exist,True
+checks,curve_specs_resolve,True
+checks,conventions_exist,True
+checks,quotes_exist_for_asof,False
+checks,yield_index_names_distinct,True
+action_items,0:code,missing_mandatory_quotes
+action_items,0:severity,error
+action_items,0:what_failed,The active curve build requests mandatory quote ids that are not present in the market data on the asof date.
+action_items,0:what_to_fix,"Add these quote ids for the asof date to the market data file, or change the active curve configuration so it stops requesting them, or mark genuinely optional quotes as optional in curveconfig.xml."
+action_items,0:where_to_fix,"['/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/curveconfig.xml', '/Users/gordonlee/Documents/PythonOreRunner/Examples/Input/market_20160205_flat.txt']"
