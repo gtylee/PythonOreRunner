@@ -247,6 +247,7 @@ def test_torch_plain_rate_swap_matches_numpy_runtime_on_bma_basis_case():
         torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
         from pythonore.compute.lgm_torch_xva import (
             TorchDiscountCurve,
+            capfloor_npv_paths_torch,
             deflate_lgm_npv_paths_torch_batched,
             par_swap_rate_paths_torch,
             price_plain_rate_leg_paths_torch,
@@ -260,6 +261,7 @@ def test_torch_plain_rate_swap_matches_numpy_runtime_on_bma_basis_case():
             "cpu",
             price_plain_rate_leg_paths_torch,
             par_swap_rate_paths_torch,
+            capfloor_npv_paths_torch,
         )
         with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend):
             torch_result = torch_adapter.run(

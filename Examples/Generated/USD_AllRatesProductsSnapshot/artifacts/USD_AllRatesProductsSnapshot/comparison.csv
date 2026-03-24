@@ -1,0 +1,18 @@
+section,field,value
+diagnostics,engine,ore_reference_expected_output
+diagnostics,reference_output_dirs,['/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_AllRatesProductsSnapshot/Output']
+diagnostics,using_expected_output,False
+diagnostics,missing_reference_pricing,True
+diagnostics,missing_reference_xva,True
+diagnostics,fallback_reason,missing_native_output
+diagnostics,fallback_error,ORE output file not found (run ORE first): /Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_AllRatesProductsSnapshot/Output/exposure_trade_IRS_USD_0001.csv
+diagnostics,sensitivity_fallback_reason,unsupported_python_sensitivity
+diagnostics,sensitivity_fallback_error,"Unsupported by PythonLgmAdapter in native-only mode: CAP_USD_SOFR3M_0001:CapFloor, FLOOR_USD_SOFR3M_0001:CapFloor. These trades are supported only through the ORE SWIG fallback."
+sensitivity,metric,CVA
+sensitivity,python_factor_count,0
+sensitivity,ore_factor_count,0
+sensitivity,matched_factor_count,0
+sensitivity,unmatched_ore_count,0
+sensitivity,unmatched_python_count,0
+sensitivity,unsupported_factor_count,0
+sensitivity,notes,"['sensitivity fallback: Unsupported by PythonLgmAdapter in native-only mode: CAP_USD_SOFR3M_0001:CapFloor, FLOOR_USD_SOFR3M_0001:CapFloor. These trades are supported only through the ORE SWIG fallback.']"

@@ -586,6 +586,56 @@ def test_native_runtime_supports_generic_cashflow_capfloor_and_swaption():
     assert coverage["unsupported"] == []
 
 
+def test_torch_generic_capfloor_matches_numpy_runtime():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_TORCH_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_capfloor_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="capfloor-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    from pythonore.compute.lgm_torch_xva import (
+        TorchDiscountCurve,
+        capfloor_npv_paths_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        par_swap_rate_paths_torch,
+        price_plain_rate_leg_paths_torch,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+    )
+
+    backend = (
+        TorchDiscountCurve,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        "cpu",
+        price_plain_rate_leg_paths_torch,
+        par_swap_rate_paths_torch,
+        capfloor_npv_paths_torch,
+    )
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="capfloor-torch")
+
+    assert abs(float(torch_result.pv_total) - float(numpy_result.pv_total)) < 1.0e-8
+    assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
+
+
 def test_native_runtime_keeps_in_arrears_capfloors_off_native_path():
     snapshot = _make_snapshot()
     trade = Trade(

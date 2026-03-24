@@ -14,6 +14,8 @@ import numpy as np
 
 from .lgm import LGM1F
 from .lgm_torch import _require_torch
+from .lgm_ir_options import CapFloorDef, _fixing_times, forward_rate_from_bonds
+from .irs_xva_utils import interpolate_path_grid
 
 
 @dataclass
@@ -535,6 +537,226 @@ def par_swap_rate_paths_torch(
         return out.detach().cpu().numpy() if return_numpy else out
 
 
+def _norm_cdf_torch(x):
+    torch = _require_torch()
+    return 0.5 * (1.0 + torch.erf(x / np.sqrt(2.0)))
+
+
+def capfloor_npv_torch(
+    model: LGM1F,
+    disc_curve: TorchDiscountCurve,
+    fwd_curve: TorchDiscountCurve,
+    capfloor: CapFloorDef,
+    t: float,
+    x_t,
+    *,
+    realized_forward: Optional[np.ndarray] = None,
+    return_numpy: bool = True,
+):
+    torch = _require_torch()
+    with torch.inference_mode():
+        x = torch.as_tensor(x_t, dtype=disc_curve.dtype, device=disc_curve.device_obj)
+        if x.ndim != 1:
+            raise ValueError("x_t must be one-dimensional")
+        start = np.asarray(capfloor.start_time, dtype=float)
+        end = np.asarray(capfloor.end_time, dtype=float)
+        pay = np.asarray(capfloor.pay_time, dtype=float)
+        tau = np.asarray(capfloor.accrual, dtype=float)
+        notional = np.asarray(capfloor.notional, dtype=float)
+        strike = np.asarray(capfloor.strike, dtype=float)
+        fixing = _fixing_times(capfloor)
+        live = pay > float(t) + 1.0e-12
+        if not np.any(live):
+            out = torch.zeros_like(x)
+            return out.detach().cpu().numpy() if return_numpy else out
+        s = start[live]
+        e = end[live]
+        p = pay[live]
+        a = tau[live]
+        n = notional[live]
+        k = strike[live]
+        g = np.asarray(capfloor.gearing if capfloor.gearing is not None else np.ones_like(strike), dtype=float)[live]
+        spread = np.asarray(capfloor.spread if capfloor.spread is not None else np.zeros_like(strike), dtype=float)[live]
+        f = fixing[live]
+        fixed_mask = f <= float(t) + 1.0e-12
+        option_is_cap = capfloor.option_type.strip().lower() == "cap"
+
+        pv_fix = torch.zeros_like(x)
+        if np.any(fixed_mask):
+            if realized_forward is None:
+                ps = fwd_curve.discount(torch.as_tensor(s[fixed_mask], dtype=x.dtype, device=x.device))
+                pe = fwd_curve.discount(torch.as_tensor(e[fixed_mask], dtype=x.dtype, device=x.device))
+                l_fix = ((ps / pe) - 1.0)[:, None] / torch.as_tensor(a[fixed_mask], dtype=x.dtype, device=x.device)[:, None]
+                l_fix = l_fix.expand(-1, x.numel())
+            else:
+                rf = np.asarray(realized_forward, dtype=float)
+                if rf.shape != (p.size, x.numel()):
+                    raise ValueError("realized_forward shape must be (n_live_coupons, n_paths)")
+                l_fix = torch.as_tensor(rf[fixed_mask, :], dtype=x.dtype, device=x.device)
+            effective_rate = (
+                torch.as_tensor(g[fixed_mask], dtype=x.dtype, device=x.device)[:, None] * l_fix
+                + torch.as_tensor(spread[fixed_mask], dtype=x.dtype, device=x.device)[:, None]
+            )
+            k_fix = torch.as_tensor(k[fixed_mask], dtype=x.dtype, device=x.device)[:, None]
+            payoff_fix = torch.maximum(effective_rate - k_fix, torch.zeros_like(effective_rate)) if option_is_cap else torch.maximum(k_fix - effective_rate, torch.zeros_like(effective_rate))
+            amount_fix = (
+                float(capfloor.position)
+                * torch.as_tensor(n[fixed_mask], dtype=x.dtype, device=x.device)[:, None]
+                * torch.as_tensor(a[fixed_mask], dtype=x.dtype, device=x.device)[:, None]
+                * payoff_fix
+            )
+            p_t = disc_curve.discount(float(t))
+            disc_fix = discount_bond_paths_torch(
+                model,
+                float(t),
+                p[fixed_mask],
+                x,
+                p_t,
+                disc_curve.discount(torch.as_tensor(p[fixed_mask], dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+            )
+            pv_fix = torch.sum(amount_fix * disc_fix, dim=0)
+
+        pv_unfixed = torch.zeros_like(x)
+        if np.any(~fixed_mask):
+            s2 = s[~fixed_mask]
+            e2 = e[~fixed_mask]
+            p2 = p[~fixed_mask]
+            a2 = a[~fixed_mask]
+            n2 = n[~fixed_mask]
+            k2 = k[~fixed_mask]
+            g2 = g[~fixed_mask]
+            spread2 = spread[~fixed_mask]
+
+            p_t = disc_curve.discount(float(t))
+            p_ts_d = discount_bond_paths_torch(
+                model,
+                float(t),
+                s2,
+                x,
+                p_t,
+                disc_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+            )
+            p_te_d = discount_bond_paths_torch(
+                model,
+                float(t),
+                e2,
+                x,
+                p_t,
+                disc_curve.discount(torch.as_tensor(e2, dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+            )
+            bt = float(fwd_curve.discount(float(t)) / disc_curve.discount(float(t)))
+            bs = (
+                fwd_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device))
+                / disc_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device))
+            )
+            be = (
+                fwd_curve.discount(torch.as_tensor(e2, dtype=x.dtype, device=x.device))
+                / disc_curve.discount(torch.as_tensor(e2, dtype=x.dtype, device=x.device))
+            )
+            c = be / bs
+            strike_adj = torch.as_tensor(k2 - spread2, dtype=x.dtype, device=x.device)
+            g2_t = torch.as_tensor(g2, dtype=x.dtype, device=x.device)
+            a2_t = torch.as_tensor(a2, dtype=x.dtype, device=x.device)
+            kbar_d = (1.0 + (strike_adj * a2_t) / torch.clamp(g2_t, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))) * c
+            strike_bond = 1.0 / torch.clamp(kbar_d, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))
+            h_s = torch.as_tensor(np.asarray(model.H(s2), dtype=float), dtype=x.dtype, device=x.device)
+            h_e = torch.as_tensor(np.asarray(model.H(e2), dtype=float), dtype=x.dtype, device=x.device)
+            z_t = float(model.zeta(float(t)))
+            z_s = torch.as_tensor(np.asarray(model.zeta(s2), dtype=float), dtype=x.dtype, device=x.device)
+            sigma = torch.abs(h_e - h_s) * torch.sqrt(torch.clamp(z_s - z_t, min=0.0))
+            fwd_bond = p_te_d / torch.clamp(p_ts_d, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))
+            k_mat = strike_bond[:, None]
+            sig_mat = sigma[:, None]
+            d1 = (
+                torch.log(torch.clamp(fwd_bond, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device)) / torch.clamp(k_mat, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device)))
+                + 0.5 * sig_mat * sig_mat
+            ) / torch.clamp(sig_mat, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))
+            d2 = d1 - sig_mat
+            call = p_te_d * _norm_cdf_torch(d1) - k_mat * p_ts_d * _norm_cdf_torch(d2)
+            put = k_mat * p_ts_d * _norm_cdf_torch(-d2) - p_te_d * _norm_cdf_torch(-d1)
+            tiny = sigma < 1.0e-14
+            if torch.any(tiny):
+                idx = torch.nonzero(tiny, as_tuple=False).reshape(-1)
+                call[idx, :] = torch.maximum(p_te_d[idx, :] - k_mat[idx, :] * p_ts_d[idx, :], torch.zeros_like(call[idx, :]))
+                put[idx, :] = torch.maximum(k_mat[idx, :] * p_ts_d[idx, :] - p_te_d[idx, :], torch.zeros_like(put[idx, :]))
+            scale = float(capfloor.position) * (
+                torch.as_tensor(n2, dtype=x.dtype, device=x.device)
+                * g2_t
+                * kbar_d
+            )[:, None]
+            pv_unfixed = torch.sum(scale * (put if option_is_cap else call), dim=0)
+
+        out = pv_fix + pv_unfixed
+        return out.detach().cpu().numpy() if return_numpy else out
+
+
+def capfloor_npv_paths_torch(
+    model: LGM1F,
+    disc_curve: TorchDiscountCurve,
+    fwd_curve: TorchDiscountCurve,
+    capfloor: CapFloorDef,
+    times: np.ndarray,
+    x_paths,
+    *,
+    lock_fixings: bool = True,
+    return_numpy: bool = True,
+):
+    t = np.asarray(times, dtype=float)
+    x = np.asarray(x_paths, dtype=float)
+    if x.shape[0] != t.size:
+        raise ValueError("x_paths first dimension must match times size")
+    fixing = _fixing_times(capfloor)
+    start = np.asarray(capfloor.start_time, dtype=float)
+    end = np.asarray(capfloor.end_time, dtype=float)
+    tau = np.asarray(capfloor.accrual, dtype=float)
+    out = np.empty_like(x)
+    fix_to_idx: dict[int, int] = {}
+    if lock_fixings:
+        for j, tf in enumerate(fixing):
+            if tf <= 1.0e-12:
+                continue
+            k = int(np.searchsorted(t, tf, side="right"))
+            fix_to_idx[j] = max(min(k, t.size - 1), 1)
+    for i, ti in enumerate(t):
+        live = np.asarray(capfloor.pay_time, dtype=float) > ti + 1.0e-12
+        rf_live = None
+        if lock_fixings and np.any(live):
+            idx_live = np.where(live)[0]
+            rf_live = np.zeros((idx_live.size, x.shape[1]), dtype=float)
+            for k_local, j in enumerate(idx_live):
+                tf = float(fixing[j])
+                if tf > ti + 1.0e-12:
+                    continue
+                if tf <= 1.0e-12:
+                    ps = float(fwd_curve.discount(max(0.0, float(start[j]))))
+                    pe = float(fwd_curve.discount(float(end[j])))
+                    rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
+                    continue
+                x_fix = interpolate_path_grid(t, x, tf)[0, :]
+                fwd = forward_rate_from_bonds(
+                    model,
+                    lambda u: float(disc_curve.discount(float(u))),
+                    lambda u: float(fwd_curve.discount(float(u))),
+                    tf,
+                    x_fix,
+                    np.array([float(start[j])], dtype=float),
+                    np.array([float(end[j])], dtype=float),
+                    np.array([float(tau[j])], dtype=float),
+                )[0, :]
+                rf_live[k_local, :] = fwd
+        out[i, :] = capfloor_npv_torch(
+            model,
+            disc_curve,
+            fwd_curve,
+            capfloor,
+            float(ti),
+            x[i, :],
+            realized_forward=rf_live,
+            return_numpy=True,
+        )
+    return out if return_numpy else _require_torch().as_tensor(out, dtype=disc_curve.dtype, device=disc_curve.device_obj)
+
+
 __all__ = [
     "TorchDiscountCurve",
     "discount_bond_paths_torch",
@@ -546,4 +768,6 @@ __all__ = [
     "deflate_lgm_npv_paths_torch_batched",
     "price_plain_rate_leg_paths_torch",
     "par_swap_rate_paths_torch",
+    "capfloor_npv_torch",
+    "capfloor_npv_paths_torch",
 ]
