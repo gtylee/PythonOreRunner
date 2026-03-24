@@ -401,6 +401,7 @@ class PythonLgmAdapter:
         self._simulation_tenor_cache: Dict[int, np.ndarray] = {}
         self._swap_index_forward_tenor_cache: Dict[int, Dict[str, str]] = {}
         self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
+        self._generic_cashflow_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
         self._market_overlay_cache: Dict[int, Dict[str, Any]] = {}
         self._quote_dict_cache: Dict[int, Tuple[Dict[str, object], ...]] = {}
@@ -480,16 +481,26 @@ class PythonLgmAdapter:
             model, inputs.times, n_paths=n_paths, rng=rng, x0=0.0, draw_order=draw_order
         )
         shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
+        valuation_idx, obs_idx, obs_closeout_idx, obs_dates = self._validated_grid_indices(inputs)
+        df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
+        obs_df_vec = np.asarray([df_base(float(t)) for t in inputs.times], dtype=float)[obs_idx]
+        pfe_quantile = _pfe_quantile(snapshot)
+        use_flow_amounts_t0 = str(snapshot.config.params.get("python.use_ore_flow_amounts_t0", "N")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+        pv_total_native = 0.0
+        ns_valuation_paths: Dict[str, np.ndarray] = {}
+        ns_closeout_paths: Dict[str, np.ndarray] = {}
+        xva_deflated_by_ns: Dict[str, bool] = {}
+        npv_cube_payload: Dict[str, Dict[str, object]] = {}
+        exposure_profiles_by_trade: Dict[str, Dict[str, object]] = {}
 
         for spec in inputs.trade_specs:
+            vals: np.ndarray | None = None
+            xva_deflated = False
             if spec.kind == "IRS":
                 p_disc = inputs.discount_curves[spec.ccy]
                 legs = spec.legs or {}
-                fwd_tenor = str(legs.get("float_index_tenor", "")).upper()
-                p_fwd = inputs.forward_curves_by_tenor.get(spec.ccy, {}).get(
-                    fwd_tenor,
-                    inputs.forward_curves.get(spec.ccy, p_disc),
-                )
+                index_name = str(legs.get("float_index", spec.trade.additional_fields.get("index", _default_index_for_ccy(spec.ccy))))
+                p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
                 realized_coupon = self._compute_realized_float_coupons(
                     model=model,
                     p0_disc=p_disc,
@@ -509,13 +520,74 @@ class PythonLgmAdapter:
                         x_paths[i, :],
                         realized_float_coupon=realized_coupon,
                     )
-                npv_by_trade[spec.trade.trade_id] = vals
+                xva_deflated = True
             elif spec.kind == "RateSwap":
                 vals = self._price_generic_rate_swap(spec, inputs, model, x_paths)
-                npv_by_trade[spec.trade.trade_id] = vals
             elif spec.kind == "FXForward":
                 vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths, shared_sim=shared_fx_sim)
-                npv_by_trade[spec.trade.trade_id] = vals
+            elif spec.kind == "CapFloor":
+                if spec.sticky_state is None:
+                    unsupported.append(spec.trade)
+                    continue
+                definition = spec.sticky_state.get("definition")
+                index_name = str(spec.sticky_state.get("index_name", ""))
+                if definition is None:
+                    unsupported.append(spec.trade)
+                    continue
+                p_disc = inputs.discount_curves[spec.ccy]
+                p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
+                vals = self._ir_options_mod.capfloor_npv_paths(
+                    model=model,
+                    p0_disc=p_disc,
+                    p0_fwd=p_fwd,
+                    capfloor=definition,
+                    times=inputs.times,
+                    x_paths=x_paths,
+                    lock_fixings=True,
+                )
+            elif spec.kind == "Swaption":
+                if spec.sticky_state is None:
+                    unsupported.append(spec.trade)
+                    continue
+                definition = spec.sticky_state.get("definition")
+                if definition is None:
+                    unsupported.append(spec.trade)
+                    continue
+                p_disc = inputs.discount_curves[spec.ccy]
+                float_index = str(spec.sticky_state.get("index_name", ""))
+                p_fwd = self._resolve_index_curve(inputs, spec.ccy, float_index)
+                vals = self._ir_options_mod.bermudan_npv_paths(
+                    model=model,
+                    p0_disc=p_disc,
+                    p0_fwd=p_fwd,
+                    bermudan=definition,
+                    times=inputs.times,
+                    x_paths=x_paths,
+                )
+            elif spec.kind == "Cashflow":
+                if spec.sticky_state is None:
+                    unsupported.append(spec.trade)
+                    continue
+                pay = np.asarray(spec.sticky_state.get("pay_time", []), dtype=float)
+                amount = np.asarray(spec.sticky_state.get("amount", []), dtype=float)
+                if pay.size == 0 or amount.size != pay.size:
+                    unsupported.append(spec.trade)
+                    continue
+                p_disc = inputs.discount_curves[spec.ccy]
+                vals = np.zeros((n_times, n_paths), dtype=float)
+                for i, t in enumerate(inputs.times):
+                    live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
+                    if not np.any(live):
+                        continue
+                    p_t = float(p_disc(float(t)))
+                    disc = model.discount_bond_paths(
+                        float(t),
+                        pay[live],
+                        x_paths[i, :],
+                        p_t,
+                        np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
+                    )
+                    vals[i, :] = np.sum(amount[live][:, None] * disc, axis=0)
             elif spec.kind == "InflationSwap":
                 trade_product = spec.trade.product
                 assert isinstance(trade_product, InflationSwap)
@@ -567,7 +639,6 @@ class PythonLgmAdapter:
                         dtype=float,
                     )
                 vals[:, :] = profile[:, None]
-                npv_by_trade[spec.trade.trade_id] = vals
             elif spec.kind == "InflationCapFloor":
                 trade_product = spec.trade.product
                 assert isinstance(trade_product, InflationCapFloor)
@@ -603,13 +674,80 @@ class PythonLgmAdapter:
                         )
                         for t in inputs.times
                     ],
-                    dtype=float,
-                )
+                        dtype=float,
+                    )
                 vals = np.zeros((n_times, n_paths), dtype=float)
                 vals[:, :] = profile[:, None]
-                npv_by_trade[spec.trade.trade_id] = vals
             else:
                 unsupported.append(spec.trade)
+                continue
+
+            if vals is None:
+                continue
+            self._fail_on_trade_nan(spec, vals)
+            npv_by_trade[spec.trade.trade_id] = vals
+            if use_flow_amounts_t0 and spec.kind == "IRS" and spec.legs is not None:
+                p_disc = inputs.discount_curves[spec.ccy]
+                anchored = _price_irs_t0_from_flow_amounts(spec.legs, p_disc)
+                pv_total_native += anchored if anchored is not None else float(np.mean(vals[valuation_idx[0], :]))
+            else:
+                pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
+
+            if xva_deflated:
+                p_disc = inputs.discount_curves[spec.ccy]
+                vals_xva = self._irs_utils.deflate_lgm_npv_paths(
+                    model=model,
+                    p0_disc=p_disc,
+                    times=inputs.times,
+                    x_paths=x_paths,
+                    npv_paths=vals,
+                )
+            else:
+                vals_xva = vals
+            vals_xva_val = vals_xva[obs_idx, :]
+            if spec.kind == "FXForward":
+                vals_xva_obs = self._fx_forward_closeout_paths(
+                    spec.trade,
+                    vals_xva,
+                    inputs.times,
+                    inputs.observation_times,
+                    inputs.observation_closeout_times,
+                )
+            else:
+                vals_xva_obs = vals_xva[obs_closeout_idx, :]
+            self._fail_on_trade_nan(spec, vals_xva_obs)
+            profile = build_ore_exposure_profile_from_paths(
+                spec.trade.trade_id,
+                obs_dates,
+                inputs.observation_times.tolist(),
+                vals_xva_val,
+                vals_xva_obs,
+                discount_factors=obs_df_vec.tolist(),
+                closeout_times=inputs.observation_closeout_times.tolist(),
+                pfe_quantile=pfe_quantile,
+                asof_date=inputs.asof,
+            )
+            exposure_profiles_by_trade[spec.trade.trade_id] = profile
+            npv_cube_payload[spec.trade.trade_id] = {
+                "times": inputs.valuation_times.tolist(),
+                "npv_mean": np.mean(vals[valuation_idx, :], axis=1).tolist(),
+                "npv_xva_mean": np.mean(vals_xva[valuation_idx, :], axis=1).tolist(),
+                "closeout_times": _build_sticky_closeout_times(inputs.valuation_times, inputs.mpor.mpor_years).tolist(),
+                "closeout_npv_mean": np.mean(vals[np.searchsorted(inputs.times, _build_sticky_closeout_times(inputs.valuation_times, inputs.mpor.mpor_years)), :], axis=1).tolist(),
+                "valuation_epe": np.mean(np.maximum(vals_xva_val, 0.0), axis=1).tolist(),
+                "valuation_ene": np.mean(np.maximum(-vals_xva_val, 0.0), axis=1).tolist(),
+                "closeout_epe": np.mean(np.maximum(vals_xva_obs, 0.0), axis=1).tolist(),
+                "closeout_ene": np.mean(np.maximum(-vals_xva_obs, 0.0), axis=1).tolist(),
+                "pfe": ore_pfe_quantile(vals_xva_obs, pfe_quantile).tolist(),
+                "basel_ee": profile["basel_ee"],
+                "basel_eee": profile["basel_eee"],
+                "time_weighted_basel_epe": profile["time_weighted_basel_epe"],
+                "time_weighted_basel_eepe": profile["time_weighted_basel_eepe"],
+            }
+            ns = spec.trade.netting_set
+            ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(vals_xva_val)) + vals_xva_val
+            ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(vals_xva_obs)) + vals_xva_obs
+            xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
 
         fallback_result: XVAResult | None = None
         if unsupported:
@@ -638,6 +776,12 @@ class PythonLgmAdapter:
             model=model,
             x_paths=x_paths,
             npv_by_trade=npv_by_trade,
+            pv_total_precomputed=pv_total_native,
+            npv_cube_payload_precomputed=npv_cube_payload,
+            exposure_profiles_by_trade_precomputed=exposure_profiles_by_trade,
+            ns_valuation_paths_precomputed=ns_valuation_paths,
+            ns_closeout_paths_precomputed=ns_closeout_paths,
+            xva_deflated_by_ns_precomputed=xva_deflated_by_ns,
             fallback=fallback_result,
             fallback_trades=fallback_trades,
             unsupported=unsupported if fallback_result is None else [],
@@ -957,24 +1101,36 @@ class PythonLgmAdapter:
                             )
                         )
                     else:
-                        generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
-                        if generic_legs is not None:
-                            notionals = [
-                                abs(float(leg.get("notional", 0.0)))
-                                for leg in generic_legs.get("rate_legs", [])
-                            ]
-                            generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+                        generic_cashflow = self._build_generic_cashflow_state(t, snapshot)
+                        if generic_cashflow is not None:
                             trade_specs.append(
                                 _TradeSpec(
                                     trade=t,
-                                    kind="RateSwap",
-                                    notional=max(notionals) if notionals else 0.0,
-                                    ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
-                                    legs=generic_legs,
+                                    kind="Cashflow",
+                                    notional=float(np.max(np.abs(np.asarray(generic_cashflow["amount"], dtype=float)))) if np.asarray(generic_cashflow["amount"], dtype=float).size else 0.0,
+                                    ccy=str(generic_cashflow.get("ccy", snapshot.config.base_currency)).upper(),
+                                    sticky_state=generic_cashflow,
                                 )
                             )
                         else:
-                            unsupported.append(t)
+                            generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
+                            if generic_legs is not None:
+                                notionals = [
+                                    abs(float(leg.get("notional", 0.0)))
+                                    for leg in generic_legs.get("rate_legs", [])
+                                ]
+                                generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+                                trade_specs.append(
+                                    _TradeSpec(
+                                        trade=t,
+                                        kind="RateSwap",
+                                        notional=max(notionals) if notionals else 0.0,
+                                        ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
+                                        legs=generic_legs,
+                                    )
+                                )
+                            else:
+                                unsupported.append(t)
             else:
                 unsupported.append(t)
         ccy_set: set[str] = {snapshot.config.base_currency.upper()}
@@ -1486,7 +1642,6 @@ class PythonLgmAdapter:
             )
         trade_specs = calibrated_specs
 
-        valuation_times = self._augment_exposure_grid_with_trade_dates(valuation_times, trade_specs)
         if valuation_times.size < 2:
             valuation_times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
 
@@ -1545,7 +1700,7 @@ class PythonLgmAdapter:
             input_provenance={
                 "model_params": param_source,
                 "market": curve_source,
-                "grid": "xml+trade_dates" if grid_source == "xml" else grid_source,
+                "grid": grid_source,
                 "portfolio": "dataclass",
                 "mpor": mpor.source,
             },
@@ -2399,7 +2554,7 @@ class PythonLgmAdapter:
         if not leg_nodes:
             return None
 
-        asof = datetime.strptime(self._normalized_asof(snapshot), "%Y-%m-%d").date()
+        asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         parse_date = self._irs_utils._parse_yyyymmdd
         build_schedule = self._irs_utils._build_schedule
         time_from_dates = self._irs_utils._time_from_dates
@@ -2559,6 +2714,51 @@ class PythonLgmAdapter:
         self._generic_rate_swap_legs_cache[cache_key] = result
         return result
 
+    def _build_generic_cashflow_state(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+    ) -> Optional[Dict[str, object]]:
+        cache_key = self._portfolio_cache_key(trade, snapshot)
+        if cache_key in self._generic_cashflow_state_cache:
+            return self._generic_cashflow_state_cache[cache_key]
+        product = trade.product
+        if not isinstance(product, GenericProduct):
+            return None
+        if str(product.payload.get("trade_type", "")).strip() != "Cashflow":
+            return None
+        xml = str(product.payload.get("xml", "")).strip()
+        if "<CashflowData" not in xml:
+            return None
+        try:
+            trade_root = ET.fromstring(f"<Trade>{xml}</Trade>")
+        except Exception:
+            return None
+        cashflow = trade_root.find("./CashflowData")
+        if cashflow is None:
+            return None
+        payment_date = (
+            (cashflow.findtext("./PaymentDate") or "").strip()
+            or (cashflow.findtext("./Date") or "").strip()
+        )
+        amount_txt = (
+            (cashflow.findtext("./Amount") or "").strip()
+            or (cashflow.findtext("./CashflowAmount") or "").strip()
+        )
+        ccy = (cashflow.findtext("./Currency") or snapshot.config.base_currency).strip().upper()
+        if not payment_date or not amount_txt:
+            return None
+        asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
+        pay_date = self._irs_utils._parse_yyyymmdd(payment_date)
+        pay_time = float(self._irs_utils._time_from_dates(asof, pay_date, "A365F"))
+        result = {
+            "ccy": ccy,
+            "pay_time": np.asarray([pay_time], dtype=float),
+            "amount": np.asarray([float(amount_txt)], dtype=float),
+        }
+        self._generic_cashflow_state_cache[cache_key] = result
+        return result
+
     def _build_generic_capfloor_state(
         self,
         trade: Trade,
@@ -2582,7 +2782,7 @@ class PythonLgmAdapter:
             return None
         if (leg.findtext("./LegType") or "").strip().upper() != "FLOATING":
             return None
-        asof = datetime.strptime(self._normalized_asof(snapshot), "%Y-%m-%d").date()
+        asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         parse_date = self._irs_utils._parse_yyyymmdd
         build_schedule = self._irs_utils._build_schedule
         time_from_dates = self._irs_utils._time_from_dates
@@ -2677,7 +2877,7 @@ class PythonLgmAdapter:
         ]
         if len(exercise_dates) != 1:
             return None
-        asof_date = datetime.strptime(asof, "%Y-%m-%d").date()
+        asof_date = self._irs_utils._parse_yyyymmdd(asof)
         exercise_time = float(self._irs_utils._time_from_dates(asof_date, exercise_dates[0], "A365F"))
         fixed_leg = next((leg for leg in trade_root.findall("./SwaptionData/LegData") if (leg.findtext("./LegType") or "").strip().lower() == "fixed"), None)
         float_index = str(underlying_legs.get("float_index", "")).upper()
@@ -2768,92 +2968,53 @@ class PythonLgmAdapter:
         s = np.asarray(legs.get("float_start_time", []), dtype=float)
         if s.size == 0:
             return None
-        e = np.asarray(legs.get("float_end_time", []), dtype=float)
-        tau = np.asarray(legs.get("float_accrual", []), dtype=float)
-        spr = np.asarray(legs.get("float_spread", np.zeros_like(s)), dtype=float)
-        fix_t = np.asarray(legs.get("float_fixing_time", s), dtype=float)
-        pay_t = np.asarray(legs.get("float_pay_time", e), dtype=float)
-        notional = np.asarray(legs.get("float_notional", np.ones_like(s)), dtype=float)
-        sign = np.asarray(legs.get("float_sign", np.ones_like(s)), dtype=float)
         quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
         fixed_mask = np.asarray(legs.get("float_is_historically_fixed", np.zeros(s.shape, dtype=bool)), dtype=bool)
-
-        n_cf = s.size
-        n_paths = x_paths_on_sim_grid.shape[1]
-        out = np.zeros((n_cf, n_paths), dtype=float)
-
-        # Fast t=0 sensitivity path: when the simulation grid only contains the
-        # valuation time, future coupons reduce to deterministic forward rates.
-        # This benchmark calls the method repeatedly under node shocks, so avoid
-        # the generic per-coupon grid search / bond revaluation branch.
-        if (
-            sim_times.ndim == 1
-            and sim_times.size == 1
-            and abs(float(sim_times[0])) <= 1.0e-12
-            and x_paths_on_sim_grid.ndim == 2
-            and x_paths_on_sim_grid.shape[0] == 1
-        ):
-            for i in range(n_cf):
-                if fixed_mask[i] or tau[i] <= 0.0:
-                    out[i, :] = quoted_coupon[i]
-                    continue
-                ps = float(p0_fwd(max(0.0, float(s[i]))))
-                pe = float(p0_fwd(float(e[i])))
-                fwd = (ps / pe - 1.0) / float(tau[i])
-                out[i, :] = fwd + float(spr[i])
-            return out
-
-        for i in range(n_cf):
-            if fixed_mask[i]:
-                # Historical fixings already overwrite quoted_coupon with the full
-                # locked coupon, so adding spread again would double-count it.
-                out[i, :] = quoted_coupon[i]
-                continue
-            if tau[i] <= 0.0:
-                out[i, :] = quoted_coupon[i]
-                continue
-            ft = float(fix_t[i])
-            if ft <= 1.0e-12:
-                ps = float(p0_fwd(max(0.0, float(s[i]))))
-                pe = float(p0_fwd(float(e[i])))
-                fwd = (ps / pe - 1.0) / float(tau[i])
-                out[i, :] = fwd + float(spr[i])
-                continue
-            j = int(np.searchsorted(sim_times, ft))
-            if j >= sim_times.size or abs(float(sim_times[j]) - ft) > 1.0e-12:
-                # If fixing time is not exactly on grid, keep deterministic coupon.
-                ps = float(p0_fwd(max(0.0, float(s[i]))))
-                pe = float(p0_fwd(float(e[i])))
-                fwd = (ps / pe - 1.0) / float(tau[i])
-                out[i, :] = fwd + float(spr[i])
-                continue
-            x_fix = x_paths_on_sim_grid[j, :]
-            p_ft = float(p0_disc(ft))
-            p_t_s_d = model.discount_bond(ft, float(s[i]), x_fix, p_ft, float(p0_disc(float(s[i]))))
-            p_t_e_d = model.discount_bond(ft, float(e[i]), x_fix, p_ft, float(p0_disc(float(e[i]))))
-            bt = float(p0_fwd(ft) / p0_disc(ft))
-            bs = float(p0_fwd(float(s[i])) / p0_disc(float(s[i])))
-            be = float(p0_fwd(float(e[i])) / p0_disc(float(e[i])))
-            p_t_s_f = p_t_s_d * (bs / bt)
-            p_t_e_f = p_t_e_d * (be / bt)
-            fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(tau[i])
-            coupon_path = fwd_path + float(spr[i])
-            target_coupon = float(quoted_coupon[i])
-            if abs(target_coupon) > 1.0e-14:
-                p_fix_pay_d = model.discount_bond(ft, float(pay_t[i]), x_fix, p_ft, float(p0_disc(float(pay_t[i]))))
-                numeraire = model.numeraire_lgm(ft, x_fix, p0_disc)
-                current_mean = float(
-                    np.mean(
-                        float(sign[i]) * float(notional[i]) * float(tau[i]) * coupon_path * p_fix_pay_d / numeraire
-                    )
-                )
-                target_mean = (
-                    float(sign[i]) * float(notional[i]) * float(tau[i]) * target_coupon * float(p0_disc(float(pay_t[i])))
-                )
-                if abs(current_mean) > 1.0e-18:
-                    coupon_path = coupon_path * (target_mean / current_mean)
-            out[i, :] = coupon_path
+        out = self._irs_utils.compute_realized_float_coupons(
+            model=model,
+            p0_disc=p0_disc,
+            p0_fwd=p0_fwd,
+            legs=legs,
+            sim_times=sim_times,
+            x_paths_on_sim_grid=x_paths_on_sim_grid,
+        )
+        if np.any(fixed_mask):
+            out[fixed_mask, :] = quoted_coupon[fixed_mask, None]
         return out
+
+    def _validated_grid_indices(
+        self,
+        inputs: _PythonLgmInputs,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+        times = inputs.times
+        valuation_times = inputs.valuation_times
+        obs_times = inputs.observation_times
+        obs_closeout_times = inputs.observation_closeout_times
+        valuation_idx = np.searchsorted(times, valuation_times)
+        obs_idx = np.searchsorted(times, obs_times)
+        obs_closeout_idx = np.searchsorted(times, obs_closeout_times)
+        for name, idx, target in (
+            ("Observation", obs_idx, obs_times),
+            ("Valuation", valuation_idx, valuation_times),
+            ("Sticky closeout", obs_closeout_idx, obs_closeout_times),
+        ):
+            if idx.size != target.size or np.any(idx >= times.size) or np.any(np.abs(times[idx] - target) > 1.0e-10):
+                raise EngineRunError(f"{name} times are not aligned with the fixed pricing grid")
+        obs_dates = [
+            (datetime.fromisoformat(inputs.asof).date() + timedelta(days=int(round(float(t) * 365.0)))).isoformat()
+            for t in obs_times
+        ]
+        return valuation_idx, obs_idx, obs_closeout_idx, obs_dates
+
+    def _fail_on_trade_nan(self, spec: _TradeSpec, values: np.ndarray) -> None:
+        arr = np.asarray(values, dtype=float)
+        if not np.isnan(arr).any():
+            return
+        idx = np.argwhere(np.isnan(arr))[0]
+        raise EngineRunError(
+            f"NaN detected in native trade pricing for {spec.trade.trade_id} ({spec.kind}) "
+            f"at time_index={int(idx[0])}, path_index={int(idx[1])}"
+        )
 
     def _resolve_index_curve(
         self,
@@ -2904,17 +3065,13 @@ class PythonLgmAdapter:
         if not points:
             return 0.0
         pts = sorted((float(t), float(v)) for t, v in points)
-        if x <= pts[0][0]:
-            return pts[0][1]
-        if x >= pts[-1][0]:
-            return pts[-1][1]
-        for (t0, v0), (t1, v1) in zip(pts[:-1], pts[1:]):
-            if t0 <= x <= t1:
-                if abs(t1 - t0) < 1.0e-12:
-                    return v1
-                w = (x - t0) / (t1 - t0)
-                return v0 + w * (v1 - v0)
-        return pts[-1][1]
+        return float(
+            self._irs_utils._interp1d_flat_vectorized(
+                float(x),
+                np.asarray([t for t, _ in pts], dtype=float),
+                np.asarray([v for _, v in pts], dtype=float),
+            )
+        )
 
     def _normal_pdf(self, x: np.ndarray) -> np.ndarray:
         return np.exp(-0.5 * np.square(x)) / math.sqrt(2.0 * math.pi)
@@ -3465,7 +3622,7 @@ class PythonLgmAdapter:
                 pay = np.asarray(leg.get("pay_time", []), dtype=float)
                 start = np.asarray(leg.get("start_time", []), dtype=float)
                 accr = np.asarray(leg.get("accrual", []), dtype=float)
-                live = pay > float(t) + 1.0e-12
+                live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
                 if not np.any(live):
                     continue
                 disc = model.discount_bond_paths(float(t), pay[live], x_t, p_t, np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float))
@@ -3495,115 +3652,86 @@ class PythonLgmAdapter:
         fallback: XVAResult | None,
         fallback_trades: List[Trade],
         unsupported: List[Trade],
+        pv_total_precomputed: float | None = None,
+        npv_cube_payload_precomputed: Dict[str, Dict[str, object]] | None = None,
+        exposure_profiles_by_trade_precomputed: Dict[str, Dict[str, object]] | None = None,
+        ns_valuation_paths_precomputed: Dict[str, np.ndarray] | None = None,
+        ns_closeout_paths_precomputed: Dict[str, np.ndarray] | None = None,
+        xva_deflated_by_ns_precomputed: Dict[str, bool] | None = None,
     ) -> XVAResult:
         times = inputs.times
         valuation_times = inputs.valuation_times
         obs_times = inputs.observation_times
         obs_closeout_times = inputs.observation_closeout_times
-        obs_dates = [
-            (datetime.fromisoformat(inputs.asof).date() + timedelta(days=int(round(float(t) * 365.0)))).isoformat()
-            for t in obs_times
-        ]
-        valuation_idx = np.searchsorted(times, valuation_times)
-        obs_idx = np.searchsorted(times, obs_times)
-        obs_closeout_idx = np.searchsorted(times, obs_closeout_times)
-        if (
-            obs_idx.size != obs_times.size
-            or np.any(obs_idx >= times.size)
-            or np.any(np.abs(times[obs_idx] - obs_times) > 1.0e-10)
-        ):
-            raise EngineRunError("Observation times are not aligned with pricing grid after augmentation")
-        if (
-            valuation_idx.size != valuation_times.size
-            or np.any(valuation_idx >= times.size)
-            or np.any(np.abs(times[valuation_idx] - valuation_times) > 1.0e-10)
-        ):
-            raise EngineRunError("Valuation times are not aligned with pricing grid after augmentation")
-        if (
-            obs_closeout_idx.size != obs_closeout_times.size
-            or np.any(obs_closeout_idx >= times.size)
-            or np.any(np.abs(times[obs_closeout_idx] - obs_closeout_times) > 1.0e-10)
-        ):
-            raise EngineRunError("Sticky closeout times are not aligned with pricing grid after augmentation")
+        valuation_idx, obs_idx, obs_closeout_idx, obs_dates = self._validated_grid_indices(inputs)
         df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
         df_vec = np.asarray([df_base(float(t)) for t in times], dtype=float)
         obs_df_vec = df_vec[obs_idx]
-        ns_valuation_paths: Dict[str, np.ndarray] = {}
-        ns_closeout_paths: Dict[str, np.ndarray] = {}
-        xva_deflated_by_ns: Dict[str, bool] = {}
-        pv_total = 0.0
-        npv_cube_payload: Dict[str, Dict[str, object]] = {}
+        ns_valuation_paths: Dict[str, np.ndarray] = dict(ns_valuation_paths_precomputed or {})
+        ns_closeout_paths: Dict[str, np.ndarray] = dict(ns_closeout_paths_precomputed or {})
+        xva_deflated_by_ns: Dict[str, bool] = dict(xva_deflated_by_ns_precomputed or {})
+        pv_total = float(pv_total_precomputed or 0.0)
+        npv_cube_payload: Dict[str, Dict[str, object]] = dict(npv_cube_payload_precomputed or {})
         exposure_cube_payload: Dict[str, Dict[str, object]] = {}
-        exposure_profiles_by_trade: Dict[str, Dict[str, object]] = {}
+        exposure_profiles_by_trade: Dict[str, Dict[str, object]] = dict(exposure_profiles_by_trade_precomputed or {})
         exposure_profiles_by_netting_set: Dict[str, Dict[str, object]] = {}
         pfe_quantile = _pfe_quantile(snapshot)
+        use_flow_amounts_t0 = str(snapshot.config.params.get("python.use_ore_flow_amounts_t0", "N")).strip().upper() in {"Y", "YES", "TRUE", "1"}
 
-        for spec in inputs.trade_specs:
-            v = npv_by_trade.get(spec.trade.trade_id)
-            if v is None:
-                continue
-            pv_total += float(np.mean(v[valuation_idx[0], :]))
-            if spec.kind == "IRS":
-                p_disc = inputs.discount_curves[spec.ccy]
-                v_xva = self._irs_utils.deflate_lgm_npv_paths(
-                    model=model,
-                    p0_disc=p_disc,
-                    times=times,
-                    x_paths=x_paths,
-                    npv_paths=v,
+        if not ns_valuation_paths_precomputed or not ns_closeout_paths_precomputed:
+            for spec in inputs.trade_specs:
+                v = npv_by_trade.get(spec.trade.trade_id)
+                if v is None:
+                    continue
+                if use_flow_amounts_t0 and spec.kind == "IRS" and spec.legs is not None:
+                    p_disc = inputs.discount_curves[spec.ccy]
+                    anchored = _price_irs_t0_from_flow_amounts(spec.legs, p_disc)
+                    if anchored is not None:
+                        pv_total += anchored
+                    else:
+                        pv_total += float(np.mean(v[valuation_idx[0], :]))
+                else:
+                    pv_total += float(np.mean(v[valuation_idx[0], :]))
+                if spec.kind == "IRS":
+                    p_disc = inputs.discount_curves[spec.ccy]
+                    v_xva = self._irs_utils.deflate_lgm_npv_paths(
+                        model=model,
+                        p0_disc=p_disc,
+                        times=times,
+                        x_paths=x_paths,
+                        npv_paths=v,
+                    )
+                    xva_deflated = True
+                else:
+                    v_xva = v
+                    xva_deflated = False
+                ns = spec.trade.netting_set
+                v_xva_val = v_xva[obs_idx, :]
+                if spec.kind == "FXForward":
+                    v_xva_obs = self._fx_forward_closeout_paths(
+                        spec.trade,
+                        v_xva,
+                        times,
+                        obs_times,
+                        obs_closeout_times,
+                    )
+                else:
+                    v_xva_obs = v_xva[obs_closeout_idx, :]
+                trade_profile = build_ore_exposure_profile_from_paths(
+                    spec.trade.trade_id,
+                    obs_dates,
+                    obs_times.tolist(),
+                    v_xva_val,
+                    v_xva_obs,
+                    discount_factors=obs_df_vec.tolist(),
+                    closeout_times=obs_closeout_times.tolist(),
+                    pfe_quantile=pfe_quantile,
+                    asof_date=inputs.asof,
                 )
-                xva_deflated = True
-            else:
-                v_xva = v
-                xva_deflated = False
-            ns = spec.trade.netting_set
-            v_xva_val = v_xva[obs_idx, :]
-            if spec.kind == "FXForward":
-                v_xva_obs = self._fx_forward_closeout_paths(
-                    spec.trade,
-                    v_xva,
-                    times,
-                    obs_times,
-                    obs_closeout_times,
-                )
-            else:
-                v_xva_obs = v_xva[obs_closeout_idx, :]
-            valuation_epe = np.mean(np.maximum(v_xva_val, 0.0), axis=1)
-            valuation_ene = np.mean(np.maximum(-v_xva_val, 0.0), axis=1)
-            epe = np.mean(np.maximum(v_xva_obs, 0.0), axis=1)
-            ene = np.mean(np.maximum(-v_xva_obs, 0.0), axis=1)
-            pfe = ore_pfe_quantile(v_xva_obs, pfe_quantile)
-            trade_profile = build_ore_exposure_profile_from_paths(
-                spec.trade.trade_id,
-                obs_dates,
-                obs_times.tolist(),
-                v_xva_val,
-                v_xva_obs,
-                discount_factors=obs_df_vec.tolist(),
-                closeout_times=obs_closeout_times.tolist(),
-                pfe_quantile=pfe_quantile,
-                asof_date=inputs.asof,
-            )
-            ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(v_xva_val)) + v_xva_val
-            ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(v_xva_obs)) + v_xva_obs
-            xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
-            npv_cube_payload[spec.trade.trade_id] = {
-                "times": valuation_times.tolist(),
-                "npv_mean": np.mean(v[valuation_idx, :], axis=1).tolist(),
-                "npv_xva_mean": np.mean(v_xva[valuation_idx, :], axis=1).tolist(),
-                "closeout_times": _build_sticky_closeout_times(valuation_times, inputs.mpor.mpor_years).tolist(),
-                "closeout_npv_mean": np.mean(v[np.searchsorted(times, _build_sticky_closeout_times(valuation_times, inputs.mpor.mpor_years)), :], axis=1).tolist(),
-                "valuation_epe": valuation_epe.tolist(),
-                "valuation_ene": valuation_ene.tolist(),
-                "closeout_epe": epe.tolist(),
-                "closeout_ene": ene.tolist(),
-                "pfe": pfe.tolist(),
-                "basel_ee": trade_profile["basel_ee"],
-                "basel_eee": trade_profile["basel_eee"],
-                "time_weighted_basel_epe": trade_profile["time_weighted_basel_epe"],
-                "time_weighted_basel_eepe": trade_profile["time_weighted_basel_eepe"],
-            }
-            exposure_profiles_by_trade[spec.trade.trade_id] = trade_profile
+                ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(v_xva_val)) + v_xva_val
+                ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(v_xva_obs)) + v_xva_obs
+                xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
+                exposure_profiles_by_trade[spec.trade.trade_id] = trade_profile
 
         epe_by_ns_paths: Dict[str, np.ndarray] = {}
         ene_by_ns_paths: Dict[str, np.ndarray] = {}
@@ -4625,6 +4753,26 @@ def _default_index_for_ccy(ccy: str) -> str:
     return "EUR-EURIBOR-3M"
 
 
+def _price_irs_t0_from_flow_amounts(
+    legs: Mapping[str, np.ndarray],
+    p_disc: Callable[[float], float],
+) -> float | None:
+    fixed_pay = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+    fixed_amount = np.asarray(legs.get("fixed_amount", []), dtype=float)
+    float_pay = np.asarray(legs.get("float_pay_time", []), dtype=float)
+    float_amount = np.asarray(legs.get("float_amount", []), dtype=float)
+    if fixed_pay.size != fixed_amount.size or float_pay.size != float_amount.size:
+        return None
+    if fixed_pay.size == 0 and float_pay.size == 0:
+        return None
+    pv = 0.0
+    if fixed_pay.size:
+        pv += float(np.sum(fixed_amount * np.fromiter((float(p_disc(float(t))) for t in fixed_pay), dtype=float, count=fixed_pay.size)))
+    if float_pay.size:
+        pv += float(np.sum(float_amount * np.fromiter((float(p_disc(float(t))) for t in float_pay), dtype=float, count=float_pay.size)))
+    return pv
+
+
 def _build_irs_legs_from_trade(trade: Trade, asof: str | None = None) -> Dict[str, np.ndarray]:
     """Last-resort IRS leg builder using the dataclass schedule fields, no historical fixings.
 
@@ -4965,7 +5113,7 @@ def _build_zero_rate_shocked_curve(
             scalar_cache[tt] = out
             return out
 
-        shocked_log_df = float(np.interp(tt, times, shocked_node_logs))
+        shocked_log_df = float(_interp1d_flat_vectorized_local(tt, times, shocked_node_logs))
         out = float(np.exp(shocked_log_df))
         scalar_cache[tt] = out
         return out
@@ -5030,6 +5178,43 @@ def _apply_curve_node_shocks(
         forward_curves_by_tenor[ccy] = tenor_curves
 
     return discount_curves, forward_curves, forward_curves_by_tenor, forward_curves_by_name, xva_discount_curve
+
+
+def _interp1d_flat_vectorized_local(
+    x: np.ndarray | Sequence[float] | float,
+    xp: np.ndarray | Sequence[float],
+    fp: np.ndarray | Sequence[float],
+) -> np.ndarray | float:
+    xp_arr = np.asarray(xp, dtype=float)
+    fp_arr = np.asarray(fp, dtype=float)
+    if xp_arr.ndim != 1 or fp_arr.ndim != 1 or xp_arr.size != fp_arr.size:
+        raise ValueError("xp and fp must be one-dimensional with matching size")
+    if xp_arr.size == 0:
+        raise ValueError("xp must not be empty")
+    if np.any(np.diff(xp_arr) <= 0.0):
+        raise ValueError("xp must be strictly increasing")
+    x_arr = np.asarray(x, dtype=float)
+    scalar = x_arr.ndim == 0
+    flat = np.atleast_1d(x_arr).astype(float, copy=False)
+    out = np.empty_like(flat, dtype=float)
+    left = flat <= xp_arr[0]
+    right = flat >= xp_arr[-1]
+    mid = ~(left | right)
+    out[left] = fp_arr[0]
+    out[right] = fp_arr[-1]
+    if np.any(mid):
+        xm = flat[mid]
+        idx = np.searchsorted(xp_arr, xm, side="right")
+        idx = np.clip(idx, 1, xp_arr.size - 1)
+        x0 = xp_arr[idx - 1]
+        x1 = xp_arr[idx]
+        y0 = fp_arr[idx - 1]
+        y1 = fp_arr[idx]
+        w = (xm - x0) / np.maximum(x1 - x0, 1.0e-12)
+        out[mid] = y0 + w * (y1 - y0)
+    if scalar:
+        return float(out[0])
+    return out.reshape(x_arr.shape)
 
 
 def _quote_matches_discount_curve(

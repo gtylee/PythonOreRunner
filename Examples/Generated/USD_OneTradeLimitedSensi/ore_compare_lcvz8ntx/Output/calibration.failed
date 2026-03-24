@@ -1,0 +1,20 @@
+{
+  "returncode": 0,
+  "reason": "calibration_xml_missing",
+  "stdout_tail": [
+    "Loading inputs                                    2 trades found in fromXML:521",
+    "OK",
+    "Requested analytics                               CALIBRATION,CASHFLOW,NPV",
+    "Calibration: Build Market                         OK",
+    "Calibration: Build Model                          Pricing: Build Market                             OK",
+    "Pricing: Build Portfolio                          OK",
+    "Pricing: Cashflow Report                          OK",
+    "Pricing: NPV Report                               OK",
+    "Pricing: Additional Results                       OK",
+    "Pricing: Curves Report                            OK",
+    "Writing reports...                                OK",
+    "Writing cubes...                                  ",
+    "Error: Error in ORE analytics: Failed to run analytics CALIBRATION"
+  ],
+  "stderr_tail": []
+}

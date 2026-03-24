@@ -799,10 +799,10 @@ class XVASnapshot:
             runtime_key = (
                 int(simulation.samples),
                 int(simulation.seed),
-                tuple(str(x) for x in simulation.grid),
-                str(xva.cpty if xva is not None else ""),
-                str(xva.own if xva is not None else ""),
-                str(xva.netting_set if xva is not None else ""),
+                tuple(str(x) for x in getattr(simulation, "grid", ())),
+                str(getattr(xva, "cpty", "") if xva is not None else ""),
+                str(getattr(xva, "own", "") if xva is not None else ""),
+                str(getattr(xva, "netting_set", "") if xva is not None else ""),
             )
         payload = (
             self.market.asof,

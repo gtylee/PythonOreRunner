@@ -1,0 +1,32 @@
+#TradeId,ResultId,ResultType,ResultValue
+IRS_USD_0001,PV01[1],double,8106.842804159585
+IRS_USD_0001,PricingConfigEngine,string,DiscountingSwapEngine
+IRS_USD_0001,PricingConfigModel,string,DiscountedCashflows
+IRS_USD_0001,PricingConfigProductType[0],string,CapFloor_as_Swap
+IRS_USD_0001,PricingConfigProductType[1],string,Swap
+IRS_USD_0001,amount[1],double,201111.111111111910
+IRS_USD_0001,amount[2],double,107089.088878891387
+IRS_USD_0001,atmForward,double,0.043610334554
+IRS_USD_0001,currentNotional[1],double,10000000.000000000000
+IRS_USD_0001,currentNotional[2],double,10000000.000000000000
+IRS_USD_0001,index[2],string,USDLibor3M Actual/360
+IRS_USD_0001,isPayer[1],bool,false
+IRS_USD_0001,isPayer[2],bool,true
+IRS_USD_0001,isdaAssetClass,string,Interest Rate
+IRS_USD_0001,isdaBaseProduct,string,IR Swap
+IRS_USD_0001,isdaSubProduct,string,Fixed Float
+IRS_USD_0001,isdaTransaction,string,
+IRS_USD_0001,legNPV[1],double,3242737.121663833503
+IRS_USD_0001,legNPV[2],double,-3535421.268653614447
+IRS_USD_0001,legType[1],string,Fixed
+IRS_USD_0001,legType[2],string,Floating
+IRS_USD_0001,notionalCurrency[1],string,USD
+IRS_USD_0001,notionalCurrency[2],string,USD
+IRS_USD_0001,originalNotional[1],double,10000000.000000000000
+IRS_USD_0001,originalNotional[2],double,10000000.000000000000
+IRS_USD_0001,paymentDate[1],string,2025-08-11
+IRS_USD_0001,paymentDate[2],string,2025-05-12
+IRS_USD_0001,rate[1],double,0.040000000000
+IRS_USD_0001,rate[2],double,0.042364914282
+IRS_USD_0001,spread[2],double,0.000000000000
+IRS_USD_0001,startDate,string,2025-02-10

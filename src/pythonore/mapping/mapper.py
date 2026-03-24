@@ -31,6 +31,7 @@ from pythonore.domain.dataclasses import (
     Trade,
     XVASnapshot,
 )
+from pythonore.repo_paths import find_engine_repo_root
 from pythonore.runtime.exceptions import MappingError
 
 
@@ -101,9 +102,12 @@ def map_snapshot(snapshot: XVASnapshot) -> MappedInputs:
                 snapshot.config.asof,
                 snapshot.config.runtime or RuntimeConfig(),
             )
-    if "netting.xml" not in xml_buffers:
-        xml_buffers["netting.xml"] = _netting_to_xml(snapshot.netting)
-    if "collateralbalances.xml" not in xml_buffers:
+    if "netting.xml" not in xml_buffers or _is_effectively_empty_xml(xml_buffers.get("netting.xml", ""), "NettingSetDefinitions"):
+        xml_buffers["netting.xml"] = _netting_to_xml(_netting_or_default_from_snapshot(snapshot))
+    if "collateralbalances.xml" not in xml_buffers or _is_effectively_empty_xml(
+        xml_buffers.get("collateralbalances.xml", ""),
+        "CollateralBalances",
+    ):
         xml_buffers["collateralbalances.xml"] = _collateral_to_xml(snapshot.collateral)
 
     # These are required by the SWIG/native orchestration layer. For dataclass-
@@ -137,8 +141,8 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     input_parameters.setAsOfDate(mapped.asof)
     input_parameters.setBaseCurrency(mapped.base_currency)
     # InputParameters expects internal analytic labels, not report-facing names.
-    # EXPOSURE is required for XVA cube generation; SCENARIO alone leads to load-cube mode.
-    input_parameters.setAnalytics("PRICING,EXPOSURE,XVA")
+    # Keep the SWIG request aligned with the snapshot instead of always forcing XVA.
+    input_parameters.setAnalytics(_swig_analytics_string(snapshot))
     input_parameters.setPortfolio(mapped.xml_buffers["portfolio.xml"])
     input_parameters.setNettingSetManager(mapped.xml_buffers["netting.xml"])
     input_parameters.setCollateralBalances(mapped.xml_buffers["collateralbalances.xml"])
@@ -181,7 +185,33 @@ def build_input_parameters(snapshot: XVASnapshot, input_parameters: InputParamet
     return input_parameters
 
 
+def _swig_analytics_string(snapshot: XVASnapshot) -> str:
+    analytics = {str(a).strip().upper() for a in snapshot.config.analytics}
+    internal: list[str] = []
+    if analytics & {"NPV", "PV", "CASHFLOW", "CURVES"}:
+        internal.append("PRICING")
+    if analytics & {"CVA", "DVA", "FVA", "MVA", "COLVA"}:
+        internal.extend(["EXPOSURE", "XVA"])
+    if analytics & {"SENSITIVITY", "SENSI"}:
+        internal.append("SENSITIVITY")
+    if not internal:
+        internal.append("PRICING")
+    deduped: list[str] = []
+    for name in internal:
+        if name not in deduped:
+            deduped.append(name)
+    return ",".join(deduped)
+
+
 def _currency_config_xml(snapshot: XVASnapshot) -> str:
+    engine_root = find_engine_repo_root()
+    if engine_root is not None:
+        candidate = engine_root / "Examples" / "Input" / "currencies.xml"
+        if candidate.exists():
+            try:
+                return candidate.read_text(encoding="utf-8")
+            except Exception:
+                pass
     currencies = sorted(_snapshot_currencies(snapshot))
     lines = ["<CurrencyConfig>"]
     for ccy in currencies:
@@ -655,6 +685,38 @@ def _netting_to_xml(netting: NettingConfig) -> str:
     return "\n".join(lines)
 
 
+def _netting_or_default_from_snapshot(snapshot: XVASnapshot) -> NettingConfig:
+    if snapshot.netting.netting_sets:
+        return snapshot.netting
+    inferred: Dict[str, Any] = {}
+    for trade in snapshot.portfolio.trades:
+        ns_id = str(trade.netting_set).strip()
+        cpty = str(trade.counterparty).strip() or ns_id
+        if not ns_id or ns_id in inferred:
+            continue
+        inferred[ns_id] = {
+            "netting_set_id": ns_id,
+            "counterparty": cpty,
+            "active_csa": False,
+            "csa_currency": snapshot.config.base_currency,
+        }
+    if not inferred:
+        return snapshot.netting
+    from pythonore.domain.dataclasses import NettingSet
+
+    return NettingConfig(
+        netting_sets={
+            ns_id: NettingSet(
+                netting_set_id=data["netting_set_id"],
+                counterparty=data["counterparty"],
+                active_csa=bool(data["active_csa"]),
+                csa_currency=str(data["csa_currency"]),
+            )
+            for ns_id, data in inferred.items()
+        }
+    )
+
+
 def _collateral_to_xml(collateral: CollateralConfig) -> str:
     lines = ["<CollateralBalances>"]
     for bal in collateral.balances:
@@ -688,6 +750,15 @@ def _is_generated_placeholder_xml(xml: str, name: str) -> bool:
     expected = name.split(".")[0].replace("_", "").lower()
     text = (root.text or "").strip()
     return root.tag.lower() == expected and not root.attrib and len(root) == 0 and not text
+
+
+def _is_effectively_empty_xml(xml: str, root_name: str) -> bool:
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return False
+    text = (root.text or "").strip()
+    return root.tag.lower() == root_name.lower() and not root.attrib and len(root) == 0 and not text
 
 
 def _fmt_yyyymmdd(asof: str) -> str:

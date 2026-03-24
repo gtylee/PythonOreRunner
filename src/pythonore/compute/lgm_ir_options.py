@@ -21,9 +21,11 @@ from typing import Callable, Dict, Iterable, Mapping, Sequence
 import numpy as np
 
 try:
+    from .irs_xva_utils import interpolate_path_grid
     from .irs_xva_utils import swap_npv_from_ore_legs_dual_curve
     from .lgm import LGM1F
 except ImportError:  # pragma: no cover - script-mode fallback
+    from irs_xva_utils import interpolate_path_grid
     from irs_xva_utils import swap_npv_from_ore_legs_dual_curve
     from lgm import LGM1F
 
@@ -355,10 +357,8 @@ def capfloor_npv_paths(
         for j, tf in enumerate(fixing):
             if tf <= 1.0e-12:
                 continue
-            k = int(np.searchsorted(t, tf))
-            if k >= t.size or abs(float(t[k]) - float(tf)) > 1.0e-10:
-                continue
-            fix_to_idx[j] = k
+            k = int(np.searchsorted(t, tf, side="right"))
+            fix_to_idx[j] = max(min(k, t.size - 1), 1)
 
     out = np.empty_like(x_paths)
     for i, ti in enumerate(t):
@@ -376,10 +376,11 @@ def capfloor_npv_paths(
                     pe = float(p0_fwd(float(end[j])))
                     rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
                     continue
-                if j not in fix_to_idx:
-                    continue
-                kf = fix_to_idx[j]
-                x_fix = x_paths[kf, :]
+                if j in fix_to_idx:
+                    kf = fix_to_idx[j]
+                    x_fix = interpolate_path_grid(t, x_paths, tf)[0, :]
+                else:
+                    x_fix = interpolate_path_grid(t, x_paths, tf)[0, :]
                 fwd = forward_rate_from_bonds(
                     model,
                     p0_disc,

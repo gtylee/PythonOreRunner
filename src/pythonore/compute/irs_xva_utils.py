@@ -14,6 +14,7 @@ small modelling approximation so that ORE inputs can still be reused.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import csv
@@ -68,6 +69,84 @@ def _infer_index_day_counter(index_name: str, fallback: str = "A365F") -> str:
     return fallback
 
 
+def _interp1d_flat_vectorized(
+    x: np.ndarray | Sequence[float] | float,
+    xp: np.ndarray | Sequence[float],
+    fp: np.ndarray | Sequence[float],
+) -> np.ndarray | float:
+    """Linear interpolation with flat extrapolation using searchsorted.
+
+    Unlike ``np.interp`` this is explicit about vectorisation and is reused across
+    the native XVA path so interpolation behavior stays consistent.
+    """
+    xp_arr = np.asarray(xp, dtype=float)
+    fp_arr = np.asarray(fp, dtype=float)
+    if xp_arr.ndim != 1 or fp_arr.ndim != 1 or xp_arr.size != fp_arr.size:
+        raise ValueError("xp and fp must be one-dimensional with matching size")
+    if xp_arr.size == 0:
+        raise ValueError("xp must not be empty")
+    if np.any(np.diff(xp_arr) <= 0.0):
+        raise ValueError("xp must be strictly increasing")
+
+    x_arr = np.asarray(x, dtype=float)
+    scalar = x_arr.ndim == 0
+    flat = np.atleast_1d(x_arr).astype(float, copy=False)
+    out = np.empty_like(flat, dtype=float)
+
+    left = flat <= xp_arr[0]
+    right = flat >= xp_arr[-1]
+    mid = ~(left | right)
+    out[left] = fp_arr[0]
+    out[right] = fp_arr[-1]
+    if np.any(mid):
+        xm = flat[mid]
+        idx = np.searchsorted(xp_arr, xm, side="right")
+        idx = np.clip(idx, 1, xp_arr.size - 1)
+        x0 = xp_arr[idx - 1]
+        x1 = xp_arr[idx]
+        y0 = fp_arr[idx - 1]
+        y1 = fp_arr[idx]
+        w = (xm - x0) / np.maximum(x1 - x0, 1.0e-12)
+        out[mid] = y0 + w * (y1 - y0)
+    if scalar:
+        return float(out[0])
+    return out.reshape(x_arr.shape)
+
+
+def interpolate_path_grid(
+    sim_times: np.ndarray,
+    path_values: np.ndarray,
+    query_times: np.ndarray | Sequence[float] | float,
+) -> np.ndarray:
+    """Interpolate a path grid [n_times, n_paths] to arbitrary query times."""
+    t = np.asarray(sim_times, dtype=float)
+    paths = np.asarray(path_values, dtype=float)
+    if t.ndim != 1:
+        raise ValueError("sim_times must be one-dimensional")
+    if paths.ndim != 2 or paths.shape[0] != t.size:
+        raise ValueError("path_values must be 2D with first dimension matching sim_times")
+    q = np.asarray(query_times, dtype=float)
+    flat_q = np.atleast_1d(q).astype(float, copy=False)
+    out = np.empty((flat_q.size, paths.shape[1]), dtype=float)
+
+    left = flat_q <= t[0]
+    right = flat_q >= t[-1]
+    mid = ~(left | right)
+    out[left, :] = paths[0, :]
+    out[right, :] = paths[-1, :]
+    if np.any(mid):
+        qm = flat_q[mid]
+        idx = np.searchsorted(t, qm, side="right")
+        idx = np.clip(idx, 1, t.size - 1)
+        t0 = t[idx - 1]
+        t1 = t[idx]
+        w = ((qm - t0) / np.maximum(t1 - t0, 1.0e-12))[:, None]
+        out[mid, :] = paths[idx - 1, :] + w * (paths[idx, :] - paths[idx - 1, :])
+    if q.ndim == 0:
+        return out[0:1, :]
+    return out.reshape(q.shape + (paths.shape[1],))
+
+
 def build_discount_curve_from_zero_rate_pairs(
     rate_pairs: Sequence[Tuple[float, float]],
     compounding: str = "continuous",
@@ -96,7 +175,7 @@ def build_discount_curve_from_zero_rate_pairs(
             return float(rates[0])
         if t >= times[-1]:
             return float(rates[-1])
-        return float(np.interp(t, times, rates))
+        return float(_interp1d_flat_vectorized(t, times, rates))
 
     if compounding == "continuous":
         return lambda t: float(np.exp(-zero_rate(float(t)) * float(t)))
@@ -137,7 +216,7 @@ def build_discount_curve_from_discount_pairs(
             return float(np.exp(log_dfs[0] + (t - times[0]) * left_slope))
         if t >= times[-1]:
             return float(np.exp(log_dfs[-1] + (t - times[-1]) * right_slope))
-        return float(np.exp(np.interp(t, times, log_dfs)))
+        return float(np.exp(_interp1d_flat_vectorized(t, times, log_dfs)))
 
     return p0
 
@@ -161,6 +240,7 @@ def build_swap_schedules(trade_def: Dict) -> Tuple[np.ndarray, np.ndarray, float
     return fixed_dates, float_dates, maturity
 
 
+@lru_cache(maxsize=4096)
 def _parse_yyyymmdd(s: str) -> date:
     txt = s.strip()
     if "-" in txt:
@@ -480,13 +560,13 @@ def load_ore_legs_from_flows(
 
     if asof_date is None:
         # Fallback for stand-alone use; parity scripts should pass the true ORE as-of date.
-        asof = min(datetime.strptime(r["AccrualStartDate"], "%Y-%m-%d") for r in rows)
+        asof = min(_parse_yyyymmdd(r["AccrualStartDate"]) for r in rows)
     else:
-        asof = datetime.strptime(asof_date, "%Y-%m-%d")
+        asof = _parse_yyyymmdd(asof_date)
 
     def to_time(date_str: str) -> float:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        return _time_from_dates(asof.date(), d.date(), time_day_counter)
+        d = _parse_yyyymmdd(date_str)
+        return _time_from_dates(asof, d, time_day_counter)
 
     def _has_real_value(value: str) -> bool:
         txt = (value or "").strip()
@@ -570,8 +650,8 @@ def load_ore_legs_from_flows(
         out["float_index_accrual"] = np.asarray(
             [
                 _time_from_dates(
-                    datetime.strptime(r["AccrualStartDate"], "%Y-%m-%d").date(),
-                    datetime.strptime(r["AccrualEndDate"], "%Y-%m-%d").date(),
+                    _parse_yyyymmdd(r["AccrualStartDate"]),
+                    _parse_yyyymmdd(r["AccrualEndDate"]),
                     idx_dc,
                 )
                 for r in floating
@@ -635,7 +715,7 @@ def load_swap_legs_from_portfolio_root(
     if len(legs_xml) != 2:
         raise ValueError("expected exactly 2 legs in swap trade")
 
-    asof = datetime.strptime(asof_date, "%Y-%m-%d").date()
+    asof = _parse_yyyymmdd(asof_date)
 
     out: Dict[str, np.ndarray] = {}
     for lx in legs_xml:
@@ -816,7 +896,7 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
     p_t = p0(t)
 
     # Fixed leg
-    mask_f = legs["fixed_pay_time"] > t + 1e-12
+    mask_f = (legs["fixed_pay_time"] >= 0.0) & (legs["fixed_pay_time"] > t + 1e-12)
     if np.any(mask_f):
         pay = legs["fixed_pay_time"][mask_f]
         disc = _discount_bond_block(model, p0, t, pay, x, p_t)
@@ -828,7 +908,11 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
     # future periods still need projection, current periods are already fixed, and
     # past periods have dropped out.
     # 1) Not yet started: model projected forward.
-    mask_future = (legs["float_pay_time"] > t + 1e-12) & (legs["float_start_time"] >= t - 1e-12)
+    mask_future = (
+        (legs["float_pay_time"] >= 0.0)
+        & (legs["float_pay_time"] > t + 1e-12)
+        & (legs["float_start_time"] >= t - 1e-12)
+    )
     if np.any(mask_future):
         s = legs["float_start_time"][mask_future]
         e = legs["float_end_time"][mask_future]
@@ -848,7 +932,8 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
 
     # 2) In accrual period: treat coupon as already fixed and discount deterministic cashflow.
     mask_in_period = (
-        (legs["float_pay_time"] > t + 1e-12)
+        (legs["float_pay_time"] >= 0.0)
+        & (legs["float_pay_time"] > t + 1e-12)
         & (legs["float_start_time"] < t - 1e-12)
         & (legs["float_end_time"] >= t - 1e-12)
     )
@@ -961,7 +1046,7 @@ def swap_npv_from_ore_legs_dual_curve(
     else:
         # For generic swap valuation a coupon remains alive until its payment date,
         # even after the accrual period has started.
-        mask_f = legs["fixed_pay_time"] > t + 1.0e-12
+        mask_f = (legs["fixed_pay_time"] >= 0.0) & (legs["fixed_pay_time"] > t + 1.0e-12)
     if np.any(mask_f):
         pay = legs["fixed_pay_time"][mask_f]
         disc = interp_from_nodes_batch(pay)
@@ -973,7 +1058,7 @@ def swap_npv_from_ore_legs_dual_curve(
     if exercise_into_whole_periods:
         live = legs["float_start_time"] >= t - 1.0e-12
     else:
-        live = pay_all > t + 1.0e-12
+        live = (pay_all >= 0.0) & (pay_all > t + 1.0e-12)
     if np.any(live):
         s = legs["float_start_time"][live]
         e = legs["float_end_time"][live]
@@ -1063,10 +1148,7 @@ def compute_realized_float_coupons(
             fwd = (ps / pe - 1.0) / float(index_tau[i])
             out[i, :] = fwd + float(spr[i])
             continue
-        j = int(np.searchsorted(sim_times, ft))
-        if j >= sim_times.size or abs(float(sim_times[j]) - ft) > 1.0e-12:
-            raise ValueError(f"fixing time {ft} not present on simulation grid")
-        x_fix = x_paths_on_sim_grid[j, :]
+        x_fix = interpolate_path_grid(sim_times, x_paths_on_sim_grid, ft)[0, :]
         p_ft_f = float(p0_fwd(ft))
         p_t_s_f = model.discount_bond(ft, float(s[i]), x_fix, p_ft_f, float(p0_fwd(float(s[i]))))
         p_t_e_f = model.discount_bond(ft, float(e[i]), x_fix, p_ft_f, float(p0_fwd(float(e[i]))))
@@ -1576,7 +1658,7 @@ def build_survival_probability_curve_from_nodes(
         if tt <= times[0]:
             return float(np.exp(-avg_hazard[0] * tt))
         if tt < times[-1]:
-            return float(np.exp(np.interp(tt, times, log_surv)))
+            return float(np.exp(_interp1d_flat_vectorized(tt, times, log_surv)))
         if mode == "flat_fwd":
             return float(np.exp(log_surv[-1] - last_fwd_hazard * (tt - times[-1])))
         return float(np.exp(-avg_hazard[-1] * tt))

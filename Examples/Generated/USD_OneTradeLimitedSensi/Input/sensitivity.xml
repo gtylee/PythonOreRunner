@@ -15,29 +15,5 @@
       <ShiftScheme>Forward</ShiftScheme>
       <ShiftTenors>1Y,2Y,5Y,10Y,20Y,30Y</ShiftTenors>
     </IndexCurve>
-  <IndexCurve index="USD-LIBOR-6M">
-      <ShiftType>Absolute</ShiftType>
-      <ShiftSize>0.0001</ShiftSize>
-      <ShiftScheme>Forward</ShiftScheme>
-      <ShiftTenors>1Y,2Y,5Y,10Y,20Y,30Y</ShiftTenors>
-    </IndexCurve>
-  <IndexCurve index="USD-FedFunds">
-      <ShiftType>Absolute</ShiftType>
-      <ShiftSize>0.0001</ShiftSize>
-      <ShiftScheme>Forward</ShiftScheme>
-      <ShiftTenors>1Y,2Y,5Y,10Y,20Y,30Y</ShiftTenors>
-    </IndexCurve>
-  <IndexCurve index="USD-SIFMA">
-      <ShiftType>Absolute</ShiftType>
-      <ShiftSize>0.0001</ShiftSize>
-      <ShiftScheme>Forward</ShiftScheme>
-      <ShiftTenors>1Y,2Y,5Y,10Y,20Y,30Y</ShiftTenors>
-    </IndexCurve>
-  <IndexCurve index="USD-SOFR-3M">
-      <ShiftType>Absolute</ShiftType>
-      <ShiftSize>0.0001</ShiftSize>
-      <ShiftScheme>Forward</ShiftScheme>
-      <ShiftTenors>1Y,2Y,5Y,10Y,20Y,30Y</ShiftTenors>
-    </IndexCurve>
   </IndexCurves>
 </SensitivityAnalysis>

@@ -98,6 +98,118 @@ def _make_snapshot(*, include_unsupported: bool = False, runtime: RuntimeConfig 
     )
 
 
+def _cashflow_trade_xml(*, payment_date: str, amount: float, currency: str = "EUR") -> str:
+    return f"""
+<CashflowData>
+  <PaymentDate>{payment_date}</PaymentDate>
+  <Amount>{amount}</Amount>
+  <Currency>{currency}</Currency>
+</CashflowData>
+""".strip()
+
+
+def _generic_capfloor_trade_xml() -> str:
+    return """
+<CapFloorData>
+  <LongShort>Long</LongShort>
+  <Caps><Cap>0.03</Cap></Caps>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</CapFloorData>
+""".strip()
+
+
+def _generic_swaption_trade_xml() -> str:
+    return """
+<SwaptionData>
+  <OptionData>
+    <Style>European</Style>
+    <Settlement>Physical</Settlement>
+    <LongShort>Long</LongShort>
+    <ExerciseDates><ExerciseDate>2026-09-08</ExerciseDate></ExerciseDates>
+  </OptionData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>EUR</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2028-09-08</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2028-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <Spreads><Spread>0.0</Spread></Spreads>
+    </FloatingLegData>
+  </LegData>
+</SwaptionData>
+""".strip()
+
+
+def _simulation_xml_with_grid(grid: str) -> str:
+    return f"""
+<Simulation>
+  <Parameters><Grid>{grid}</Grid></Parameters>
+  <CrossAssetModel>
+    <InterestRateModels>
+      <LGM ccy="EUR">
+        <Volatility><InitialValue>0.01</InitialValue></Volatility>
+        <Reversion><InitialValue>0.03</InitialValue></Reversion>
+        <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+      </LGM>
+    </InterestRateModels>
+  </CrossAssetModel>
+</Simulation>
+""".strip()
+
+
 def _dynamic_im_feeder():
     fx_delta = [[2.0, 2.1, 2.2]]
     fx_vega = [[[0.2, 0.22, 0.24]]]
@@ -248,6 +360,112 @@ def test_python_lgm_adapter_swig_unavailable_error_is_explicit():
             assert "UNSUPPORTED_1:EquityOption" in text
         else:  # pragma: no cover
             raise AssertionError("Expected EngineRunError")
+
+
+def test_native_runtime_keeps_fixed_ore_grid_without_trade_date_augmentation():
+    snapshot = _make_snapshot(
+        params={},
+    )
+    cashflow_trade = Trade(
+        trade_id="CF_OFFGRID",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Cashflow",
+        product=GenericProduct(payload={"trade_type": "Cashflow", "xml": _cashflow_trade_xml(payment_date="2027-09-08", amount=1000.0)}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(cashflow_trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={
+                "simulation.xml": _simulation_xml_with_grid("2,1Y"),
+            },
+        ),
+    )
+    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
+    assert result.metadata["valuation_grid_size"] == 3
+    assert result.metadata["grid_size"] >= 3
+
+
+def test_native_runtime_filters_past_cashflow_payments():
+    snapshot = _make_snapshot()
+    past_cashflow_trade = Trade(
+        trade_id="CF_PAST",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Cashflow",
+        product=GenericProduct(payload={"trade_type": "Cashflow", "xml": _cashflow_trade_xml(payment_date="2025-03-08", amount=1000.0)}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(past_cashflow_trade,)),
+        config=replace(snapshot.config, analytics=("CVA",)),
+    )
+    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
+    assert abs(float(result.pv_total)) <= 1.0e-12
+
+
+def test_native_runtime_fails_fast_on_trade_nan():
+    snapshot = _make_snapshot()
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    with patch.object(PythonLgmAdapter, "_price_fx_forward", return_value=np.full((2, 8), np.nan)):
+        try:
+            adapter.run(snapshot, mapped=mapped, run_id="nan-fast-fail")
+        except EngineRunError as exc:
+            assert "NaN detected in native trade pricing" in str(exc)
+            assert "FXFWD_DEMO_1" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("Expected EngineRunError")
+
+
+def test_native_runtime_supports_generic_cashflow_capfloor_and_swaption():
+    snapshot = _make_snapshot()
+    trades = (
+        Trade(
+            trade_id="CF_NATIVE",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="Cashflow",
+            product=GenericProduct(payload={"trade_type": "Cashflow", "xml": _cashflow_trade_xml(payment_date="2027-03-08", amount=5000.0)}),
+        ),
+        Trade(
+            trade_id="CAP_NATIVE",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="CapFloor",
+            product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_capfloor_trade_xml()}),
+        ),
+        Trade(
+            trade_id="SWO_NATIVE",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="Swaption",
+            product=GenericProduct(payload={"trade_type": "Swaption", "xml": _generic_swaption_trade_xml()}),
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch.object(adapter._ir_options_mod, "capfloor_npv_paths", return_value=np.zeros((5, snapshot.config.num_paths))), patch.object(
+        adapter._ir_options_mod,
+        "bermudan_npv_paths",
+        return_value=np.zeros((5, snapshot.config.num_paths)),
+    ):
+        result = adapter.run(snapshot, mapped=XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs, run_id="generic-native")
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
 
 
 def test_python_lgm_runtime_attaches_dim_reports_and_metadata():
