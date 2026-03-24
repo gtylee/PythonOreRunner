@@ -223,6 +223,60 @@ def test_python_runtime_supports_real_bma_basis_case_without_fallback():
     assert math.isfinite(float(result.pv_total))
 
 
+def test_torch_plain_rate_swap_matches_numpy_runtime_on_bma_basis_case():
+    snapshot = _load_case("Examples/Legacy/Example_27/Input")
+    snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            num_paths=16,
+            params={**snapshot.config.params, "python.progress": "N", "python.progress_bar": "N"},
+        ),
+    )
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+            numpy_result = numpy_adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id="bma-numpy",
+            )
+
+        torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        from pythonore.compute.lgm_torch_xva import (
+            TorchDiscountCurve,
+            deflate_lgm_npv_paths_torch_batched,
+            par_swap_rate_paths_torch,
+            price_plain_rate_leg_paths_torch,
+            swap_npv_paths_from_ore_legs_dual_curve_torch,
+        )
+
+        backend = (
+            TorchDiscountCurve,
+            swap_npv_paths_from_ore_legs_dual_curve_torch,
+            deflate_lgm_npv_paths_torch_batched,
+            "cpu",
+            price_plain_rate_leg_paths_torch,
+            par_swap_rate_paths_torch,
+        )
+        with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend):
+            torch_result = torch_adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id="bma-torch",
+            )
+
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=2.0e-5, abs_tol=1.0e-2)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=2.0e-5,
+        abs_tol=1.0e-2,
+    )
+
+
 def test_native_runtime_ignores_residual_output_curves_and_calibration_by_default():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_root = Path(tmp)

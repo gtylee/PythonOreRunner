@@ -49,6 +49,7 @@ import re
 from pathlib import Path
 import sys
 import tempfile
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
@@ -103,6 +104,108 @@ class SessionState:
     rebuild_counts: Dict[str, int]
 
 
+class _ConsoleRunReporter:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        stream: Any = None,
+        use_bar: Optional[bool] = None,
+        checkpoint_interval: int = 25,
+        bar_width: int = 24,
+    ):
+        self.enabled = bool(enabled)
+        self.stream = stream if stream is not None else sys.stderr
+        self.use_bar = bool(use_bar) if use_bar is not None else bool(getattr(self.stream, "isatty", lambda: False)())
+        self.checkpoint_interval = max(int(checkpoint_interval), 1)
+        self.bar_width = max(int(bar_width), 10)
+        self.start_time = time.monotonic()
+        self._active_label = ""
+        self._active_total = 0
+        self._active_progress = 0
+        self._last_percent = -1
+        self._last_checkpoint = -1
+        self._bar_open = False
+
+    def _elapsed(self) -> str:
+        elapsed = max(time.monotonic() - self.start_time, 0.0)
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            return f"{hours:02d}:{mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}"
+
+    def _write_line(self, text: str) -> None:
+        if not self.enabled:
+            return
+        if self._bar_open:
+            self.stream.write("\r" + " " * 160 + "\r")
+            self._bar_open = False
+        self.stream.write(f"[python-lgm {self._elapsed()}] {text}\n")
+        self.stream.flush()
+
+    def log(self, text: str) -> None:
+        self._write_line(text)
+
+    def start(self, label: str, total: int) -> None:
+        if not self.enabled:
+            return
+        self._active_label = str(label)
+        self._active_total = max(int(total), 0)
+        self._active_progress = 0
+        self._last_percent = -1
+        self._last_checkpoint = -1
+        if self._active_total <= 0:
+            self.log(f"{self._active_label}: nothing to do")
+            return
+        if not self.use_bar:
+            self.log(f"{self._active_label}: 0/{self._active_total}")
+
+    def update(self, progress: int, detail: str = "") -> None:
+        if not self.enabled or self._active_total <= 0:
+            return
+        current = min(max(int(progress), 0), self._active_total)
+        self._active_progress = current
+        suffix = f" {detail}" if detail else ""
+        if self.use_bar:
+            ratio = float(current) / float(self._active_total)
+            percent = int(ratio * 100.0)
+            if percent == self._last_percent and current < self._active_total:
+                return
+            self._last_percent = percent
+            filled = min(int(self.bar_width * ratio), self.bar_width)
+            if filled >= self.bar_width:
+                bar = "=" * self.bar_width
+            else:
+                head = "=" * max(filled - 1, 0)
+                mid = ">" if filled > 0 else ""
+                tail = " " * (self.bar_width - len(head) - len(mid))
+                bar = head + mid + tail
+            self.stream.write(
+                "\r"
+                + f"[python-lgm {self._elapsed()}] {self._active_label:<20} "
+                + f"[{bar}] {current}/{self._active_total}{suffix}"[:220]
+            )
+            self.stream.flush()
+            self._bar_open = current < self._active_total
+            if current >= self._active_total:
+                self.stream.write("\n")
+                self.stream.flush()
+                self._bar_open = False
+            return
+        if current == self._active_total or current == 0 or current - self._last_checkpoint >= self.checkpoint_interval:
+            self._last_checkpoint = current
+            self.log(f"{self._active_label}: {current}/{self._active_total}{suffix}")
+
+    def finish(self, detail: str = "") -> None:
+        if not self.enabled or self._active_total <= 0:
+            return
+        self.update(self._active_total, detail)
+        self._active_label = ""
+        self._active_total = 0
+        self._active_progress = 0
+
+
 class XVAEngine:
     """Orchestration entry point for XVA computation.
 
@@ -116,7 +219,7 @@ class XVAEngine:
         self.adapter = adapter or DeterministicToyAdapter()
 
     @classmethod
-    def python_lgm_default(cls, fallback_to_swig: bool = True) -> "XVAEngine":
+    def python_lgm_default(cls, fallback_to_swig: bool = False) -> "XVAEngine":
         return cls(adapter=PythonLgmAdapter(fallback_to_swig=fallback_to_swig))
 
     def create_session(self, snapshot: XVASnapshot) -> "XVASession":
@@ -382,7 +485,7 @@ class _SharedFxSimulation:
 class PythonLgmAdapter:
     """Adapter that values supported trades using the Python LGM stack."""
 
-    def __init__(self, fallback_to_swig: bool = True):
+    def __init__(self, fallback_to_swig: bool = False):
         self.fallback_to_swig = bool(fallback_to_swig)
         self._loaded = False
         self._lgm_mod = None
@@ -407,6 +510,426 @@ class PythonLgmAdapter:
         self._quote_dict_cache: Dict[int, Tuple[Dict[str, object], ...]] = {}
         self._extract_inputs_cache: Dict[str, _PythonLgmInputs] = {}
         self._curve_fit_cache: Dict[tuple[object, ...], Optional[_CurveBundle]] = {}
+        self._swap_pricing_backend_cache = None
+
+    def _progress_enabled(self, snapshot: XVASnapshot) -> bool:
+        raw = str(snapshot.config.params.get("python.progress", "Y")).strip().upper()
+        return raw not in {"N", "NO", "FALSE", "0", "OFF"}
+
+    def _build_reporter(self, snapshot: XVASnapshot) -> _ConsoleRunReporter:
+        raw_bar = str(snapshot.config.params.get("python.progress_bar", "Y")).strip().upper()
+        use_bar = raw_bar not in {"N", "NO", "FALSE", "0", "OFF"}
+        interval_raw = snapshot.config.params.get("python.progress_log_interval", 25)
+        try:
+            checkpoint_interval = int(interval_raw)
+        except Exception:
+            checkpoint_interval = 25
+        return _ConsoleRunReporter(
+            enabled=self._progress_enabled(snapshot),
+            use_bar=use_bar,
+            checkpoint_interval=checkpoint_interval,
+        )
+
+    def _resolve_irs_pricing_backend(self, inputs: _PythonLgmInputs):
+        irs_count = sum(1 for spec in inputs.trade_specs if spec.kind == "IRS")
+        rate_swap_count = sum(1 for spec in inputs.trade_specs if spec.kind == "RateSwap")
+        if irs_count == 0 and rate_swap_count == 0:
+            return None
+        if self._swap_pricing_backend_cache is not None:
+            return self._swap_pricing_backend_cache
+        try:
+            import torch
+            from pythonore.compute.lgm_torch_xva import (
+                TorchDiscountCurve,
+                deflate_lgm_npv_paths_torch_batched,
+                par_swap_rate_paths_torch,
+                price_plain_rate_leg_paths_torch,
+                swap_npv_paths_from_ore_legs_dual_curve_torch,
+            )
+        except Exception:
+            self._swap_pricing_backend_cache = None
+            return None
+        if bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+            device = "mps"
+        else:
+            device = "cpu"
+        self._swap_pricing_backend_cache = (
+            TorchDiscountCurve,
+            swap_npv_paths_from_ore_legs_dual_curve_torch,
+            deflate_lgm_npv_paths_torch_batched,
+            device,
+            price_plain_rate_leg_paths_torch,
+            par_swap_rate_paths_torch,
+        )
+        return self._swap_pricing_backend_cache
+
+    def _supports_torch_rate_swap(self, spec: _TradeSpec) -> bool:
+        if spec.kind != "RateSwap" or not isinstance(spec.legs, dict):
+            return False
+        rate_legs = list(spec.legs.get("rate_legs", []))
+        if not rate_legs:
+            return False
+        return all(
+            str(leg.get("kind", "")).upper() in {"FIXED", "FLOATING"}
+            for leg in rate_legs
+        )
+
+    def _torch_curve_from_handle(
+        self,
+        curve_cache: Dict[tuple[str, str], object],
+        torch_curve_ctor: object,
+        torch_device: str,
+        key: tuple[str, str],
+        curve: Callable[[float], float],
+        sample_times: np.ndarray,
+    ):
+        cached = curve_cache.get(key)
+        if cached is not None:
+            return cached
+        pts = np.unique(np.asarray(sample_times, dtype=float))
+        pts = pts[np.isfinite(pts)]
+        pts.sort()
+        cached = torch_curve_ctor(
+            times=pts,
+            dfs=np.asarray([float(curve(float(t))) for t in pts], dtype=float),
+            device=torch_device,
+        )
+        curve_cache[key] = cached
+        return cached
+
+    def _torch_capped_floored_rate(
+        self,
+        raw_rate: np.ndarray,
+        cap: Optional[float] = None,
+        floor: Optional[float] = None,
+    ) -> np.ndarray:
+        out = np.asarray(raw_rate, dtype=float).copy()
+        if floor is not None:
+            out = np.maximum(out, float(floor))
+        if cap is not None:
+            out = np.minimum(out, float(cap))
+        return out
+
+    def _torch_digital_option_rate(
+        self,
+        raw_rate: np.ndarray,
+        strike: float,
+        payoff: float,
+        *,
+        is_call: bool,
+        long_short: float,
+        fixed_mode: bool,
+        atm_included: bool,
+        capped_rate_fn: Optional[Callable[[float, float], np.ndarray]] = None,
+    ) -> np.ndarray:
+        return self._digital_option_rate(
+            raw_rate,
+            strike,
+            payoff,
+            is_call=is_call,
+            long_short=long_short,
+            fixed_mode=fixed_mode,
+            atm_included=atm_included,
+            capped_rate_fn=capped_rate_fn,
+        )
+
+    def _rate_leg_coupon_paths_torch(
+        self,
+        model: Any,
+        leg: Dict[str, object],
+        ccy: str,
+        inputs: _PythonLgmInputs,
+        t: float,
+        x_t: np.ndarray,
+        *,
+        torch_backend: tuple[object, ...],
+        curve_cache: Dict[tuple[str, str], object],
+    ) -> np.ndarray:
+        kind = str(leg.get("kind", "")).upper()
+        torch_curve_ctor, _, _, torch_device, _, torch_par_swap = torch_backend
+        start = np.asarray(leg.get("start_time", []), dtype=float)
+        end = np.asarray(leg.get("end_time", []), dtype=float)
+        pay = np.asarray(leg.get("pay_time", end), dtype=float)
+        fixing = np.asarray(leg.get("fixing_time", start), dtype=float)
+        quoted = np.asarray(leg.get("quoted_coupon", np.zeros(start.shape)), dtype=float)
+        fixed_mask = np.asarray(leg.get("is_historically_fixed", np.zeros(start.shape, dtype=bool)), dtype=bool)
+        spread = np.asarray(leg.get("spread", np.zeros(start.shape)), dtype=float)
+        gearing = np.asarray(leg.get("gearing", np.ones(start.shape)), dtype=float)
+        coupons = np.zeros((start.size, x_t.size), dtype=float)
+        sample_base = np.concatenate((np.asarray([t], dtype=float), start, end, pay))
+        for i in range(start.size):
+            fixed_now = bool(fixed_mask[i] or fixing[i] <= t + 1.0e-12)
+            if fixed_now:
+                base = np.full(x_t.shape, quoted[i], dtype=float)
+            elif kind == "CMS":
+                index_name = str(leg.get("index_name", ""))
+                curve = self._resolve_index_curve(inputs, ccy, index_name)
+                tenor_match = re.search(r"(\d+[YMWD])$", index_name.upper())
+                tenor_years = _parse_ore_tenor_to_years(tenor_match.group(1)) if tenor_match else 10.0
+                ql_rate = None
+                if t <= 1.0e-12:
+                    ql_rate = self._static_ql_cms_rate(
+                        inputs,
+                        asof=inputs.asof,
+                        ccy=ccy,
+                        index_name=index_name,
+                        start_time=float(start[i]),
+                        end_time=float(end[i]),
+                        pay_time=float(pay[i]),
+                        fixing_days=int(leg.get("fixing_days", 2)),
+                        day_counter_name=str(leg.get("day_counter", "A365")),
+                        in_arrears=bool(leg.get("is_in_arrears", False)),
+                    )
+                if ql_rate is not None:
+                    base = np.full(x_t.shape, ql_rate, dtype=float)
+                else:
+                    cms_horizon = max(float(np.max(sample_base)) if sample_base.size else 0.0, float(start[i]) + float(tenor_years))
+                    cms_dense_grid = np.arange(0.0, cms_horizon + 0.2500001, 0.25, dtype=float)
+                    cms_sample = np.unique(np.concatenate((sample_base, cms_dense_grid, np.asarray([cms_horizon], dtype=float))))
+                    torch_curve = self._torch_curve_from_handle(
+                        curve_cache,
+                        torch_curve_ctor,
+                        torch_device,
+                        ("cms", index_name.upper()),
+                        curve,
+                        cms_sample,
+                    )
+                    base = torch_par_swap(
+                        model,
+                        torch_curve,
+                        float(t),
+                        x_t,
+                        float(start[i]),
+                        float(tenor_years),
+                        return_numpy=True,
+                    )
+            elif kind in {"CMSSPREAD", "DIGITALCMSSPREAD"}:
+                idx1 = str(leg.get("index_name_1", ""))
+                idx2 = str(leg.get("index_name_2", ""))
+                curve1 = self._resolve_index_curve(inputs, ccy, idx1)
+                curve2 = self._resolve_index_curve(inputs, ccy, idx2)
+                tenor1 = re.search(r"(\d+[YMWD])$", idx1.upper())
+                tenor2 = re.search(r"(\d+[YMWD])$", idx2.upper())
+                ql_rate1 = ql_rate2 = None
+                if kind == "DIGITALCMSSPREAD" and t <= 1.0e-12:
+                    ql_rate1 = self._static_ql_cms_rate(
+                        inputs,
+                        asof=inputs.asof,
+                        ccy=ccy,
+                        index_name=idx1,
+                        start_time=float(start[i]),
+                        end_time=float(end[i]),
+                        pay_time=float(pay[i]),
+                        fixing_days=int(leg.get("fixing_days", 2)),
+                        day_counter_name=str(leg.get("day_counter", "A365")),
+                        in_arrears=bool(leg.get("is_in_arrears", False)),
+                    )
+                    ql_rate2 = self._static_ql_cms_rate(
+                        inputs,
+                        asof=inputs.asof,
+                        ccy=ccy,
+                        index_name=idx2,
+                        start_time=float(start[i]),
+                        end_time=float(end[i]),
+                        pay_time=float(pay[i]),
+                        fixing_days=int(leg.get("fixing_days", 2)),
+                        day_counter_name=str(leg.get("day_counter", "A365")),
+                        in_arrears=bool(leg.get("is_in_arrears", False)),
+                    )
+                if ql_rate1 is None:
+                    tenor_years_1 = float(_parse_ore_tenor_to_years(tenor1.group(1)) if tenor1 else 10.0)
+                    cms_horizon_1 = max(float(np.max(sample_base)) if sample_base.size else 0.0, float(start[i]) + tenor_years_1)
+                    cms_sample_1 = np.unique(
+                        np.concatenate(
+                            (
+                                sample_base,
+                                np.arange(0.0, cms_horizon_1 + 0.2500001, 0.25, dtype=float),
+                                np.asarray([cms_horizon_1], dtype=float),
+                            )
+                        )
+                    )
+                    torch_curve1 = self._torch_curve_from_handle(
+                        curve_cache,
+                        torch_curve_ctor,
+                        torch_device,
+                        ("cms", idx1.upper()),
+                        curve1,
+                        cms_sample_1,
+                    )
+                    rate1 = torch_par_swap(
+                        model,
+                        torch_curve1,
+                        float(t),
+                        x_t,
+                        float(start[i]),
+                        tenor_years_1,
+                        return_numpy=True,
+                    )
+                else:
+                    rate1 = np.full(x_t.shape, ql_rate1, dtype=float)
+                if ql_rate2 is None:
+                    tenor_years_2 = float(_parse_ore_tenor_to_years(tenor2.group(1)) if tenor2 else 2.0)
+                    cms_horizon_2 = max(float(np.max(sample_base)) if sample_base.size else 0.0, float(start[i]) + tenor_years_2)
+                    cms_sample_2 = np.unique(
+                        np.concatenate(
+                            (
+                                sample_base,
+                                np.arange(0.0, cms_horizon_2 + 0.2500001, 0.25, dtype=float),
+                                np.asarray([cms_horizon_2], dtype=float),
+                            )
+                        )
+                    )
+                    torch_curve2 = self._torch_curve_from_handle(
+                        curve_cache,
+                        torch_curve_ctor,
+                        torch_device,
+                        ("cms", idx2.upper()),
+                        curve2,
+                        cms_sample_2,
+                    )
+                    rate2 = torch_par_swap(
+                        model,
+                        torch_curve2,
+                        float(t),
+                        x_t,
+                        float(start[i]),
+                        tenor_years_2,
+                        return_numpy=True,
+                    )
+                else:
+                    rate2 = np.full(x_t.shape, ql_rate2, dtype=float)
+                base = rate1 - rate2
+            elif kind == "FLOATING":
+                return self._rate_leg_coupon_paths(model, leg, ccy, inputs, t, x_t)
+            else:
+                base = np.zeros_like(x_t, dtype=float)
+
+            raw_coupon = gearing[i] * base + spread[i]
+            coupon = raw_coupon
+            if kind == "CMSSPREAD":
+                cap = leg.get("cap")
+                floor = leg.get("floor")
+                ql_rate = None
+                if t <= 1.0e-12:
+                    ql_rate = self._static_ql_cmsspread_rate(
+                        inputs,
+                        asof=inputs.asof,
+                        ccy=ccy,
+                        idx1=str(leg.get("index_name_1", "")),
+                        idx2=str(leg.get("index_name_2", "")),
+                        start_time=float(start[i]),
+                        end_time=float(end[i]),
+                        pay_time=float(pay[i]),
+                        fixing_days=int(leg.get("fixing_days", 2)),
+                        day_counter_name=str(leg.get("day_counter", "A365")),
+                        in_arrears=bool(leg.get("is_in_arrears", False)),
+                        gearing=float(gearing[i]),
+                        spread=float(spread[i]),
+                        cap=float(cap) if cap is not None else None,
+                        floor=float(floor) if floor is not None else None,
+                    )
+                if ql_rate is not None:
+                    coupon = np.full_like(raw_coupon, ql_rate, dtype=float)
+                elif fixed_now:
+                    coupon = self._torch_capped_floored_rate(
+                        raw_coupon,
+                        cap=float(cap) if cap is not None else None,
+                        floor=float(floor) if floor is not None else None,
+                    )
+                else:
+                    coupon = self._cmsspread_coupon_rate(
+                        inputs,
+                        ccy=ccy,
+                        idx1=str(leg.get("index_name_1", "")),
+                        idx2=str(leg.get("index_name_2", "")),
+                        fixing_time=float(fixing[i]),
+                        raw_coupon=raw_coupon,
+                        cap=float(cap) if cap is not None else None,
+                        floor=float(floor) if floor is not None else None,
+                    )
+            elif kind == "DIGITALCMSSPREAD":
+                ql_raw = None
+                ql_capped_rate_fn = None
+                if not fixed_now and t <= 1.0e-12:
+                    idx1 = str(leg.get("index_name_1", ""))
+                    idx2 = str(leg.get("index_name_2", ""))
+                    ql_raw = self._static_ql_cmsspread_rate(
+                        inputs,
+                        asof=inputs.asof,
+                        ccy=ccy,
+                        idx1=idx1,
+                        idx2=idx2,
+                        start_time=float(start[i]),
+                        end_time=float(end[i]),
+                        pay_time=float(pay[i]),
+                        fixing_days=int(leg.get("fixing_days", 2)),
+                        day_counter_name=str(leg.get("day_counter", "A365")),
+                        in_arrears=bool(leg.get("is_in_arrears", False)),
+                        gearing=float(gearing[i]),
+                        spread=float(spread[i]),
+                    )
+                    ql_capped_rate_fn = lambda cap, floor, idx1_=idx1, idx2_=idx2: np.full_like(
+                        raw_coupon,
+                        self._static_ql_cmsspread_rate(
+                            inputs,
+                            asof=inputs.asof,
+                            ccy=ccy,
+                            idx1=idx1_,
+                            idx2=idx2_,
+                            start_time=float(start[i]),
+                            end_time=float(end[i]),
+                            pay_time=float(pay[i]),
+                            fixing_days=int(leg.get("fixing_days", 2)),
+                            day_counter_name=str(leg.get("day_counter", "A365")),
+                            in_arrears=bool(leg.get("is_in_arrears", False)),
+                            gearing=float(gearing[i]),
+                            spread=float(spread[i]),
+                            cap=None if math.isnan(cap) else float(cap),
+                            floor=None if math.isnan(floor) else float(floor),
+                        ),
+                        dtype=float,
+                    )
+                if bool(leg.get("naked_option", False)):
+                    coupon = np.zeros_like(raw_coupon, dtype=float)
+                elif ql_raw is not None:
+                    coupon = np.full_like(raw_coupon, ql_raw, dtype=float)
+                capped_rate_fn = ql_capped_rate_fn
+                if capped_rate_fn is None and not fixed_now:
+                    idx1 = str(leg.get("index_name_1", ""))
+                    idx2 = str(leg.get("index_name_2", ""))
+                    fixing_time = float(fixing[i])
+                    capped_rate_fn = lambda cap, floor, raw=raw_coupon, ccy_=ccy, idx1_=idx1, idx2_=idx2, ft=fixing_time: self._cmsspread_coupon_rate(
+                        inputs,
+                        ccy=ccy_,
+                        idx1=idx1_,
+                        idx2=idx2_,
+                        fixing_time=ft,
+                        raw_coupon=raw,
+                        cap=None if math.isnan(cap) else float(cap),
+                        floor=None if math.isnan(floor) else float(floor),
+                    )
+                coupon = coupon + self._torch_digital_option_rate(
+                    raw_coupon,
+                    float(leg.get("call_strike", float("nan"))),
+                    float(leg.get("call_payoff", float("nan"))),
+                    is_call=True,
+                    long_short=float(leg.get("call_position", 1.0)),
+                    fixed_mode=fixed_now,
+                    atm_included=bool(leg.get("is_call_atm_included", False)),
+                    capped_rate_fn=capped_rate_fn,
+                )
+                coupon = coupon + self._torch_digital_option_rate(
+                    raw_coupon,
+                    float(leg.get("put_strike", float("nan"))),
+                    float(leg.get("put_payoff", float("nan"))),
+                    is_call=False,
+                    long_short=float(leg.get("put_position", 1.0)),
+                    fixed_mode=fixed_now,
+                    atm_included=bool(leg.get("is_put_atm_included", False)),
+                    capped_rate_fn=capped_rate_fn,
+                )
+            coupons[i, :] = coupon
+        return coupons
 
     def classify_portfolio_support(self, snapshot: XVASnapshot) -> Dict[str, Any]:
         """Classify a portfolio into Python-native and SWIG-only buckets."""
@@ -455,7 +978,19 @@ class PythonLgmAdapter:
                 f"DIM mode '{dim_mode}' requires snapshot.config.params['python.dim_feeder'] for the Python DIM port."
             )
         self._ensure_py_lgm_imports()
+        reporter = self._build_reporter(snapshot)
+        reporter.log(
+            f"run {run_id}: start mode={'hybrid' if self.fallback_to_swig else 'native_only'} "
+            f"trades={len(snapshot.portfolio.trades)} paths={int(snapshot.config.num_paths)} "
+            f"analytics={','.join(snapshot.config.analytics)}"
+        )
+        reporter.log("extracting runtime inputs")
         inputs = self._extract_inputs(snapshot, mapped)
+        reporter.log(
+            "inputs ready: "
+            f"grid={inputs.times.size} valuation_grid={inputs.valuation_times.size} "
+            f"obs={inputs.observation_times.size} native_specs={len(inputs.trade_specs)} unsupported={len(inputs.unsupported)}"
+        )
 
         n_times = int(inputs.times.size)
         n_paths = int(snapshot.config.num_paths)
@@ -463,6 +998,16 @@ class PythonLgmAdapter:
         fallback_trades: List[Trade] = []
         unsupported: List[Trade] = list(inputs.unsupported)
         preflight_support = self.classify_portfolio_support(snapshot)
+        reporter.log(
+            "support classification: "
+            f"native={preflight_support.get('native_trade_count', 0)} "
+            f"requires_swig={preflight_support.get('requires_swig_trade_count', 0)}"
+        )
+        irs_backend = self._resolve_irs_pricing_backend(inputs)
+        if irs_backend is None:
+            reporter.log("irs pricing backend: numpy")
+        else:
+            reporter.log(f"irs pricing backend: torch ({irs_backend[3]})")
 
         # Single-currency LGM model for IRS path simulation.
         model = self._lgm_mod.LGM1F(
@@ -477,9 +1022,11 @@ class PythonLgmAdapter:
         )
         rng_mode = self._python_lgm_rng_mode(snapshot)
         rng, draw_order = self._build_lgm_rng(inputs.seed, rng_mode)
+        reporter.log("simulating LGM state paths")
         x_paths = self._lgm_mod.simulate_lgm_measure(
             model, inputs.times, n_paths=n_paths, rng=rng, x0=0.0, draw_order=draw_order
         )
+        reporter.log(f"simulation complete: x_paths_shape={tuple(x_paths.shape)}")
         shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
         valuation_idx, obs_idx, obs_closeout_idx, obs_dates = self._validated_grid_indices(inputs)
         df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
@@ -492,8 +1039,11 @@ class PythonLgmAdapter:
         xva_deflated_by_ns: Dict[str, bool] = {}
         npv_cube_payload: Dict[str, Dict[str, object]] = {}
         exposure_profiles_by_trade: Dict[str, Dict[str, object]] = {}
+        reporter.start("native pricing", len(inputs.trade_specs))
+        irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = {}
+        torch_curve_cache: Dict[tuple[str, str], object] = {}
 
-        for spec in inputs.trade_specs:
+        for trade_idx, spec in enumerate(inputs.trade_specs, start=1):
             vals: np.ndarray | None = None
             xva_deflated = False
             if spec.kind == "IRS":
@@ -509,20 +1059,163 @@ class PythonLgmAdapter:
                     sim_times=inputs.times,
                     x_paths_on_sim_grid=x_paths,
                 )
-                vals = np.zeros((n_times, n_paths), dtype=float)
-                for i, t in enumerate(inputs.times):
-                    vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
+                if irs_backend is None:
+                    vals = np.zeros((n_times, n_paths), dtype=float)
+                    for i, t in enumerate(inputs.times):
+                        vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
+                            model,
+                            p_disc,
+                            p_fwd,
+                            legs,
+                            float(t),
+                            x_paths[i, :],
+                            realized_float_coupon=realized_coupon,
+                        )
+                else:
+                    torch_curve_ctor, torch_pricer, _, torch_device, _, _ = irs_backend
+                    curve_key = (spec.ccy, index_name)
+                    curve_state = irs_curve_cache.get(curve_key)
+                    if curve_state is None:
+                        sample_disc = np.unique(
+                            np.concatenate(
+                                (
+                                    np.asarray([0.0], dtype=float),
+                                    np.asarray(inputs.times, dtype=float),
+                                    np.asarray(legs.get("fixed_pay_time", []), dtype=float),
+                                    np.asarray(legs.get("float_pay_time", []), dtype=float),
+                                )
+                            )
+                        )
+                        sample_disc = sample_disc[np.isfinite(sample_disc)]
+                        sample_disc.sort()
+                        sample_fwd = np.unique(
+                            np.concatenate(
+                                (
+                                    sample_disc,
+                                    np.asarray(legs.get("float_start_time", []), dtype=float),
+                                    np.asarray(legs.get("float_end_time", []), dtype=float),
+                                )
+                            )
+                        )
+                        sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
+                        sample_fwd.sort()
+                        curve_state = {
+                            "disc_curve": torch_curve_ctor(
+                                times=sample_disc,
+                                dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
+                                device=torch_device,
+                            ),
+                            "fwd_curve": torch_curve_ctor(
+                                times=sample_fwd,
+                                dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
+                                device=torch_device,
+                            ),
+                        }
+                        irs_curve_cache[curve_key] = curve_state
+                    vals = torch_pricer(
                         model,
-                        p_disc,
-                        p_fwd,
+                        curve_state["disc_curve"],
+                        curve_state["fwd_curve"],
                         legs,
-                        float(t),
-                        x_paths[i, :],
+                        np.asarray(inputs.times, dtype=float),
+                        x_paths,
                         realized_float_coupon=realized_coupon,
+                        return_numpy=True,
                     )
                 xva_deflated = True
             elif spec.kind == "RateSwap":
-                vals = self._price_generic_rate_swap(spec, inputs, model, x_paths)
+                if irs_backend is not None and self._supports_torch_rate_swap(spec):
+                    torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _ = irs_backend
+                    rate_legs = list((spec.legs or {}).get("rate_legs", []))
+                    vals = np.zeros((n_times, n_paths), dtype=float)
+                    disc_key = ("disc", spec.ccy)
+                    disc_curve = torch_curve_cache.get(disc_key)
+                    if disc_curve is None:
+                        sample_disc = [np.asarray(inputs.times, dtype=float)]
+                        for leg in rate_legs:
+                            sample_disc.append(np.asarray(leg.get("pay_time", []), dtype=float))
+                        disc_times = np.unique(np.concatenate(sample_disc))
+                        disc_times = disc_times[np.isfinite(disc_times)]
+                        disc_times.sort()
+                        disc_curve = torch_curve_ctor(
+                            times=disc_times,
+                            dfs=np.asarray(
+                                [float(inputs.discount_curves[spec.ccy](float(t))) for t in disc_times],
+                                dtype=float,
+                            ),
+                            device=torch_device,
+                        )
+                        torch_curve_cache[disc_key] = disc_curve
+                    p_disc = inputs.discount_curves[spec.ccy]
+                    for leg in rate_legs:
+                        kind = str(leg.get("kind", "")).upper()
+                        if kind in {"FIXED", "FLOATING"}:
+                            fwd_curve = None
+                            if kind == "FLOATING":
+                                index_name = str(leg.get("index_name", ""))
+                                fwd_key = ("fwd", index_name.upper())
+                                fwd_curve = torch_curve_cache.get(fwd_key)
+                                if fwd_curve is None:
+                                    curve = self._resolve_index_curve(inputs, spec.ccy, index_name)
+                                    sample_fwd = np.unique(
+                                        np.concatenate(
+                                            (
+                                                np.asarray(inputs.times, dtype=float),
+                                                np.asarray(leg.get("start_time", []), dtype=float),
+                                                np.asarray(leg.get("end_time", []), dtype=float),
+                                            )
+                                        )
+                                    )
+                                    sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
+                                    sample_fwd.sort()
+                                    fwd_curve = torch_curve_ctor(
+                                        times=sample_fwd,
+                                        dfs=np.asarray([float(curve(float(t))) for t in sample_fwd], dtype=float),
+                                        device=torch_device,
+                                    )
+                                    torch_curve_cache[fwd_key] = fwd_curve
+                            vals += torch_plain_leg_pricer(
+                                model,
+                                disc_curve,
+                                leg,
+                                np.asarray(inputs.times, dtype=float),
+                                x_paths,
+                                fwd_curve=fwd_curve,
+                                return_numpy=True,
+                            )
+                            continue
+
+                        pay = np.asarray(leg.get("pay_time", []), dtype=float)
+                        accr = np.asarray(leg.get("accrual", []), dtype=float)
+                        notional = float(leg.get("notional", 0.0))
+                        sign = float(leg.get("sign", 1.0))
+                        for i, t in enumerate(inputs.times):
+                            live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
+                            if not np.any(live):
+                                continue
+                            x_t = x_paths[i, :]
+                            p_t = float(p_disc(float(t)))
+                            disc = model.discount_bond_paths(
+                                float(t),
+                                pay[live],
+                                x_t,
+                                p_t,
+                                np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
+                            )
+                            coupons = self._rate_leg_coupon_paths_torch(
+                                model,
+                                leg,
+                                spec.ccy,
+                                inputs,
+                                float(t),
+                                x_t,
+                                torch_backend=irs_backend,
+                                curve_cache=torch_curve_cache,
+                            )[live, :]
+                            amount = sign * notional * accr[live, None] * coupons
+                            vals[i, :] += np.sum(amount * disc, axis=0)
+                else:
+                    vals = self._price_generic_rate_swap(spec, inputs, model, x_paths)
             elif spec.kind == "FXForward":
                 vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths, shared_sim=shared_fx_sim)
             elif spec.kind == "CapFloor":
@@ -694,14 +1387,39 @@ class PythonLgmAdapter:
                 pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
 
             if xva_deflated:
-                p_disc = inputs.discount_curves[spec.ccy]
-                vals_xva = self._irs_utils.deflate_lgm_npv_paths(
-                    model=model,
-                    p0_disc=p_disc,
-                    times=inputs.times,
-                    x_paths=x_paths,
-                    npv_paths=vals,
-                )
+                if spec.kind == "IRS" and irs_backend is not None:
+                    _, _, torch_deflator, _, _, _ = irs_backend
+                    curve_key = (
+                        spec.ccy,
+                        str(
+                            (spec.legs or {}).get(
+                                "float_index",
+                                spec.trade.additional_fields.get("index", _default_index_for_ccy(spec.ccy)),
+                            )
+                        ),
+                    )
+                    curve_state = irs_curve_cache.get(curve_key)
+                    if curve_state is None:
+                        raise EngineRunError(
+                            f"missing cached IRS torch curve state for trade '{spec.trade.trade_id}'"
+                        )
+                    vals_xva = torch_deflator(
+                        model=model,
+                        disc_curve=curve_state["disc_curve"],
+                        times=inputs.times,
+                        x_paths=x_paths,
+                        npv_paths=vals,
+                        return_numpy=True,
+                    )
+                else:
+                    p_disc = inputs.discount_curves[spec.ccy]
+                    vals_xva = self._irs_utils.deflate_lgm_npv_paths(
+                        model=model,
+                        p0_disc=p_disc,
+                        times=inputs.times,
+                        x_paths=x_paths,
+                        npv_paths=vals,
+                    )
             else:
                 vals_xva = vals
             vals_xva_val = vals_xva[obs_idx, :]
@@ -748,16 +1466,26 @@ class PythonLgmAdapter:
             ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(vals_xva_val)) + vals_xva_val
             ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(vals_xva_obs)) + vals_xva_obs
             xva_deflated_by_ns[ns] = xva_deflated_by_ns.get(ns, True) and xva_deflated
+            reporter.update(trade_idx, f"{spec.trade.trade_id} [{spec.kind}]")
+
+        reporter.finish("native trade pricing complete")
 
         fallback_result: XVAResult | None = None
         if unsupported:
             if not self.fallback_to_swig:
                 bad = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported}))
+                preview = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported})[:10])
+                reporter.log(
+                    "native-only run blocked by unsupported trades: "
+                    + preview
+                    + (" ..." if len(unsupported) > 10 else "")
+                )
                 raise EngineRunError(
                     "Unsupported by PythonLgmAdapter in native-only mode: "
                     f"{bad}. These trades are supported only through the ORE SWIG fallback."
                 )
             try:
+                reporter.log(f"entering SWIG fallback for {len(unsupported)} trades")
                 swig_adapter = ORESwigAdapter()
             except Exception as exc:
                 bad = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported}))
@@ -768,7 +1496,9 @@ class PythonLgmAdapter:
             fallback_trades = unsupported
             partial = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=tuple(unsupported)))
             fallback_result = swig_adapter.run(partial, mapped=map_snapshot(partial), run_id=f"{run_id}-swig")
+            reporter.log("SWIG fallback completed")
 
+        reporter.log("assembling result payload")
         result = self._assemble_result(
             run_id=run_id,
             snapshot=snapshot,
@@ -785,6 +1515,11 @@ class PythonLgmAdapter:
             fallback=fallback_result,
             fallback_trades=fallback_trades,
             unsupported=unsupported if fallback_result is None else [],
+        )
+        reporter.log(
+            "run complete: "
+            f"pv_total={float(result.pv_total):.6f} "
+            f"metrics={','.join(sorted(result.xva_by_metric)) if result.xva_by_metric else 'none'}"
         )
         result.metadata["python_lgm_rng_mode"] = rng_mode
         if dim_mode in supported_python_dim_models:
@@ -956,7 +1691,7 @@ class PythonLgmAdapter:
                         simulation_xml_path=simulation_xml_path,
                         ccy_key=model_ccy,
                     )
-                    if lgm_params is None and requested_source in {"auto", "ore", "runtime_calibration"}:
+                    if lgm_params is None and requested_source in {"ore", "runtime_calibration"}:
                         lgm_params = self._ore_snapshot_mod.calibrate_lgm_params_via_ore(
                             ore_xml_path=ore_path,
                             input_dir=input_dir,
@@ -2806,6 +3541,12 @@ class PythonLgmAdapter:
         accr = np.asarray([year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
         fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
         in_arrears = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
+        if in_arrears:
+            # The native cap/floor pricer below assumes forward-start coupons with
+            # fixing no later than accrual start. In-arrears compounded structures
+            # like SOFR caps need a different valuation treatment, so keep them on
+            # the fallback path rather than mispricing or crashing mid-run.
+            return None
         fixing_base = e_dates if in_arrears else s_dates
         fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
         fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
@@ -5292,7 +6033,7 @@ def _toy_trade_numbers(trade: Trade):
 def classify_portfolio_support(
     snapshot: XVASnapshot,
     *,
-    fallback_to_swig: bool = True,
+    fallback_to_swig: bool = False,
 ) -> Dict[str, Any]:
     """Public preflight helper for native-vs-SWIG support classification."""
     return PythonLgmAdapter(fallback_to_swig=fallback_to_swig).classify_portfolio_support(snapshot)

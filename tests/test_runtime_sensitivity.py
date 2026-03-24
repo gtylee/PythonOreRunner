@@ -16,9 +16,9 @@ from pythonore.runtime.sensitivity import (
 from pythonore.runtime.runtime import ORESwigAdapter, PythonLgmAdapter
 
 
-def test_sensitivity_comparator_defaults_to_hybrid_swig_fallback():
+def test_sensitivity_comparator_defaults_to_native_only():
     comparator = OreSnapshotPythonLgmSensitivityComparator()
-    assert comparator.engine.adapter.fallback_to_swig is True
+    assert comparator.engine.adapter.fallback_to_swig is False
 
 
 def test_ore_swig_adapter_primes_engine_swig_paths(tmp_path, monkeypatch):

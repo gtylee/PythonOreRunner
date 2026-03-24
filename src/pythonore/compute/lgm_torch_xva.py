@@ -384,6 +384,157 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
         return pv.detach().cpu().numpy() if return_numpy else pv
 
 
+def price_plain_rate_leg_paths_torch(
+    model: LGM1F,
+    disc_curve: TorchDiscountCurve,
+    leg: Mapping[str, np.ndarray | float | str],
+    times: np.ndarray,
+    x_paths,
+    *,
+    fwd_curve: Optional[TorchDiscountCurve] = None,
+    return_numpy: bool = True,
+):
+    torch = _require_torch()
+    kind = str(leg.get("kind", "")).upper()
+    if kind not in {"FIXED", "FLOATING"}:
+        raise ValueError(f"unsupported plain rate leg kind '{kind}'")
+    with torch.inference_mode():
+        eval_times_np = np.asarray(times, dtype=float)
+        x = torch.as_tensor(x_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
+        if x.ndim != 2 or x.shape[0] != eval_times_np.size:
+            raise ValueError("x_paths must have shape [n_times, n_paths]")
+        eval_times = torch.as_tensor(eval_times_np, dtype=x.dtype, device=x.device)
+        pay_np = np.asarray(leg.get("pay_time", []), dtype=float)
+        if pay_np.size == 0:
+            out = torch.zeros_like(x)
+            return out.detach().cpu().numpy() if return_numpy else out
+        pay = torch.as_tensor(pay_np, dtype=x.dtype, device=x.device)
+        live = (pay[None, :] >= 0.0) & (pay[None, :] > eval_times[:, None] + 1.0e-12)
+        p_tp_d = discount_bond_path_grid_torch(
+            model,
+            eval_times_np,
+            pay_np,
+            x,
+            disc_curve.discount(eval_times),
+            disc_curve.discount(pay),
+        )
+
+        if kind == "FIXED":
+            amount = torch.as_tensor(np.asarray(leg.get("amount", np.zeros(pay_np.shape)), dtype=float), dtype=x.dtype, device=x.device)
+            pv = torch.sum(p_tp_d * amount[None, :, None] * live[:, :, None], dim=1)
+            return pv.detach().cpu().numpy() if return_numpy else pv
+
+        if fwd_curve is None:
+            raise ValueError("floating rate leg requires fwd_curve")
+
+        start_np = np.asarray(leg.get("start_time", []), dtype=float)
+        end_np = np.asarray(leg.get("end_time", []), dtype=float)
+        fixing_np = np.asarray(leg.get("fixing_time", start_np), dtype=float)
+        quoted_np = np.asarray(leg.get("quoted_coupon", np.zeros(start_np.shape)), dtype=float)
+        fixed_mask_np = np.asarray(
+            leg.get("is_historically_fixed", np.zeros(start_np.shape, dtype=bool)),
+            dtype=bool,
+        )
+        spread_np = np.asarray(leg.get("spread", np.zeros(start_np.shape)), dtype=float)
+        gearing_np = np.asarray(leg.get("gearing", np.ones(start_np.shape)), dtype=float)
+        accr_np = np.asarray(leg.get("accrual", np.zeros(start_np.shape)), dtype=float)
+        index_accr_np = np.asarray(leg.get("index_accrual", accr_np), dtype=float)
+        start = torch.as_tensor(start_np, dtype=x.dtype, device=x.device)
+        end = torch.as_tensor(end_np, dtype=x.dtype, device=x.device)
+        fixing = torch.as_tensor(fixing_np, dtype=x.dtype, device=x.device)
+        quoted = torch.as_tensor(quoted_np, dtype=x.dtype, device=x.device)
+        fixed_mask = torch.as_tensor(fixed_mask_np, dtype=torch.bool, device=x.device)
+        spread = torch.as_tensor(spread_np, dtype=x.dtype, device=x.device)
+        gearing = torch.as_tensor(gearing_np, dtype=x.dtype, device=x.device)
+        accr = torch.as_tensor(accr_np, dtype=x.dtype, device=x.device)
+        index_accr = torch.as_tensor(index_accr_np, dtype=x.dtype, device=x.device)
+
+        p_t_f = fwd_curve.discount(eval_times)
+        p_te_f = discount_bond_path_grid_torch(
+            model,
+            eval_times_np,
+            end_np,
+            x,
+            p_t_f,
+            fwd_curve.discount(end),
+        )
+        p_ts_f = discount_bond_path_grid_torch(
+            model,
+            eval_times_np,
+            start_np,
+            x,
+            p_t_f,
+            fwd_curve.discount(start),
+        )
+        after_start = eval_times[:, None] >= start[None, :] - 1.0e-12
+        p_ts_f = torch.where(after_start[:, :, None], torch.ones_like(p_ts_f), p_ts_f)
+        tau = torch.clamp(index_accr[None, :, None], min=torch.as_tensor(1.0e-8, dtype=x.dtype, device=x.device))
+        floating_base = (p_ts_f / p_te_f - 1.0) / tau
+        fixed_now = fixed_mask[None, :] | (fixing[None, :] <= eval_times[:, None] + 1.0e-12)
+        base = torch.where(fixed_now[:, :, None], quoted[None, :, None], floating_base)
+        coupon = gearing[None, :, None] * base + spread[None, :, None]
+        notional = float(leg.get("notional", 0.0))
+        sign = float(leg.get("sign", 1.0))
+        amount = sign * notional * accr[None, :, None] * coupon
+        pv = torch.sum(amount * p_tp_d * live[:, :, None], dim=1)
+        return pv.detach().cpu().numpy() if return_numpy else pv
+
+
+def par_swap_rate_paths_torch(
+    model: LGM1F,
+    curve: TorchDiscountCurve,
+    t: float,
+    x_t,
+    start: float,
+    tenor_years: float,
+    *,
+    return_numpy: bool = True,
+):
+    torch = _require_torch()
+    with torch.inference_mode():
+        x = torch.as_tensor(x_t, dtype=curve.dtype, device=curve.device_obj)
+        effective_start = max(float(start), float(t))
+        maturity = effective_start + max(float(tenor_years), 1.0e-8)
+        pay_times = np.arange(effective_start + 1.0, maturity + 1.0e-10, 1.0)
+        if pay_times.size == 0 or pay_times[-1] < maturity - 1.0e-10:
+            pay_times = np.append(pay_times, maturity)
+        p_t = curve.discount(float(t))
+        p_start = discount_bond_paths_torch(
+            model,
+            float(t),
+            np.asarray([effective_start], dtype=float),
+            x,
+            p_t,
+            curve.discount(torch.as_tensor([effective_start], dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+        )[0]
+        p_end = discount_bond_paths_torch(
+            model,
+            float(t),
+            np.asarray([maturity], dtype=float),
+            x,
+            p_t,
+            curve.discount(torch.as_tensor([maturity], dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+        )[0]
+        annuity = torch.zeros_like(x)
+        prev = effective_start
+        for pay in pay_times:
+            tau = max(float(pay) - prev, 1.0e-8)
+            disc = discount_bond_paths_torch(
+                model,
+                float(t),
+                np.asarray([float(pay)], dtype=float),
+                x,
+                p_t,
+                curve.discount(torch.as_tensor([float(pay)], dtype=x.dtype, device=x.device)).detach().cpu().numpy(),
+            )[0]
+            annuity = annuity + float(tau) * disc
+            prev = float(pay)
+        eps = torch.as_tensor(1.0e-12, dtype=x.dtype, device=x.device)
+        annuity = torch.where(torch.abs(annuity) < eps, eps, annuity)
+        out = (p_start - p_end) / annuity
+        return out.detach().cpu().numpy() if return_numpy else out
+
+
 __all__ = [
     "TorchDiscountCurve",
     "discount_bond_paths_torch",
@@ -393,4 +544,6 @@ __all__ = [
     "deflate_lgm_npv_paths_torch",
     "swap_npv_paths_from_ore_legs_dual_curve_torch",
     "deflate_lgm_npv_paths_torch_batched",
+    "price_plain_rate_leg_paths_torch",
+    "par_swap_rate_paths_torch",
 ]

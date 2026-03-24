@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
@@ -32,6 +34,7 @@ from pythonore.runtime.runtime import (
     _quote_matches_discount_curve,
     classify_portfolio_support,
 )
+from pythonore.mapping.mapper import map_snapshot
 
 
 def _make_snapshot(*, include_unsupported: bool = False, runtime: RuntimeConfig | None = None, params=None) -> XVASnapshot:
@@ -132,6 +135,38 @@ def _generic_capfloor_trade_xml() -> str:
       <Index>EUR-EURIBOR-6M</Index>
       <FixingDays>2</FixingDays>
       <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</CapFloorData>
+""".strip()
+
+
+def _generic_capfloor_in_arrears_trade_xml() -> str:
+    return """
+<CapFloorData>
+  <LongShort>Long</LongShort>
+  <Caps><Cap>0.03</Cap></Caps>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>USD</Currency>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-09-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SOFR-3M</Index>
+      <FixingDays>0</FixingDays>
+      <IsInArrears>true</IsInArrears>
       <Spreads><Spread>0.0</Spread></Spreads>
       <Gearings><Gearing>1.0</Gearing></Gearings>
     </FloatingLegData>
@@ -389,6 +424,11 @@ def test_native_runtime_keeps_fixed_ore_grid_without_trade_date_augmentation():
     assert result.metadata["grid_size"] >= 3
 
 
+def test_python_lgm_default_is_native_only_by_default():
+    engine = XVAEngine.python_lgm_default()
+    assert engine.adapter.fallback_to_swig is False
+
+
 def test_native_runtime_filters_past_cashflow_payments():
     snapshot = _make_snapshot()
     past_cashflow_trade = Trade(
@@ -405,6 +445,84 @@ def test_native_runtime_filters_past_cashflow_payments():
     )
     result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
     assert abs(float(result.pv_total)) <= 1.0e-12
+
+
+def test_native_runtime_emits_progress_logs(capsys):
+    snapshot = _make_snapshot(params={"python.progress": "Y", "python.progress_bar": "N", "python.progress_log_interval": 1})
+    XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
+    err = capsys.readouterr().err
+    assert "extracting runtime inputs" in err
+    assert "support classification:" in err
+    assert "native pricing:" in err
+    assert "run complete:" in err
+
+
+def test_native_runtime_auto_lgm_calibration_does_not_fall_back_to_ore_subprocess():
+    snapshot = _make_snapshot(params={"python.lgm_param_source": "auto"})
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+    runtime_params = {
+        "alpha_times": np.array([], dtype=float),
+        "alpha_values": np.array([0.01], dtype=float),
+        "kappa_times": np.array([], dtype=float),
+        "kappa_values": np.array([0.03], dtype=float),
+        "shift": 0.0,
+        "scaling": 1.0,
+    }
+    snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            source_meta=SimpleNamespace(path="/tmp/fake/ore.xml"),
+        ),
+    )
+    xml = {"simulation.xml": _simulation_xml_with_grid("4,6M")}
+    fake_root = ET.fromstring(
+        """
+<ORE>
+  <Setup>
+    <Parameter name="marketDataFile">market.txt</Parameter>
+    <Parameter name="curveConfigFile">curve.xml</Parameter>
+    <Parameter name="conventionsFile">conv.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+  </Setup>
+  <Analytics>
+    <Analytic type="simulation">
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""".strip()
+    )
+    with patch.object(adapter, "_is_ore_case_snapshot", return_value=True), patch(
+        "pythonore.runtime.runtime.ET.parse",
+        return_value=SimpleNamespace(getroot=lambda: fake_root),
+    ), patch.object(
+        adapter._ore_snapshot_mod,
+        "_resolve_case_dirs",
+        return_value=(Path("/tmp/fake/ore.xml"), fake_root, Path("/tmp/fake/Input")),
+    ), patch.object(
+        adapter._ore_snapshot_mod,
+        "_resolve_ore_path",
+        side_effect=lambda rel, base: Path(base) / str(rel or "missing"),
+    ), patch.object(
+        adapter._ore_snapshot_mod,
+        "_resolve_output_ore_path",
+        return_value=Path("/tmp/fake/Output"),
+    ), patch.object(
+        adapter._ore_snapshot_mod,
+        "calibrate_lgm_params_in_python",
+        return_value=runtime_params,
+    ) as py_cal, patch.object(
+        adapter._ore_snapshot_mod,
+        "calibrate_lgm_params_via_ore",
+        side_effect=AssertionError("ORE calibration subprocess should not run in auto mode"),
+    ):
+        params, source = adapter._parse_model_params(xml, "EUR", snapshot)
+    assert source == "calibration"
+    assert float(np.asarray(params["alpha_values"], dtype=float)[0]) == 0.01
+    py_cal.assert_called()
 
 
 def test_native_runtime_fails_fast_on_trade_nan():
@@ -466,6 +584,25 @@ def test_native_runtime_supports_generic_cashflow_capfloor_and_swaption():
     coverage = result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
+
+
+def test_native_runtime_keeps_in_arrears_capfloors_off_native_path():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_IN_ARREARS",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_capfloor_in_arrears_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, analytics=("CVA",)),
+    )
+    support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+    assert support["native_trade_count"] == 0
+    assert support["requires_swig_trade_ids"] == ["CAP_IN_ARREARS"]
 
 
 def test_python_lgm_runtime_attaches_dim_reports_and_metadata():

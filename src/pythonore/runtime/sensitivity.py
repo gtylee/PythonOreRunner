@@ -59,7 +59,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
     """Finite-difference XVA sensitivities for ore_snapshot plus ORE comparison."""
 
     def __init__(self, engine: Optional[XVAEngine] = None):
-        self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=True)
+        self.engine = engine or XVAEngine.python_lgm_default(fallback_to_swig=False)
         self._swap_npv_backend_cache = None
         self._supported_quotes_cache: Dict[tuple[int, int], Dict[str, List[Tuple[int, MarketQuote]]]] = {}
 
