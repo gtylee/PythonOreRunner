@@ -14,6 +14,7 @@ import argparse
 import os
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 import subprocess
 import sys
 
@@ -70,6 +71,12 @@ def _run(cmd: list[str]) -> None:
         pythonpath_parts.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=True)
+
+
+def _safe_rate(units: float, seconds: float) -> float:
+    if seconds <= 0.0:
+        return float("inf")
+    return float(units) / float(seconds)
 
 
 def main() -> None:
@@ -162,10 +169,25 @@ def main() -> None:
     print(f"  paths                    : {args.paths}")
     print(f"  lgm_param_source         : {args.lgm_param_source}")
     print(f"  torch_device             : {args.device}")
-    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(run_snapshot).run(return_cubes=False)
+    engine = XVAEngine.python_lgm_default(fallback_to_swig=False)
+    session_build_t0 = perf_counter()
+    session = engine.create_session(run_snapshot)
+    session_build_sec = perf_counter() - session_build_t0
+    run_t0 = perf_counter()
+    result = session.run(return_cubes=False)
+    run_sec = perf_counter() - run_t0
+    trade_count = len(snapshot.portfolio.trades)
+    path_trade_units = float(trade_count) * float(args.paths)
     print("Run summary")
     print(f"  pv_total                 : {float(result.pv_total):.6f}")
     print(f"  cva                      : {float(result.xva_by_metric.get('CVA', 0.0)):.6f}")
+    print(f"  xva_total                : {float(result.xva_total):.6f}")
+    print("Performance summary")
+    print(f"  session_build_sec        : {session_build_sec:.6f}")
+    print(f"  run_sec                  : {run_sec:.6f}")
+    print(f"  trades_per_sec           : {_safe_rate(trade_count, run_sec):.2f}")
+    print(f"  paths_per_sec            : {_safe_rate(args.paths, run_sec):.2f}")
+    print(f"  path_trades_per_sec      : {_safe_rate(path_trade_units, run_sec):.2f}")
 
 
 if __name__ == "__main__":
