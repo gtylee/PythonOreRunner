@@ -140,6 +140,18 @@ def discount_bond_path_grid_torch(
     h_T = torch.as_tensor(np.asarray(model.H(T_np), dtype=float), dtype=x.dtype, device=x.device)
     p0_t_t = torch.as_tensor(p0_t, dtype=x.dtype, device=x.device)
     p0_T_t = torch.as_tensor(p0_T, dtype=x.dtype, device=x.device)
+    return _discount_bond_path_grid_from_terms_torch(x, h_t, z_t, h_T, p0_t_t, p0_T_t)
+
+
+def _discount_bond_path_grid_from_terms_torch(
+    x,
+    h_t,
+    z_t,
+    h_T,
+    p0_t_t,
+    p0_T_t,
+):
+    torch = _require_torch()
     d_h = h_T[None, :] - h_t[:, None]
     d_h2 = h_T[None, :] * h_T[None, :] - h_t[:, None] * h_t[:, None]
     return (p0_T_t[None, :] / p0_t_t[:, None])[:, :, None] * torch.exp(
@@ -342,6 +354,61 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
         legs_t = _tensorize_legs(legs, device=disc_curve.device, dtype=disc_curve.dtype)
         eval_times = torch.as_tensor(eval_times_np, dtype=x.dtype, device=x.device)
         pv = torch.zeros_like(x)
+        h_eval = torch.as_tensor(np.asarray(model.H(eval_times_np), dtype=float), dtype=x.dtype, device=x.device)
+        z_eval = torch.as_tensor(np.asarray(model.zeta(eval_times_np), dtype=float), dtype=x.dtype, device=x.device)
+        disc_eval = disc_curve.discount(eval_times)
+        fwd_eval = fwd_curve.discount(eval_times)
+
+        fixed_pay_np = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+        float_pay_np = np.asarray(legs.get("float_pay_time", []), dtype=float)
+        float_start_np = np.asarray(legs.get("float_start_time", []), dtype=float)
+        float_end_np = np.asarray(legs.get("float_end_time", []), dtype=float)
+
+        disc_parts = []
+        disc_meta: dict[str, np.ndarray] = {}
+        if fixed_pay_np.size > 0:
+            disc_parts.append(fixed_pay_np)
+        if float_pay_np.size > 0:
+            disc_parts.append(float_pay_np)
+        if disc_parts:
+            disc_union, disc_inverse = np.unique(np.concatenate(disc_parts), return_inverse=True)
+            offset = 0
+            if fixed_pay_np.size > 0:
+                disc_meta["fixed_pay"] = disc_inverse[offset : offset + fixed_pay_np.size]
+                offset += fixed_pay_np.size
+            if float_pay_np.size > 0:
+                disc_meta["float_pay"] = disc_inverse[offset : offset + float_pay_np.size]
+            h_disc = torch.as_tensor(np.asarray(model.H(disc_union), dtype=float), dtype=x.dtype, device=x.device)
+            p_disc_union = disc_curve.discount(torch.as_tensor(disc_union, dtype=x.dtype, device=x.device))
+            disc_grid_union = _discount_bond_path_grid_from_terms_torch(x, h_eval, z_eval, h_disc, disc_eval, p_disc_union)
+        else:
+            disc_grid_union = torch.empty((eval_times.numel(), 0, x.shape[1]), dtype=x.dtype, device=x.device)
+
+        fwd_parts = []
+        fwd_meta: dict[str, np.ndarray] = {}
+        if float_start_np.size > 0:
+            fwd_parts.append(float_start_np)
+        if float_end_np.size > 0:
+            fwd_parts.append(float_end_np)
+        if fwd_parts:
+            fwd_union, fwd_inverse = np.unique(np.concatenate(fwd_parts), return_inverse=True)
+            offset = 0
+            if float_start_np.size > 0:
+                fwd_meta["float_start"] = fwd_inverse[offset : offset + float_start_np.size]
+                offset += float_start_np.size
+            if float_end_np.size > 0:
+                fwd_meta["float_end"] = fwd_inverse[offset : offset + float_end_np.size]
+            h_fwd = torch.as_tensor(np.asarray(model.H(fwd_union), dtype=float), dtype=x.dtype, device=x.device)
+            p_fwd_union = fwd_curve.discount(torch.as_tensor(fwd_union, dtype=x.dtype, device=x.device))
+            fwd_grid_union = _discount_bond_path_grid_from_terms_torch(x, h_eval, z_eval, h_fwd, fwd_eval, p_fwd_union)
+        else:
+            fwd_grid_union = torch.empty((eval_times.numel(), 0, x.shape[1]), dtype=x.dtype, device=x.device)
+
+        def gather_grid(grid_union, inverse_idx: np.ndarray):
+            if inverse_idx.size == 0:
+                return torch.empty((eval_times.numel(), 0, x.shape[1]), dtype=x.dtype, device=x.device)
+            idx_t = torch.as_tensor(np.asarray(inverse_idx, dtype=np.int64), dtype=torch.long, device=x.device)
+            return torch.index_select(grid_union, 1, idx_t)
 
     fixed_pay = legs_t["fixed_pay_time"]
     fixed_amount = legs_t["fixed_amount"]
@@ -351,14 +418,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
             fixed_live = fixed_start[None, :] >= eval_times[:, None] - 1.0e-12
         else:
             fixed_live = fixed_pay[None, :] > eval_times[:, None] + 1.0e-12
-        fixed_disc = discount_bond_path_grid_torch(
-            model,
-            eval_times_np,
-            fixed_pay.detach().cpu().numpy(),
-            x,
-            disc_curve.discount(eval_times),
-            disc_curve.discount(fixed_pay),
-        )
+        fixed_disc = gather_grid(disc_grid_union, disc_meta["fixed_pay"])
         pv = pv + torch.sum(fixed_disc * fixed_amount[None, :, None] * fixed_live[:, :, None], dim=1)
 
     pay = legs_t["float_pay_time"]
@@ -371,14 +431,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
         notionals = legs_t["float_notional"]
         sign = legs_t["float_sign"]
         spread = legs_t["float_spread"]
-        p_tp_d = discount_bond_path_grid_torch(
-            model,
-            eval_times_np,
-            pay.detach().cpu().numpy(),
-            x,
-            disc_curve.discount(eval_times),
-            disc_curve.discount(pay),
-        )
+        p_tp_d = gather_grid(disc_grid_union, disc_meta["float_pay"])
         if exercise_into_whole_periods:
             live = start[None, :] >= eval_times[:, None] - 1.0e-12
         else:
@@ -400,22 +453,8 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
 
         unfixed = live & ~fixed
         if torch.any(unfixed):
-            p_ts_f = discount_bond_path_grid_torch(
-                model,
-                eval_times_np,
-                start.detach().cpu().numpy(),
-                x,
-                fwd_curve.discount(eval_times),
-                fwd_curve.discount(start),
-            )
-            p_te_f = discount_bond_path_grid_torch(
-                model,
-                eval_times_np,
-                end.detach().cpu().numpy(),
-                x,
-                fwd_curve.discount(eval_times),
-                fwd_curve.discount(end),
-            )
+            p_ts_f = gather_grid(fwd_grid_union, fwd_meta["float_start"])
+            p_te_f = gather_grid(fwd_grid_union, fwd_meta["float_end"])
             fwd = (p_ts_f / p_te_f - 1.0) / index_tau[None, :, None]
             float_amounts = sign[None, :, None] * notionals[None, :, None] * (fwd + spread[None, :, None]) * tau[None, :, None]
             amount = amount + float_amounts * unfixed[:, :, None]
