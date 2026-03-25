@@ -291,6 +291,7 @@ def capfloor_npv(
     if np.any(~fixed_mask):
         s2 = s[~fixed_mask]
         e2 = e[~fixed_mask]
+        s2_eff = np.maximum(s2, float(t))
         a2 = a[~fixed_mask]
         n2 = n[~fixed_mask]
         k2 = k[~fixed_mask]
@@ -298,13 +299,13 @@ def capfloor_npv(
         s2_spread = sread[~fixed_mask]
 
         p_t = float(p0_disc(t))
-        p_ts_d = model.discount_bond_paths(t, s2, x, p_t, lambda u: float(p0_disc(float(u))))
+        p_ts_d = model.discount_bond_paths(t, s2_eff, x, p_t, lambda u: float(p0_disc(float(u))))
         p_te_d = model.discount_bond_paths(t, e2, x, p_t, lambda u: float(p0_disc(float(u))))
 
         # Dual-curve mapping: derive forwarding bonds from discounting bonds using
         # the deterministic t=0 basis ratio.
         bt = float(p0_fwd(t) / p0_disc(t))
-        bs = np.array([float(p0_fwd(float(u)) / p0_disc(float(u))) for u in s2], dtype=float)
+        bs = np.array([float(p0_fwd(float(u)) / p0_disc(float(u))) for u in s2_eff], dtype=float)
         be = np.array([float(p0_fwd(float(u)) / p0_disc(float(u))) for u in e2], dtype=float)
         c = be / bs  # P_f(T0,T1) = c * P_d(T0,T1)
 
@@ -314,10 +315,10 @@ def capfloor_npv(
         kbar_d = (1.0 + ((strike_adj * a2) / np.clip(g2, 1.0e-18, None))) * c
         strike_bond = 1.0 / np.clip(kbar_d, 1.0e-18, None)
 
-        h_s = np.asarray(model.H(s2), dtype=float)
+        h_s = np.asarray(model.H(s2_eff), dtype=float)
         h_e = np.asarray(model.H(e2), dtype=float)
         z_t = float(model.zeta(t))
-        z_s = np.asarray(model.zeta(s2), dtype=float)
+        z_s = np.asarray(model.zeta(s2_eff), dtype=float)
         sigma = np.abs(h_e - h_s) * np.sqrt(np.clip(z_s - z_t, 0.0, None))
 
         fwd_bond = p_te_d / np.clip(p_ts_d, 1.0e-18, None)
@@ -391,6 +392,11 @@ def capfloor_npv_paths(
                 if tf > ti + 1.0e-12:
                     continue
                 if tf <= 1.0e-12:
+                    ps = float(p0_fwd(max(0.0, float(start[j]))))
+                    pe = float(p0_fwd(float(end[j])))
+                    rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
+                    continue
+                if tf >= float(end[j]) - 1.0e-12:
                     ps = float(p0_fwd(max(0.0, float(start[j]))))
                     pe = float(p0_fwd(float(end[j])))
                     rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])

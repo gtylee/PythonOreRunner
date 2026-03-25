@@ -701,6 +701,7 @@ def capfloor_npv_torch(
         pv_unfixed = torch.zeros_like(x)
         if np.any(~fixed_mask):
             s2 = s[~fixed_mask]
+            s2_eff = np.maximum(s2, float(t))
             e2 = e[~fixed_mask]
             p2 = p[~fixed_mask]
             a2 = a[~fixed_mask]
@@ -713,10 +714,10 @@ def capfloor_npv_torch(
             p_ts_d = discount_bond_paths_torch(
                 model,
                 float(t),
-                s2,
+                s2_eff,
                 x,
                 p_t,
-                disc_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device)),
+                disc_curve.discount(torch.as_tensor(s2_eff, dtype=x.dtype, device=x.device)),
             )
             p_te_d = discount_bond_paths_torch(
                 model,
@@ -728,8 +729,8 @@ def capfloor_npv_torch(
             )
             bt = float(fwd_curve.discount(float(t)) / disc_curve.discount(float(t)))
             bs = (
-                fwd_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device))
-                / disc_curve.discount(torch.as_tensor(s2, dtype=x.dtype, device=x.device))
+                fwd_curve.discount(torch.as_tensor(s2_eff, dtype=x.dtype, device=x.device))
+                / disc_curve.discount(torch.as_tensor(s2_eff, dtype=x.dtype, device=x.device))
             )
             be = (
                 fwd_curve.discount(torch.as_tensor(e2, dtype=x.dtype, device=x.device))
@@ -741,10 +742,10 @@ def capfloor_npv_torch(
             a2_t = torch.as_tensor(a2, dtype=x.dtype, device=x.device)
             kbar_d = (1.0 + (strike_adj * a2_t) / torch.clamp(g2_t, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))) * c
             strike_bond = 1.0 / torch.clamp(kbar_d, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))
-            h_s = torch.as_tensor(np.asarray(model.H(s2), dtype=float), dtype=x.dtype, device=x.device)
+            h_s = torch.as_tensor(np.asarray(model.H(s2_eff), dtype=float), dtype=x.dtype, device=x.device)
             h_e = torch.as_tensor(np.asarray(model.H(e2), dtype=float), dtype=x.dtype, device=x.device)
             z_t = float(model.zeta(float(t)))
-            z_s = torch.as_tensor(np.asarray(model.zeta(s2), dtype=float), dtype=x.dtype, device=x.device)
+            z_s = torch.as_tensor(np.asarray(model.zeta(s2_eff), dtype=float), dtype=x.dtype, device=x.device)
             sigma = torch.abs(h_e - h_s) * torch.sqrt(torch.clamp(z_s - z_t, min=0.0))
             fwd_bond = p_te_d / torch.clamp(p_ts_d, min=torch.as_tensor(1.0e-18, dtype=x.dtype, device=x.device))
             k_mat = strike_bond[:, None]

@@ -3429,12 +3429,6 @@ class PythonLgmAdapter:
         accr = np.asarray([year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
         fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
         in_arrears = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
-        if in_arrears:
-            # The native cap/floor pricer below assumes forward-start coupons with
-            # fixing no later than accrual start. In-arrears compounded structures
-            # like SOFR caps need a different valuation treatment, so keep them on
-            # the fallback path rather than mispricing or crashing mid-run.
-            return None
         fixing_base = e_dates if in_arrears else s_dates
         fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
         fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)

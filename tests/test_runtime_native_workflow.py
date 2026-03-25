@@ -896,7 +896,7 @@ def test_torch_generic_capfloor_matches_numpy_runtime():
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
 
 
-def test_native_runtime_keeps_in_arrears_capfloors_off_native_path():
+def test_native_runtime_supports_in_arrears_capfloors():
     snapshot = _make_snapshot()
     trade = Trade(
         trade_id="CAP_IN_ARREARS",
@@ -911,8 +911,11 @@ def test_native_runtime_keeps_in_arrears_capfloors_off_native_path():
         config=replace(snapshot.config, analytics=("CVA",)),
     )
     support = classify_portfolio_support(snapshot, fallback_to_swig=False)
-    assert support["native_trade_count"] == 0
-    assert support["requires_swig_trade_ids"] == ["CAP_IN_ARREARS"]
+    assert support["native_trade_count"] == 1
+    assert support["requires_swig_trade_ids"] == []
+
+    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
+    assert np.isfinite(float(result.pv_total))
 
 
 def test_native_runtime_torch_bermudan_parity():
