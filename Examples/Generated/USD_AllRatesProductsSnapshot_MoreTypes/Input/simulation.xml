@@ -33,8 +33,8 @@
           <InitialValue>0.03</InitialValue>
         </Reversion>
         <CalibrationSwaptions>
-          <Expiries>1Y,2Y,4Y,6Y,8Y,10Y,12Y,14Y,16Y,18Y,19Y</Expiries>
-          <Terms>19Y,18Y,16Y,14Y,12Y,10Y,8Y,6Y,4Y,2Y,1Y</Terms>
+          <Expiries>6M,1Y,2Y,3Y,5Y,10Y</Expiries>
+          <Terms>1Y,2Y,3Y,5Y,10Y,30Y</Terms>
           <Strikes/>
         </CalibrationSwaptions>
         <ParameterTransformation>
@@ -59,10 +59,23 @@
       </Configuration>
     </YieldCurves>
     <Indices>
+      <Index>USD-FedFunds</Index>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
       <Index>USD-SIFMA</Index>
+      <Index>USD-SOFR</Index>
+      <Index>USD-SOFR-3M</Index>
     </Indices>
+    <SwapIndices>
+      <SwapIndex>
+        <Name>USD-CMS-2Y</Name>
+        <DiscountingIndex>USD-SOFR</DiscountingIndex>
+      </SwapIndex>
+      <SwapIndex>
+        <Name>USD-CMS-30Y</Name>
+        <DiscountingIndex>USD-SOFR</DiscountingIndex>
+      </SwapIndex>
+    </SwapIndices>
     <DefaultCurves>
       <Names/>
       <Tenors>6M,1Y,2Y</Tenors>
@@ -72,16 +85,19 @@
       <Currencies>
         <Currency>USD</Currency>
       </Currencies>
-      <Expiries>6M,1Y,2Y,3Y,5Y,10Y,12Y,15Y,20Y</Expiries>
-      <Terms>1Y,2Y,3Y,4Y,5Y,7Y,10Y,15Y,20Y,30Y</Terms>
+      <Expiries>6M,1Y,2Y,3Y,5Y,10Y</Expiries>
+      <Terms>1Y,2Y,3Y,5Y,10Y,30Y</Terms>
     </SwaptionVolatilities>
     <AggregationScenarioDataCurrencies>
       <Currency>USD</Currency>
     </AggregationScenarioDataCurrencies>
     <AggregationScenarioDataIndices>
+      <Index>USD-FedFunds</Index>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
       <Index>USD-SIFMA</Index>
+      <Index>USD-SOFR</Index>
+      <Index>USD-SOFR-3M</Index>
     </AggregationScenarioDataIndices>
   </Market>
 </Simulation>

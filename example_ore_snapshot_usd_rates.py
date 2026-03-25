@@ -123,7 +123,57 @@ def _trade_blocks(count_per_type: int, *, include_digital_cmsspread: bool) -> li
     return blocks
 
 
+def _suffix_index(suffix: str) -> int:
+    return max(int(suffix), 1)
+
+
+def _add_months(yyyymmdd: str, months: int) -> str:
+    year = int(yyyymmdd[0:4])
+    month = int(yyyymmdd[4:6])
+    day = int(yyyymmdd[6:8])
+    month0 = (month - 1) + int(months)
+    year += month0 // 12
+    month = (month0 % 12) + 1
+    if month == 2:
+        leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        month_days = 29 if leap else 28
+    elif month in {4, 6, 9, 11}:
+        month_days = 30
+    else:
+        month_days = 31
+    day = min(day, month_days)
+    return f"{year:04d}{month:02d}{day:02d}"
+
+
+def _compact_to_iso(yyyymmdd: str) -> str:
+    return f"{yyyymmdd[0:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+
+
+def _rate_book_variant(suffix: str) -> dict[str, float | str]:
+    idx = _suffix_index(suffix) - 1
+    start_shift_months = (idx % 12) * 3
+    maturity_shift_months = ((idx // 12) % 5 - 1) * 12
+    notional_scale = 1.0 + 0.05 * (idx % 5)
+    coupon_shift = (idx % 9 - 4) * 0.0004
+    spread_shift = (idx % 7 - 3) * 0.00025
+    strike_shift = (idx % 5 - 2) * 0.0015
+    return {
+        "start_shift_months": start_shift_months,
+        "maturity_shift_months": maturity_shift_months,
+        "notional_scale": notional_scale,
+        "coupon_shift": coupon_shift,
+        "spread_shift": spread_shift,
+        "strike_shift": strike_shift,
+    }
+
+
 def _irs_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20260209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(10_000_000 * float(v["notional_scale"])))
+    fixed_rate = 0.025 + float(v["coupon_shift"])
+    float_spread = float(v["spread_shift"])
     return f"""  <Trade id="IRS_USD_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
@@ -137,19 +187,19 @@ def _irs_trade_xml(suffix: str) -> str:
         <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>30/360</DayCounter>
         <PaymentConvention>F</PaymentConvention>
         <FixedLegData>
           <Rates>
-            <Rate>0.025</Rate>
+            <Rate>{fixed_rate:.6f}</Rate>
           </Rates>
         </FixedLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -164,22 +214,22 @@ def _irs_trade_xml(suffix: str) -> str:
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <FloatingLegData>
           <Index>USD-LIBOR-3M</Index>
           <Spreads>
-            <Spread>0.0</Spread>
+            <Spread>{float_spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>3M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -194,6 +244,12 @@ def _irs_trade_xml(suffix: str) -> str:
 
 
 def _cap_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20260209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(1_000_000 * float(v["notional_scale"])))
+    strike = max(0.005, 0.04 + float(v["strike_shift"]))
+    spread = float(v["spread_shift"])
     return f"""  <Trade id="CAP_USD_{suffix}">
     <TradeType>CapFloor</TradeType>
     <Envelope>
@@ -210,12 +266,12 @@ def _cap_trade_xml(suffix: str) -> str:
         <DayCounter>ACT/360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <Notionals>
-          <Notional>1000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>3M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -227,14 +283,14 @@ def _cap_trade_xml(suffix: str) -> str:
         <FloatingLegData>
           <Index>USD-LIBOR-3M</Index>
           <Spreads>
-            <Spread>0</Spread>
+            <Spread>{spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </FloatingLegData>
       </LegData>
       <Caps>
-        <Cap>0.04</Cap>
+        <Cap>{strike:.6f}</Cap>
       </Caps>
       <Floors/>
     </CapFloorData>
@@ -242,6 +298,12 @@ def _cap_trade_xml(suffix: str) -> str:
 
 
 def _floor_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20260209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(1_000_000 * float(v["notional_scale"])))
+    strike = max(0.0001, 0.01 + 0.5 * float(v["strike_shift"]))
+    spread = float(v["spread_shift"])
     return f"""  <Trade id="FLOOR_USD_{suffix}">
     <TradeType>CapFloor</TradeType>
     <Envelope>
@@ -258,12 +320,12 @@ def _floor_trade_xml(suffix: str) -> str:
         <DayCounter>ACT/360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <Notionals>
-          <Notional>1000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>3M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -275,7 +337,7 @@ def _floor_trade_xml(suffix: str) -> str:
         <FloatingLegData>
           <Index>USD-LIBOR-3M</Index>
           <Spreads>
-            <Spread>0</Spread>
+            <Spread>{spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
@@ -283,13 +345,19 @@ def _floor_trade_xml(suffix: str) -> str:
       </LegData>
       <Caps/>
       <Floors>
-        <Floor>0.01</Floor>
+        <Floor>{strike:.6f}</Floor>
       </Floors>
     </CapFloorData>
   </Trade>"""
 
 
 def _cms_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20360209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(10_000_000 * float(v["notional_scale"])))
+    fixed_rate = 0.028 + 0.75 * float(v["coupon_shift"])
+    spread = float(v["spread_shift"])
     return f"""  <Trade id="CMS_SWAP_USD_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
@@ -303,19 +371,19 @@ def _cms_trade_xml(suffix: str) -> str:
         <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>30/360</DayCounter>
         <PaymentConvention>F</PaymentConvention>
         <FixedLegData>
           <Rates>
-            <Rate>0.028</Rate>
+            <Rate>{fixed_rate:.6f}</Rate>
           </Rates>
         </FixedLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20360209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>1Y</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -330,22 +398,22 @@ def _cms_trade_xml(suffix: str) -> str:
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <CMSLegData>
           <Index>USD-CMS-30Y</Index>
           <Spreads>
-            <Spread>0.0</Spread>
+            <Spread>{spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </CMSLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20360209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -360,6 +428,14 @@ def _cms_trade_xml(suffix: str) -> str:
 
 
 def _cmsspread_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20310209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(10_000_000 * float(v["notional_scale"])))
+    cms_spread = 0.001 + float(v["spread_shift"])
+    libor_spread = 0.002 + 0.5 * float(v["spread_shift"])
+    cap = max(0.02, 0.06 + float(v["strike_shift"]))
+    gearing = 2.0 + 0.1 * ((_suffix_index(suffix) - 1) % 3)
     return f"""  <Trade id="CMSSPREAD_USD_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
@@ -373,7 +449,7 @@ def _cmsspread_trade_xml(suffix: str) -> str:
         <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>30/360</DayCounter>
         <PaymentConvention>F</PaymentConvention>
@@ -383,23 +459,23 @@ def _cmsspread_trade_xml(suffix: str) -> str:
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
           <Caps>
-            <Cap>0.06</Cap>
+            <Cap>{cap:.6f}</Cap>
           </Caps>
           <Floors>
             <Floor>0.00</Floor>
           </Floors>
           <Gearings>
-            <Gearing>2.0</Gearing>
+            <Gearing>{gearing:.6f}</Gearing>
           </Gearings>
           <Spreads>
-            <Spread>0.001</Spread>
+            <Spread>{cms_spread:.6f}</Spread>
           </Spreads>
           <NakedOption>false</NakedOption>
         </CMSSpreadLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20310209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>1Y</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -414,22 +490,22 @@ def _cmsspread_trade_xml(suffix: str) -> str:
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <FloatingLegData>
           <Index>USD-LIBOR-6M</Index>
           <Spreads>
-            <Spread>0.002</Spread>
+            <Spread>{libor_spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20310209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -444,6 +520,15 @@ def _cmsspread_trade_xml(suffix: str) -> str:
 
 
 def _digital_cmsspread_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    start = _add_months("20160209", int(v["start_shift_months"]))
+    end = _add_months("20260209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(10_000_000 * float(v["notional_scale"])))
+    cms_spread = 0.001 + float(v["spread_shift"])
+    libor_spread = 0.002 + 0.5 * float(v["spread_shift"])
+    call_strike = max(0.0001, 0.002 + 0.4 * float(v["strike_shift"]))
+    put_strike = max(0.0001, 0.0005 + 0.2 * float(v["strike_shift"]))
+    gearing = 2.0 + 0.1 * ((_suffix_index(suffix) - 1) % 3)
     return f"""  <Trade id="DIGITAL_CMSSPREAD_USD_{suffix}">
     <TradeType>Swap</TradeType>
     <Envelope>
@@ -457,7 +542,7 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>30/360</DayCounter>
         <PaymentConvention>F</PaymentConvention>
@@ -468,16 +553,16 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
             <IsInArrears>false</IsInArrears>
             <FixingDays>2</FixingDays>
             <Gearings>
-              <Gearing>2.0</Gearing>
+              <Gearing>{gearing:.6f}</Gearing>
             </Gearings>
             <Spreads>
-              <Spread>0.001</Spread>
+              <Spread>{cms_spread:.6f}</Spread>
             </Spreads>
           </CMSSpreadLegData>
           <CallPosition>Long</CallPosition>
           <IsCallATMIncluded>false</IsCallATMIncluded>
           <CallStrikes>
-            <Strike>0.002</Strike>
+            <Strike>{call_strike:.6f}</Strike>
           </CallStrikes>
           <CallPayoffs>
             <Payoff>0.002</Payoff>
@@ -485,7 +570,7 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
           <PutPosition>Long</PutPosition>
           <IsPutATMIncluded>false</IsPutATMIncluded>
           <PutStrikes>
-            <Strike>0.0005</Strike>
+            <Strike>{put_strike:.6f}</Strike>
           </PutStrikes>
           <PutPayoffs>
             <Payoff>0.001</Payoff>
@@ -493,8 +578,8 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         </DigitalCMSSpreadLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -509,22 +594,22 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>MF</PaymentConvention>
         <FloatingLegData>
           <Index>USD-LIBOR-6M</Index>
           <Spreads>
-            <Spread>0.002</Spread>
+            <Spread>{libor_spread:.6f}</Spread>
           </Spreads>
           <IsInArrears>false</IsInArrears>
           <FixingDays>2</FixingDays>
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>20160209</StartDate>
-            <EndDate>20260209</EndDate>
+            <StartDate>{start}</StartDate>
+            <EndDate>{end}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>MF</Convention>
@@ -539,6 +624,12 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
 
 
 def _swaption_trade_xml(suffix: str) -> str:
+    v = _rate_book_variant(suffix)
+    exercise = _add_months("20210209", int(v["start_shift_months"]))
+    end = _add_months("20310209", int(v["start_shift_months"]) + int(v["maturity_shift_months"]))
+    notional = int(round(10_000_000 * float(v["notional_scale"])))
+    fixed_rate = 0.03 + float(v["coupon_shift"])
+    spread = float(v["spread_shift"])
     return f"""  <Trade id="SWAPTION_USD_{suffix}">
     <TradeType>Swaption</TradeType>
     <Envelope>
@@ -554,7 +645,7 @@ def _swaption_trade_xml(suffix: str) -> str:
         <Settlement>Physical</Settlement>
         <PayOffAtExpiry>false</PayOffAtExpiry>
         <ExerciseDates>
-          <ExerciseDate>2021-02-09</ExerciseDate>
+          <ExerciseDate>{_compact_to_iso(exercise)}</ExerciseDate>
         </ExerciseDates>
       </OptionData>
       <LegData>
@@ -562,20 +653,20 @@ def _swaption_trade_xml(suffix: str) -> str:
         <Payer>true</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>A360</DayCounter>
         <PaymentConvention>ModifiedFollowing</PaymentConvention>
         <FloatingLegData>
           <Index>USD-LIBOR-3M</Index>
           <Spreads>
-            <Spread>0.0</Spread>
+            <Spread>{spread:.6f}</Spread>
           </Spreads>
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>2021-02-09</StartDate>
-            <EndDate>2031-02-09</EndDate>
+            <StartDate>{_compact_to_iso(exercise)}</StartDate>
+            <EndDate>{_compact_to_iso(end)}</EndDate>
             <Tenor>3M</Tenor>
             <Calendar>US</Calendar>
             <Convention>ModifiedFollowing</Convention>
@@ -590,19 +681,19 @@ def _swaption_trade_xml(suffix: str) -> str:
         <Payer>false</Payer>
         <Currency>USD</Currency>
         <Notionals>
-          <Notional>10000000</Notional>
+          <Notional>{notional}</Notional>
         </Notionals>
         <DayCounter>30/360</DayCounter>
         <PaymentConvention>Following</PaymentConvention>
         <FixedLegData>
           <Rates>
-            <Rate>0.03</Rate>
+            <Rate>{fixed_rate:.6f}</Rate>
           </Rates>
         </FixedLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>2021-02-09</StartDate>
-            <EndDate>2031-02-09</EndDate>
+            <StartDate>{_compact_to_iso(exercise)}</StartDate>
+            <EndDate>{_compact_to_iso(end)}</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>US</Calendar>
             <Convention>Following</Convention>

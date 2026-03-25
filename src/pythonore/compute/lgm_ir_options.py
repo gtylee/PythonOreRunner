@@ -21,11 +21,11 @@ from typing import Callable, Dict, Iterable, Mapping, Sequence
 import numpy as np
 
 try:
-    from .irs_xva_utils import interpolate_path_grid
+    from .irs_xva_utils import curve_values, interpolate_path_grid
     from .irs_xva_utils import swap_npv_from_ore_legs_dual_curve
     from .lgm import LGM1F
 except ImportError:  # pragma: no cover - script-mode fallback
-    from irs_xva_utils import interpolate_path_grid
+    from irs_xva_utils import curve_values, interpolate_path_grid
     from irs_xva_utils import swap_npv_from_ore_legs_dual_curve
     from lgm import LGM1F
 
@@ -69,7 +69,7 @@ class CapFloorDef:
             raise ValueError("cap/floor arrays must have equal length")
         if m == 0:
             raise ValueError("cap/floor must contain at least one coupon")
-        if np.any(t0 < 0.0) or np.any(t1 < t0) or np.any(tp < t1):
+        if np.any(t1 < t0) or np.any(tp < t1):
             raise ValueError("invalid cap/floor times ordering")
         if np.any(tau <= 0.0):
             raise ValueError("accrual factors must be positive")
@@ -154,6 +154,25 @@ def _basis_polynomial_1d(x: np.ndarray, degree: int) -> np.ndarray:
     for d in range(1, degree + 1):
         cols.append(np.power(x1, d))
     return np.column_stack(cols)
+
+
+def _basis_cache_key(x: np.ndarray, degree: int) -> tuple[int, tuple[int, ...], bytes]:
+    x1 = np.ascontiguousarray(np.asarray(x, dtype=float))
+    return int(degree), x1.shape, x1.tobytes()
+
+
+def _basis_polynomial_cached(
+    cache: dict[tuple[int, tuple[int, ...], bytes], np.ndarray],
+    x: np.ndarray,
+    degree: int,
+) -> np.ndarray:
+    key = _basis_cache_key(x, degree)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    out = _basis_polynomial_1d(x, degree)
+    cache[key] = out
+    return out
 
 
 def _norm_cdf(x: np.ndarray) -> np.ndarray:
@@ -406,6 +425,63 @@ def bermudan_npv_paths(
     basis_degree: int = 2,
     itm_only: bool = True,
 ) -> np.ndarray:
+    signed_swap = bermudan_signed_underlying_paths(
+        model=model,
+        p0_disc=p0_disc,
+        p0_fwd=p0_fwd,
+        bermudan=bermudan,
+        times=times,
+        x_paths=x_paths,
+    )
+    return bermudan_npv_paths_from_underlying(
+        model=model,
+        p0_disc=p0_disc,
+        bermudan=bermudan,
+        times=times,
+        x_paths=x_paths,
+        signed_swap=signed_swap,
+        basis_degree=basis_degree,
+        itm_only=itm_only,
+    )
+
+
+def bermudan_signed_underlying_paths(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    p0_fwd: Callable[[float], float],
+    bermudan: BermudanSwaptionDef,
+    times: Iterable[float],
+    x_paths: np.ndarray,
+ ) -> np.ndarray:
+    t = _to_1d(np.asarray(list(times), dtype=float), "times")
+    if x_paths.shape[0] != t.size:
+        raise ValueError("x_paths first dimension must match times size")
+    signed_swap = np.zeros_like(x_paths)
+    for i in range(t.size):
+        swap_npv = swap_npv_from_ore_legs_dual_curve(
+            model,
+            p0_disc,
+            p0_fwd,
+            bermudan.underlying_legs,
+            float(t[i]),
+            x_paths[i, :],
+            exercise_into_whole_periods=True,
+            deterministic_fixings_cutoff=0.0,
+        )
+        signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
+    return signed_swap
+
+
+def bermudan_npv_paths_from_underlying(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    bermudan: BermudanSwaptionDef,
+    times: Iterable[float],
+    x_paths: np.ndarray,
+    signed_swap: np.ndarray,
+    basis_degree: int = 2,
+    itm_only: bool = True,
+) -> np.ndarray:
     """Bermudan swaption pathwise NPV profile via least-squares Monte Carlo.
 
     For physical settlement, this follows ORE-style wrapper behavior:
@@ -430,32 +506,25 @@ def bermudan_npv_paths(
         raise ValueError("exercise_times must be <= last simulation time")
     ex_flags = np.zeros(t.size, dtype=bool)
     ex_flags[ex_idx] = True
-
-    # Keep signed underlying values on every date so the forward pass can switch from
-    # option value to exercised swap value once exercise has occurred.
-    signed_swap = np.zeros_like(x_paths)
-    for i in range(t.size):
-        swap_npv = swap_npv_from_ore_legs_dual_curve(
-            model,
-            p0_disc,
-            p0_fwd,
-            bermudan.underlying_legs,
-            float(t[i]),
-            x_paths[i, :],
-            exercise_into_whole_periods=True,
-            deterministic_fixings_cutoff=0.0,
-        )
-        signed_swap[i, :] = float(bermudan.exercise_sign) * swap_npv
-
+    signed_swap = np.asarray(signed_swap, dtype=float)
+    if signed_swap.shape != x_paths.shape:
+        raise ValueError("signed_swap must match x_paths shape")
+    disc_curve_vals = np.asarray(curve_values(p0_disc, t), dtype=float)
     # Standard LSMC backward induction: regress discounted continuation on basis
     # functions of the current state x(t), then compare against immediate exercise.
     v = np.zeros_like(x_paths)
     v[-1, :] = np.maximum(signed_swap[-1, :], 0.0) if ex_flags[-1] else 0.0
     betas: dict[int, np.ndarray] = {}
+    basis_cache: dict[tuple[int, tuple[int, ...], bytes], np.ndarray] = {}
 
     for i in range(t.size - 2, -1, -1):
-        p_i = float(p0_disc(float(t[i])))
-        cont_realized = model.discount_bond(float(t[i]), float(t[i + 1]), x_paths[i, :], p_i, float(p0_disc(float(t[i + 1])))) * v[i + 1, :]
+        cont_realized = model.discount_bond(
+            float(t[i]),
+            float(t[i + 1]),
+            x_paths[i, :],
+            float(disc_curve_vals[i]),
+            float(disc_curve_vals[i + 1]),
+        ) * v[i + 1, :]
         if not ex_flags[i]:
             v[i, :] = cont_realized
             continue
@@ -470,12 +539,13 @@ def bermudan_npv_paths(
             if np.count_nonzero(reg_mask) < max(8, basis_degree + 2):
                 reg_mask = np.ones_like(x_i, dtype=bool)
 
-        a = _basis_polynomial_1d(x_i[reg_mask], basis_degree)
+        basis_all = _basis_polynomial_cached(basis_cache, x_i, basis_degree)
+        a = basis_all[reg_mask]
         b = y_i[reg_mask]
         try:
             beta, *_ = np.linalg.lstsq(a, b, rcond=None)
             betas[i] = beta
-            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ beta
+            cont_hat = basis_all @ beta
         except np.linalg.LinAlgError:
             cont_hat = np.full_like(y_i, float(np.mean(b)))
         cont_hat = np.maximum(cont_hat, 0.0)
@@ -508,7 +578,7 @@ def bermudan_npv_paths(
 
         x_i = x_paths[i, active_idx]
         if i in betas:
-            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ betas[i]
+            cont_hat = _basis_polynomial_cached(basis_cache, x_i, basis_degree) @ betas[i]
         else:
             cont_hat = np.zeros_like(x_i)
         cont_hat = np.maximum(cont_hat, 0.0)
@@ -554,6 +624,7 @@ def bermudan_lsmc_result(
         raise ValueError("exercise_times must be <= last simulation time")
     ex_flags = np.zeros(t.size, dtype=bool)
     ex_flags[ex_idx] = True
+    disc_curve_vals = np.asarray(curve_values(p0_disc, t), dtype=float)
 
     signed_swap = np.zeros_like(x_paths)
     for i in range(t.size):
@@ -574,10 +645,16 @@ def bermudan_lsmc_result(
     betas: dict[int, np.ndarray] = {}
     cont_hat_by_idx: dict[int, np.ndarray] = {}
     intrinsic_by_idx: dict[int, np.ndarray] = {}
+    basis_cache: dict[tuple[int, tuple[int, ...], bytes], np.ndarray] = {}
 
     for i in range(t.size - 2, -1, -1):
-        p_i = float(p0_disc(float(t[i])))
-        cont_realized = model.discount_bond(float(t[i]), float(t[i + 1]), x_paths[i, :], p_i, float(p0_disc(float(t[i + 1])))) * v[i + 1, :]
+        cont_realized = model.discount_bond(
+            float(t[i]),
+            float(t[i + 1]),
+            x_paths[i, :],
+            float(disc_curve_vals[i]),
+            float(disc_curve_vals[i + 1]),
+        ) * v[i + 1, :]
         if not ex_flags[i]:
             v[i, :] = cont_realized
             continue
@@ -593,12 +670,13 @@ def bermudan_lsmc_result(
             if np.count_nonzero(reg_mask) < max(8, basis_degree + 2):
                 reg_mask = np.ones_like(x_i, dtype=bool)
 
-        a = _basis_polynomial_1d(x_i[reg_mask], basis_degree)
+        basis_all = _basis_polynomial_cached(basis_cache, x_i, basis_degree)
+        a = basis_all[reg_mask]
         b = y_i[reg_mask]
         try:
             beta, *_ = np.linalg.lstsq(a, b, rcond=None)
             betas[i] = beta
-            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ beta
+            cont_hat = basis_all @ beta
         except np.linalg.LinAlgError:
             cont_hat = np.full_like(y_i, float(np.mean(b)))
         cont_hat = np.maximum(cont_hat, 0.0)
@@ -662,7 +740,7 @@ def bermudan_lsmc_result(
 
         x_i = x_paths[i, active_idx]
         if i in betas:
-            cont_hat = _basis_polynomial_1d(x_i, basis_degree) @ betas[i]
+            cont_hat = _basis_polynomial_cached(basis_cache, x_i, basis_degree) @ betas[i]
         else:
             cont_hat = np.zeros_like(x_i)
         cont_hat = np.maximum(cont_hat, 0.0)

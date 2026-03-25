@@ -5274,16 +5274,17 @@ def _run_sensitivity_case(
         ore_xml, sensi_params=sensi_params
     )
     comparator, snapshot = OreSnapshotPythonLgmSensitivityComparator.from_case_dir(case_dir, ore_file=ore_xml.name)
-    snapshot = replace(
-        snapshot,
-        config=replace(
-            snapshot.config,
-            params={
-                **dict(snapshot.config.params),
-                "python.lgm_param_source": str(lgm_param_source or "auto"),
-            },
-        ),
-    )
+    if hasattr(snapshot, "config"):
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.lgm_param_source": str(lgm_param_source or "auto"),
+                },
+            ),
+        )
     result = comparator.compare(
         snapshot,
         metric=resolved_metric,
@@ -6536,7 +6537,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             f"{_one_year_profile_value(netting_profile, 'time_weighted_basel_eepe') or xva.get('py_basel_eepe', 0.0):.2f}",
         ]
         trade_row = [
-            trade_id,
+            entity_id,
             netting_set_id,
             f"{xva.get('py_cva', 0.0):.2f}",
             f"{xva.get('py_dva', 0.0):.2f}",
@@ -6583,7 +6584,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
             ene = float(ene)
             pfe = float(pfe)
             trade_rows.append([
-                trade_id,
+                entity_id,
                 d,
                 _fmt_float(t),
                 f"{epe:.0f}",
@@ -6609,7 +6610,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
                 f"{float(netting_tw_epe[i]):.2f}",
                 f"{float(netting_tw_eepe[i]):.2f}",
             ])
-        with open(case_out_dir / f"exposure_trade_{trade_id}.csv", "w", encoding="utf-8", newline="") as handle:
+        with open(case_out_dir / f"exposure_trade_{entity_id}.csv", "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(trade_headers)
             writer.writerows(trade_rows)

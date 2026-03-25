@@ -61,8 +61,21 @@
     <Indices>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
-      <Index>USD-SIFMA</Index>
     </Indices>
+    <SwapIndices>
+      <SwapIndex>
+        <Name>USD-CMS-1Y</Name>
+        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
+      </SwapIndex>
+      <SwapIndex>
+        <Name>USD-CMS-10Y</Name>
+        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
+      </SwapIndex>
+      <SwapIndex>
+        <Name>USD-CMS-30Y</Name>
+        <DiscountingIndex>USD-LIBOR-3M</DiscountingIndex>
+      </SwapIndex>
+    </SwapIndices>
     <DefaultCurves>
       <Names/>
       <Tenors>6M,1Y,2Y</Tenors>
@@ -81,7 +94,6 @@
     <AggregationScenarioDataIndices>
       <Index>USD-LIBOR-3M</Index>
       <Index>USD-LIBOR-6M</Index>
-      <Index>USD-SIFMA</Index>
     </AggregationScenarioDataIndices>
   </Market>
 </Simulation>

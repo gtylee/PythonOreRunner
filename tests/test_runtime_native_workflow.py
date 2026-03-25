@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from pythonore.domain.dataclasses import (
+    BermudanSwaption,
     CollateralBalance,
     CollateralConfig,
     FXForward,
@@ -26,15 +27,19 @@ from pythonore.domain.dataclasses import (
     XVAConfig,
     XVASnapshot,
 )
+from pythonore.io.loader import XVALoader
 from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.runtime import (
     DeterministicToyAdapter,
     PythonLgmAdapter,
     XVAEngine,
+    _parse_market_overlay,
     _quote_matches_discount_curve,
     classify_portfolio_support,
 )
 from pythonore.mapping.mapper import map_snapshot
+
+TOOLS_DIR = Path(__file__).resolve().parents[1]
 
 
 def _make_snapshot(*, include_unsupported: bool = False, runtime: RuntimeConfig | None = None, params=None) -> XVASnapshot:
@@ -225,6 +230,212 @@ def _generic_swaption_trade_xml() -> str:
     </FloatingLegData>
   </LegData>
 </SwaptionData>
+""".strip()
+
+
+def _generic_digital_cmsspread_trade_xml() -> str:
+    return """
+<SwapData>
+  <LegData>
+    <LegType>DigitalCMSSpread</LegType>
+    <Payer>false</Payer>
+    <Currency>USD</Currency>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <DigitalCMSSpreadLegData>
+      <CMSSpreadLegData>
+        <Index1>USD-CMS-30Y</Index1>
+        <Index2>USD-CMS-2Y</Index2>
+        <IsInArrears>false</IsInArrears>
+        <FixingDays>2</FixingDays>
+        <Gearings><Gearing>2.0</Gearing></Gearings>
+        <Spreads><Spread>0.001</Spread></Spreads>
+      </CMSSpreadLegData>
+      <CallPosition>Long</CallPosition>
+      <IsCallATMIncluded>false</IsCallATMIncluded>
+      <CallStrikes><Strike>0.002</Strike></CallStrikes>
+      <CallPayoffs><Payoff>0.002</Payoff></CallPayoffs>
+      <PutPosition>Long</PutPosition>
+      <IsPutATMIncluded>false</IsPutATMIncluded>
+      <PutStrikes><Strike>0.0005</Strike></PutStrikes>
+      <PutPayoffs><Payoff>0.001</Payoff></PutPayoffs>
+    </DigitalCMSSpreadLegData>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2031-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Payer>true</Payer>
+    <Currency>USD</Currency>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <FloatingLegData>
+      <Index>USD-LIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.002</Spread></Spreads>
+    </FloatingLegData>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2031-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _simulation_xml_with_usd_grid(spec: str) -> str:
+    return f"""
+<Simulation>
+  <Parameters><Grid>{spec}</Grid></Parameters>
+  <CrossAssetModel>
+    <InterestRateModels>
+      <LGM ccy="USD">
+        <Reversion><Value>0.03</Value></Reversion>
+        <Volatility><Value>0.01</Value></Volatility>
+        <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+      </LGM>
+    </InterestRateModels>
+  </CrossAssetModel>
+</Simulation>
+""".strip()
+
+
+def _generic_bermudan_swaption_trade_xml() -> str:
+    return """
+<SwaptionData>
+  <OptionData>
+    <Style>Bermudan</Style>
+    <Settlement>Physical</Settlement>
+    <LongShort>Long</LongShort>
+    <ExerciseDates>
+      <ExerciseDate>2026-09-08</ExerciseDate>
+      <ExerciseDate>2027-03-08</ExerciseDate>
+    </ExerciseDates>
+  </OptionData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>EUR</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2029-09-08</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2029-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <Spreads><Spread>0.0</Spread></Spreads>
+    </FloatingLegData>
+  </LegData>
+</SwaptionData>
+""".strip()
+
+
+def _generic_live_capfloor_with_past_coupon_xml() -> str:
+    return """
+<CapFloorData>
+  <LongShort>Long</LongShort>
+  <Caps><Cap>0.03</Cap></Caps>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</CapFloorData>
+""".strip()
+
+
+def _generic_amortizing_capfloor_trade_xml() -> str:
+    return """
+<CapFloorData>
+  <LongShort>Long</LongShort>
+  <Caps><Cap>0.03</Cap></Caps>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>GBP</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>ACT/365</DayCounter>
+    <Notionals>
+      <Notional>3000000</Notional>
+      <Notional>2900000</Notional>
+      <Notional>2800000</Notional>
+    </Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>UK</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>GBP-LIBOR-6M</Index>
+      <FixingDays>0</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</CapFloorData>
 """.strip()
 
 
@@ -586,6 +797,55 @@ def test_native_runtime_supports_generic_cashflow_capfloor_and_swaption():
     assert coverage["unsupported"] == []
 
 
+def test_native_runtime_handles_usd_digital_cmsspread_without_nan():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="DIGITAL_CMSSPREAD_NATIVE",
+        counterparty="CP_A",
+        netting_set="NS_USD",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_digital_cmsspread_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/30Y", value=0.0315),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-LIBOR-6M/1Y/30Y", value=0.0330),
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=replace(
+            snapshot.netting,
+            netting_sets={
+                "NS_USD": NettingSet(
+                    netting_set_id="NS_USD",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="USD",
+                )
+            },
+        ),
+        collateral=replace(
+            snapshot.collateral,
+            balances=(CollateralBalance(netting_set_id="NS_USD", currency="USD"),),
+        ),
+        config=replace(
+            snapshot.config,
+            base_currency="USD",
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_usd_grid("4,6M")},
+        ),
+    )
+    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+    assert np.isfinite(float(result.pv_total))
+
+
 def test_torch_generic_capfloor_matches_numpy_runtime():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -653,6 +913,189 @@ def test_native_runtime_keeps_in_arrears_capfloors_off_native_path():
     support = classify_portfolio_support(snapshot, fallback_to_swig=False)
     assert support["native_trade_count"] == 0
     assert support["requires_swig_trade_ids"] == ["CAP_IN_ARREARS"]
+
+
+def test_native_runtime_torch_bermudan_parity():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="BERM_TORCH_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swaption",
+        product=GenericProduct(payload={"trade_type": "Swaption", "xml": _generic_bermudan_swaption_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="bermudan-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    from pythonore.compute.lgm_torch_xva import (
+        TorchDiscountCurve,
+        capfloor_npv_paths_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        par_swap_rate_paths_torch,
+        price_plain_rate_leg_paths_torch,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+    )
+
+    backend = (
+        TorchDiscountCurve,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        "cpu",
+        price_plain_rate_leg_paths_torch,
+        par_swap_rate_paths_torch,
+        capfloor_npv_paths_torch,
+    )
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="bermudan-torch")
+
+    assert abs(float(torch_result.pv_total) - float(numpy_result.pv_total)) < 1.0e-8
+    assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
+
+
+def test_parse_market_overlay_accepts_named_dated_zero_quotes():
+    overlay = _parse_market_overlay(
+        (
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/EUR-EURIBOR-6M/A365/2037-06-15", value=0.02),
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2037-06-15", value=0.021),
+        ),
+        asof_date="2026-03-08",
+    )
+
+    named = overlay["named_zero"]["EUR-EURIBOR-6M"]
+    unnamed = overlay["zero"]["EUR"]
+    assert len(named) == 1
+    assert len(unnamed) == 1
+    assert named[0][0] > 11.0
+    assert abs(named[0][1] - 0.02) < 1.0e-12
+    assert unnamed[0][0] > 11.0
+
+
+def test_loader_from_ore_xml_matches_from_files():
+    ore_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_6" / "Input" / "ore_portfolio_2.xml"
+    from_xml = XVALoader.from_ore_xml(ore_xml)
+    from_dir = XVALoader.from_files(str(ore_xml.parent), ore_file=ore_xml.name)
+
+    assert from_xml.config.source_meta.path == str(ore_xml)
+    assert from_dir.config.source_meta.path == str(ore_xml)
+    assert len(from_xml.portfolio.trades) == len(from_dir.portfolio.trades)
+    assert tuple(t.trade_id for t in from_xml.portfolio.trades) == tuple(t.trade_id for t in from_dir.portfolio.trades)
+
+
+def test_live_capfloor_with_past_coupon_stays_native_and_filters_paid_cashflows():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_LIVE_PAST_COUPON",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_live_capfloor_with_past_coupon_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, asof="2026-04-15"),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, asof="2026-04-15", analytics=("CVA",)),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    state = adapter._build_generic_capfloor_state(trade, snapshot)
+
+    assert state is not None
+    definition = state["definition"]
+    assert np.all(np.asarray(definition.pay_time, dtype=float) >= -1.0e-12)
+    assert np.min(np.asarray(definition.start_time, dtype=float)) < 0.0
+
+    support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+    assert support["native_trade_count"] == 1
+    assert support["requires_swig_trade_ids"] == []
+
+
+def test_generic_capfloor_uses_period_notionals_from_xml_schedule():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_AMORT_XML",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_amortizing_capfloor_trade_xml()}),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    state = adapter._build_generic_capfloor_state(trade, snapshot)
+
+    assert state is not None
+    np.testing.assert_allclose(np.asarray(state["definition"].notional, dtype=float), np.array([3_000_000.0, 2_900_000.0, 2_800_000.0]))
+
+
+def test_native_runtime_supports_generic_bermudan_swaption():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="BERM_GENERIC",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swaption",
+        product=GenericProduct(payload={"trade_type": "Swaption", "xml": _generic_bermudan_swaption_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, analytics=("CVA",), xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")}),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch.object(adapter._ir_options_mod, "bermudan_npv_paths", return_value=np.zeros((5, snapshot.config.num_paths))):
+        result = adapter.run(snapshot, mapped=XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs, run_id="berm-generic")
+
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+
+
+def test_native_runtime_supports_dataclass_bermudan_swaption():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="BERM_DATACLASS",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swaption",
+        product=BermudanSwaption(
+            ccy="EUR",
+            notional=1_000_000.0,
+            fixed_rate=0.025,
+            maturity_years=3.0,
+            pay_fixed=True,
+            exercise_dates=("2026-09-08", "2027-03-08"),
+            start_date="2026-09-08",
+            end_date="2029-09-08",
+            float_index="EUR-EURIBOR-6M",
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, analytics=("CVA",), xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")}),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch.object(adapter._ir_options_mod, "bermudan_npv_paths", return_value=np.zeros((5, snapshot.config.num_paths))):
+        result = adapter.run(snapshot, mapped=XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs, run_id="berm-dataclass")
+
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
 
 
 def test_python_lgm_runtime_attaches_dim_reports_and_metadata():

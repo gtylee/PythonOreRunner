@@ -35,9 +35,9 @@ def ore_pfe_quantile(samples: np.ndarray, quantile: float) -> np.ndarray:
     if values.shape[1] == 0:
         return np.zeros(values.shape[0], dtype=float)
     q = min(max(float(quantile), 0.0), 1.0)
-    sorted_values = np.sort(values, axis=1)
     index = int(math.floor(q * (values.shape[1] - 1) + 0.5))
-    return np.maximum(sorted_values[:, index], 0.0)
+    kth = np.partition(values, index, axis=1)[:, index]
+    return np.maximum(kth, 0.0)
 
 
 def _mean_positive(values: np.ndarray) -> np.ndarray:

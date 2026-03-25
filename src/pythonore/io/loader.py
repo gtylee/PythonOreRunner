@@ -85,6 +85,21 @@ class XVALoader:
             )
 
         ore_path = _pick_ore_file(base_dir, ore_file)
+        return XVALoader.from_ore_xml(ore_path)
+
+    @staticmethod
+    def from_ore_xml(path: str | Path) -> XVASnapshot:
+        ore_path = Path(path)
+        if not ore_path.exists():
+            raise ValidationError(
+                f"ORE file not found: {ore_path}. "
+                "Fix: pass a valid ore.xml path, or use XVALoader.from_files(...) with the Input directory."
+            )
+        if ore_path.is_dir():
+            raise ValidationError(
+                f"Expected an ore.xml file but received a directory: {ore_path}. "
+                "Fix: pass the ore.xml file path or use XVALoader.from_files(...) instead."
+            )
         ore_tree = ET.parse(ore_path)
         ore_root = ore_tree.getroot()
         setup = _parse_ore_setup(ore_root)

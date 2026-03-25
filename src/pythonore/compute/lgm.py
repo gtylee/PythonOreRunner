@@ -34,6 +34,12 @@ ORE_PARITY_SEQUENCE_TYPE = "MersenneTwister"
 ORE_PARITY_ANTITHETIC_SEQUENCE_TYPE = "MersenneTwisterAntithetic"
 ORE_SOBOL_SEQUENCE_TYPE = "Sobol"
 ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE = "SobolBrownianBridge"
+_ARRAY_CACHE_MAX_ITEMS = 256
+
+
+def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], bytes]:
+    arr64 = np.ascontiguousarray(np.asarray(arr, dtype=float))
+    return arr64.shape, arr64.tobytes()
 
 
 def _as_1d_float_array(values: Iterable[float], name: str) -> np.ndarray:
@@ -427,6 +433,10 @@ class LGM1F:
         self._alpha_prefix_int = self._prefix_integral_square(self.alpha_times, self.alpha_values)
         self._kappa_prefix_int = self._prefix_integral_linear(self.kappa_times, self.kappa_values)
         self._h_prefix_int = self._build_h_prefix_integral()
+        self._zeta_scalar_cache: dict[float, float] = {0.0: 0.0}
+        self._h_scalar_cache: dict[float, float] = {0.0: self.shift}
+        self._zeta_vector_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
+        self._h_vector_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
 
     @staticmethod
     def _prefix_integral_square(times: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -519,7 +529,20 @@ class LGM1F:
     def zeta(self, t: ArrayLike) -> np.ndarray:
         # ``zeta(t) = int_0^t alpha(u)^2 du`` in this scaled representation.  Under
         # the LGM measure it is also the variance clock for the state ``x(t)``.
+        if np.isscalar(t):
+            key = float(t)
+            cached = self._zeta_scalar_cache.get(key)
+            if cached is not None:
+                return np.asarray(cached, dtype=float)
+            out = self._int_piecewise_square(self.alpha_times, self.alpha_values, self._alpha_prefix_int, key)
+            out /= self.scaling * self.scaling
+            self._zeta_scalar_cache[key] = float(out)
+            return np.asarray(out, dtype=float)
         t_arr = _validate_time_input(t)
+        cache_key = _array_cache_key(t_arr)
+        cached_vec = self._zeta_vector_cache.get(cache_key)
+        if cached_vec is not None:
+            return cached_vec
         flat = t_arr.ravel()
         idx = np.searchsorted(self.alpha_times, flat, side="right")
         out = np.zeros_like(flat)
@@ -532,7 +555,11 @@ class LGM1F:
         a = self.alpha_values[idx]
         out += a * a * (flat - t0)
         out /= self.scaling * self.scaling
-        return out.reshape(t_arr.shape)
+        reshaped = out.reshape(t_arr.shape)
+        if len(self._zeta_vector_cache) >= _ARRAY_CACHE_MAX_ITEMS:
+            self._zeta_vector_cache.pop(next(iter(self._zeta_vector_cache)))
+        self._zeta_vector_cache[cache_key] = reshaped
+        return reshaped
 
     def Hprime(self, t: ArrayLike) -> np.ndarray:
         t_arr = _validate_time_input(t)
@@ -552,7 +579,30 @@ class LGM1F:
     def H(self, t: ArrayLike) -> np.ndarray:
         # ``H`` is the deterministic loading appearing in the ORE/LGM bond formula
         # P(t,T) = P(0,T)/P(0,t) * exp(-(H(T)-H(t)) x_t - ...).
+        if np.isscalar(t):
+            key = float(t)
+            cached = self._h_scalar_cache.get(key)
+            if cached is not None:
+                return np.asarray(cached, dtype=float)
+            i = int(np.searchsorted(self.kappa_times, key, side="right"))
+            out = 0.0
+            if i >= 1:
+                out += self._h_prefix_int[min(i - 1, self._h_prefix_int.size - 1)]
+            delta = key - (0.0 if i == 0 else self.kappa_times[i - 1])
+            base = 1.0 if i == 0 else float(np.exp(-self._kappa_prefix_int[i - 1]))
+            k = float(self.kappa_values[min(i, self.kappa_values.size - 1)])
+            if abs(k) < self.zero_cutoff:
+                tail = base * delta
+            else:
+                tail = base * (1.0 - np.exp(-k * delta)) / k
+            out = self.scaling * (out + tail) + self.shift
+            self._h_scalar_cache[key] = float(out)
+            return np.asarray(out, dtype=float)
         t_arr = _validate_time_input(t)
+        cache_key = _array_cache_key(t_arr)
+        cached_vec = self._h_vector_cache.get(cache_key)
+        if cached_vec is not None:
+            return cached_vec
         flat = t_arr.ravel()
         idx = np.searchsorted(self.kappa_times, flat, side="right")
         out = np.zeros_like(flat)
@@ -571,7 +621,11 @@ class LGM1F:
         tail[small] = base[small] * delta[small]
         tail[~small] = base[~small] * (1.0 - np.exp(-k[~small] * delta[~small])) / k[~small]
         out = self.scaling * (out + tail) + self.shift
-        return out.reshape(t_arr.shape)
+        reshaped = out.reshape(t_arr.shape)
+        if len(self._h_vector_cache) >= _ARRAY_CACHE_MAX_ITEMS:
+            self._h_vector_cache.pop(next(iter(self._h_vector_cache)))
+        self._h_vector_cache[cache_key] = reshaped
+        return reshaped
 
     def _int_exp_minus_int_kappa_scalar(self, t: float) -> float:
         if t <= 0.0:

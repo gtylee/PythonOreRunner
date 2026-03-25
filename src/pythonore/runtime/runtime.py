@@ -57,6 +57,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Proto
 import numpy as np
 
 from pythonore.domain.dataclasses import (
+    BermudanSwaption,
     FXForward,
     GenericProduct,
     InflationCapFloor,
@@ -482,6 +483,21 @@ class _SharedFxSimulation:
     pair_keys: Tuple[str, ...]
 
 
+@dataclass
+class _PricingContext:
+    snapshot: XVASnapshot
+    inputs: _PythonLgmInputs
+    model: Any
+    x_paths: np.ndarray
+    irs_backend: Any
+    shared_fx_sim: Any
+    n_times: int
+    n_paths: int
+    torch_curve_cache: Dict[tuple[str, str], object]
+    torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray]
+    irs_curve_cache: Dict[tuple[str, str], Dict[str, object]]
+
+
 class PythonLgmAdapter:
     """Adapter that values supported trades using the Python LGM stack."""
 
@@ -521,6 +537,8 @@ class PythonLgmAdapter:
         ] = {}
         self._curve_fit_cache: Dict[tuple[object, ...], Optional[_CurveBundle]] = {}
         self._swap_pricing_backend_cache = None
+        self._par_swap_deterministic_cache: Dict[tuple[int, float, float, float, int], np.ndarray] = {}
+        self._coupon_path_cache: Dict[tuple[object, ...], np.ndarray] = {}
 
     def _progress_enabled(self, snapshot: XVASnapshot) -> bool:
         raw = str(snapshot.config.params.get("python.progress", "Y")).strip().upper()
@@ -1039,6 +1057,8 @@ class PythonLgmAdapter:
                 f"DIM mode '{dim_mode}' requires snapshot.config.params['python.dim_feeder'] for the Python DIM port."
             )
         self._ensure_py_lgm_imports()
+        self._par_swap_deterministic_cache.clear()
+        self._coupon_path_cache.clear()
         reporter = self._build_reporter(snapshot)
         reporter.log(
             f"run {run_id}: start mode={'hybrid' if self.fallback_to_swig else 'native_only'} "
@@ -1103,404 +1123,26 @@ class PythonLgmAdapter:
         irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = {}
         torch_curve_cache: Dict[tuple[str, str], object] = {}
         torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray] = {}
+        pricing_ctx = _PricingContext(
+            snapshot=snapshot,
+            inputs=inputs,
+            model=model,
+            x_paths=x_paths,
+            irs_backend=irs_backend,
+            shared_fx_sim=shared_fx_sim,
+            n_times=n_times,
+            n_paths=n_paths,
+            torch_curve_cache=torch_curve_cache,
+            torch_rate_leg_value_cache=torch_rate_leg_value_cache,
+            irs_curve_cache=irs_curve_cache,
+        )
 
         for trade_idx, spec in enumerate(inputs.trade_specs, start=1):
-            vals: np.ndarray | None = None
-            xva_deflated = False
-            if spec.kind == "IRS":
-                p_disc = inputs.discount_curves[spec.ccy]
-                legs = spec.legs or {}
-                index_name = str(legs.get("float_index", spec.trade.additional_fields.get("index", _default_index_for_ccy(spec.ccy))))
-                p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
-                realized_coupon = self._compute_realized_float_coupons(
-                    model=model,
-                    p0_disc=p_disc,
-                    p0_fwd=p_fwd,
-                    legs=legs,
-                    sim_times=inputs.times,
-                    x_paths_on_sim_grid=x_paths,
-                )
-                if irs_backend is None:
-                    vals = np.zeros((n_times, n_paths), dtype=float)
-                    for i, t in enumerate(inputs.times):
-                        vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
-                            model,
-                            p_disc,
-                            p_fwd,
-                            legs,
-                            float(t),
-                            x_paths[i, :],
-                            realized_float_coupon=realized_coupon,
-                        )
-                else:
-                    torch_curve_ctor, torch_pricer, _, torch_device, _, _, _ = irs_backend
-                    curve_key = (spec.ccy, index_name)
-                    curve_state = irs_curve_cache.get(curve_key)
-                    if curve_state is None:
-                        sample_disc = np.unique(
-                            np.concatenate(
-                                (
-                                    np.asarray([0.0], dtype=float),
-                                    np.asarray(inputs.times, dtype=float),
-                                    np.asarray(legs.get("fixed_pay_time", []), dtype=float),
-                                    np.asarray(legs.get("float_pay_time", []), dtype=float),
-                                )
-                            )
-                        )
-                        sample_disc = sample_disc[np.isfinite(sample_disc)]
-                        sample_disc.sort()
-                        sample_fwd = np.unique(
-                            np.concatenate(
-                                (
-                                    sample_disc,
-                                    np.asarray(legs.get("float_start_time", []), dtype=float),
-                                    np.asarray(legs.get("float_end_time", []), dtype=float),
-                                )
-                            )
-                        )
-                        sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
-                        sample_fwd.sort()
-                        curve_state = {
-                            "disc_curve": torch_curve_ctor(
-                                times=sample_disc,
-                                dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
-                                device=torch_device,
-                            ),
-                            "fwd_curve": torch_curve_ctor(
-                                times=sample_fwd,
-                                dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
-                                device=torch_device,
-                            ),
-                        }
-                        irs_curve_cache[curve_key] = curve_state
-                    vals = torch_pricer(
-                        model,
-                        curve_state["disc_curve"],
-                        curve_state["fwd_curve"],
-                        legs,
-                        np.asarray(inputs.times, dtype=float),
-                        x_paths,
-                        realized_float_coupon=realized_coupon,
-                        return_numpy=True,
-                    )
-                xva_deflated = True
-            elif spec.kind == "RateSwap":
-                if irs_backend is not None and self._supports_torch_rate_swap(spec):
-                    torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _, _ = irs_backend
-                    rate_legs = list((spec.legs or {}).get("rate_legs", []))
-                    vals = np.zeros((n_times, n_paths), dtype=float)
-                    disc_key = ("disc", spec.ccy)
-                    disc_curve = torch_curve_cache.get(disc_key)
-                    if disc_curve is None:
-                        sample_disc = [np.asarray(inputs.times, dtype=float)]
-                        for leg in rate_legs:
-                            sample_disc.append(np.asarray(leg.get("pay_time", []), dtype=float))
-                        disc_times = np.unique(np.concatenate(sample_disc))
-                        disc_times = disc_times[np.isfinite(disc_times)]
-                        disc_times.sort()
-                        disc_curve = torch_curve_ctor(
-                            times=disc_times,
-                            dfs=np.asarray(
-                                [float(inputs.discount_curves[spec.ccy](float(t))) for t in disc_times],
-                                dtype=float,
-                            ),
-                            device=torch_device,
-                        )
-                        torch_curve_cache[disc_key] = disc_curve
-                    p_disc = inputs.discount_curves[spec.ccy]
-                    for leg in rate_legs:
-                        kind = str(leg.get("kind", "")).upper()
-                        if kind in {"FIXED", "FLOATING"}:
-                            leg_cache_key = self._rate_leg_pricing_cache_key(spec.ccy, leg)
-                            cached_vals = torch_rate_leg_value_cache.get(leg_cache_key)
-                            if cached_vals is not None:
-                                vals += cached_vals
-                                continue
-                            fwd_curve = None
-                            if kind == "FLOATING":
-                                index_name = str(leg.get("index_name", ""))
-                                fwd_key = ("fwd", index_name.upper())
-                                fwd_curve = torch_curve_cache.get(fwd_key)
-                                if fwd_curve is None:
-                                    curve = self._resolve_index_curve(inputs, spec.ccy, index_name)
-                                    sample_fwd = np.unique(
-                                        np.concatenate(
-                                            (
-                                                np.asarray(inputs.times, dtype=float),
-                                                np.asarray(leg.get("start_time", []), dtype=float),
-                                                np.asarray(leg.get("end_time", []), dtype=float),
-                                            )
-                                        )
-                                    )
-                                    sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
-                                    sample_fwd.sort()
-                                    fwd_curve = torch_curve_ctor(
-                                        times=sample_fwd,
-                                        dfs=np.asarray([float(curve(float(t))) for t in sample_fwd], dtype=float),
-                                        device=torch_device,
-                                    )
-                                    torch_curve_cache[fwd_key] = fwd_curve
-                            leg_vals = torch_plain_leg_pricer(
-                                model,
-                                disc_curve,
-                                leg,
-                                np.asarray(inputs.times, dtype=float),
-                                x_paths,
-                                fwd_curve=fwd_curve,
-                                return_numpy=True,
-                            )
-                            torch_rate_leg_value_cache[leg_cache_key] = leg_vals
-                            vals += leg_vals
-                            continue
-
-                        pay = np.asarray(leg.get("pay_time", []), dtype=float)
-                        accr = np.asarray(leg.get("accrual", []), dtype=float)
-                        notional = float(leg.get("notional", 0.0))
-                        sign = float(leg.get("sign", 1.0))
-                        for i, t in enumerate(inputs.times):
-                            live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
-                            if not np.any(live):
-                                continue
-                            x_t = x_paths[i, :]
-                            p_t = float(p_disc(float(t)))
-                            disc = model.discount_bond_paths(
-                                float(t),
-                                pay[live],
-                                x_t,
-                                p_t,
-                                np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
-                            )
-                            coupons = self._rate_leg_coupon_paths_torch(
-                                model,
-                                leg,
-                                spec.ccy,
-                                inputs,
-                                float(t),
-                                x_t,
-                                torch_backend=irs_backend,
-                                curve_cache=torch_curve_cache,
-                            )[live, :]
-                            amount = sign * notional * accr[live, None] * coupons
-                            vals[i, :] += np.sum(amount * disc, axis=0)
-                else:
-                    vals = self._price_generic_rate_swap(spec, inputs, model, x_paths)
-            elif spec.kind == "FXForward":
-                vals = self._price_fx_forward(spec.trade, inputs, n_times, n_paths, shared_sim=shared_fx_sim)
-            elif spec.kind == "CapFloor":
-                if spec.sticky_state is None:
-                    unsupported.append(spec.trade)
-                    continue
-                definition = spec.sticky_state.get("definition")
-                index_name = str(spec.sticky_state.get("index_name", ""))
-                if definition is None:
-                    unsupported.append(spec.trade)
-                    continue
-                p_disc = inputs.discount_curves[spec.ccy]
-                p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
-                if irs_backend is None:
-                    vals = self._ir_options_mod.capfloor_npv_paths(
-                        model=model,
-                        p0_disc=p_disc,
-                        p0_fwd=p_fwd,
-                        capfloor=definition,
-                        times=inputs.times,
-                        x_paths=x_paths,
-                        lock_fixings=True,
-                    )
-                else:
-                    torch_curve_ctor, _, _, torch_device, _, _, torch_capfloor_pricer = irs_backend
-                    disc_key = ("capfloor_disc", spec.ccy)
-                    disc_curve = torch_curve_cache.get(disc_key)
-                    if disc_curve is None:
-                        disc_times = np.unique(
-                            np.concatenate(
-                                (
-                                    np.asarray(inputs.times, dtype=float),
-                                    np.asarray(definition.start_time, dtype=float),
-                                    np.asarray(definition.end_time, dtype=float),
-                                    np.asarray(definition.pay_time, dtype=float),
-                                    np.asarray(definition.fixing_time if definition.fixing_time is not None else definition.start_time, dtype=float),
-                                )
-                            )
-                        )
-                        disc_times = disc_times[np.isfinite(disc_times)]
-                        disc_times.sort()
-                        disc_curve = torch_curve_ctor(
-                            times=disc_times,
-                            dfs=np.asarray([float(p_disc(float(t))) for t in disc_times], dtype=float),
-                            device=torch_device,
-                        )
-                        torch_curve_cache[disc_key] = disc_curve
-                    fwd_key = ("capfloor_fwd", index_name.upper())
-                    fwd_curve = torch_curve_cache.get(fwd_key)
-                    if fwd_curve is None:
-                        fwd_times = np.unique(
-                            np.concatenate(
-                                (
-                                    np.asarray(inputs.times, dtype=float),
-                                    np.asarray(definition.start_time, dtype=float),
-                                    np.asarray(definition.end_time, dtype=float),
-                                    np.asarray(definition.fixing_time if definition.fixing_time is not None else definition.start_time, dtype=float),
-                                )
-                            )
-                        )
-                        fwd_times = fwd_times[np.isfinite(fwd_times)]
-                        fwd_times.sort()
-                        fwd_curve = torch_curve_ctor(
-                            times=fwd_times,
-                            dfs=np.asarray([float(p_fwd(float(t))) for t in fwd_times], dtype=float),
-                            device=torch_device,
-                        )
-                        torch_curve_cache[fwd_key] = fwd_curve
-                    vals = torch_capfloor_pricer(
-                        model,
-                        disc_curve,
-                        fwd_curve,
-                        definition,
-                        np.asarray(inputs.times, dtype=float),
-                        x_paths,
-                        lock_fixings=True,
-                        return_numpy=True,
-                    )
-            elif spec.kind == "Swaption":
-                if spec.sticky_state is None:
-                    unsupported.append(spec.trade)
-                    continue
-                definition = spec.sticky_state.get("definition")
-                if definition is None:
-                    unsupported.append(spec.trade)
-                    continue
-                p_disc = inputs.discount_curves[spec.ccy]
-                float_index = str(spec.sticky_state.get("index_name", ""))
-                p_fwd = self._resolve_index_curve(inputs, spec.ccy, float_index)
-                vals = self._ir_options_mod.bermudan_npv_paths(
-                    model=model,
-                    p0_disc=p_disc,
-                    p0_fwd=p_fwd,
-                    bermudan=definition,
-                    times=inputs.times,
-                    x_paths=x_paths,
-                )
-            elif spec.kind == "Cashflow":
-                if spec.sticky_state is None:
-                    unsupported.append(spec.trade)
-                    continue
-                pay = np.asarray(spec.sticky_state.get("pay_time", []), dtype=float)
-                amount = np.asarray(spec.sticky_state.get("amount", []), dtype=float)
-                if pay.size == 0 or amount.size != pay.size:
-                    unsupported.append(spec.trade)
-                    continue
-                p_disc = inputs.discount_curves[spec.ccy]
-                vals = np.zeros((n_times, n_paths), dtype=float)
-                for i, t in enumerate(inputs.times):
-                    live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
-                    if not np.any(live):
-                        continue
-                    p_t = float(p_disc(float(t)))
-                    disc = model.discount_bond_paths(
-                        float(t),
-                        pay[live],
-                        x_paths[i, :],
-                        p_t,
-                        np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
-                    )
-                    vals[i, :] = np.sum(amount[live][:, None] * disc, axis=0)
-            elif spec.kind == "InflationSwap":
-                trade_product = spec.trade.product
-                assert isinstance(trade_product, InflationSwap)
-                curve_key = (
-                    str(trade_product.index).upper(),
-                    "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
-                )
-                inflation_curve = inputs.inflation_curves.get(curve_key)
-                if inflation_curve is None or str(trade_product.pay_leg).lower() == "float":
-                    unsupported.append(spec.trade)
-                    continue
-                p_disc = inputs.discount_curves[spec.ccy]
-                vals = np.zeros((n_times, n_paths), dtype=float)
-                if str(trade_product.inflation_type).upper() == "YY":
-                    payment_times = self._inflation_mod.inflation_swap_payment_times(
-                        float(trade_product.maturity_years),
-                        str(trade_product.schedule_tenor or "1Y"),
-                    )
-                    profile = np.asarray(
-                        [
-                            self._inflation_mod.price_yoy_swap_at_time(
-                                notional=float(trade_product.notional),
-                                payment_times=payment_times,
-                                fixed_rate=float(trade_product.fixed_rate),
-                                inflation_curve=inflation_curve,
-                                discount_curve=p_disc,
-                                valuation_time=float(t),
-                                receive_inflation=True,
-                            )
-                            for t in inputs.times
-                        ],
-                        dtype=float,
-                    )
-                else:
-                    profile = np.asarray(
-                        [
-                            self._inflation_mod.price_zero_coupon_cpi_swap_at_time(
-                                notional=float(trade_product.notional),
-                                maturity_years=float(trade_product.maturity_years),
-                                fixed_rate=float(trade_product.fixed_rate),
-                                base_cpi=float(trade_product.base_cpi or 100.0),
-                                inflation_curve=inflation_curve,
-                                discount_curve=p_disc,
-                                valuation_time=float(t),
-                                receive_inflation=True,
-                            )
-                            for t in inputs.times
-                        ],
-                        dtype=float,
-                    )
-                vals[:, :] = profile[:, None]
-            elif spec.kind == "InflationCapFloor":
-                trade_product = spec.trade.product
-                assert isinstance(trade_product, InflationCapFloor)
-                curve_key = (
-                    str(trade_product.index).upper(),
-                    "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
-                )
-                inflation_curve = inputs.inflation_curves.get(curve_key)
-                if inflation_curve is None:
-                    unsupported.append(spec.trade)
-                    continue
-                p_disc = inputs.discount_curves[spec.ccy]
-                definition = self._inflation_mod.InflationCapFloorDefinition(
-                    trade_id=spec.trade.trade_id,
-                    currency=spec.ccy,
-                    inflation_type=str(trade_product.inflation_type),
-                    option_type=str(trade_product.option_type),
-                    index=str(trade_product.index),
-                    strike=float(trade_product.strike),
-                    notional=float(trade_product.notional),
-                    maturity_years=float(trade_product.maturity_years),
-                    base_cpi=float(trade_product.base_cpi) if trade_product.base_cpi is not None else None,
-                    observation_lag=trade_product.observation_lag,
-                    long_short=str(trade_product.long_short),
-                )
-                profile = np.asarray(
-                    [
-                        self._inflation_mod.price_inflation_capfloor_at_time(
-                            definition=definition,
-                            inflation_curve=inflation_curve,
-                            discount_curve=p_disc,
-                            valuation_time=float(t),
-                        )
-                        for t in inputs.times
-                    ],
-                        dtype=float,
-                    )
-                vals = np.zeros((n_times, n_paths), dtype=float)
-                vals[:, :] = profile[:, None]
-            else:
+            vals, xva_deflated = self._price_trade_paths(spec, pricing_ctx)
+            if vals is None:
                 unsupported.append(spec.trade)
                 continue
 
-            if vals is None:
-                continue
             self._fail_on_trade_nan(spec, vals)
             npv_by_trade[spec.trade.trade_id] = vals
             if use_flow_amounts_t0 and spec.kind == "IRS" and spec.legs is not None:
@@ -1954,6 +1596,21 @@ class PythonLgmAdapter:
                         ccy=t.product.ccy.upper(),
                     )
                 )
+            elif isinstance(t.product, BermudanSwaption):
+                bermudan_state = self._build_bermudan_swaption_state(t, snapshot, mapped)
+                if bermudan_state is not None:
+                    trade_specs.append(
+                        _TradeSpec(
+                            trade=t,
+                            kind="Swaption",
+                            notional=float(bermudan_state["notional"]),
+                            ccy=str(bermudan_state["ccy"]).upper(),
+                            legs=bermudan_state.get("underlying_legs"),
+                            sticky_state=bermudan_state,
+                        )
+                    )
+                else:
+                    unsupported.append(t)
             elif isinstance(t.product, GenericProduct):
                 generic_capfloor = self._build_generic_capfloor_state(t, snapshot)
                 if generic_capfloor is not None:
@@ -1996,7 +1653,7 @@ class PythonLgmAdapter:
                             generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
                             if generic_legs is not None:
                                 notionals = [
-                                    abs(float(leg.get("notional", 0.0)))
+                                    float(np.max(np.abs(np.asarray(leg.get("notional", np.asarray([0.0], dtype=float)), dtype=float))))
                                     for leg in generic_legs.get("rate_legs", [])
                                 ]
                                 generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
@@ -2023,6 +1680,8 @@ class PythonLgmAdapter:
             if isinstance(t.product, InflationSwap):
                 ccy_set.add(t.product.ccy.upper())
             if isinstance(t.product, InflationCapFloor):
+                ccy_set.add(t.product.ccy.upper())
+            if isinstance(t.product, BermudanSwaption):
                 ccy_set.add(t.product.ccy.upper())
         ccy_set.update(generic_ccys)
         result = (trade_specs, unsupported, ccy_set)
@@ -2309,7 +1968,7 @@ class PythonLgmAdapter:
         market_cache_key = id(snapshot.market.raw_quotes)
         overlay = self._market_overlay_cache.get(market_cache_key)
         if overlay is None:
-            overlay = _parse_market_overlay(snapshot.market.raw_quotes)
+            overlay = _parse_market_overlay(snapshot.market.raw_quotes, snapshot.config.asof)
             self._market_overlay_cache[market_cache_key] = overlay
         fx_spots = overlay["fx"]
         fx_vols = overlay.get("fx_vol", {})
@@ -3367,8 +3026,33 @@ class PythonLgmAdapter:
         cached_legs = self._irs_leg_cache.get(cache_key)
         if cached_legs is not None:
             return cached_legs
+        use_flows_csv = self._use_flows_csv_legs(snapshot)
+        if portfolio_xml and not use_flows_csv:
+            asof = self._normalized_asof(snapshot)
+            try:
+                legs = self._irs_utils.load_swap_legs_from_portfolio_root(
+                    self._portfolio_root_from_xml(portfolio_xml),
+                    trade.trade_id,
+                    asof,
+                )
+                sim_xml = mapped.xml_buffers.get("simulation.xml")
+                if sim_xml:
+                    try:
+                        legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
+                    except Exception:
+                        pass
+                result = self._apply_historical_fixings_to_legs(snapshot, trade, legs)
+                self._irs_leg_cache[cache_key] = result
+                return result
+            except Exception as exc:
+                import warnings as _warnings
+                _warnings.warn(
+                    f"Failed to load legs from portfolio.xml for trade {trade.trade_id}: {exc}",
+                    UserWarning,
+                    stacklevel=2,
+                )
         ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
-        if ore_path_txt:
+        if use_flows_csv and ore_path_txt:
             try:
                 ore_path = Path(ore_path_txt).resolve()
                 output_dir = (ore_path.parent.parent / snapshot.config.params.get("outputPath", "Output")).resolve()
@@ -3437,6 +3121,14 @@ class PythonLgmAdapter:
         self._irs_leg_cache[cache_key] = result
         return result
 
+    def _use_flows_csv_legs(self, snapshot: XVASnapshot) -> bool:
+        params = dict(snapshot.config.params or {})
+        source = str(params.get("python.irs_leg_source", "")).strip().lower()
+        if source in {"flows", "flows_csv", "ore_flows"}:
+            return True
+        flag = str(params.get("python.use_flows_csv", "")).strip().lower()
+        return flag in {"y", "yes", "true", "1"}
+
     def _build_generic_rate_swap_legs(
         self,
         trade: Trade,
@@ -3488,7 +3180,6 @@ class PythonLgmAdapter:
             ccy = ccy or leg_ccy
             payer = (leg.findtext("./Payer") or "").strip().lower() == "true"
             sign = -1.0 if payer else 1.0
-            notional = float((leg.findtext("./Notionals/Notional") or "0").strip())
             dc = (leg.findtext("./DayCounter") or "A365").strip()
             pay_conv = (leg.findtext("./PaymentConvention") or "F").strip()
             rules = leg.find("./ScheduleData/Rules")
@@ -3504,10 +3195,11 @@ class PythonLgmAdapter:
             e_t = np.asarray([time_from_dates(asof, d, "A365F") for d in e_dates], dtype=float)
             p_t = np.asarray([time_from_dates(asof, d, "A365F") for d in p_dates], dtype=float)
             accr = np.asarray([year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
+            notionals = np.asarray(self._irs_utils.expand_leg_notionals(leg, s_dates, e_dates), dtype=float)
             leg_info: Dict[str, object] = {
                 "kind": leg_type_upper,
                 "ccy": leg_ccy,
-                "notional": notional,
+                "notional": notionals,
                 "sign": sign,
                 "start_time": s_t,
                 "end_time": e_t,
@@ -3519,7 +3211,7 @@ class PythonLgmAdapter:
             }
             if leg_type_upper == "FIXED":
                 rate = float((leg.findtext("./FixedLegData/Rates/Rate") or "0").strip())
-                amount = sign * notional * rate * accr
+                amount = sign * notionals * rate * accr
                 leg_info["fixed_rate"] = np.full_like(accr, rate)
                 leg_info["amount"] = amount
             elif leg_type_upper == "FLOATING":
@@ -3746,7 +3438,17 @@ class PythonLgmAdapter:
         fixing_base = e_dates if in_arrears else s_dates
         fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
         fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
-        notional = float((leg.findtext("./Notionals/Notional") or "0").strip() or 0.0)
+        live = pay_t >= -1.0e-12
+        if not np.any(live):
+            self._generic_capfloor_state_cache[cache_key] = None
+            self._generic_capfloor_state_xml_cache[xml_cache_key] = None
+            return None
+        start_t = start_t[live]
+        end_t = end_t[live]
+        pay_t = pay_t[live]
+        accr = accr[live]
+        fixing_t = fixing_t[live]
+        notionals = np.asarray(self._irs_utils.expand_leg_notionals(leg, s_dates, e_dates), dtype=float)
         spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
         gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
         cap_text = (data.findtext("./Caps/Cap") or "").strip()
@@ -3771,7 +3473,7 @@ class PythonLgmAdapter:
             end_time=end_t,
             pay_time=pay_t,
             accrual=accr,
-            notional=np.full_like(accr, notional),
+            notional=notionals,
             strike=np.full_like(accr, strike),
             gearing=np.full_like(accr, gearing),
             spread=np.full_like(accr, spread),
@@ -3810,7 +3512,7 @@ class PythonLgmAdapter:
         except Exception:
             return None
         style = (trade_root.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
-        if style != "european":
+        if style not in {"european", "bermudan"}:
             return None
         asof = self._normalized_asof(snapshot)
         fake_root = ET.fromstring(f"<Portfolio>{ET.tostring(trade_root, encoding='unicode')}</Portfolio>")
@@ -3824,10 +3526,15 @@ class PythonLgmAdapter:
             for node in exercise_nodes
             if (node.text or "").strip()
         ]
-        if len(exercise_dates) != 1:
+        if style == "european" and len(exercise_dates) != 1:
+            return None
+        if len(exercise_dates) == 0:
             return None
         asof_date = self._irs_utils._parse_yyyymmdd(asof)
-        exercise_time = float(self._irs_utils._time_from_dates(asof_date, exercise_dates[0], "A365F"))
+        exercise_times = np.asarray(
+            [float(self._irs_utils._time_from_dates(asof_date, dt, "A365F")) for dt in exercise_dates],
+            dtype=float,
+        )
         fixed_leg = next((leg for leg in trade_root.findall("./SwaptionData/LegData") if (leg.findtext("./LegType") or "").strip().lower() == "fixed"), None)
         float_index = str(underlying_legs.get("float_index", "")).upper()
         ccy = (
@@ -3842,7 +3549,7 @@ class PythonLgmAdapter:
             exercise_sign *= -1.0
         bermudan = self._ir_options_mod.BermudanSwaptionDef(
             trade_id=trade.trade_id,
-            exercise_times=np.asarray([exercise_time], dtype=float),
+            exercise_times=exercise_times,
             underlying_legs=underlying_legs,
             exercise_sign=exercise_sign,
             settlement=(trade_root.findtext("./SwaptionData/OptionData/Settlement") or "Physical").strip().lower(),
@@ -3854,10 +3561,62 @@ class PythonLgmAdapter:
             "notional": notional,
             "underlying_legs": underlying_legs,
             "index_name": float_index,
+            "style": style,
         }
         self._generic_swaption_state_cache[cache_key] = result
         self._generic_swaption_state_xml_cache[xml_cache_key] = result
         return result
+
+    def _build_bermudan_swaption_state(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+        mapped: MappedInputs,
+    ) -> Optional[Dict[str, object]]:
+        product = trade.product
+        if isinstance(product, GenericProduct):
+            state = self._build_generic_swaption_state(trade, snapshot)
+            if state is not None and str(state.get("style", "")).lower() == "bermudan":
+                return state
+            return None
+        if not isinstance(product, BermudanSwaption):
+            return None
+        portfolio_xml = mapped.xml_buffers.get("portfolio.xml", "")
+        if not portfolio_xml:
+            return None
+        asof = self._normalized_asof(snapshot)
+        try:
+            underlying_legs = self._irs_utils.load_swap_legs_from_portfolio_root(
+                self._portfolio_root_from_xml(portfolio_xml),
+                trade.trade_id,
+                asof,
+            )
+        except Exception:
+            return None
+        asof_date = self._irs_utils._parse_yyyymmdd(asof)
+        exercise_times = np.asarray(
+            [float(self._irs_utils._time_from_dates(asof_date, self._irs_utils._parse_yyyymmdd(d), "A365F")) for d in product.exercise_dates],
+            dtype=float,
+        )
+        exercise_sign = 1.0 if bool(product.pay_fixed) else -1.0
+        if str(product.long_short).strip().lower() == "short":
+            exercise_sign *= -1.0
+        definition = self._ir_options_mod.BermudanSwaptionDef(
+            trade_id=trade.trade_id,
+            exercise_times=exercise_times,
+            underlying_legs=underlying_legs,
+            exercise_sign=exercise_sign,
+            settlement=str(product.settlement).strip().lower(),
+        )
+        notional = float(np.max(np.abs(np.asarray(underlying_legs.get("fixed_notional", [0.0]), dtype=float))))
+        return {
+            "definition": definition,
+            "ccy": str(product.ccy).upper(),
+            "notional": notional,
+            "underlying_legs": underlying_legs,
+            "index_name": str(underlying_legs.get("float_index", "")).upper(),
+            "style": "bermudan",
+        }
 
     def _apply_historical_fixings_to_generic_rate_legs(
         self,
@@ -3968,6 +3727,482 @@ class PythonLgmAdapter:
             f"at time_index={int(idx[0])}, path_index={int(idx[1])}"
         )
 
+    def _price_trade_paths(
+        self,
+        spec: _TradeSpec,
+        ctx: _PricingContext,
+    ) -> tuple[np.ndarray | None, bool]:
+        handlers = {
+            "IRS": self._price_trade_irs_paths,
+            "RateSwap": self._price_trade_rate_swap_paths,
+            "FXForward": self._price_trade_fx_forward_paths,
+            "CapFloor": self._price_trade_capfloor_paths,
+            "Swaption": self._price_trade_swaption_paths,
+            "Cashflow": self._price_trade_cashflow_paths,
+            "InflationSwap": self._price_trade_inflation_swap_paths,
+            "InflationCapFloor": self._price_trade_inflation_capfloor_paths,
+        }
+        handler = handlers.get(spec.kind)
+        if handler is None:
+            return None, False
+        return handler(spec, ctx)
+
+    def _price_trade_irs_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
+        inputs = ctx.inputs
+        model = ctx.model
+        x_paths = ctx.x_paths
+        p_disc = inputs.discount_curves[spec.ccy]
+        legs = spec.legs or {}
+        index_name = str(legs.get("float_index", spec.trade.additional_fields.get("index", _default_index_for_ccy(spec.ccy))))
+        p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
+        realized_coupon = self._compute_realized_float_coupons(
+            model=model,
+            p0_disc=p_disc,
+            p0_fwd=p_fwd,
+            legs=legs,
+            sim_times=inputs.times,
+            x_paths_on_sim_grid=x_paths,
+        )
+        if ctx.irs_backend is None:
+            vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+            for i, t in enumerate(inputs.times):
+                vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
+                    model,
+                    p_disc,
+                    p_fwd,
+                    legs,
+                    float(t),
+                    x_paths[i, :],
+                    realized_float_coupon=realized_coupon,
+                )
+            return vals, True
+        torch_curve_ctor, torch_pricer, _, torch_device, _, _, _ = ctx.irs_backend
+        curve_key = (spec.ccy, index_name)
+        curve_state = ctx.irs_curve_cache.get(curve_key)
+        if curve_state is None:
+            sample_disc = np.unique(
+                np.concatenate(
+                    (
+                        np.asarray([0.0], dtype=float),
+                        np.asarray(inputs.times, dtype=float),
+                        np.asarray(legs.get("fixed_pay_time", []), dtype=float),
+                        np.asarray(legs.get("float_pay_time", []), dtype=float),
+                    )
+                )
+            )
+            sample_disc = sample_disc[np.isfinite(sample_disc)]
+            sample_disc.sort()
+            sample_fwd = np.unique(
+                np.concatenate(
+                    (
+                        sample_disc,
+                        np.asarray(legs.get("float_start_time", []), dtype=float),
+                        np.asarray(legs.get("float_end_time", []), dtype=float),
+                    )
+                )
+            )
+            sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
+            sample_fwd.sort()
+            curve_state = {
+                "disc_curve": torch_curve_ctor(
+                    times=sample_disc,
+                    dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
+                    device=torch_device,
+                ),
+                "fwd_curve": torch_curve_ctor(
+                    times=sample_fwd,
+                    dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
+                    device=torch_device,
+                ),
+            }
+            ctx.irs_curve_cache[curve_key] = curve_state
+        vals = torch_pricer(
+            model,
+            curve_state["disc_curve"],
+            curve_state["fwd_curve"],
+            legs,
+            np.asarray(inputs.times, dtype=float),
+            x_paths,
+            realized_float_coupon=realized_coupon,
+            return_numpy=True,
+        )
+        return vals, True
+
+    def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
+        inputs = ctx.inputs
+        if ctx.irs_backend is None or not self._supports_torch_rate_swap(spec):
+            return self._price_generic_rate_swap(spec, inputs, ctx.model, ctx.x_paths), False
+        torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _, _ = ctx.irs_backend
+        rate_legs = list((spec.legs or {}).get("rate_legs", []))
+        vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        disc_key = ("disc", spec.ccy)
+        disc_curve = ctx.torch_curve_cache.get(disc_key)
+        if disc_curve is None:
+            sample_disc = [np.asarray(inputs.times, dtype=float)]
+            for leg in rate_legs:
+                sample_disc.append(np.asarray(leg.get("pay_time", []), dtype=float))
+            disc_times = np.unique(np.concatenate(sample_disc))
+            disc_times = disc_times[np.isfinite(disc_times)]
+            disc_times.sort()
+            disc_curve = torch_curve_ctor(
+                times=disc_times,
+                dfs=np.asarray([float(inputs.discount_curves[spec.ccy](float(t))) for t in disc_times], dtype=float),
+                device=torch_device,
+            )
+            ctx.torch_curve_cache[disc_key] = disc_curve
+        p_disc = inputs.discount_curves[spec.ccy]
+        for leg in rate_legs:
+            kind = str(leg.get("kind", "")).upper()
+            if kind in {"FIXED", "FLOATING"}:
+                leg_cache_key = self._rate_leg_pricing_cache_key(spec.ccy, leg)
+                cached_vals = ctx.torch_rate_leg_value_cache.get(leg_cache_key)
+                if cached_vals is not None:
+                    vals += cached_vals
+                    continue
+                fwd_curve = None
+                if kind == "FLOATING":
+                    index_name = str(leg.get("index_name", ""))
+                    fwd_key = ("fwd", index_name.upper())
+                    fwd_curve = ctx.torch_curve_cache.get(fwd_key)
+                    if fwd_curve is None:
+                        curve = self._resolve_index_curve(inputs, spec.ccy, index_name)
+                        sample_fwd = np.unique(
+                            np.concatenate(
+                                (
+                                    np.asarray(inputs.times, dtype=float),
+                                    np.asarray(leg.get("start_time", []), dtype=float),
+                                    np.asarray(leg.get("end_time", []), dtype=float),
+                                )
+                            )
+                        )
+                        sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
+                        sample_fwd.sort()
+                        fwd_curve = torch_curve_ctor(
+                            times=sample_fwd,
+                            dfs=np.asarray([float(curve(float(t))) for t in sample_fwd], dtype=float),
+                            device=torch_device,
+                        )
+                        ctx.torch_curve_cache[fwd_key] = fwd_curve
+                leg_vals = torch_plain_leg_pricer(
+                    ctx.model,
+                    disc_curve,
+                    leg,
+                    np.asarray(inputs.times, dtype=float),
+                    ctx.x_paths,
+                    fwd_curve=fwd_curve,
+                    return_numpy=True,
+                )
+                ctx.torch_rate_leg_value_cache[leg_cache_key] = leg_vals
+                vals += leg_vals
+                continue
+            pay = np.asarray(leg.get("pay_time", []), dtype=float)
+            accr = np.asarray(leg.get("accrual", []), dtype=float)
+            notionals = np.asarray(leg.get("notional", np.zeros(pay.shape)), dtype=float)
+            sign = float(leg.get("sign", 1.0))
+            for i, t in enumerate(inputs.times):
+                live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
+                if not np.any(live):
+                    continue
+                x_t = ctx.x_paths[i, :]
+                p_t = float(p_disc(float(t)))
+                disc = ctx.model.discount_bond_paths(
+                    float(t),
+                    pay[live],
+                    x_t,
+                    p_t,
+                    np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
+                )
+                coupons = self._rate_leg_coupon_paths_torch(
+                    ctx.model,
+                    leg,
+                    spec.ccy,
+                    inputs,
+                    float(t),
+                    x_t,
+                    torch_backend=ctx.irs_backend,
+                    curve_cache=ctx.torch_curve_cache,
+                )[live, :]
+                amount = sign * notionals[live, None] * accr[live, None] * coupons
+                vals[i, :] += np.sum(amount * disc, axis=0)
+        return vals, False
+
+    def _price_trade_fx_forward_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
+        return self._price_fx_forward(spec.trade, ctx.inputs, ctx.n_times, ctx.n_paths, shared_sim=ctx.shared_fx_sim), False
+
+    def _price_trade_capfloor_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        if spec.sticky_state is None:
+            return None, False
+        definition = spec.sticky_state.get("definition")
+        index_name = str(spec.sticky_state.get("index_name", ""))
+        if definition is None:
+            return None, False
+        p_disc = ctx.inputs.discount_curves[spec.ccy]
+        p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, index_name)
+        if ctx.irs_backend is None:
+            return self._ir_options_mod.capfloor_npv_paths(
+                model=ctx.model,
+                p0_disc=p_disc,
+                p0_fwd=p_fwd,
+                capfloor=definition,
+                times=ctx.inputs.times,
+                x_paths=ctx.x_paths,
+                lock_fixings=True,
+            ), False
+        torch_curve_ctor, _, _, torch_device, _, _, torch_capfloor_pricer = ctx.irs_backend
+        disc_key = ("capfloor_disc", spec.ccy)
+        disc_curve = ctx.torch_curve_cache.get(disc_key)
+        if disc_curve is None:
+            disc_times = np.unique(
+                np.concatenate(
+                    (
+                        np.asarray(ctx.inputs.times, dtype=float),
+                        np.asarray(definition.start_time, dtype=float),
+                        np.asarray(definition.end_time, dtype=float),
+                        np.asarray(definition.pay_time, dtype=float),
+                        np.asarray(definition.fixing_time if definition.fixing_time is not None else definition.start_time, dtype=float),
+                    )
+                )
+            )
+            disc_times = disc_times[np.isfinite(disc_times)]
+            disc_times.sort()
+            disc_curve = torch_curve_ctor(
+                times=disc_times,
+                dfs=np.asarray([float(p_disc(float(t))) for t in disc_times], dtype=float),
+                device=torch_device,
+            )
+            ctx.torch_curve_cache[disc_key] = disc_curve
+        fwd_key = ("capfloor_fwd", index_name.upper())
+        fwd_curve = ctx.torch_curve_cache.get(fwd_key)
+        if fwd_curve is None:
+            fwd_times = np.unique(
+                np.concatenate(
+                    (
+                        np.asarray(ctx.inputs.times, dtype=float),
+                        np.asarray(definition.start_time, dtype=float),
+                        np.asarray(definition.end_time, dtype=float),
+                        np.asarray(definition.fixing_time if definition.fixing_time is not None else definition.start_time, dtype=float),
+                    )
+                )
+            )
+            fwd_times = fwd_times[np.isfinite(fwd_times)]
+            fwd_times.sort()
+            fwd_curve = torch_curve_ctor(
+                times=fwd_times,
+                dfs=np.asarray([float(p_fwd(float(t))) for t in fwd_times], dtype=float),
+                device=torch_device,
+            )
+            ctx.torch_curve_cache[fwd_key] = fwd_curve
+        vals = torch_capfloor_pricer(
+            ctx.model,
+            disc_curve,
+            fwd_curve,
+            definition,
+            np.asarray(ctx.inputs.times, dtype=float),
+            ctx.x_paths,
+            lock_fixings=True,
+            return_numpy=True,
+        )
+        return vals, False
+
+    def _price_trade_swaption_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        if spec.sticky_state is None:
+            return None, False
+        definition = spec.sticky_state.get("definition")
+        if definition is None:
+            return None, False
+        p_disc = ctx.inputs.discount_curves[spec.ccy]
+        float_index = str(spec.sticky_state.get("index_name", ""))
+        p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, float_index)
+        if ctx.irs_backend is not None:
+            torch_curve_ctor, torch_pricer, _, torch_device, _, _, _ = ctx.irs_backend
+            curve_key = (spec.ccy, float_index)
+            curve_state = ctx.irs_curve_cache.get(curve_key)
+            legs = definition.underlying_legs
+            if curve_state is None:
+                sample_disc = np.unique(
+                    np.concatenate(
+                        (
+                            np.asarray([0.0], dtype=float),
+                            np.asarray(ctx.inputs.times, dtype=float),
+                            np.asarray(legs.get("fixed_pay_time", []), dtype=float),
+                            np.asarray(legs.get("float_pay_time", []), dtype=float),
+                        )
+                    )
+                )
+                sample_disc = sample_disc[np.isfinite(sample_disc)]
+                sample_disc.sort()
+                sample_fwd = np.unique(
+                    np.concatenate(
+                        (
+                            sample_disc,
+                            np.asarray(legs.get("float_start_time", []), dtype=float),
+                            np.asarray(legs.get("float_end_time", []), dtype=float),
+                        )
+                    )
+                )
+                sample_fwd = sample_fwd[np.isfinite(sample_fwd)]
+                sample_fwd.sort()
+                disc_curve = torch_curve_ctor(
+                    times=sample_disc,
+                    dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
+                    device=torch_device,
+                )
+                fwd_curve = torch_curve_ctor(
+                    times=sample_fwd,
+                    dfs=np.asarray([float(p_fwd(float(t))) for t in sample_fwd], dtype=float),
+                    device=torch_device,
+                )
+                curve_state = {
+                    "disc_curve": disc_curve,
+                    "fwd_curve": fwd_curve,
+                }
+                ctx.irs_curve_cache[curve_key] = curve_state
+            signed_swap = torch_pricer(
+                ctx.model,
+                curve_state["disc_curve"],
+                curve_state["fwd_curve"],
+                legs,
+                np.asarray(ctx.inputs.times, dtype=float),
+                ctx.x_paths,
+                exercise_into_whole_periods=True,
+                deterministic_fixings_cutoff=0.0,
+                return_numpy=True,
+            )
+            vals = self._ir_options_mod.bermudan_npv_paths_from_underlying(
+                model=ctx.model,
+                p0_disc=p_disc,
+                bermudan=definition,
+                times=ctx.inputs.times,
+                x_paths=ctx.x_paths,
+                signed_swap=float(definition.exercise_sign) * np.asarray(signed_swap, dtype=float),
+            )
+            return vals, False
+        vals = self._ir_options_mod.bermudan_npv_paths(
+            model=ctx.model,
+            p0_disc=p_disc,
+            p0_fwd=p_fwd,
+            bermudan=definition,
+            times=ctx.inputs.times,
+            x_paths=ctx.x_paths,
+        )
+        return vals, False
+
+    def _price_trade_cashflow_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        if spec.sticky_state is None:
+            return None, False
+        pay = np.asarray(spec.sticky_state.get("pay_time", []), dtype=float)
+        amount = np.asarray(spec.sticky_state.get("amount", []), dtype=float)
+        if pay.size == 0 or amount.size != pay.size:
+            return None, False
+        p_disc = ctx.inputs.discount_curves[spec.ccy]
+        vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        for i, t in enumerate(ctx.inputs.times):
+            live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
+            if not np.any(live):
+                continue
+            p_t = float(p_disc(float(t)))
+            disc = ctx.model.discount_bond_paths(
+                float(t),
+                pay[live],
+                ctx.x_paths[i, :],
+                p_t,
+                np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
+            )
+            vals[i, :] = np.sum(amount[live][:, None] * disc, axis=0)
+        return vals, False
+
+    def _price_trade_inflation_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        trade_product = spec.trade.product
+        assert isinstance(trade_product, InflationSwap)
+        curve_key = (
+            str(trade_product.index).upper(),
+            "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
+        )
+        inflation_curve = ctx.inputs.inflation_curves.get(curve_key)
+        if inflation_curve is None or str(trade_product.pay_leg).lower() == "float":
+            return None, False
+        p_disc = ctx.inputs.discount_curves[spec.ccy]
+        vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        if str(trade_product.inflation_type).upper() == "YY":
+            payment_times = self._inflation_mod.inflation_swap_payment_times(
+                float(trade_product.maturity_years),
+                str(trade_product.schedule_tenor or "1Y"),
+            )
+            profile = np.asarray(
+                [
+                    self._inflation_mod.price_yoy_swap_at_time(
+                        notional=float(trade_product.notional),
+                        payment_times=payment_times,
+                        fixed_rate=float(trade_product.fixed_rate),
+                        inflation_curve=inflation_curve,
+                        discount_curve=p_disc,
+                        valuation_time=float(t),
+                        receive_inflation=True,
+                    )
+                    for t in ctx.inputs.times
+                ],
+                dtype=float,
+            )
+        else:
+            profile = np.asarray(
+                [
+                    self._inflation_mod.price_zero_coupon_cpi_swap_at_time(
+                        notional=float(trade_product.notional),
+                        maturity_years=float(trade_product.maturity_years),
+                        fixed_rate=float(trade_product.fixed_rate),
+                        base_cpi=float(trade_product.base_cpi or 100.0),
+                        inflation_curve=inflation_curve,
+                        discount_curve=p_disc,
+                        valuation_time=float(t),
+                        receive_inflation=True,
+                    )
+                    for t in ctx.inputs.times
+                ],
+                dtype=float,
+            )
+        vals[:, :] = profile[:, None]
+        return vals, False
+
+    def _price_trade_inflation_capfloor_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        trade_product = spec.trade.product
+        assert isinstance(trade_product, InflationCapFloor)
+        curve_key = (
+            str(trade_product.index).upper(),
+            "YY" if str(trade_product.inflation_type).upper() == "YY" else "ZC",
+        )
+        inflation_curve = ctx.inputs.inflation_curves.get(curve_key)
+        if inflation_curve is None:
+            return None, False
+        p_disc = ctx.inputs.discount_curves[spec.ccy]
+        definition = self._inflation_mod.InflationCapFloorDefinition(
+            trade_id=spec.trade.trade_id,
+            currency=spec.ccy,
+            inflation_type=str(trade_product.inflation_type),
+            option_type=str(trade_product.option_type),
+            index=str(trade_product.index),
+            strike=float(trade_product.strike),
+            notional=float(trade_product.notional),
+            maturity_years=float(trade_product.maturity_years),
+            base_cpi=float(trade_product.base_cpi) if trade_product.base_cpi is not None else None,
+            observation_lag=trade_product.observation_lag,
+            long_short=str(trade_product.long_short),
+        )
+        profile = np.asarray(
+            [
+                self._inflation_mod.price_inflation_capfloor_at_time(
+                    definition=definition,
+                    inflation_curve=inflation_curve,
+                    discount_curve=p_disc,
+                    valuation_time=float(t),
+                )
+                for t in ctx.inputs.times
+            ],
+            dtype=float,
+        )
+        vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        vals[:, :] = profile[:, None]
+        return vals, False
+
     def _resolve_index_curve(
         self,
         inputs: _PythonLgmInputs,
@@ -4001,14 +4236,43 @@ class PythonLgmAdapter:
         pay_times = np.arange(effective_start + 1.0, maturity + 1.0e-10, 1.0)
         if pay_times.size == 0 or pay_times[-1] < maturity - 1.0e-10:
             pay_times = np.append(pay_times, maturity)
+        curve_values = self._irs_utils.curve_values
+        if float(t) <= 1.0e-12 and np.ptp(np.asarray(x_t, dtype=float)) <= 1.0e-14:
+            cache_key = (
+                id(curve),
+                round(float(t), 12),
+                round(float(effective_start), 12),
+                round(float(tenor_years), 12),
+                int(np.asarray(x_t, dtype=float).size),
+            )
+            cached = self._par_swap_deterministic_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            pay_dfs = np.asarray(curve_values(curve, pay_times), dtype=float)
+            p_start = float(curve(effective_start))
+            p_end = float(curve(float(maturity)))
+            annuity = 0.0
+            prev = effective_start
+            for pay, pay_df in zip(pay_times, pay_dfs):
+                tau = max(float(pay) - prev, 1.0e-8)
+                annuity += tau * float(pay_df)
+                prev = float(pay)
+            annuity = annuity if abs(annuity) >= 1.0e-12 else 1.0e-12
+            par_rate = (p_start - p_end) / annuity
+            out = np.full_like(np.asarray(x_t, dtype=float), par_rate, dtype=float)
+            self._par_swap_deterministic_cache[cache_key] = out
+            return out
         p_t = float(curve(t))
-        p_start = model.discount_bond(t, effective_start, x_t, p_t, float(curve(effective_start)))
-        p_end = model.discount_bond(t, float(maturity), x_t, p_t, float(curve(float(maturity))))
+        terminal_times = np.asarray([effective_start, float(maturity)], dtype=float)
+        terminal_dfs = np.asarray(curve_values(curve, terminal_times), dtype=float)
+        p_start = model.discount_bond(t, effective_start, x_t, p_t, float(terminal_dfs[0]))
+        p_end = model.discount_bond(t, float(maturity), x_t, p_t, float(terminal_dfs[1]))
         annuity = np.zeros_like(x_t, dtype=float)
         prev = effective_start
-        for pay in pay_times:
+        pay_dfs = np.asarray(curve_values(curve, pay_times), dtype=float)
+        for pay, pay_df in zip(pay_times, pay_dfs):
             tau = max(float(pay) - prev, 1.0e-8)
-            annuity += tau * model.discount_bond(t, float(pay), x_t, p_t, float(curve(float(pay))))
+            annuity += tau * model.discount_bond(t, float(pay), x_t, p_t, float(pay_df))
             prev = float(pay)
         annuity = np.where(np.abs(annuity) < 1.0e-12, 1.0e-12, annuity)
         return (p_start - p_end) / annuity
@@ -4018,12 +4282,21 @@ class PythonLgmAdapter:
             return 0.0
         pts = sorted((float(t), float(v)) for t, v in points)
         return float(
-            self._irs_utils._interp1d_flat_vectorized(
+            self._irs_utils.interpolate_linear_flat(
                 float(x),
                 np.asarray([t for t, _ in pts], dtype=float),
                 np.asarray([v for _, v in pts], dtype=float),
             )
         )
+
+    def _finite_optional_rate(self, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            rate = float(value)
+        except Exception:
+            return None
+        return rate if math.isfinite(rate) else None
 
     def _normal_pdf(self, x: np.ndarray) -> np.ndarray:
         return np.exp(-0.5 * np.square(x)) / math.sqrt(2.0 * math.pi)
@@ -4326,6 +4599,16 @@ class PythonLgmAdapter:
         t: float,
         x_t: np.ndarray,
     ) -> np.ndarray:
+        x_arr = np.asarray(x_t, dtype=float)
+        cache_key = (
+            self._rate_leg_pricing_cache_key(ccy, leg),
+            round(float(t), 12),
+            int(x_arr.ctypes.data),
+            int(x_arr.size),
+        )
+        cached = self._coupon_path_cache.get(cache_key)
+        if cached is not None:
+            return cached
         kind = str(leg.get("kind", "")).upper()
         start = np.asarray(leg.get("start_time", []), dtype=float)
         end = np.asarray(leg.get("end_time", []), dtype=float)
@@ -4334,16 +4617,17 @@ class PythonLgmAdapter:
         fixed_mask = np.asarray(leg.get("is_historically_fixed", np.zeros(start.shape, dtype=bool)), dtype=bool)
         spread = np.asarray(leg.get("spread", np.zeros(start.shape)), dtype=float)
         gearing = np.asarray(leg.get("gearing", np.ones(start.shape)), dtype=float)
-        coupons = np.zeros((start.size, x_t.size), dtype=float)
+        coupons = np.zeros((start.size, x_arr.size), dtype=float)
         for i in range(start.size):
             if fixed_mask[i] or fixing[i] <= t + 1.0e-12:
-                base = np.full(x_t.shape, quoted[i], dtype=float)
+                base = np.full(x_arr.shape, quoted[i], dtype=float)
             elif kind == "FLOATING":
                 curve = self._resolve_index_curve(inputs, ccy, str(leg.get("index_name", "")))
                 p_t = float(curve(t))
                 effective_start = max(float(start[i]), float(t))
-                p_s = model.discount_bond(t, effective_start, x_t, p_t, float(curve(effective_start)))
-                p_e = model.discount_bond(t, float(end[i]), x_t, p_t, float(curve(float(end[i]))))
+                leg_dfs = np.asarray(self._irs_utils.curve_values(curve, np.asarray([effective_start, float(end[i])], dtype=float)), dtype=float)
+                p_s = model.discount_bond(t, effective_start, x_arr, p_t, float(leg_dfs[0]))
+                p_e = model.discount_bond(t, float(end[i]), x_arr, p_t, float(leg_dfs[1]))
                 tau = float(np.asarray(leg.get("index_accrual", leg["accrual"]), dtype=float)[i])
                 base = (p_s / p_e - 1.0) / max(tau, 1.0e-8)
             elif kind == "CMS":
@@ -4365,7 +4649,7 @@ class PythonLgmAdapter:
                         day_counter_name=str(leg.get("day_counter", "A365")),
                         in_arrears=bool(leg.get("is_in_arrears", False)),
                     )
-                base = np.full(x_t.shape, ql_rate, dtype=float) if ql_rate is not None else self._par_swap_rate_paths(model, curve, t, x_t, float(start[i]), tenor_years)
+                base = np.full(x_arr.shape, ql_rate, dtype=float) if ql_rate is not None else self._par_swap_rate_paths(model, curve, t, x_arr, float(start[i]), tenor_years)
             elif kind in {"CMSSPREAD", "DIGITALCMSSPREAD"}:
                 idx1 = str(leg.get("index_name_1", ""))
                 idx2 = str(leg.get("index_name_2", ""))
@@ -4403,11 +4687,11 @@ class PythonLgmAdapter:
                         day_counter_name=dc_name,
                         in_arrears=in_arrears,
                     )
-                rate1 = np.full(x_t.shape, ql_rate1, dtype=float) if ql_rate1 is not None else self._par_swap_rate_paths(model, curve1, t, x_t, float(start[i]), _parse_ore_tenor_to_years(tenor1.group(1)) if tenor1 else 10.0)
-                rate2 = np.full(x_t.shape, ql_rate2, dtype=float) if ql_rate2 is not None else self._par_swap_rate_paths(model, curve2, t, x_t, float(start[i]), _parse_ore_tenor_to_years(tenor2.group(1)) if tenor2 else 2.0)
+                rate1 = np.full(x_arr.shape, ql_rate1, dtype=float) if ql_rate1 is not None else self._par_swap_rate_paths(model, curve1, t, x_arr, float(start[i]), _parse_ore_tenor_to_years(tenor1.group(1)) if tenor1 else 10.0)
+                rate2 = np.full(x_arr.shape, ql_rate2, dtype=float) if ql_rate2 is not None else self._par_swap_rate_paths(model, curve2, t, x_arr, float(start[i]), _parse_ore_tenor_to_years(tenor2.group(1)) if tenor2 else 2.0)
                 base = rate1 - rate2
             else:
-                base = np.zeros_like(x_t, dtype=float)
+                base = np.zeros_like(x_arr, dtype=float)
 
             raw_coupon = gearing[i] * base + spread[i]
             coupon = raw_coupon
@@ -4416,22 +4700,24 @@ class PythonLgmAdapter:
                 floor = leg.get("floor")
                 ql_rate = None
                 if not (fixed_mask[i] or fixing[i] <= t + 1.0e-12) and t <= 1.0e-12:
-                    ql_rate = self._static_ql_cmsspread_rate(
-                        inputs,
-                        asof=inputs.asof,
-                        ccy=ccy,
-                        idx1=str(leg.get("index_name_1", "")),
-                        idx2=str(leg.get("index_name_2", "")),
-                        start_time=float(start[i]),
-                        end_time=float(end[i]),
-                        pay_time=float(np.asarray(leg.get("pay_time", end), dtype=float)[i]),
-                        fixing_days=int(leg.get("fixing_days", 2)),
-                        day_counter_name=str(leg.get("day_counter", "A365")),
-                        in_arrears=bool(leg.get("is_in_arrears", False)),
-                        gearing=float(gearing[i]),
-                        spread=float(spread[i]),
-                        cap=float(cap) if cap is not None else None,
-                        floor=float(floor) if floor is not None else None,
+                    ql_rate = self._finite_optional_rate(
+                        self._static_ql_cmsspread_rate(
+                            inputs,
+                            asof=inputs.asof,
+                            ccy=ccy,
+                            idx1=str(leg.get("index_name_1", "")),
+                            idx2=str(leg.get("index_name_2", "")),
+                            start_time=float(start[i]),
+                            end_time=float(end[i]),
+                            pay_time=float(np.asarray(leg.get("pay_time", end), dtype=float)[i]),
+                            fixing_days=int(leg.get("fixing_days", 2)),
+                            day_counter_name=str(leg.get("day_counter", "A365")),
+                            in_arrears=bool(leg.get("is_in_arrears", False)),
+                            gearing=float(gearing[i]),
+                            spread=float(spread[i]),
+                            cap=float(cap) if cap is not None else None,
+                            floor=float(floor) if floor is not None else None,
+                        )
                     )
                 if ql_rate is not None:
                     coupon = np.full_like(raw_coupon, ql_rate, dtype=float)
@@ -4448,6 +4734,12 @@ class PythonLgmAdapter:
                         cap=float(cap) if cap is not None else None,
                         floor=float(floor) if floor is not None else None,
                     )
+                if not np.all(np.isfinite(coupon)):
+                    coupon = self._capped_floored_rate(
+                        raw_coupon,
+                        cap=float(cap) if cap is not None else None,
+                        floor=float(floor) if floor is not None else None,
+                    )
             elif kind == "DIGITALCMSSPREAD":
                 fixed_mode = bool(fixed_mask[i] or fixing[i] <= t + 1.0e-12)
                 ql_raw = None
@@ -4459,42 +4751,47 @@ class PythonLgmAdapter:
                     fixing_days = int(leg.get("fixing_days", 2))
                     dc_name = str(leg.get("day_counter", "A365"))
                     in_arrears = bool(leg.get("is_in_arrears", False))
-                    ql_raw = self._static_ql_cmsspread_rate(
-                        inputs,
-                        asof=inputs.asof,
-                        ccy=ccy,
-                        idx1=idx1,
-                        idx2=idx2,
-                        start_time=float(start[i]),
-                        end_time=float(end[i]),
-                        pay_time=pay_time,
-                        fixing_days=fixing_days,
-                        day_counter_name=dc_name,
-                        in_arrears=in_arrears,
-                        gearing=float(gearing[i]),
-                        spread=float(spread[i]),
-                    )
-                    ql_capped_rate_fn = lambda cap, floor, idx1_=idx1, idx2_=idx2, pt=pay_time, fd=fixing_days, dc_=dc_name, ia=in_arrears: np.full_like(
-                        raw_coupon,
+                    ql_raw = self._finite_optional_rate(
                         self._static_ql_cmsspread_rate(
                             inputs,
                             asof=inputs.asof,
                             ccy=ccy,
-                            idx1=idx1_,
-                            idx2=idx2_,
+                            idx1=idx1,
+                            idx2=idx2,
                             start_time=float(start[i]),
                             end_time=float(end[i]),
-                            pay_time=pt,
-                            fixing_days=fd,
-                            day_counter_name=dc_,
-                            in_arrears=ia,
+                            pay_time=pay_time,
+                            fixing_days=fixing_days,
+                            day_counter_name=dc_name,
+                            in_arrears=in_arrears,
                             gearing=float(gearing[i]),
                             spread=float(spread[i]),
-                            cap=None if math.isnan(cap) else float(cap),
-                            floor=None if math.isnan(floor) else float(floor),
-                        ),
-                        dtype=float,
+                        )
                     )
+                    if ql_raw is not None:
+                        ql_capped_rate_fn = lambda cap, floor, idx1_=idx1, idx2_=idx2, pt=pay_time, fd=fixing_days, dc_=dc_name, ia=in_arrears, raw=raw_coupon: np.full_like(
+                            raw,
+                            self._finite_optional_rate(
+                                self._static_ql_cmsspread_rate(
+                                    inputs,
+                                    asof=inputs.asof,
+                                    ccy=ccy,
+                                    idx1=idx1_,
+                                    idx2=idx2_,
+                                    start_time=float(start[i]),
+                                    end_time=float(end[i]),
+                                    pay_time=pt,
+                                    fixing_days=fd,
+                                    day_counter_name=dc_,
+                                    in_arrears=ia,
+                                    gearing=float(gearing[i]),
+                                    spread=float(spread[i]),
+                                    cap=None if math.isnan(cap) else float(cap),
+                                    floor=None if math.isnan(floor) else float(floor),
+                                )
+                            ),
+                            dtype=float,
+                        )
                 if bool(leg.get("naked_option", False)):
                     coupon = np.zeros_like(raw_coupon, dtype=float)
                 elif ql_raw is not None:
@@ -4536,7 +4833,28 @@ class PythonLgmAdapter:
                     atm_included=bool(leg.get("is_put_atm_included", False)),
                     capped_rate_fn=capped_rate_fn,
                 )
+                if not np.all(np.isfinite(coupon)):
+                    coupon = np.zeros_like(raw_coupon, dtype=float) if bool(leg.get("naked_option", False)) else raw_coupon.copy()
+                    coupon = coupon + self._digital_option_rate(
+                        raw_coupon,
+                        float(leg.get("call_strike", float("nan"))),
+                        float(leg.get("call_payoff", float("nan"))),
+                        is_call=True,
+                        long_short=float(leg.get("call_position", 1.0)),
+                        fixed_mode=True,
+                        atm_included=bool(leg.get("is_call_atm_included", False)),
+                    )
+                    coupon = coupon + self._digital_option_rate(
+                        raw_coupon,
+                        float(leg.get("put_strike", float("nan"))),
+                        float(leg.get("put_payoff", float("nan"))),
+                        is_call=False,
+                        long_short=float(leg.get("put_position", 1.0)),
+                        fixed_mode=True,
+                        atm_included=bool(leg.get("is_put_atm_included", False)),
+                    )
             coupons[i, :] = coupon
+        self._coupon_path_cache[cache_key] = coupons
         return coupons
 
     def _price_generic_rate_swap(
@@ -4577,7 +4895,14 @@ class PythonLgmAdapter:
                 live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
                 if not np.any(live):
                     continue
-                disc = model.discount_bond_paths(float(t), pay[live], x_t, p_t, np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float))
+                pay_live = pay[live]
+                disc = model.discount_bond_paths(
+                    float(t),
+                    pay_live,
+                    x_t,
+                    p_t,
+                    np.asarray(self._irs_utils.curve_values(p_disc, pay_live), dtype=float),
+                )
                 if kind == "FIXED":
                     amount = np.asarray(leg.get("amount", np.zeros(pay.shape)), dtype=float)[live]
                     pv += np.sum(amount[:, None] * disc, axis=0)
@@ -4586,9 +4911,9 @@ class PythonLgmAdapter:
                     coupons = frozen_coupon_paths[leg_idx][live, :]
                 else:
                     coupons = self._rate_leg_coupon_paths(model, leg, spec.ccy, inputs, float(t), x_t)[live, :]
-                notional = float(leg.get("notional", 0.0))
+                notionals = np.asarray(leg.get("notional", np.zeros(pay.shape)), dtype=float)
                 sign = float(leg.get("sign", 1.0))
-                amount = sign * notional * accr[live, None] * coupons
+                amount = sign * notionals[live, None] * accr[live, None] * coupons
                 pv += np.sum(amount * disc, axis=0)
             vals[i, :] = pv
         return vals
@@ -5545,7 +5870,27 @@ def _build_sticky_closeout_times(times: np.ndarray, mpor_years: float) -> np.nda
     return np.minimum(t + mpor, float(t[-1]))
 
 
-def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
+def _parse_zero_quote_time(token: str, asof_date: str | None, day_counter: str = "A365F") -> float | None:
+    if not asof_date:
+        return None
+    try:
+        from pythonore.io import ore_snapshot as ore_snapshot_io
+
+        anchor = datetime.fromisoformat(_normalize_asof_date(asof_date)).date()
+        txt = str(token).strip()
+        if re.fullmatch(r"\d{8}", txt):
+            pillar = datetime.strptime(txt, "%Y%m%d").date()
+        else:
+            pillar = datetime.fromisoformat(txt).date()
+    except Exception:
+        return None
+    yf = ore_snapshot_io._year_fraction_from_day_counter(anchor, pillar, day_counter)
+    if yf <= 0.0:
+        return None
+    return float(yf)
+
+
+def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = None) -> Dict[str, Any]:
     zero: Dict[str, List[Tuple[float, float]]] = {}
     named_zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
@@ -5610,13 +5955,18 @@ def _parse_market_overlay(raw_quotes: Sequence[Any]) -> Dict[str, Any]:
             ccy = parts[2]
             tenor = parts[3]
             curve_name = None
+            day_counter = "A365F"
             if len(parts) >= 6:
                 curve_name = parts[3]
+                if len(parts) >= 7:
+                    day_counter = parts[-2]
                 tenor = parts[-1]
             try:
                 t = _parse_tenor_to_years(tenor)
             except Exception:
-                continue
+                t = _parse_zero_quote_time(tenor, asof_date, day_counter=day_counter)
+                if t is None:
+                    continue
             if curve_name is not None:
                 named_zero.setdefault(curve_name, []).append((t, val))
             else:
@@ -6025,6 +6375,8 @@ def _build_zero_rate_shocked_curve(
     node_times: Sequence[float],
     node_shifts: Sequence[float],
 ) -> Callable[[float], float]:
+    from pythonore.compute import irs_xva_utils as irs_utils
+
     times = np.asarray([float(x) for x in node_times], dtype=float)
     shifts = np.asarray([float(x) for x in node_shifts], dtype=float)
     if times.size == 0 or times.size != shifts.size:
@@ -6065,7 +6417,7 @@ def _build_zero_rate_shocked_curve(
             scalar_cache[tt] = out
             return out
 
-        shocked_log_df = float(_interp1d_flat_vectorized_local(tt, times, shocked_node_logs))
+        shocked_log_df = float(irs_utils.interpolate_linear_flat(tt, times, shocked_node_logs))
         out = float(np.exp(shocked_log_df))
         scalar_cache[tt] = out
         return out
@@ -6132,43 +6484,6 @@ def _apply_curve_node_shocks(
     return discount_curves, forward_curves, forward_curves_by_tenor, forward_curves_by_name, xva_discount_curve
 
 
-def _interp1d_flat_vectorized_local(
-    x: np.ndarray | Sequence[float] | float,
-    xp: np.ndarray | Sequence[float],
-    fp: np.ndarray | Sequence[float],
-) -> np.ndarray | float:
-    xp_arr = np.asarray(xp, dtype=float)
-    fp_arr = np.asarray(fp, dtype=float)
-    if xp_arr.ndim != 1 or fp_arr.ndim != 1 or xp_arr.size != fp_arr.size:
-        raise ValueError("xp and fp must be one-dimensional with matching size")
-    if xp_arr.size == 0:
-        raise ValueError("xp must not be empty")
-    if np.any(np.diff(xp_arr) <= 0.0):
-        raise ValueError("xp must be strictly increasing")
-    x_arr = np.asarray(x, dtype=float)
-    scalar = x_arr.ndim == 0
-    flat = np.atleast_1d(x_arr).astype(float, copy=False)
-    out = np.empty_like(flat, dtype=float)
-    left = flat <= xp_arr[0]
-    right = flat >= xp_arr[-1]
-    mid = ~(left | right)
-    out[left] = fp_arr[0]
-    out[right] = fp_arr[-1]
-    if np.any(mid):
-        xm = flat[mid]
-        idx = np.searchsorted(xp_arr, xm, side="right")
-        idx = np.clip(idx, 1, xp_arr.size - 1)
-        x0 = xp_arr[idx - 1]
-        x1 = xp_arr[idx]
-        y0 = fp_arr[idx - 1]
-        y1 = fp_arr[idx]
-        w = (xm - x0) / np.maximum(x1 - x0, 1.0e-12)
-        out[mid] = y0 + w * (y1 - y0)
-    if scalar:
-        return float(out[0])
-    return out.reshape(x_arr.shape)
-
-
 def _quote_matches_discount_curve(
     key: str,
     ccy: str,
@@ -6181,6 +6496,12 @@ def _quote_matches_discount_curve(
     family = _curve_family_from_source_column(source_column)
     if not family:
         family = str(fallback_family).strip().upper()
+    if parts[0] == "ZERO" and parts[1] == "RATE":
+        if len(parts) == 4:
+            return True
+        if len(parts) >= 6:
+            return parts[3] == family or family in {"", "1D", "ON", "O/N"}
+        return False
     if parts[0] == "MM" and parts[1] == "RATE":
         return True
     if parts[0] == "IR_SWAP" and parts[1] == "RATE":

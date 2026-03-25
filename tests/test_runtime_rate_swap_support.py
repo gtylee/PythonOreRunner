@@ -458,6 +458,60 @@ def test_example25_cmsspread_prices_without_flows_csv():
         tmp.cleanup()
 
 
+def test_build_irs_legs_ignores_flows_csv_by_default():
+    case_root = TOOLS_DIR / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    snapshot = replace(snapshot, config=replace(snapshot.config, num_paths=4))
+    trade = snapshot.portfolio.trades[0]
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+
+    with patch.object(adapter._irs_utils, "load_ore_legs_from_flows", side_effect=AssertionError("flows.csv should not be used by default")):
+        legs = adapter._build_irs_legs(trade, map_snapshot(snapshot), snapshot)
+
+    assert "fixed_notional" in legs
+    assert np.asarray(legs["fixed_notional"], dtype=float).size > 0
+
+
+def test_build_irs_legs_can_use_flows_csv_when_explicitly_requested():
+    case_root = TOOLS_DIR / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    snapshot = replace(
+        snapshot,
+        config=replace(snapshot.config, num_paths=4, params={**dict(snapshot.config.params), "python.use_flows_csv": "Y"}),
+    )
+    trade = snapshot.portfolio.trades[0]
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    flow_legs = {
+        "fixed_pay_time": np.array([0.5], dtype=float),
+        "fixed_start_time": np.array([0.0], dtype=float),
+        "fixed_end_time": np.array([0.5], dtype=float),
+        "fixed_accrual": np.array([0.5], dtype=float),
+        "fixed_rate": np.array([0.02], dtype=float),
+        "fixed_notional": np.array([1_234_567.0], dtype=float),
+        "fixed_sign": np.array([-1.0], dtype=float),
+        "fixed_amount": np.array([-12_345.67], dtype=float),
+        "float_pay_time": np.array([0.5], dtype=float),
+        "float_start_time": np.array([0.0], dtype=float),
+        "float_end_time": np.array([0.5], dtype=float),
+        "float_accrual": np.array([0.5], dtype=float),
+        "float_index_accrual": np.array([0.5], dtype=float),
+        "float_notional": np.array([1_234_567.0], dtype=float),
+        "float_sign": np.array([1.0], dtype=float),
+        "float_coupon": np.array([0.0], dtype=float),
+        "float_amount": np.array([0.0], dtype=float),
+        "float_spread": np.array([0.0], dtype=float),
+        "float_fixing_time": np.array([0.0], dtype=float),
+    }
+
+    with patch.object(adapter._irs_utils, "load_ore_legs_from_flows", return_value=flow_legs) as flow_loader:
+        legs = adapter._build_irs_legs(trade, map_snapshot(snapshot), snapshot)
+
+    flow_loader.assert_called_once()
+    np.testing.assert_allclose(np.asarray(legs["fixed_notional"], dtype=float), np.array([1_234_567.0]))
+
+
 def test_python_runtime_compares_example25_digital_cmsspread_with_local_ore_run():
     if not LOCAL_ORE_BINARY.exists():
         return

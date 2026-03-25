@@ -13,7 +13,7 @@
     "action_items": [
       {
         "code": "missing_mandatory_quotes",
-        "detail_count": 90,
+        "detail_count": 70,
         "details": [
           "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/10Y",
           "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/12Y",
@@ -91,11 +91,9 @@
         "USD-3M-FRA-CONVENTIONS",
         "USD-3M-SWAP-CONVENTIONS",
         "USD-6M-FRA-CONVENTIONS",
-        "USD-FED-FUNDS-CONVENTIONS",
         "USD-LIBOR-3M-6M-BASIS-CONVENTIONS",
         "USD-LIBOR-CONVENTIONS",
-        "USD-LIBOR-SIFMA-3M-BASIS-CONVENTIONS",
-        "USD-OIS-CONVENTIONS"
+        "USD-LIBOR-SIFMA-3M-BASIS-CONVENTIONS"
       ],
       "valid": true
     },
@@ -133,7 +131,6 @@
       "quote_scope_curve_ids_by_section": {
         "YieldCurves": [
           "USD-IN-EUR",
-          "USD1D",
           "USD3M",
           "USD6M",
           "USDBMA"
@@ -179,7 +176,7 @@
     },
     "quotes": {
       "asof_quote_count": 0,
-      "mandatory_required_count": 90,
+      "mandatory_required_count": 70,
       "missing_mandatory": [
         "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/10Y",
         "BASIS_SWAP/BASIS_SPREAD/3M/6M/USD/12Y",
@@ -232,25 +229,6 @@
         "FXFWD/RATE/EUR/USD/3M",
         "FXFWD/RATE/EUR/USD/6M",
         "FXFWD/RATE/EUR/USD/9M",
-        "IR_SWAP/RATE/USD/2D/1D/10Y",
-        "IR_SWAP/RATE/USD/2D/1D/12Y",
-        "IR_SWAP/RATE/USD/2D/1D/15Y",
-        "IR_SWAP/RATE/USD/2D/1D/1M",
-        "IR_SWAP/RATE/USD/2D/1D/1Y",
-        "IR_SWAP/RATE/USD/2D/1D/1Y3M",
-        "IR_SWAP/RATE/USD/2D/1D/1Y6M",
-        "IR_SWAP/RATE/USD/2D/1D/1Y9M",
-        "IR_SWAP/RATE/USD/2D/1D/20Y",
-        "IR_SWAP/RATE/USD/2D/1D/25Y",
-        "IR_SWAP/RATE/USD/2D/1D/2Y",
-        "IR_SWAP/RATE/USD/2D/1D/30Y",
-        "IR_SWAP/RATE/USD/2D/1D/3M",
-        "IR_SWAP/RATE/USD/2D/1D/3Y",
-        "IR_SWAP/RATE/USD/2D/1D/4Y",
-        "IR_SWAP/RATE/USD/2D/1D/5Y",
-        "IR_SWAP/RATE/USD/2D/1D/6M",
-        "IR_SWAP/RATE/USD/2D/1D/7Y",
-        "IR_SWAP/RATE/USD/2D/1D/9M",
         "IR_SWAP/RATE/USD/2D/3M/10Y",
         "IR_SWAP/RATE/USD/2D/3M/12Y",
         "IR_SWAP/RATE/USD/2D/3M/15Y",
@@ -265,7 +243,6 @@
         "IR_SWAP/RATE/USD/2D/3M/7Y",
         "IR_SWAP/RATE/USD/2D/3M/8Y",
         "IR_SWAP/RATE/USD/2D/3M/9Y",
-        "MM/RATE/USD/0D/1D",
         "MM/RATE/USD/2D/1M",
         "MM/RATE/USD/2D/1W",
         "MM/RATE/USD/2D/2M",

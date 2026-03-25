@@ -1,11 +1,14 @@
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from pythonore.compute.irs_xva_utils import interpolate_linear_flat
 from py_ore_tools.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
     compute_realized_float_coupons,
+    load_swap_legs_from_portfolio_root,
     load_ore_default_curve_inputs,
     payer_swap_npv_at_time,
     swap_npv_from_ore_legs,
@@ -199,6 +202,114 @@ class TestIrsXvaUtils(unittest.TestCase):
 
         self.assertAlmostEqual(p0(0.5), float(np.exp(-0.01)), places=12)
         self.assertAlmostEqual(p0(2.5), float(np.exp(-0.05)), places=12)
+
+    def test_interpolate_linear_flat_handles_scalar_vector_and_flat_extrapolation(self):
+        x = np.array([1.0, 2.0, 4.0], dtype=float)
+        y = np.array([10.0, 20.0, 40.0], dtype=float)
+
+        self.assertAlmostEqual(float(interpolate_linear_flat(0.5, x, y)), 10.0, places=12)
+        self.assertAlmostEqual(float(interpolate_linear_flat(1.5, x, y)), 15.0, places=12)
+        self.assertAlmostEqual(float(interpolate_linear_flat(5.0, x, y)), 40.0, places=12)
+
+        got = np.asarray(interpolate_linear_flat(np.array([0.5, 1.5, 5.0], dtype=float), x, y), dtype=float)
+        np.testing.assert_allclose(got, np.array([10.0, 15.0, 40.0], dtype=float), rtol=0.0, atol=1.0e-12)
+
+    def test_interpolate_linear_flat_supports_log_space_curve_values(self):
+        x = np.array([0.0, 1.0, 2.0], dtype=float)
+        log_df = np.log(np.array([1.0, np.exp(-0.02), np.exp(-0.04)], dtype=float))
+
+        mid = float(np.exp(interpolate_linear_flat(1.5, x, log_df)))
+        left = float(np.exp(interpolate_linear_flat(-0.5, x, log_df)))
+        right = float(np.exp(interpolate_linear_flat(3.0, x, log_df)))
+
+        self.assertAlmostEqual(mid, float(np.exp(-0.03)), places=12)
+        self.assertAlmostEqual(left, 1.0, places=12)
+        self.assertAlmostEqual(right, float(np.exp(-0.04)), places=12)
+
+    def test_load_swap_legs_from_portfolio_root_expands_amortization_schedule(self):
+        root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="AMORT_SWAP">
+                <TradeType>Swap</TradeType>
+                <SwapData>
+                  <LegData>
+                    <LegType>Fixed</LegType>
+                    <Payer>false</Payer>
+                    <Currency>GBP</Currency>
+                    <Notionals><Notional>3000000</Notional></Notionals>
+                    <Amortizations>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2024-10-17</StartDate>
+                        <EndDate>2025-10-17</EndDate>
+                        <Value>0.0666666666666667</Value>
+                      </AmortizationData>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2025-10-17</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Value>0.0357142857142857</Value>
+                      </AmortizationData>
+                    </Amortizations>
+                    <DayCounter>ACT/365</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FixedLegData><Rates><Rate>0.04</Rate></Rates></FixedLegData>
+                    <ScheduleData>
+                      <Rules>
+                        <StartDate>2023-10-18</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Tenor>1Y</Tenor>
+                        <Calendar>UK</Calendar>
+                        <Convention>MF</Convention>
+                      </Rules>
+                    </ScheduleData>
+                  </LegData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>true</Payer>
+                    <Currency>GBP</Currency>
+                    <Notionals><Notional>3000000</Notional></Notionals>
+                    <Amortizations>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2024-10-17</StartDate>
+                        <EndDate>2025-10-17</EndDate>
+                        <Value>0.0666666666666667</Value>
+                      </AmortizationData>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2025-10-17</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Value>0.0357142857142857</Value>
+                      </AmortizationData>
+                    </Amortizations>
+                    <DayCounter>ACT/365</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <ScheduleData>
+                      <Rules>
+                        <StartDate>2023-10-18</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Tenor>1Y</Tenor>
+                        <Calendar>UK</Calendar>
+                        <Convention>MF</Convention>
+                      </Rules>
+                    </ScheduleData>
+                    <FloatingLegData>
+                      <Index>GBP-LIBOR-1Y</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>0.0</Spread></Spreads>
+                    </FloatingLegData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        legs = load_swap_legs_from_portfolio_root(root, "AMORT_SWAP", "2023-10-18")
+        np.testing.assert_allclose(legs["fixed_notional"], np.array([3_000_000.0, 2_800_000.0, 2_700_000.0]))
+        np.testing.assert_allclose(legs["float_notional"], np.array([3_000_000.0, 2_800_000.0, 2_700_000.0]))
 
     def test_payer_swap_npv_matches_reference_implementation(self):
         trade_def = {

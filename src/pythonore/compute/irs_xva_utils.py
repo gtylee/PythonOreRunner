@@ -25,6 +25,28 @@ import numpy as np
 
 
 _TIME_YEAR_BASIS = 365.25
+_ARRAY_CACHE_MAX_ITEMS = 256
+
+
+def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], bytes]:
+    arr64 = np.ascontiguousarray(np.asarray(arr, dtype=float))
+    return arr64.shape, arr64.tobytes()
+
+
+def _cache_array_value(
+    cache: dict[tuple[tuple[int, ...], bytes], np.ndarray],
+    arr: np.ndarray,
+    value_fn: Callable[[np.ndarray], np.ndarray],
+) -> np.ndarray:
+    key = _array_cache_key(arr)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    out = np.asarray(value_fn(np.asarray(arr, dtype=float)), dtype=float)
+    if len(cache) >= _ARRAY_CACHE_MAX_ITEMS:
+        cache.pop(next(iter(cache)))
+    cache[key] = out
+    return out
 
 
 def _days_in_year(year: int) -> int:
@@ -69,7 +91,82 @@ def _infer_index_day_counter(index_name: str, fallback: str = "A365F") -> str:
     return fallback
 
 
-def _interp1d_flat_vectorized(
+def _apply_amortization_rule(current: float, initial: float, amort_type: str, value: float) -> float:
+    kind = (amort_type or "").strip().upper()
+    if kind in {"RELATIVETOPREVIOUSNOTIONAL", "RELATIVETOPREVIOUS"}:
+        return current * (1.0 - value)
+    if kind in {"RELATIVETOINITIALNOTIONAL", "RELATIVETOINITIAL"}:
+        return initial * (1.0 - value)
+    if kind in {"FIXEDAMOUNT", "ABSOLUTE"}:
+        return current - value
+    raise ValueError(f"unsupported amortization type '{amort_type}'")
+
+
+def expand_leg_notionals(
+    leg: ET.Element,
+    start_dates: Sequence[date],
+    end_dates: Sequence[date],
+) -> np.ndarray:
+    """Expand ORE leg notionals to one value per accrual period.
+
+    Supports:
+    - one `<Notional>` per coupon period
+    - a single initial `<Notional>` plus `<Amortizations>`
+    """
+    n_periods = len(start_dates)
+    raw_notionals = [
+        float((node.text or "").strip())
+        for node in leg.findall("./Notionals/Notional")
+        if (node.text or "").strip()
+    ]
+    if n_periods == 0:
+        return np.asarray([], dtype=float)
+    if not raw_notionals:
+        return np.zeros(n_periods, dtype=float)
+    if len(raw_notionals) == n_periods:
+        return np.asarray(raw_notionals, dtype=float)
+    if len(raw_notionals) != 1:
+        raise ValueError(
+            f"expected one notional or one per coupon, got {len(raw_notionals)} for {n_periods} periods"
+        )
+
+    initial = float(raw_notionals[0])
+    amort_nodes = list(leg.findall("./Amortizations/AmortizationData"))
+    if not amort_nodes:
+        return np.full(n_periods, initial, dtype=float)
+
+    schedule_starts = list(start_dates)
+    events_by_index: dict[int, list[tuple[date | None, str, float]]] = {}
+    for node in amort_nodes:
+        start_txt = (node.findtext("./StartDate") or "").strip()
+        if not start_txt:
+            continue
+        start = _parse_yyyymmdd(start_txt)
+        end_txt = (node.findtext("./EndDate") or "").strip()
+        end = _parse_yyyymmdd(end_txt) if end_txt else None
+        amort_type = (node.findtext("./Type") or "FixedAmount").strip()
+        value = float((node.findtext("./Value") or "0").strip() or 0.0)
+        target_idx = None
+        for idx, sched_start in enumerate(schedule_starts):
+            if sched_start >= start:
+                target_idx = idx
+                break
+        if target_idx is None:
+            continue
+        events_by_index.setdefault(target_idx, []).append((end, amort_type, value))
+
+    notionals = np.empty(n_periods, dtype=float)
+    current = initial
+    for i, (_, end) in enumerate(zip(start_dates, end_dates)):
+        for amort_end, amort_type, value in events_by_index.get(i, []):
+            if amort_end is not None and amort_end > end:
+                continue
+            current = _apply_amortization_rule(current, initial, amort_type, value)
+        notionals[i] = current
+    return notionals
+
+
+def interpolate_linear_flat(
     x: np.ndarray | Sequence[float] | float,
     xp: np.ndarray | Sequence[float],
     fp: np.ndarray | Sequence[float],
@@ -111,6 +208,103 @@ def _interp1d_flat_vectorized(
     if scalar:
         return float(out[0])
     return out.reshape(x_arr.shape)
+
+
+def curve_values(
+    curve: Callable[[float], float],
+    times: np.ndarray | Sequence[float] | float,
+) -> np.ndarray | float:
+    values_fn = getattr(curve, "values", None)
+    if callable(values_fn):
+        return values_fn(times)
+    t_arr = np.asarray(times, dtype=float)
+    if t_arr.ndim == 0:
+        return float(curve(float(t_arr)))
+    flat = t_arr.reshape(-1)
+    out = np.fromiter((float(curve(float(t))) for t in flat), dtype=float, count=flat.size)
+    return out.reshape(t_arr.shape)
+
+
+class _ZeroRateDiscountCurve:
+    def __init__(self, times: np.ndarray, rates: np.ndarray, compounding: str) -> None:
+        self.times = np.asarray(times, dtype=float)
+        self.rates = np.asarray(rates, dtype=float)
+        self.compounding = compounding
+        self._cache: dict[float, float] = {}
+        self._vector_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
+
+    def _zero_rates(self, t: np.ndarray | Sequence[float] | float) -> np.ndarray | float:
+        return interpolate_linear_flat(t, self.times, self.rates)
+
+    def values(self, t: np.ndarray | Sequence[float] | float) -> np.ndarray | float:
+        t_arr = np.asarray(t, dtype=float)
+        if t_arr.ndim > 0:
+            return _cache_array_value(self._vector_cache, t_arr, self._values_uncached)
+        return float(np.asarray(self._values_uncached(t_arr), dtype=float))
+
+    def _values_uncached(self, t_arr: np.ndarray) -> np.ndarray:
+        zero = np.asarray(self._zero_rates(t_arr), dtype=float)
+        if self.compounding == "continuous":
+            out = np.exp(-zero * t_arr)
+        elif self.compounding == "simple":
+            out = 1.0 / (1.0 + zero * t_arr)
+        else:  # pragma: no cover
+            raise ValueError("compounding must be either 'continuous' or 'simple'")
+        return np.asarray(out, dtype=float)
+
+    def __call__(self, t: float) -> float:
+        key = float(t)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        out = float(self.values(key))
+        self._cache[key] = out
+        return out
+
+
+class _DiscountFactorCurve:
+    def __init__(self, times: np.ndarray, dfs: np.ndarray) -> None:
+        self.times = np.asarray(times, dtype=float)
+        self.dfs = np.asarray(dfs, dtype=float)
+        self.log_dfs = np.log(self.dfs)
+        self.left_slope = (self.log_dfs[1] - self.log_dfs[0]) / max(self.times[1] - self.times[0], 1.0e-12)
+        self.right_slope = (self.log_dfs[-1] - self.log_dfs[-2]) / max(self.times[-1] - self.times[-2], 1.0e-12)
+        self._cache: dict[float, float] = {}
+        self._vector_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
+
+    def values(self, t: np.ndarray | Sequence[float] | float) -> np.ndarray | float:
+        t_arr = np.asarray(t, dtype=float)
+        if t_arr.ndim > 0:
+            return _cache_array_value(self._vector_cache, t_arr, self._values_uncached)
+        return float(np.asarray(self._values_uncached(t_arr), dtype=float))
+
+    def _values_uncached(self, t_arr: np.ndarray) -> np.ndarray:
+        scalar = t_arr.ndim == 0
+        flat = np.atleast_1d(t_arr).astype(float, copy=False)
+        out = np.empty_like(flat, dtype=float)
+        left = flat <= self.times[0]
+        right = flat >= self.times[-1]
+        mid = ~(left | right)
+        if np.any(left):
+            vals = flat[left]
+            left_out = np.exp(self.log_dfs[0] + (vals - self.times[0]) * self.left_slope)
+            left_out = np.where(vals <= 1.0e-14, 1.0, left_out)
+            out[left] = left_out
+        if np.any(right):
+            vals = flat[right]
+            out[right] = np.exp(self.log_dfs[-1] + (vals - self.times[-1]) * self.right_slope)
+        if np.any(mid):
+            out[mid] = np.exp(interpolate_linear_flat(flat[mid], self.times, self.log_dfs))
+        return out[0] if scalar else out.reshape(t_arr.shape)
+
+    def __call__(self, t: float) -> float:
+        key = float(t)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        out = float(self.values(key))
+        self._cache[key] = out
+        return out
 
 
 def interpolate_path_grid(
@@ -170,19 +364,9 @@ def build_discount_curve_from_zero_rate_pairs(
     if np.any(np.diff(times) <= 0.0):
         raise ValueError("curve times must be strictly increasing")
 
-    def zero_rate(t: float) -> float:
-        if t <= times[0]:
-            return float(rates[0])
-        if t >= times[-1]:
-            return float(rates[-1])
-        return float(_interp1d_flat_vectorized(t, times, rates))
-
-    if compounding == "continuous":
-        return lambda t: float(np.exp(-zero_rate(float(t)) * float(t)))
-    if compounding == "simple":
-        return lambda t: float(1.0 / (1.0 + zero_rate(float(t)) * float(t)))
-
-    raise ValueError("compounding must be either 'continuous' or 'simple'")
+    if compounding not in {"continuous", "simple"}:
+        raise ValueError("compounding must be either 'continuous' or 'simple'")
+    return _ZeroRateDiscountCurve(times, rates, compounding)
 
 
 def build_discount_curve_from_discount_pairs(
@@ -204,21 +388,7 @@ def build_discount_curve_from_discount_pairs(
         raise ValueError("discount curve times must be strictly increasing")
     if np.any(dfs <= 0.0):
         raise ValueError("discount factors must be strictly positive")
-    log_dfs = np.log(dfs)
-    left_slope = (log_dfs[1] - log_dfs[0]) / max(times[1] - times[0], 1.0e-12)
-    right_slope = (log_dfs[-1] - log_dfs[-2]) / max(times[-1] - times[-2], 1.0e-12)
-
-    def p0(t: float) -> float:
-        t = float(t)
-        if t <= times[0]:
-            if t <= 1.0e-14:
-                return 1.0
-            return float(np.exp(log_dfs[0] + (t - times[0]) * left_slope))
-        if t >= times[-1]:
-            return float(np.exp(log_dfs[-1] + (t - times[-1]) * right_slope))
-        return float(np.exp(_interp1d_flat_vectorized(t, times, log_dfs)))
-
-    return p0
+    return _DiscountFactorCurve(times, dfs)
 
 
 def build_swap_schedules(trade_def: Dict) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -723,7 +893,6 @@ def load_swap_legs_from_portfolio_root(
         payer = (lx.findtext("./Payer") or "").strip().lower() == "true"
         # ORE convention: Payer=true means we pay this leg (outflow); Payer=false means we receive (inflow).
         sign = -1.0 if payer else 1.0
-        notional = float((lx.findtext("./Notionals/Notional") or "0").strip())
         dc = (lx.findtext("./DayCounter") or "A365").strip()
         pay_conv = (lx.findtext("./PaymentConvention") or "F").strip()
         rules = lx.find("./ScheduleData/Rules")
@@ -740,6 +909,7 @@ def load_swap_legs_from_portfolio_root(
         e_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in e_dates], dtype=float)
         p_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in p_dates], dtype=float)
         accr = np.asarray([_year_fraction(sd, ed, dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
+        notionals = expand_leg_notionals(lx, s_dates, e_dates)
 
         if ltype == "Fixed":
             rate = float((lx.findtext("./FixedLegData/Rates/Rate") or "0").strip())
@@ -748,9 +918,9 @@ def load_swap_legs_from_portfolio_root(
             out["fixed_pay_time"] = p_t
             out["fixed_accrual"] = accr
             out["fixed_rate"] = np.full_like(accr, rate)
-            out["fixed_notional"] = np.full_like(accr, notional)
+            out["fixed_notional"] = np.asarray(notionals, dtype=float)
             out["fixed_sign"] = np.full_like(accr, sign)
-            out["fixed_amount"] = sign * notional * rate * accr
+            out["fixed_amount"] = sign * notionals * rate * accr
         elif ltype == "Floating":
             spread = float((lx.findtext("./FloatingLegData/Spreads/Spread") or "0").strip())
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
@@ -765,7 +935,7 @@ def load_swap_legs_from_portfolio_root(
                 [_year_fraction(sd, ed, index_dc) for sd, ed in zip(s_dates, e_dates)],
                 dtype=float,
             )
-            out["float_notional"] = np.full_like(accr, notional)
+            out["float_notional"] = np.asarray(notionals, dtype=float)
             out["float_sign"] = np.full_like(accr, sign)
             out["float_spread"] = np.full_like(accr, spread)
             out["float_coupon"] = np.zeros_like(accr)
@@ -844,7 +1014,7 @@ def _remaining_schedule_from_index(dates: np.ndarray, t: float) -> np.ndarray:
 def _discount_bond_block(model, p0, t: float, maturities: np.ndarray, x_t: np.ndarray, p_t: float) -> np.ndarray:
     if maturities.size == 0:
         return np.empty((0, x_t.size), dtype=float)
-    p_T = np.fromiter((float(p0(float(T))) for T in maturities), dtype=float, count=maturities.size)
+    p_T = np.asarray(curve_values(p0, maturities), dtype=float)
     return model.discount_bond_paths(t, maturities, x_t, p_t, p_T)
 
 
@@ -986,6 +1156,8 @@ def swap_npv_from_ore_legs_dual_curve(
     p_nodes_d = None
     logp = None
     slope = None
+    disc_block_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
+    fwd_curve_cache: dict[tuple[tuple[int, ...], bytes], np.ndarray] = {}
     if use_nodes:
         # Some ORE workflows expose simulation node tenors rather than requiring bond
         # evaluation at every maturity.  When available, interpolate in log-discount
@@ -1001,7 +1173,11 @@ def swap_npv_from_ore_legs_dual_curve(
         if maturities.size == 0:
             return np.empty((0, x.size), dtype=float)
         if not use_nodes:
-            return _discount_bond_block(model, p0_disc, t, maturities, x, p_t_d)
+            return _cache_array_value(
+                disc_block_cache,
+                maturities,
+                lambda arr: _discount_bond_block(model, p0_disc, t, arr, x, p_t_d),
+            )
 
         out = np.empty((maturities.size, x.size), dtype=float)
         immediate = maturities <= t + 1.0e-14
@@ -1037,7 +1213,11 @@ def swap_npv_from_ore_legs_dual_curve(
             raise ValueError("maturities must be one-dimensional")
         if maturities.size == 0:
             return np.empty((0, x.size), dtype=float)
-        p_T_f = np.fromiter((float(p0_fwd(float(Ti))) for Ti in maturities), dtype=float, count=maturities.size)
+        p_T_f = _cache_array_value(
+            fwd_curve_cache,
+            maturities,
+            lambda arr: np.asarray(curve_values(p0_fwd, arr), dtype=float),
+        )
         return model.discount_bond_paths(t, maturities, x, p_t_f, p_T_f)
 
     if exercise_into_whole_periods:
@@ -1658,7 +1838,7 @@ def build_survival_probability_curve_from_nodes(
         if tt <= times[0]:
             return float(np.exp(-avg_hazard[0] * tt))
         if tt < times[-1]:
-            return float(np.exp(_interp1d_flat_vectorized(tt, times, log_surv)))
+            return float(np.exp(interpolate_linear_flat(tt, times, log_surv)))
         if mode == "flat_fwd":
             return float(np.exp(log_surv[-1] - last_fwd_hazard * (tt - times[-1])))
         return float(np.exp(-avg_hazard[-1] * tt))

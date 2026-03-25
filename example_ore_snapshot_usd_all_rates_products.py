@@ -59,9 +59,17 @@ def _trade_blocks(count_per_type: int) -> list[str]:
         suffix = f"{i:04d}"
         batch = [
             _irs_trade_xml(suffix),
+            _amortizing_irs_trade_xml(suffix),
             _cap_trade_xml(suffix),
             _floor_trade_xml(suffix),
+            _native_cap_trade_xml(suffix),
+            _native_floor_trade_xml(suffix),
+            _cashflow_trade_xml(suffix),
             _swaption_trade_xml(suffix),
+            _bermudan_swaption_trade_xml(suffix),
+            _cms_trade_xml(suffix),
+            _cmsspread_trade_xml(suffix),
+            _digital_cmsspread_trade_xml(suffix),
             _basis_libor_3m_6m_trade_xml(suffix),
             _basis_libor_3m_sifma_trade_xml(suffix),
             _basis_fedfunds_libor_3m_trade_xml(suffix),
@@ -128,6 +136,89 @@ def _irs_trade_xml(suffix: str) -> str:
           <Rules>
             <StartDate>{ASOF_DATE}</StartDate>
             <EndDate>2035-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <TermConvention>MF</TermConvention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>"""
+
+
+def _amortizing_irs_trade_xml(suffix: str) -> str:
+    fixed_notionals = "\n".join(
+        f"          <Notional>{n}</Notional>"
+        for n in (10_000_000, 9_500_000, 9_000_000, 8_500_000, 8_000_000, 7_500_000)
+    )
+    float_notionals = "\n".join(
+        f"          <Notional>{n}</Notional>"
+        for n in (
+            10_000_000, 10_000_000,
+            9_500_000, 9_500_000,
+            9_000_000, 9_000_000,
+            8_500_000, 8_500_000,
+            8_000_000, 8_000_000,
+            7_500_000, 7_500_000,
+        )
+    )
+    return f"""  <Trade id="IRS_AMORT_USD_{suffix}">
+    <TradeType>Swap</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+{fixed_notionals}
+        </Notionals>
+        <DayCounter>30/360</DayCounter>
+        <PaymentConvention>F</PaymentConvention>
+        <FixedLegData>
+          <Rates>
+            <Rate>0.0375</Rate>
+          </Rates>
+        </FixedLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2028-02-10</EndDate>
+            <Tenor>6M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <TermConvention>MF</TermConvention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+{float_notionals}
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0005</Spread>
+          </Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2028-02-10</EndDate>
             <Tenor>3M</Tenor>
             <Calendar>USD</Calendar>
             <Convention>MF</Convention>
@@ -229,6 +320,125 @@ def _floor_trade_xml(suffix: str) -> str:
         <Floor>0.02</Floor>
       </Floors>
     </CapFloorData>
+  </Trade>"""
+
+
+def _native_cap_trade_xml(suffix: str) -> str:
+    notionals = "\n".join(
+        f"          <Notional>{n}</Notional>"
+        for n in (2_000_000, 1_900_000, 1_800_000, 1_700_000, 1_600_000, 1_500_000, 1_400_000, 1_300_000)
+    )
+    return f"""  <Trade id="CAP_USD_LIB3M_{suffix}">
+    <TradeType>CapFloor</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <CapFloorData>
+      <LongShort>Long</LongShort>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <Notionals>
+{notionals}
+        </Notionals>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2027-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0000</Spread>
+          </Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+      </LegData>
+      <Caps>
+        <Cap>0.045</Cap>
+      </Caps>
+      <Floors/>
+    </CapFloorData>
+  </Trade>"""
+
+
+def _native_floor_trade_xml(suffix: str) -> str:
+    notionals = "\n".join(
+        f"          <Notional>{n}</Notional>"
+        for n in (2_000_000, 1_900_000, 1_800_000, 1_700_000, 1_600_000, 1_500_000, 1_400_000, 1_300_000)
+    )
+    return f"""  <Trade id="FLOOR_USD_LIB3M_{suffix}">
+    <TradeType>CapFloor</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <CapFloorData>
+      <LongShort>Long</LongShort>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <Notionals>
+{notionals}
+        </Notionals>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2027-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0000</Spread>
+          </Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+      </LegData>
+      <Caps/>
+      <Floors>
+        <Floor>0.015</Floor>
+      </Floors>
+    </CapFloorData>
+  </Trade>"""
+
+
+def _cashflow_trade_xml(suffix: str) -> str:
+    amount = 100_000 + (int(suffix) - 1) * 2_500
+    month = ((int(suffix) - 1) % 9) + 3
+    pay_date = f"2026-{month:02d}-10"
+    return f"""  <Trade id="CASHFLOW_USD_{suffix}">
+    <TradeType>Cashflow</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <CashflowData>
+      <PaymentDate>{pay_date}</PaymentDate>
+      <Amount>{amount:.2f}</Amount>
+      <Currency>USD</Currency>
+    </CashflowData>
   </Trade>"""
 
 
@@ -540,6 +750,87 @@ def _swaption_trade_xml(suffix: str) -> str:
           <Rules>
             <StartDate>2027-02-10</StartDate>
             <EndDate>2037-02-10</EndDate>
+            <Tenor>6M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>F</Convention>
+            <TermConvention>F</TermConvention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+    </SwaptionData>
+  </Trade>"""
+
+
+def _bermudan_swaption_trade_xml(suffix: str) -> str:
+    start_year = 2027 + ((int(suffix) - 1) % 2)
+    end_year = start_year + 10
+    return f"""  <Trade id="BERMUDAN_SWAPTION_USD_{suffix}">
+    <TradeType>Swaption</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwaptionData>
+      <OptionData>
+        <LongShort>Long</LongShort>
+        <OptionType>Call</OptionType>
+        <Style>Bermudan</Style>
+        <Settlement>Physical</Settlement>
+        <PayOffAtExpiry>false</PayOffAtExpiry>
+        <ExerciseDates>
+          <ExerciseDate>{start_year}-02-10</ExerciseDate>
+          <ExerciseDate>{start_year + 1}-02-10</ExerciseDate>
+          <ExerciseDate>{start_year + 2}-02-10</ExerciseDate>
+        </ExerciseDates>
+      </OptionData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>10000000</Notional>
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0000</Spread>
+          </Spreads>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{start_year}-02-10</StartDate>
+            <EndDate>{end_year}-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <TermConvention>MF</TermConvention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>10000000</Notional>
+        </Notionals>
+        <DayCounter>30/360</DayCounter>
+        <PaymentConvention>F</PaymentConvention>
+        <FixedLegData>
+          <Rates>
+            <Rate>0.039</Rate>
+          </Rates>
+        </FixedLegData>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{start_year}-02-10</StartDate>
+            <EndDate>{end_year}-02-10</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>USD</Calendar>
             <Convention>F</Convention>
@@ -1063,9 +1354,17 @@ def _case_slug(ore_xml: Path) -> str:
 
 def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("IRS", count_per_type)
-    yield ("Cap", count_per_type)
-    yield ("Floor", count_per_type)
+    yield ("Amortizing IRS", count_per_type)
+    yield ("SOFR Cap", count_per_type)
+    yield ("SOFR Floor", count_per_type)
+    yield ("LIBOR Cap", count_per_type)
+    yield ("LIBOR Floor", count_per_type)
+    yield ("Cashflow", count_per_type)
     yield ("Swaption", count_per_type)
+    yield ("Bermudan Swaption", count_per_type)
+    yield ("CMS Swap", count_per_type)
+    yield ("CMS Spread Swap", count_per_type)
+    yield ("Digital CMS Spread Swap", count_per_type)
     yield ("Basis LIBOR3M/LIBOR6M", count_per_type)
     yield ("Basis LIBOR3M/SIFMA", count_per_type)
     yield ("Basis FedFunds/LIBOR3M", count_per_type)
@@ -1095,7 +1394,7 @@ def main() -> int:
     print("  product_counts :")
     for name, count in _product_counts(args.count_per_type):
         print(f"    - {name}: {count}")
-    print("  note           : CMS-family trades are excluded to keep native XVA/sensitivity output working")
+    print("  note           : book now includes CMS-family and amortizing native IR trades; SOFR cap/floor remain useful unsupported controls")
     print()
     print("Next scale-up:")
     print("  python3 example_ore_snapshot_usd_all_rates_products.py --count-per-type 100 --overwrite")

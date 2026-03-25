@@ -20,9 +20,9 @@ def _parse_args() -> argparse.Namespace:
 
     p = argparse.ArgumentParser(description="Plot ORE vs Python MC vs LGM 1D semi-analytic EPE/ENE")
     p.add_argument("--ore-xml", type=Path, default=default_xml)
-    p.add_argument("--paths", type=int, default=2000)
+    p.add_argument("--paths", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--gh-order", type=int, default=64, help="Gauss-Hermite order for 1D integration")
+    p.add_argument("--gh-order", type=int, default=128, help="Gauss-Hermite order for 1D integration")
     p.add_argument("--out", type=Path, default=default_out)
     return p.parse_args()
 
@@ -30,7 +30,7 @@ def _parse_args() -> argparse.Namespace:
 def _mc_profile(snap, n_paths: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     model = snap.build_model()
     rng = np.random.default_rng(seed)
-    x = simulate_lgm_measure(model, snap.exposure_model_times, n_paths=n_paths, rng=rng)
+    x = simulate_lgm_measure(model, snap.exposure_model_times, n_paths=n_paths, rng=None)
     npv = np.zeros((snap.exposure_model_times.size, n_paths), dtype=float)
     for i, t in enumerate(snap.exposure_model_times):
         npv[i, :] = swap_npv_from_ore_legs_dual_curve(
