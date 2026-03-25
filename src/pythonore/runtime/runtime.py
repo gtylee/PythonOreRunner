@@ -469,6 +469,7 @@ class _PythonLgmInputs:
     swaption_normal_vols: Dict[Tuple[str, str], List[Tuple[float, float]]]
     cms_correlations: Dict[Tuple[str, str], List[Tuple[float, float]]]
     stochastic_fx_pairs: Tuple[str, ...]
+    torch_device: str | None
     trade_specs: Tuple[_TradeSpec, ...]
     unsupported: Tuple[Trade, ...]
     mpor: MporConfig
@@ -578,7 +579,12 @@ class PythonLgmAdapter:
         except Exception:
             self._swap_pricing_backend_cache = None
             return None
-        if bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        requested_device = str(inputs.torch_device or "").strip().lower()
+        if requested_device in {"cpu", "mps"}:
+            if requested_device == "mps" and not bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+                requested_device = "cpu"
+            device = requested_device
+        elif bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
             device = "mps"
         else:
             device = "cpu"
@@ -2263,6 +2269,10 @@ class PythonLgmAdapter:
             swaption_normal_vols=swaption_normal_vols,
             cms_correlations=cms_correlations,
             stochastic_fx_pairs=stochastic_fx_pairs,
+            torch_device=(
+                str(snapshot.config.params.get("python.torch_device", snapshot.config.params.get("python.device", ""))).strip().lower()
+                or None
+            ),
             trade_specs=tuple(trade_specs),
             unsupported=tuple(unsupported),
             mpor=mpor,

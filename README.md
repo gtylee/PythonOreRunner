@@ -26,6 +26,11 @@ There are two broad workflows:
 The maintained native path is strongest for:
 
 - vanilla IRS and related mapped rate swaps
+- generic fixed/floating rate swaps, including basis swaps
+- generic CMS, CMS spread, and digital CMS spread swaps
+- generic cap/floor trades, including in-arrears SOFR-style cap/floors
+- European and Bermudan swaptions
+- deterministic cashflows
 - FX forwards
 - inflation swaps and inflation cap/floor flows already supported by the runtime
 - XVA exposure, CVA, DVA, FVA, and related parity-style reporting for supported products
@@ -98,6 +103,68 @@ python -m py_ore_tools.ore_snapshot_cli \
   --price \
   --lgm-param-source simulation_xml
 ```
+
+## Large Mixed-Book Benchmark
+
+If you want a quick native stress test on a broad USD rates book, use the generated all-products case.
+
+### 1. Generate a broad mixed rates book
+
+This generator creates:
+
+- IRS and amortising IRS
+- basis swaps
+- CMS, CMS spread, and digital CMS spread swaps
+- cap/floor trades including in-arrears SOFR cap/floors
+- European and Bermudan swaptions
+- deterministic cashflows
+
+Example:
+
+```bash
+python3 example_ore_snapshot_usd_all_rates_products.py \
+  --count-per-type 134 \
+  --case-root Examples/Generated/USD_AllRatesProductsSnapshot_134PerType \
+  --overwrite \
+  --no-run
+```
+
+That produces:
+
+- `2278` total trades
+- current native coverage on this generated book: `2278/2278`
+
+### 2. Run a large native XVA benchmark
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  Examples/Generated/USD_AllRatesProductsSnapshot_134PerType/Input/ore.xml \
+  --xva \
+  --paths 2000 \
+  --rng ore_sobol_bridge \
+  --lgm-param-source simulation_xml
+```
+
+If you want the heavier stress run we used for hotspot work, increase to:
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  Examples/Generated/USD_AllRatesProductsSnapshot_134PerType/Input/ore.xml \
+  --xva \
+  --paths 10000 \
+  --rng ore_sobol_bridge \
+  --lgm-param-source simulation_xml
+```
+
+### 3. Preflight native support quickly
+
+```bash
+python -m py_ore_tools.ore_snapshot_cli \
+  Examples/Generated/USD_AllRatesProductsSnapshot_134PerType/Input/ore.xml \
+  --preflight
+```
+
+This is the fastest way to confirm whether a generated mixed book is fully native-supported before running the larger XVA job.
 
 ## LGM Parameter Source
 

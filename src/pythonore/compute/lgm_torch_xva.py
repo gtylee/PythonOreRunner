@@ -18,6 +18,13 @@ from .lgm_ir_options import CapFloorDef, _fixing_times
 from .irs_xva_utils import interpolate_path_grid
 
 
+def _to_numpy_float_array(values) -> np.ndarray:
+    torch = _require_torch()
+    if isinstance(values, torch.Tensor):
+        return values.detach().cpu().numpy().astype(float, copy=False)
+    return np.asarray(values, dtype=float)
+
+
 @dataclass
 class TorchDiscountCurve:
     times: np.ndarray
@@ -111,7 +118,7 @@ def discount_bond_paths_torch(
 ):
     torch = _require_torch()
     x = torch.as_tensor(x_t)
-    T_np = np.asarray(maturities, dtype=float)
+    T_np = _to_numpy_float_array(maturities)
     h_t = float(model.H(t))
     z_t = float(model.zeta(t))
     h_T = torch.as_tensor(np.asarray(model.H(T_np), dtype=float), dtype=x.dtype, device=x.device)
@@ -133,8 +140,8 @@ def discount_bond_path_grid_torch(
 ):
     torch = _require_torch()
     x = torch.as_tensor(x_paths)
-    t_np = np.asarray(eval_times, dtype=float)
-    T_np = np.asarray(maturities, dtype=float)
+    t_np = _to_numpy_float_array(eval_times)
+    T_np = _to_numpy_float_array(maturities)
     h_t = torch.as_tensor(np.asarray(model.H(t_np), dtype=float), dtype=x.dtype, device=x.device)
     z_t = torch.as_tensor(np.asarray(model.zeta(t_np), dtype=float), dtype=x.dtype, device=x.device)
     h_T = torch.as_tensor(np.asarray(model.H(T_np), dtype=float), dtype=x.dtype, device=x.device)
