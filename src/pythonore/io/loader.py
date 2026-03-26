@@ -987,6 +987,7 @@ def _load_known_xml_buffers(ore_path: Path, setup: Dict[str, str], analytics: Di
         "collateralbalances.xml": "collateralbalances.xml",
     }
     buffers: Dict[str, str] = {}
+    buffers["ore.xml"] = ore_path.read_text(encoding="utf-8")
     for key, ref in fields.items():
         if not ref:
             continue

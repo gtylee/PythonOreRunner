@@ -4,9 +4,11 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+from pythonore.compute.irs_xva_utils import _discount_bond_block
 from pythonore.compute.irs_xva_utils import interpolate_linear_flat
 from py_ore_tools.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
+    calibrate_float_spreads_from_coupon,
     compute_realized_float_coupons,
     load_swap_legs_from_portfolio_root,
     load_ore_default_curve_inputs,
@@ -196,6 +198,16 @@ class TestIrsXvaUtils(unittest.TestCase):
         scalar = np.array([self.model.discount_bond(t, float(T), self.x_t, self.p0(t), self.p0(float(T))) for T in maturities])
         vectorized = self.model.discount_bond_paths(t, maturities, self.x_t, self.p0(t), self.p0)
         self.assertTrue(np.allclose(vectorized, scalar, rtol=1.0e-12, atol=1.0e-13))
+
+    def test_discount_bond_block_returns_identity_for_matured_points(self):
+        t = 0.75
+        maturities = np.array([0.25, 0.75, 1.25], dtype=float)
+        got = _discount_bond_block(self.model, self.p0, t, maturities, self.x_t, self.p0(t))
+
+        self.assertEqual(got.shape, (3, self.x_t.size))
+        np.testing.assert_allclose(got[0], np.ones_like(self.x_t), rtol=0.0, atol=1.0e-12)
+        np.testing.assert_allclose(got[1], np.ones_like(self.x_t), rtol=0.0, atol=1.0e-12)
+        self.assertTrue(np.all(np.isfinite(got[2])))
 
     def test_build_discount_curve_from_discount_pairs_extrapolates_in_log_discount_space(self):
         p0 = build_discount_curve_from_discount_pairs([(0.0, 1.0), (1.0, np.exp(-0.02)), (2.0, np.exp(-0.04))])
@@ -619,6 +631,24 @@ T1,Swap,1,1,2016-09-01,Interest,100.0,TRY,0.10,0.5,2016-03-01,2016-09-01,0.0,#N/
         self.assertAlmostEqual(float(legs["fixed_notional"][0]), 20000.0)
         self.assertAlmostEqual(float(legs["float_notional"][0]), 10000.0)
         self.assertEqual(legs["float_fixing_source"], "flows_fixing_date")
+
+    def test_calibrate_float_spreads_from_coupon_keeps_spread_finite_when_coupon_missing_or_nan(self):
+        legs = {
+            "float_start_time": np.array([0.0, 1.0], dtype=float),
+            "float_end_time": np.array([1.0, 2.0], dtype=float),
+            "float_accrual": np.array([1.0, 1.0], dtype=float),
+            "float_index_accrual": np.array([1.0, 1.0], dtype=float),
+            "float_spread": np.array([0.001, np.nan], dtype=float),
+            "float_coupon": np.array([0.0, np.nan], dtype=float),
+        }
+        p0 = build_discount_curve_from_discount_pairs([(0.0, 1.0), (1.0, 0.98), (2.0, 0.95)])
+
+        out = calibrate_float_spreads_from_coupon(legs, p0, t0=0.0)
+
+        self.assertTrue(np.isfinite(out["float_spread"][0]))
+        self.assertEqual(float(out["float_spread"][0]), 0.001)
+        self.assertEqual(float(out["float_spread"][1]), 0.0)
+        self.assertTrue(np.all(np.isfinite(out["float_coupon"])))
 
 
 if __name__ == "__main__":

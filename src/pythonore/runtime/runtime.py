@@ -431,6 +431,22 @@ class _CurveBundle:
     funding_lend_curve: Callable[[float], float] | None
 
 
+def _normalize_forward_tenor_family(tenor: str) -> str:
+    token = str(tenor or "").strip().upper()
+    if token in {"", "0D", "1D", "ON", "O/N"}:
+        return "1D"
+    return token
+
+
+def _filter_leg_arrays_by_mask(leg: Dict[str, object], mask: np.ndarray) -> Dict[str, object]:
+    out = dict(leg)
+    n = int(mask.size)
+    for key, value in leg.items():
+        if isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] == n:
+            out[key] = value[mask].copy()
+    return out
+
+
 @dataclass(frozen=True)
 class _TradeSpec:
     trade: Trade          # Original Trade dataclass instance.
@@ -2054,6 +2070,14 @@ class PythonLgmAdapter:
                 xva_discount_curve = fitted_curves.xva_discount_curve
                 funding_borrow_curve = fitted_curves.funding_borrow_curve
                 funding_lend_curve = fitted_curves.funding_lend_curve
+                for ccy in sorted(ccy_set):
+                    if ccy not in discount_curves and ccy in zero_curves:
+                        pts = sorted(zero_curves[ccy], key=lambda x: x[0])
+                        if pts:
+                            discount_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(pts)
+                    if ccy in discount_curves:
+                        forward_curves.setdefault(ccy, discount_curves[ccy])
+                        forward_curves_by_tenor.setdefault(ccy, {})
                 curve_source = "ore_quote_fit"
             else:
                 ore_root = self._ore_root_from_xml(xml.get("ore.xml", ""))
@@ -2200,7 +2224,7 @@ class PythonLgmAdapter:
                     continue
             fwd_tenor = str(spec.legs.get("float_index_tenor", "")).upper()
             p_fwd = forward_curves_by_tenor.get(spec.ccy, {}).get(
-                fwd_tenor,
+                _normalize_forward_tenor_family(fwd_tenor),
                 forward_curves.get(spec.ccy, discount_curves.get(spec.ccy)),
             )
             if p_fwd is None:
@@ -2582,6 +2606,7 @@ class PythonLgmAdapter:
             for ccy, tenors in needed_tenors.items():
                 tenor_curves: Dict[str, Callable[[float], float]] = {}
                 for tenor in sorted(tenors):
+                    normalized_tenor = _normalize_forward_tenor_family(tenor)
                     tenor_quotes = [
                         q for q in quote_dicts if _quote_matches_forward_curve(str(q["key"]), ccy, tenor)
                     ]
@@ -2594,17 +2619,22 @@ class PythonLgmAdapter:
                     ).get(ccy)
                     if not payload:
                         continue
-                    tenor_curves[tenor] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                    tenor_curves[normalized_tenor] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
                         list(zip(payload["times"], payload["dfs"]))
                     )
                     for spec in trade_specs:
-                        if spec.kind == "IRS" and spec.ccy == ccy and spec.legs is not None and str(spec.legs.get("float_index_tenor", "")).upper() == tenor:
+                        if (
+                            spec.kind == "IRS"
+                            and spec.ccy == ccy
+                            and spec.legs is not None
+                            and _normalize_forward_tenor_family(str(spec.legs.get("float_index_tenor", "")).upper()) == normalized_tenor
+                        ):
                             index_name = str(spec.legs.get("float_index", "")).upper()
                             if index_name:
-                                forward_curves_by_name[index_name] = tenor_curves[tenor]
+                                forward_curves_by_name[index_name] = tenor_curves[normalized_tenor]
                     for index_name, mapped_tenor in swap_index_forward_tenors.items():
-                        if index_name.startswith(ccy + "-") and mapped_tenor == tenor:
-                            forward_curves_by_name.setdefault(index_name.upper(), tenor_curves[tenor])
+                        if index_name.startswith(ccy + "-") and _normalize_forward_tenor_family(mapped_tenor) == normalized_tenor:
+                            forward_curves_by_name.setdefault(index_name.upper(), tenor_curves[normalized_tenor])
                 forward_curves_by_tenor[ccy] = tenor_curves
                 if tenor_curves:
                     preferred = "6M" if "6M" in tenor_curves else sorted(tenor_curves)[0]
@@ -2622,7 +2652,6 @@ class PythonLgmAdapter:
                 forward_curves=forward_curves,
                 forward_curves_by_tenor=forward_curves_by_tenor,
                 forward_curves_by_name=forward_curves_by_name,
-                swap_index_forward_tenors=swap_index_forward_tenors,
                 xva_discount_curve=base_curve,
                 funding_borrow_curve=None,
                 funding_lend_curve=None,
@@ -3322,6 +3351,10 @@ class PythonLgmAdapter:
                 leg_info["fixing_days"] = fixing_days
                 leg_info["fixing_time"] = np.asarray([time_from_dates(asof, fd, "A365F") for fd in fix_dates], dtype=float)
                 leg_info["quoted_coupon"] = np.zeros_like(accr)
+            live_mask = p_t >= -1.0e-12
+            if not np.any(live_mask):
+                continue
+            leg_info = _filter_leg_arrays_by_mask(leg_info, live_mask)
             rate_legs.append(leg_info)
 
         result = self._apply_historical_fixings_to_generic_rate_legs(
@@ -3374,6 +3407,15 @@ class PythonLgmAdapter:
         asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         pay_date = self._irs_utils._parse_yyyymmdd(payment_date)
         pay_time = float(self._irs_utils._time_from_dates(asof, pay_date, "A365F"))
+        if pay_time < -1.0e-12:
+            result = {
+                "ccy": ccy,
+                "pay_time": np.asarray([], dtype=float),
+                "amount": np.asarray([], dtype=float),
+            }
+            self._generic_cashflow_state_cache[cache_key] = result
+            self._generic_cashflow_state_xml_cache[xml_cache_key] = result
+            return result
         result = {
             "ccy": ccy,
             "pay_time": np.asarray([pay_time], dtype=float),
@@ -3535,8 +3577,13 @@ class PythonLgmAdapter:
         if len(exercise_dates) == 0:
             return None
         asof_date = self._irs_utils._parse_yyyymmdd(asof)
+        live_exercise_dates = [dt for dt in exercise_dates if dt >= asof_date]
+        if style == "european" and len(live_exercise_dates) != 1:
+            return None
+        if len(live_exercise_dates) == 0:
+            return None
         exercise_times = np.asarray(
-            [float(self._irs_utils._time_from_dates(asof_date, dt, "A365F")) for dt in exercise_dates],
+            [float(self._irs_utils._time_from_dates(asof_date, dt, "A365F")) for dt in live_exercise_dates],
             dtype=float,
         )
         fixed_leg = next((leg for leg in trade_root.findall("./SwaptionData/LegData") if (leg.findtext("./LegType") or "").strip().lower() == "fixed"), None)
@@ -3598,8 +3645,15 @@ class PythonLgmAdapter:
         except Exception:
             return None
         asof_date = self._irs_utils._parse_yyyymmdd(asof)
+        live_exercise_dates = []
+        for d in product.exercise_dates:
+            dt = self._irs_utils._parse_yyyymmdd(d)
+            if dt >= asof_date:
+                live_exercise_dates.append(dt)
+        if len(live_exercise_dates) == 0:
+            return None
         exercise_times = np.asarray(
-            [float(self._irs_utils._time_from_dates(asof_date, self._irs_utils._parse_yyyymmdd(d), "A365F")) for d in product.exercise_dates],
+            [float(self._irs_utils._time_from_dates(asof_date, dt, "A365F")) for dt in live_exercise_dates],
             dtype=float,
         )
         exercise_sign = 1.0 if bool(product.pay_fixed) else -1.0
@@ -4096,7 +4150,9 @@ class PythonLgmAdapter:
             return None, False
         pay = np.asarray(spec.sticky_state.get("pay_time", []), dtype=float)
         amount = np.asarray(spec.sticky_state.get("amount", []), dtype=float)
-        if pay.size == 0 or amount.size != pay.size:
+        if pay.size == 0:
+            return np.zeros((ctx.n_times, ctx.n_paths), dtype=float), False
+        if amount.size != pay.size:
             return None, False
         p_disc = ctx.inputs.discount_curves[spec.ccy]
         vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
@@ -4217,11 +4273,12 @@ class PythonLgmAdapter:
         if key and key in inputs.forward_curves_by_name:
             return inputs.forward_curves_by_name[key]
         mapped_tenor = inputs.swap_index_forward_tenors.get(key, "")
+        mapped_tenor = _normalize_forward_tenor_family(mapped_tenor)
         if mapped_tenor and mapped_tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
             return inputs.forward_curves_by_tenor[ccy][mapped_tenor]
         tenor_match = re.search(r"(\d+[YMWD])$", key)
         if tenor_match:
-            tenor = tenor_match.group(1).upper()
+            tenor = _normalize_forward_tenor_family(tenor_match.group(1).upper())
             if tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
                 return inputs.forward_curves_by_tenor[ccy][tenor]
         return inputs.forward_curves.get(ccy, inputs.discount_curves[ccy])
@@ -6522,12 +6579,21 @@ def _quote_matches_forward_curve(key: str, ccy: str, tenor: str) -> bool:
     parts = str(key).strip().upper().split("/")
     if len(parts) < 3 or parts[2] != ccy.upper():
         return False
+    family = _normalize_forward_tenor_family(tenor)
+    if parts[0] == "ZERO" and parts[1] == "RATE":
+        if family == "1D":
+            return True
+        if len(parts) == 4:
+            return False
+        if len(parts) >= 6:
+            return _normalize_forward_tenor_family(parts[3]) == family
+        return False
     if parts[0] == "MM" and parts[1] == "RATE":
         return True
     if parts[0] == "IR_SWAP" and parts[1] == "RATE":
-        return len(parts) > 5 and parts[4] == tenor.upper()
+        return len(parts) > 5 and _normalize_forward_tenor_family(parts[4]) == family
     if parts[0] == "FRA" and parts[1] == "RATE":
-        return len(parts) > 4 and parts[-1] == tenor.upper()
+        return len(parts) > 4 and _normalize_forward_tenor_family(parts[-1]) == family
     return False
 
 

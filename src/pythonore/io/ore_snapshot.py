@@ -2729,7 +2729,7 @@ def quote_dicts_from_pairs(
 
 def _forward_family_tokens(index_name: str) -> set[str]:
     text = str(index_name or "").strip().upper()
-    if text.endswith("1D") or "EONIA" in text or "SOFR" in text:
+    if text.endswith(("0D", "1D", "ON", "O/N")) or "EONIA" in text or "ESTR" in text or "ESTER" in text or "SOFR" in text:
         return {"1D"}
     if text.endswith("1M"):
         return {"1M"}

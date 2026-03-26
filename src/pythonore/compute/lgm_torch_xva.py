@@ -25,6 +25,16 @@ def _to_numpy_float_array(values) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
+def _clamp_nonnegative_times(times) -> np.ndarray:
+    arr = np.asarray(times, dtype=float)
+    if arr.ndim == 0:
+        return np.asarray(max(float(arr), 0.0), dtype=float)
+    out = arr.copy()
+    out[~np.isfinite(out)] = 0.0
+    out[out < 0.0] = 0.0
+    return out
+
+
 @dataclass
 class TorchDiscountCurve:
     times: np.ndarray
@@ -118,9 +128,10 @@ def discount_bond_paths_torch(
 ):
     torch = _require_torch()
     x = torch.as_tensor(x_t)
-    T_np = _to_numpy_float_array(maturities)
-    h_t = float(model.H(t))
-    z_t = float(model.zeta(t))
+    t_eff = max(float(t), 0.0)
+    T_np = _clamp_nonnegative_times(_to_numpy_float_array(maturities))
+    h_t = float(model.H(t_eff))
+    z_t = float(model.zeta(t_eff))
     h_T = torch.as_tensor(np.asarray(model.H(T_np), dtype=float), dtype=x.dtype, device=x.device)
     p0_T_t = torch.as_tensor(p0_T, dtype=x.dtype, device=x.device)
     p0_t_t = torch.as_tensor(p0_t, dtype=x.dtype, device=x.device)
@@ -140,8 +151,8 @@ def discount_bond_path_grid_torch(
 ):
     torch = _require_torch()
     x = torch.as_tensor(x_paths)
-    t_np = _to_numpy_float_array(eval_times)
-    T_np = _to_numpy_float_array(maturities)
+    t_np = _clamp_nonnegative_times(_to_numpy_float_array(eval_times))
+    T_np = _clamp_nonnegative_times(_to_numpy_float_array(maturities))
     h_t = torch.as_tensor(np.asarray(model.H(t_np), dtype=float), dtype=x.dtype, device=x.device)
     z_t = torch.as_tensor(np.asarray(model.zeta(t_np), dtype=float), dtype=x.dtype, device=x.device)
     h_T = torch.as_tensor(np.asarray(model.H(T_np), dtype=float), dtype=x.dtype, device=x.device)
@@ -169,8 +180,9 @@ def _discount_bond_path_grid_from_terms_torch(
 def numeraire_lgm_torch(model: LGM1F, t: float, x_t, p0_t):
     torch = _require_torch()
     x = torch.as_tensor(x_t)
-    h_t = float(model.H(t))
-    z_t = float(model.zeta(t))
+    t_eff = max(float(t), 0.0)
+    h_t = float(model.H(t_eff))
+    z_t = float(model.zeta(t_eff))
     p_t = torch.as_tensor(p0_t, dtype=x.dtype, device=x.device)
     return torch.exp(h_t * x + 0.5 * h_t * h_t * z_t) / p_t
 
@@ -245,7 +257,7 @@ def swap_npv_from_ore_legs_dual_curve_torch(
         index_tau = legs_t.get("float_index_accrual", legs_t["float_accrual"])[live]
         n = legs_t["float_notional"][live]
         sign = legs_t["float_sign"][live]
-        spread = legs_t["float_spread"][live]
+        spread = torch.nan_to_num(legs_t["float_spread"][live], nan=0.0, posinf=0.0, neginf=0.0)
         fixed = fix_t[live] <= float(t) + 1.0e-12
 
         p_tp_d = discount_bond_paths_torch(
@@ -263,6 +275,7 @@ def swap_npv_from_ore_legs_dual_curve_torch(
                 coupon_fix = torch.as_tensor(np.asarray(realized_float_coupon, dtype=float), dtype=x.dtype, device=x.device)[live][fixed]
             else:
                 coupon_fix = legs_t["float_coupon"][live][fixed][:, None].expand(-1, x.numel())
+            coupon_fix = torch.nan_to_num(coupon_fix, nan=0.0, posinf=0.0, neginf=0.0)
             amount[fixed, :] = sign[fixed, None] * n[fixed, None] * coupon_fix * tau[fixed, None]
 
         if torch.any(~fixed):
@@ -290,6 +303,7 @@ def swap_npv_from_ore_legs_dual_curve_torch(
                 fwd_curve.discount(e2),
             )
             fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None]
+            fwd2 = torch.nan_to_num(fwd2, nan=0.0, posinf=0.0, neginf=0.0)
             amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv = pv + torch.sum(amount * p_tp_d, dim=0)
@@ -308,7 +322,7 @@ def deflate_lgm_npv_paths_torch(
 ):
     torch = _require_torch()
     with torch.inference_mode():
-        t = np.asarray(times, dtype=float)
+        t = _clamp_nonnegative_times(times)
         x = torch.as_tensor(x_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
         v = torch.as_tensor(npv_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
         out = torch.empty_like(v)
@@ -328,7 +342,7 @@ def deflate_lgm_npv_paths_torch_batched(
 ):
     torch = _require_torch()
     with torch.inference_mode():
-        t = np.asarray(times, dtype=float)
+        t = _clamp_nonnegative_times(times)
         x = torch.as_tensor(x_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
         v = torch.as_tensor(npv_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
         h_t = torch.as_tensor(np.asarray(model.H(t), dtype=float), dtype=x.dtype, device=x.device)
@@ -354,7 +368,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
 ):
     torch = _require_torch()
     with torch.inference_mode():
-        eval_times_np = np.asarray(times, dtype=float)
+        eval_times_np = _clamp_nonnegative_times(times)
         x = torch.as_tensor(x_paths, dtype=disc_curve.dtype, device=disc_curve.device_obj)
         if x.ndim != 2 or x.shape[0] != eval_times_np.size:
             raise ValueError("x_paths must have shape [n_times, n_paths]")
@@ -366,10 +380,10 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
         disc_eval = disc_curve.discount(eval_times)
         fwd_eval = fwd_curve.discount(eval_times)
 
-        fixed_pay_np = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
-        float_pay_np = np.asarray(legs.get("float_pay_time", []), dtype=float)
-        float_start_np = np.asarray(legs.get("float_start_time", []), dtype=float)
-        float_end_np = np.asarray(legs.get("float_end_time", []), dtype=float)
+        fixed_pay_np = _clamp_nonnegative_times(legs.get("fixed_pay_time", []))
+        float_pay_np = _clamp_nonnegative_times(legs.get("float_pay_time", []))
+        float_start_np = _clamp_nonnegative_times(legs.get("float_start_time", []))
+        float_end_np = _clamp_nonnegative_times(legs.get("float_end_time", []))
 
         disc_parts = []
         disc_meta: dict[str, np.ndarray] = {}
@@ -437,7 +451,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
         index_tau = legs_t.get("float_index_accrual", tau)
         notionals = legs_t["float_notional"]
         sign = legs_t["float_sign"]
-        spread = legs_t["float_spread"]
+        spread = torch.nan_to_num(legs_t["float_spread"], nan=0.0, posinf=0.0, neginf=0.0)
         p_tp_d = gather_grid(disc_grid_union, disc_meta["float_pay"])
         if exercise_into_whole_periods:
             live = start[None, :] >= eval_times[:, None] - 1.0e-12
@@ -455,6 +469,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
                 coupons = torch.as_tensor(np.asarray(realized_float_coupon, dtype=float), dtype=x.dtype, device=x.device)
             else:
                 coupons = legs_t["float_coupon"][:, None].expand(-1, x.shape[1])
+            coupons = torch.nan_to_num(coupons, nan=0.0, posinf=0.0, neginf=0.0)
             fixed_amounts = sign[:, None] * notionals[:, None] * coupons * tau[:, None]
             amount = amount + fixed_amounts[None, :, :] * (live & fixed)[:, :, None]
 
@@ -463,6 +478,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
             p_ts_f = gather_grid(fwd_grid_union, fwd_meta["float_start"])
             p_te_f = gather_grid(fwd_grid_union, fwd_meta["float_end"])
             fwd = (p_ts_f / p_te_f - 1.0) / index_tau[None, :, None]
+            fwd = torch.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0)
             float_amounts = sign[None, :, None] * notionals[None, :, None] * (fwd + spread[None, :, None]) * tau[None, :, None]
             amount = amount + float_amounts * unfixed[:, :, None]
 
@@ -526,12 +542,12 @@ def price_plain_rate_leg_paths_torch(
         gearing_np = np.asarray(leg.get("gearing", np.ones(start_np.shape)), dtype=float)
         accr_np = np.asarray(leg.get("accrual", np.zeros(start_np.shape)), dtype=float)
         index_accr_np = np.asarray(leg.get("index_accrual", accr_np), dtype=float)
-        start = torch.as_tensor(start_np, dtype=x.dtype, device=x.device)
-        end = torch.as_tensor(end_np, dtype=x.dtype, device=x.device)
-        fixing = torch.as_tensor(fixing_np, dtype=x.dtype, device=x.device)
+        start = torch.as_tensor(_clamp_nonnegative_times(start_np), dtype=x.dtype, device=x.device)
+        end = torch.as_tensor(_clamp_nonnegative_times(end_np), dtype=x.dtype, device=x.device)
+        fixing = torch.as_tensor(_clamp_nonnegative_times(fixing_np), dtype=x.dtype, device=x.device)
         quoted = torch.as_tensor(quoted_np, dtype=x.dtype, device=x.device)
         fixed_mask = torch.as_tensor(fixed_mask_np, dtype=torch.bool, device=x.device)
-        spread = torch.as_tensor(spread_np, dtype=x.dtype, device=x.device)
+        spread = torch.nan_to_num(torch.as_tensor(spread_np, dtype=x.dtype, device=x.device), nan=0.0, posinf=0.0, neginf=0.0)
         gearing = torch.as_tensor(gearing_np, dtype=x.dtype, device=x.device)
         accr = torch.as_tensor(accr_np, dtype=x.dtype, device=x.device)
         index_accr = torch.as_tensor(index_accr_np, dtype=x.dtype, device=x.device)
@@ -557,6 +573,7 @@ def price_plain_rate_leg_paths_torch(
         p_ts_f = torch.where(after_start[:, :, None], torch.ones_like(p_ts_f), p_ts_f)
         tau = torch.clamp(index_accr[None, :, None], min=torch.as_tensor(1.0e-8, dtype=x.dtype, device=x.device))
         floating_base = (p_ts_f / p_te_f - 1.0) / tau
+        floating_base = torch.nan_to_num(floating_base, nan=0.0, posinf=0.0, neginf=0.0)
         fixed_now = fixed_mask[None, :] | (fixing[None, :] <= eval_times[:, None] + 1.0e-12)
         base = torch.where(fixed_now[:, :, None], quoted[None, :, None], floating_base)
         coupon = gearing[None, :, None] * base + spread[None, :, None]

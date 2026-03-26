@@ -122,6 +122,41 @@ def test_xccy_float_float_swap_npv_regression():
     assert np.allclose(result, np.full(3, -22945.39475074), rtol=1.0e-10, atol=1.0e-8)
 
 
+def test_xccy_float_float_swap_npv_handles_negative_start_times_and_nan_spread():
+    hybrid = _hybrid()
+    result = xccy_float_float_swap_npv(
+        hybrid=hybrid,
+        domestic_ccy="USD",
+        leg1=XccyFloatLegDef(
+            ccy="EUR",
+            pay_time=np.array([1.0, 1.5]),
+            start_time=np.array([0.0, 0.5]),
+            end_time=np.array([1.0, 1.5]),
+            accrual=np.array([1.0, 1.0]),
+            notional=np.array([1_000_000.0, 1_000_000.0]),
+            spread=np.array([np.nan, 0.001]),
+            sign=np.array([1.0, 1.0]),
+        ),
+        leg2=XccyFloatLegDef(
+            ccy="USD",
+            pay_time=np.array([1.0, 1.5]),
+            start_time=np.array([0.0, 0.5]),
+            end_time=np.array([1.0, 1.5]),
+            accrual=np.array([1.0, 1.0]),
+            notional=np.array([1_050_000.0, 1_050_000.0]),
+            spread=np.array([0.002, np.nan]),
+            sign=np.array([-1.0, -1.0]),
+        ),
+        t=0.5,
+        x_by_ccy={"EUR": np.zeros(4), "USD": np.zeros(4)},
+        s_fx_by_pair={"EUR/USD": np.full(4, 1.1)},
+        disc_curves={"EUR": _curve(0.02), "USD": _curve(0.03)},
+        fwd_curves={"EUR": _curve(0.025), "USD": _curve(0.035)},
+    )
+
+    assert np.all(np.isfinite(result))
+
+
 def test_stress_classic_templates_smoke():
     xml_buffers = stress_classic_xml_buffers(num_paths=64)
 

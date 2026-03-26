@@ -507,6 +507,9 @@ def bermudan_npv_paths_from_underlying(
         raise ValueError("basis_degree must be non-negative")
 
     ex = np.asarray(bermudan.exercise_times, dtype=float)
+    ex = ex[ex >= 0.0]
+    if ex.size == 0:
+        return np.zeros_like(x_paths)
     ex_idx = np.searchsorted(t, ex)
     if np.any(ex_idx >= t.size):
         raise ValueError("exercise_times must be <= last simulation time")
@@ -625,6 +628,15 @@ def bermudan_lsmc_result(
         raise ValueError("basis_degree must be non-negative")
 
     ex = np.asarray(bermudan.exercise_times, dtype=float)
+    ex = ex[ex >= 0.0]
+    if ex.size == 0:
+        return BermudanLsmcResult(
+            npv_paths=np.zeros_like(x_paths),
+            option_npv_paths=np.zeros_like(x_paths),
+            signed_underlying_paths=np.zeros_like(x_paths),
+            exercise_indices=np.full(x_paths.shape[1], -1, dtype=int),
+            diagnostics=(),
+        )
     ex_idx = np.searchsorted(t, ex)
     if np.any(ex_idx >= t.size):
         raise ValueError("exercise_times must be <= last simulation time")
@@ -819,6 +831,9 @@ def bermudan_backward_price(
         raise ValueError("convolution_ny must be >= 1")
 
     ex = np.asarray(bermudan.exercise_times, dtype=float)
+    ex = ex[ex >= 0.0]
+    if ex.size == 0:
+        return BermudanBackwardResult(price=0.0, exercise_values=(), diagnostics=())
     times = np.concatenate(([0.0], ex))
     zeta = np.asarray(model.zeta(times), dtype=float)
     mx = (int(n_grid) - 1) // 2

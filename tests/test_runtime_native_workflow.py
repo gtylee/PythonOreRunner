@@ -35,6 +35,7 @@ from pythonore.runtime.runtime import (
     XVAEngine,
     _parse_market_overlay,
     _quote_matches_discount_curve,
+    _quote_matches_forward_curve,
     classify_portfolio_support,
 )
 from pythonore.mapping.mapper import map_snapshot
@@ -293,6 +294,53 @@ def _generic_digital_cmsspread_trade_xml() -> str:
         <Convention>F</Convention>
       </Rules>
     </ScheduleData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _generic_rate_swap_trade_xml(*, start_date: str = "2024-03-08", end_date: str = "2028-03-08") -> str:
+    return f"""
+<SwapData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>EUR</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>{start_date}</StartDate>
+        <EndDate>{end_date}</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>{start_date}</StartDate>
+        <EndDate>{end_date}</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <Spreads><Spread>0.0</Spread></Spreads>
+    </FloatingLegData>
   </LegData>
 </SwapData>
 """.strip()
@@ -658,6 +706,47 @@ def test_native_runtime_filters_past_cashflow_payments():
     assert abs(float(result.pv_total)) <= 1.0e-12
 
 
+def test_generic_cashflow_state_returns_empty_live_flows_for_fully_past_payment():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CF_PAST_DIRECT",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Cashflow",
+        product=GenericProduct(payload={"trade_type": "Cashflow", "xml": _cashflow_trade_xml(payment_date="2025-03-08", amount=1000.0)}),
+    )
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    state = adapter._build_generic_cashflow_state(trade, snapshot)
+
+    assert state is not None
+    assert np.asarray(state["pay_time"], dtype=float).size == 0
+    assert np.asarray(state["amount"], dtype=float).size == 0
+
+
+def test_generic_rate_swap_builder_drops_fully_past_coupons():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="GENERIC_SWAP_FILTER",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_rate_swap_trade_xml()}),
+    )
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+
+    assert state is not None
+    assert state["rate_legs"]
+    for leg in state["rate_legs"]:
+        pay = np.asarray(leg["pay_time"], dtype=float)
+        assert pay.size > 0
+        assert np.all(pay >= -1.0e-12)
+
+
 def test_native_runtime_emits_progress_logs(capsys):
     snapshot = _make_snapshot(params={"python.progress": "Y", "python.progress_bar": "N", "python.progress_log_interval": 1})
     XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run(return_cubes=False)
@@ -993,6 +1082,8 @@ def test_loader_from_ore_xml_matches_from_files():
 
     assert from_xml.config.source_meta.path == str(ore_xml)
     assert from_dir.config.source_meta.path == str(ore_xml)
+    assert "<ORE>" in from_xml.config.xml_buffers["ore.xml"]
+    assert "<ORE>" in from_dir.config.xml_buffers["ore.xml"]
     assert len(from_xml.portfolio.trades) == len(from_dir.portfolio.trades)
     assert tuple(t.trade_id for t in from_xml.portfolio.trades) == tuple(t.trade_id for t in from_dir.portfolio.trades)
 
@@ -1134,6 +1225,13 @@ def test_quote_matches_discount_curve_uses_unique_trade_family_as_fallback():
     assert _quote_matches_discount_curve(quote_1d, "GBP", "GBP") is True
 
 
+def test_quote_matches_forward_curve_accepts_zero_quotes_for_zero_tenor_family():
+    assert _quote_matches_forward_curve("ZERO/RATE/EUR/1Y", "EUR", "1D") is True
+    assert _quote_matches_forward_curve("ZERO/RATE/EUR/EUR-ESTR/A365/2027-03-08", "EUR", "ON") is True
+    assert _quote_matches_forward_curve("IR_SWAP/RATE/EUR/2D/1D/10Y", "EUR", "0D") is True
+    assert _quote_matches_forward_curve("IR_SWAP/RATE/EUR/2D/6M/10Y", "EUR", "ON") is False
+
+
 def test_parse_swap_index_forward_tenors_caches_conventions_root():
     adapter = PythonLgmAdapter(fallback_to_swig=False)
     conventions_xml = """
@@ -1156,3 +1254,95 @@ def test_parse_swap_index_forward_tenors_caches_conventions_root():
     assert first == {"EUR-CMS-10Y": "6M"}
     assert second == first
     assert fromstring.call_count == 1
+
+
+def test_generic_bermudan_runtime_drops_past_exercise_dates():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="BERM_PAST_EX",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swaption",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swaption",
+                "xml": _generic_bermudan_swaption_trade_xml().replace(
+                    "<ExerciseDate>2026-09-08</ExerciseDate>",
+                    "<ExerciseDate>2025-09-08</ExerciseDate>",
+                    1,
+                ),
+            }
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, analytics=("CVA",), xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")}),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    fake_legs = {
+        "float_index": "EUR-EURIBOR-6M",
+        "fixed_notional": np.array([1_000_000.0], dtype=float),
+    }
+    with patch.object(adapter._irs_utils, "load_swap_legs_from_portfolio_root", return_value=fake_legs):
+        state = adapter._build_generic_swaption_state(trade, snapshot)
+    assert state is not None
+    ex = np.asarray(state["definition"].exercise_times, dtype=float)
+    assert ex.size == 1
+    assert np.all(ex >= 0.0)
+
+
+def test_torch_swap_pricer_handles_negative_schedule_times():
+    pytest = __import__("pytest")
+    torch = pytest.importorskip("torch")
+    from pythonore.compute.lgm import LGM1F, LGMParams
+    from pythonore.compute.lgm_torch_xva import (
+        TorchDiscountCurve,
+        deflate_lgm_npv_paths_torch_batched,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+    )
+
+    model = LGM1F(LGMParams.constant(alpha=0.01, kappa=0.03))
+    curve = TorchDiscountCurve(
+        times=np.array([0.0, 1.0, 5.0], dtype=float),
+        dfs=np.array([1.0, 0.98, 0.90], dtype=float),
+        device="cpu",
+        dtype=torch.float64,
+    )
+    legs = {
+        "fixed_pay_time": np.array([-0.25, 1.0], dtype=float),
+        "fixed_amount": np.array([100.0, 100.0], dtype=float),
+        "fixed_start_time": np.array([-0.75, 0.5], dtype=float),
+        "float_pay_time": np.array([0.5, 1.0], dtype=float),
+        "float_start_time": np.array([-0.5, 0.5], dtype=float),
+        "float_end_time": np.array([0.5, 1.0], dtype=float),
+        "float_fixing_time": np.array([-0.5, 0.5], dtype=float),
+        "float_accrual": np.array([0.5, 0.5], dtype=float),
+        "float_index_accrual": np.array([0.5, 0.5], dtype=float),
+        "float_notional": np.array([1_000_000.0, 1_000_000.0], dtype=float),
+        "float_sign": np.array([1.0, 1.0], dtype=float),
+        "float_spread": np.array([np.nan, 0.001], dtype=float),
+        "float_coupon": np.array([0.0, 0.0], dtype=float),
+    }
+    times = np.array([-0.25, 0.0, 0.5, 1.0], dtype=float)
+    x_paths = np.zeros((times.size, 4), dtype=float)
+    npv = swap_npv_paths_from_ore_legs_dual_curve_torch(
+        model,
+        curve,
+        curve,
+        legs,
+        times,
+        x_paths,
+        return_numpy=True,
+    )
+    deflated = deflate_lgm_npv_paths_torch_batched(
+        model,
+        curve,
+        times,
+        x_paths,
+        npv,
+        return_numpy=True,
+    )
+    assert np.all(np.isfinite(npv))
+    assert np.all(np.isfinite(deflated))

@@ -515,11 +515,12 @@ def xccy_float_float_swap_npv(
         pay = leg.pay_time[live]
         tau = leg.accrual[live]
         n = leg.notional[live]
-        spr = leg.spread[live]
+        spr = np.nan_to_num(leg.spread[live], nan=0.0, posinf=0.0, neginf=0.0)
         sign = leg.sign[live]
+        effective_s = np.maximum(s, float(t))
 
         p_t_s_d = np.array([
-            hybrid.zc_bond(c, t, float(si), x_t, float(p0_d(t)), float(p0_d(float(si)))) for si in s
+            hybrid.zc_bond(c, t, float(si), x_t, float(p0_d(t)), float(p0_d(float(si)))) for si in effective_s
         ])
         p_t_e_d = np.array([
             hybrid.zc_bond(c, t, float(ei), x_t, float(p0_d(t)), float(p0_d(float(ei)))) for ei in e
@@ -531,15 +532,15 @@ def xccy_float_float_swap_npv(
         # Deterministic basis ratio maps the simulated discounting bond into the
         # forwarding bond.  This is the same approximation used elsewhere in the
         # package to keep one LGM state while still honouring dual-curve inputs.
-        b_t = float(p0_f(t) / p0_d(t))
-        b_s = np.array([float(p0_f(float(si)) / p0_d(float(si))) for si in s], dtype=float)
+        b_t = float(p0_f(t) / max(p0_d(t), 1.0e-18))
+        b_s = np.array([float(p0_f(float(si)) / max(p0_d(float(si)), 1.0e-18)) for si in effective_s], dtype=float)
         b_e = np.array([float(p0_f(float(ei)) / p0_d(float(ei))) for ei in e], dtype=float)
         p_t_s_f = p_t_s_d * (b_s / b_t)[:, None]
         p_t_e_f = p_t_e_d * (b_e / b_t)[:, None]
 
-        fwd = (p_t_s_f / p_t_e_f - 1.0) / tau[:, None]
+        fwd = np.nan_to_num((p_t_s_f / p_t_e_f - 1.0) / np.clip(tau[:, None], 1.0e-8, None), nan=0.0, posinf=0.0, neginf=0.0)
         cash = sign[:, None] * n[:, None] * (fwd + spr[:, None]) * tau[:, None]
-        pv_ccy = np.sum(cash * p_t_pay_d, axis=0)
+        pv_ccy = np.sum(np.nan_to_num(cash * p_t_pay_d, nan=0.0, posinf=0.0, neginf=0.0), axis=0)
 
         if c == dccy:
             return pv_ccy

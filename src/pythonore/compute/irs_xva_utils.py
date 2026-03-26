@@ -1014,8 +1014,15 @@ def _remaining_schedule_from_index(dates: np.ndarray, t: float) -> np.ndarray:
 def _discount_bond_block(model, p0, t: float, maturities: np.ndarray, x_t: np.ndarray, p_t: float) -> np.ndarray:
     if maturities.size == 0:
         return np.empty((0, x_t.size), dtype=float)
-    p_T = np.asarray(curve_values(p0, maturities), dtype=float)
-    return model.discount_bond_paths(t, maturities, x_t, p_t, p_T)
+    mats = np.asarray(maturities, dtype=float)
+    out = np.ones((mats.size, x_t.size), dtype=float)
+    live = mats > float(t) + 1.0e-12
+    if not np.any(live):
+        return out
+    live_mats = mats[live]
+    p_T = np.asarray(curve_values(p0, live_mats), dtype=float)
+    out[live, :] = model.discount_bond_paths(t, live_mats, x_t, p_t, p_T)
+    return out
 
 
 def payer_swap_npv_at_time(model, p0, fixed_dates, float_dates, t, x_t, fixed_rate, trade_def):
@@ -1091,12 +1098,12 @@ def swap_npv_from_ore_legs(model, p0, legs: Dict[str, np.ndarray], t: float, x_t
         index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"])[mask_future], dtype=float)
         n = legs["float_notional"][mask_future]
         sign = legs["float_sign"][mask_future]
-        spread = legs["float_spread"][mask_future]
+        spread = np.nan_to_num(legs["float_spread"][mask_future], nan=0.0, posinf=0.0, neginf=0.0)
 
         p_ts = _discount_bond_block(model, p0, t, s, x, p_t)
         p_te = _discount_bond_block(model, p0, t, e, x, p_t)
         p_tp = _discount_bond_block(model, p0, t, pay, x, p_t)
-        fwd = (p_ts / p_te - 1.0) / index_tau[:, None]
+        fwd = np.nan_to_num((p_ts / p_te - 1.0) / index_tau[:, None], nan=0.0, posinf=0.0, neginf=0.0)
         cash = sign[:, None] * n[:, None] * (fwd + spread[:, None]) * tau[:, None]
         pv += np.sum(cash * p_tp, axis=0)
 
@@ -1247,7 +1254,7 @@ def swap_npv_from_ore_legs_dual_curve(
         index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"])[live], dtype=float)
         n = legs["float_notional"][live]
         sign = legs["float_sign"][live]
-        spread = legs["float_spread"][live]
+        spread = np.nan_to_num(legs["float_spread"][live], nan=0.0, posinf=0.0, neginf=0.0)
         if deterministic_fixings_cutoff is None:
             fixed = fix_t[live] <= t + 1.0e-12
         else:
@@ -1266,6 +1273,7 @@ def swap_npv_from_ore_legs_dual_curve(
                     coupon_fix = realized_float_coupon[live][fixed]
                 else:
                     coupon_fix = np.tile(legs["float_coupon"][live][fixed][:, None], (1, x_t.size))
+                coupon_fix = np.nan_to_num(coupon_fix, nan=0.0, posinf=0.0, neginf=0.0)
                 amount[fixed, :] = sign[fixed, None] * n[fixed, None] * coupon_fix * tau[fixed, None]
 
         # Unfixed coupons: project with the forwarding curve, discount with the
@@ -1280,7 +1288,7 @@ def swap_npv_from_ore_legs_dual_curve(
             spread2 = spread[~fixed]
             p_ts_f2 = forward_bond_batch(s2)
             p_te_f2 = forward_bond_batch(e2)
-            fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None]
+            fwd2 = np.nan_to_num((p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None], nan=0.0, posinf=0.0, neginf=0.0)
             amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv += np.sum(amount * p_tp_d, axis=0)
@@ -1352,6 +1360,8 @@ def calibrate_float_spreads_from_coupon(
     """
     out = {k: np.array(v, copy=True) for k, v in legs.items()}
     spread = np.array(out.get("float_spread", np.zeros_like(out["float_accrual"])), copy=True, dtype=float)
+    coupons = np.asarray(out.get("float_coupon", np.zeros_like(out["float_accrual"])), dtype=float)
+    out["float_coupon"] = coupons.copy()
 
     for i in range(spread.size):
         s = float(out["float_start_time"][i])
@@ -1362,9 +1372,16 @@ def calibrate_float_spreads_from_coupon(
             continue
         ps = float(p0_fwd(max(t0, s)))
         pe = float(p0_fwd(e))
+        if not np.isfinite(ps) or not np.isfinite(pe) or pe == 0.0:
+            continue
         fwd0 = (ps / pe - 1.0) / index_tau
-        if "float_coupon" in out and out["float_coupon"][i] != 0.0:
-            spread[i] = float(out["float_coupon"][i]) - fwd0
+        if not np.isfinite(fwd0):
+            continue
+        coupon_i = float(coupons[i])
+        if np.isfinite(coupon_i) and abs(coupon_i) > 0.0:
+            spread[i] = coupon_i - fwd0
+        if not np.isfinite(spread[i]):
+            spread[i] = 0.0
         out["float_coupon"][i] = fwd0 + spread[i]
 
     out["float_spread"] = spread
