@@ -1,3 +1,4 @@
+from datetime import date
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -5,13 +6,15 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from pythonore.compute.irs_xva_utils import _discount_bond_block
+from pythonore.compute.irs_xva_utils import expand_leg_notionals
 from pythonore.compute.irs_xva_utils import interpolate_linear_flat
 from py_ore_tools.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
     calibrate_float_spreads_from_coupon,
     compute_realized_float_coupons,
-    load_swap_legs_from_portfolio_root,
     load_ore_default_curve_inputs,
+    load_ore_discount_pairs_by_columns,
+    load_swap_legs_from_portfolio_root,
     payer_swap_npv_at_time,
     swap_npv_from_ore_legs,
     swap_npv_from_ore_legs_dual_curve,
@@ -322,6 +325,262 @@ class TestIrsXvaUtils(unittest.TestCase):
         legs = load_swap_legs_from_portfolio_root(root, "AMORT_SWAP", "2023-10-18")
         np.testing.assert_allclose(legs["fixed_notional"], np.array([3_000_000.0, 2_800_000.0, 2_700_000.0]))
         np.testing.assert_allclose(legs["float_notional"], np.array([3_000_000.0, 2_800_000.0, 2_700_000.0]))
+
+    def test_load_swap_legs_from_portfolio_root_expands_recurring_amortization_frequency(self):
+        root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="AMORT_FREQ_SWAP">
+                <TradeType>Swap</TradeType>
+                <SwapData>
+                  <LegData>
+                    <LegType>Fixed</LegType>
+                    <Payer>false</Payer>
+                    <Currency>EUR</Currency>
+                    <Notionals><Notional>3000000</Notional></Notionals>
+                    <Amortizations>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2024-10-17</StartDate>
+                        <Frequency>1Y</Frequency>
+                        <Value>0.10</Value>
+                      </AmortizationData>
+                    </Amortizations>
+                    <DayCounter>ACT/365</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FixedLegData><Rates><Rate>0.04</Rate></Rates></FixedLegData>
+                    <ScheduleData>
+                      <Rules>
+                        <StartDate>20231018</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Tenor>1Y</Tenor>
+                        <Calendar>TARGET</Calendar>
+                        <Convention>MF</Convention>
+                      </Rules>
+                    </ScheduleData>
+                  </LegData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>true</Payer>
+                    <Currency>EUR</Currency>
+                    <Notionals><Notional>3000000</Notional></Notionals>
+                    <Amortizations>
+                      <AmortizationData>
+                        <Type>RelativeToPreviousNotional</Type>
+                        <StartDate>2024-10-17</StartDate>
+                        <Frequency>1Y</Frequency>
+                        <Value>0.10</Value>
+                      </AmortizationData>
+                    </Amortizations>
+                    <DayCounter>ACT/365</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <ScheduleData>
+                      <Rules>
+                        <StartDate>20231018</StartDate>
+                        <EndDate>2026-10-17</EndDate>
+                        <Tenor>1Y</Tenor>
+                        <Calendar>TARGET</Calendar>
+                        <Convention>MF</Convention>
+                      </Rules>
+                    </ScheduleData>
+                    <FloatingLegData>
+                      <Index>EUR-ESTR</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>0.0</Spread></Spreads>
+                    </FloatingLegData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        legs = load_swap_legs_from_portfolio_root(root, "AMORT_FREQ_SWAP", "2023-10-18")
+        expected = np.array([3_000_000.0, 2_700_000.0, 2_430_000.0])
+        np.testing.assert_allclose(legs["fixed_notional"], expected)
+        np.testing.assert_allclose(legs["float_notional"], expected)
+
+    def test_expand_leg_notionals_supports_dated_nodes_with_undated_base(self):
+        leg = ET.fromstring(
+            """
+            <LegData>
+              <Notionals>
+                <Notional>3000000</Notional>
+                <Notional startDate="2025-10-17">2800000</Notional>
+                <Notional startDate="20261017">2600000</Notional>
+              </Notionals>
+            </LegData>
+            """
+        )
+
+        notionals = expand_leg_notionals(
+            leg,
+            [date(2024, 10, 18), date(2025, 10, 17), date(2026, 10, 17)],
+            [date(2025, 10, 17), date(2026, 10, 17), date(2027, 10, 17)],
+        )
+
+        np.testing.assert_allclose(notionals, np.array([3_000_000.0, 2_800_000.0, 2_600_000.0]))
+
+    def test_expand_leg_notionals_keeps_active_periods_on_base_notional_until_future_start_date(self):
+        leg = ET.fromstring(
+            """
+            <LegData>
+              <Notionals>
+                <Notional>1000000</Notional>
+                <Notional startDate="2025-07-01">900000</Notional>
+              </Notionals>
+            </LegData>
+            """
+        )
+
+        notionals = expand_leg_notionals(
+            leg,
+            [date(2025, 1, 1), date(2025, 7, 1), date(2026, 1, 1)],
+            [date(2025, 7, 1), date(2026, 1, 1), date(2026, 7, 1)],
+        )
+
+        np.testing.assert_allclose(notionals, np.array([1_000_000.0, 900_000.0, 900_000.0]))
+
+    def test_expand_leg_notionals_aligns_nearby_start_dates_to_generated_schedule(self):
+        leg = ET.fromstring(
+            """
+            <LegData>
+              <Notionals>
+                <Notional>1000000</Notional>
+                <Notional startDate="2025-07-04">900000</Notional>
+              </Notionals>
+            </LegData>
+            """
+        )
+
+        notionals = expand_leg_notionals(
+            leg,
+            [date(2025, 1, 1), date(2025, 7, 1), date(2026, 1, 1)],
+            [date(2025, 7, 1), date(2026, 1, 1), date(2026, 7, 1)],
+        )
+
+        np.testing.assert_allclose(notionals, np.array([1_000_000.0, 900_000.0, 900_000.0]))
+
+    def test_expand_leg_notionals_aligns_nearby_dates_before_boundary(self):
+        leg = ET.fromstring(
+            """
+            <LegData>
+              <Notionals>
+                <Notional>1000000</Notional>
+                <Notional startDate="2025-06-28">900000</Notional>
+              </Notionals>
+            </LegData>
+            """
+        )
+
+        notionals = expand_leg_notionals(
+            leg,
+            [date(2025, 1, 1), date(2025, 7, 1), date(2026, 1, 1)],
+            [date(2025, 7, 1), date(2026, 1, 1), date(2026, 7, 1)],
+        )
+
+        np.testing.assert_allclose(notionals, np.array([1_000_000.0, 900_000.0, 900_000.0]))
+
+    def test_expand_leg_notionals_large_mid_period_dates_still_roll_forward(self):
+        leg = ET.fromstring(
+            """
+            <LegData>
+              <Notionals>
+                <Notional>1000000</Notional>
+                <Notional startDate="2025-09-15">900000</Notional>
+              </Notionals>
+            </LegData>
+            """
+        )
+
+        notionals = expand_leg_notionals(
+            leg,
+            [date(2025, 1, 1), date(2025, 7, 1), date(2026, 1, 1)],
+            [date(2025, 7, 1), date(2026, 1, 1), date(2026, 7, 1)],
+        )
+
+        np.testing.assert_allclose(notionals, np.array([1_000_000.0, 1_000_000.0, 900_000.0]))
+
+    def test_load_swap_legs_from_portfolio_root_prefers_explicit_schedule_dates(self):
+        root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="DATES_SWAP">
+                <TradeType>Swap</TradeType>
+                <SwapData>
+                  <LegData>
+                    <LegType>Fixed</LegType>
+                    <Payer>false</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                      <Notional startDate="2025-07-04">900000</Notional>
+                    </Notionals>
+                    <DayCounter>A360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FixedLegData><Rates><Rate>0.04</Rate></Rates></FixedLegData>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2025-01-03</Date>
+                          <Date>2025-07-03</Date>
+                          <Date>2026-01-05</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                  </LegData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>true</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                      <Notional startDate="2025-07-04">900000</Notional>
+                    </Notionals>
+                    <DayCounter>A360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2025-01-03</Date>
+                          <Date>2025-07-03</Date>
+                          <Date>2026-01-05</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                    <FloatingLegData>
+                      <Index>USD-FedFunds</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>0.0</Spread></Spreads>
+                    </FloatingLegData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        legs = load_swap_legs_from_portfolio_root(root, "DATES_SWAP", "2025-01-03")
+
+        np.testing.assert_allclose(legs["fixed_notional"], np.array([1_000_000.0, 900_000.0]))
+        np.testing.assert_allclose(legs["float_notional"], np.array([1_000_000.0, 900_000.0]))
+
+    def test_load_ore_discount_pairs_by_columns_is_case_insensitive_and_supports_ester_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            curves_csv = f"{tmp}/curves.csv"
+            with open(curves_csv, "w", encoding="utf-8", newline="") as handle:
+                handle.write("Date,EUR-ESTER,usd-sofr\n")
+                handle.write("2026-03-08,1.0,1.0\n")
+                handle.write("2027-03-08,0.98,0.97\n")
+
+            data = load_ore_discount_pairs_by_columns(curves_csv, ["eur-estr", "USD-SOFR"])
+
+        times_estr, dfs_estr = data["eur-estr"]
+        times_sofr, dfs_sofr = data["USD-SOFR"]
+        np.testing.assert_allclose(times_estr, np.array([0.0, 1.0]))
+        np.testing.assert_allclose(dfs_estr, np.array([1.0, 0.98]))
+        np.testing.assert_allclose(times_sofr, np.array([0.0, 1.0]))
+        np.testing.assert_allclose(dfs_sofr, np.array([1.0, 0.97]))
 
     def test_payer_swap_npv_matches_reference_implementation(self):
         trade_def = {

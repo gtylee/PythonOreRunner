@@ -93,6 +93,7 @@ from pythonore.compute.rate_futures import (
 from pythonore.compute.irs_xva_utils import (
     apply_parallel_float_spread_shift_to_match_npv,
     build_discount_curve_from_discount_pairs,
+    _normalize_curve_name,
     calibrate_float_spreads_from_coupon,
     _infer_index_day_counter,
     load_ore_default_curve_inputs,
@@ -3600,19 +3601,28 @@ def _load_ore_discount_pairs_by_columns_with_day_counter(
         raise ValueError("curves.csv appears empty")
     if "Date" not in rows[0]:
         raise ValueError("curves.csv missing Date column")
-    missing = [c for c in requested if c not in rows[0]]
+    available_columns = [str(name) for name in rows[0].keys() if name is not None]
+    normalized_columns = {
+        _normalize_curve_name(column): column
+        for column in available_columns
+    }
+    resolved_columns: Dict[str, str] = {}
+    missing: list[str] = []
+    for requested_name in requested:
+        actual = normalized_columns.get(_normalize_curve_name(requested_name))
+        if actual is None:
+            missing.append(requested_name)
+            continue
+        resolved_columns[requested_name] = actual
     if missing:
         raise ValueError(f"curves.csv missing requested discount columns: {missing}")
 
     base_dates: list[str] = []
     times: list[float] = []
-    by_col: Dict[str, list[float]] = {c: [] for c in requested}
     for r in rows:
         d = str(r["Date"])
         base_dates.append(d)
         times.append(_year_fraction_from_day_counter(asof_date, d, day_counter))
-        for c in requested:
-            by_col[c].append(float(r[c]))
 
     times_arr = np.asarray(times, dtype=float)
     uniq_t, idx = np.unique(times_arr, return_index=True)
@@ -3620,7 +3630,8 @@ def _load_ore_discount_pairs_by_columns_with_day_counter(
 
     out: Dict[str, tuple[tuple[str, ...], np.ndarray, np.ndarray]] = {}
     for c in requested:
-        dfs_arr = np.asarray(by_col[c], dtype=float)
+        actual_column = resolved_columns[c]
+        dfs_arr = np.asarray([float(r[actual_column]) for r in rows], dtype=float)
         uniq_df = dfs_arr[idx].copy()
         dates = uniq_dates
         if uniq_t[0] > 1.0e-12:

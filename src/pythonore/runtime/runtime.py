@@ -433,9 +433,42 @@ class _CurveBundle:
 
 def _normalize_forward_tenor_family(tenor: str) -> str:
     token = str(tenor or "").strip().upper()
-    if token in {"", "0D", "1D", "ON", "O/N"}:
+    if token in {"", "0D", "1D", "ON", "O/N", "ESTR", "ESTER", "EONIA", "SOFR", "SONIA", "SARON", "TONAR"}:
         return "1D"
     return token
+
+
+def _normalize_curve_lookup_key(name: str) -> str:
+    token = str(name or "").strip().upper().replace("O/N", "ON")
+    return token.replace("ESTER", "ESTR")
+
+
+def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[str, str] | None = None) -> str:
+    key = str(index_name or "").strip().upper()
+    mapped = str((swap_index_forward_tenors or {}).get(key, "")).strip().upper()
+    if mapped:
+        return _normalize_forward_tenor_family(mapped)
+    tenor_match = re.search(r"(\d+[YMWD])$", key)
+    if tenor_match is not None:
+        return _normalize_forward_tenor_family(tenor_match.group(1).upper())
+    if any(tag in key for tag in ("EONIA", "ESTR", "ESTER", "FEDFUNDS", "SOFR", "SONIA", "SARON", "TOIS", "TONAR")):
+        return "1D"
+    return ""
+
+
+def _index_name_matches_quote_token(token: str, index_name: str, ccy: str) -> bool:
+    quote_token = _normalize_curve_lookup_key(token)
+    exact_name = _normalize_curve_lookup_key(index_name)
+    if not quote_token or not exact_name:
+        return False
+    if quote_token == exact_name:
+        return True
+    ccy_prefix = str(ccy or "").strip().upper() + "-"
+    if exact_name.startswith(ccy_prefix) and quote_token == exact_name[len(ccy_prefix):]:
+        return True
+    if quote_token.startswith(ccy_prefix) and exact_name == quote_token[len(ccy_prefix):]:
+        return True
+    return False
 
 
 def _filter_leg_arrays_by_mask(leg: Dict[str, object], mask: np.ndarray) -> Dict[str, object]:
@@ -445,6 +478,34 @@ def _filter_leg_arrays_by_mask(leg: Dict[str, object], mask: np.ndarray) -> Dict
         if isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] == n:
             out[key] = value[mask].copy()
     return out
+
+
+def _rate_leg_currencies(legs_payload: Dict[str, object] | None, fallback_ccy: str = "") -> tuple[str, ...]:
+    if not isinstance(legs_payload, dict):
+        return (str(fallback_ccy).upper(),) if fallback_ccy else ()
+    values: list[str] = []
+    for leg in legs_payload.get("rate_legs", []):
+        ccy = str(leg.get("ccy", "")).strip().upper()
+        if ccy and ccy not in values:
+            values.append(ccy)
+    if not values and fallback_ccy:
+        values.append(str(fallback_ccy).upper())
+    return tuple(values)
+
+
+def _resolve_fx_pair_name(ccy1: str, ccy2: str, available_pairs: Sequence[str]) -> str | None:
+    left = str(ccy1).upper()
+    right = str(ccy2).upper()
+    if not left or not right or left == right:
+        return None
+    direct = f"{left}/{right}"
+    inverse = f"{right}/{left}"
+    available = {str(pair).upper().replace("-", "/") for pair in available_pairs}
+    if direct in available:
+        return direct
+    if inverse in available:
+        return inverse
+    return direct
 
 
 @dataclass(frozen=True)
@@ -620,6 +681,8 @@ class PythonLgmAdapter:
             return False
         rate_legs = list(spec.legs.get("rate_legs", []))
         if not rate_legs:
+            return False
+        if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1:
             return False
         return all(
             str(leg.get("kind", "")).upper() in {"FIXED", "FLOATING"}
@@ -1678,7 +1741,7 @@ class PythonLgmAdapter:
                                     float(np.max(np.abs(np.asarray(leg.get("notional", np.asarray([0.0], dtype=float)), dtype=float))))
                                     for leg in generic_legs.get("rate_legs", [])
                                 ]
-                                generic_ccys.add(str(generic_legs.get("ccy", snapshot.config.base_currency)).upper())
+                                generic_ccys.update(_rate_leg_currencies(generic_legs, str(generic_legs.get("ccy", snapshot.config.base_currency))))
                                 trade_specs.append(
                                     _TradeSpec(
                                         trade=t,
@@ -2011,8 +2074,12 @@ class PythonLgmAdapter:
             trade_specs=trade_specs,
         )
         needed_tenors: Dict[str, set[str]] = {}
+        needed_forward_names: Dict[str, set[str]] = {}
         for spec in trade_specs:
             if spec.kind == "IRS" and spec.legs is not None:
+                index_name = str(spec.legs.get("float_index", "")).upper()
+                if index_name:
+                    needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
                 tenor = str(spec.legs.get("float_index_tenor", "")).upper()
                 if tenor:
                     needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
@@ -2020,6 +2087,8 @@ class PythonLgmAdapter:
                 for leg in spec.legs.get("rate_legs", []):
                     for field in ("index_name", "index_name_1", "index_name_2"):
                         index_name = str(leg.get(field, "")).upper()
+                        if index_name:
+                            needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
                         tenor = swap_index_forward_tenors.get(index_name, "")
                         if tenor:
                             needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
@@ -2156,6 +2225,14 @@ class PythonLgmAdapter:
                     curve = forward_curves_by_tenor.get(index_ccy, {}).get(str(tenor).upper())
                     if curve is not None:
                         forward_curves_by_name.setdefault(index_name.upper(), curve)
+                for ccy, names in needed_forward_names.items():
+                    for index_name in sorted(names):
+                        payload = named_zero_curves.get(index_name)
+                        if not payload:
+                            continue
+                        forward_curves_by_name[index_name] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(
+                            sorted(payload, key=lambda x: x[0])
+                        )
                 curve_source = "market_overlay"
 
         runtime = snapshot.config.runtime
@@ -2540,8 +2617,12 @@ class PythonLgmAdapter:
                 snapshot.config.xml_buffers.get("conventions.xml", "")
             )
             needed_tenors: Dict[str, set[str]] = {}
+            needed_forward_names: Dict[str, set[str]] = {}
             for spec in trade_specs:
                 if spec.kind == "IRS" and spec.legs is not None:
+                    index_name = str(spec.legs.get("float_index", "")).upper()
+                    if index_name:
+                        needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
                     tenor = str(spec.legs.get("float_index_tenor", "")).upper()
                     if tenor:
                         needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
@@ -2549,6 +2630,8 @@ class PythonLgmAdapter:
                     for leg in spec.legs.get("rate_legs", []):
                         for field in ("index_name", "index_name_1", "index_name_2"):
                             index_name = str(leg.get(field, "")).upper()
+                            if index_name:
+                                needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
                             tenor = swap_index_forward_tenors.get(index_name, "")
                             if tenor:
                                 needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
@@ -2559,6 +2642,7 @@ class PythonLgmAdapter:
                 sim_config_id,
                 tuple(sorted(ccy_set)),
                 tuple((ccy, tuple(sorted(tenors))) for ccy, tenors in sorted(needed_tenors.items())),
+                tuple((ccy, tuple(sorted(names))) for ccy, names in sorted(needed_forward_names.items())),
             )
             cached_bundle = self._curve_fit_cache.get(cache_key)
             if cached_bundle is not None:
@@ -2635,6 +2719,27 @@ class PythonLgmAdapter:
                     for index_name, mapped_tenor in swap_index_forward_tenors.items():
                         if index_name.startswith(ccy + "-") and _normalize_forward_tenor_family(mapped_tenor) == normalized_tenor:
                             forward_curves_by_name.setdefault(index_name.upper(), tenor_curves[normalized_tenor])
+                for index_name in sorted(needed_forward_names.get(ccy, ())):
+                    family = _forward_index_family(index_name, swap_index_forward_tenors)
+                    if not family:
+                        continue
+                    index_quotes = [
+                        q
+                        for q in quote_dicts
+                        if _quote_matches_forward_curve(str(q["key"]), ccy, family, index_name=index_name)
+                    ]
+                    if not index_quotes:
+                        continue
+                    payload = self._ore_snapshot_mod.fit_discount_curves_from_programmatic_quotes(
+                        snapshot.config.asof,
+                        index_quotes,
+                        fit_method="bootstrap_mm_irs_v1",
+                    ).get(ccy)
+                    if not payload:
+                        continue
+                    forward_curves_by_name[index_name] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                        list(zip(payload["times"], payload["dfs"]))
+                    )
                 forward_curves_by_tenor[ccy] = tenor_curves
                 if tenor_curves:
                     preferred = "6M" if "6M" in tenor_curves else sorted(tenor_curves)[0]
@@ -2777,13 +2882,28 @@ class PythonLgmAdapter:
         inputs: _PythonLgmInputs,
         n_paths: int,
     ) -> _SharedFxSimulation | None:
-        all_fx_pairs = sorted(
-            {
-                f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
-                for spec in inputs.trade_specs
-                if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
-            }
-        )
+        available_pairs = tuple(str(pair).upper().replace("-", "/") for pair in inputs.stochastic_fx_pairs)
+        pair_maturities: Dict[str, float] = {}
+        for spec in inputs.trade_specs:
+            if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward):
+                pair = f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+                pair_maturities[pair] = max(pair_maturities.get(pair, 0.0), float(spec.trade.product.maturity_years))
+                continue
+            if spec.kind != "RateSwap":
+                continue
+            ccys = _rate_leg_currencies(spec.legs, spec.ccy)
+            if len(ccys) != 2:
+                continue
+            pair = _resolve_fx_pair_name(ccys[0], ccys[1], available_pairs)
+            if pair is None:
+                continue
+            max_pay = 0.0
+            for leg in (spec.legs or {}).get("rate_legs", []):
+                pay = np.asarray(leg.get("pay_time", []), dtype=float)
+                if pay.size:
+                    max_pay = max(max_pay, float(np.max(pay)))
+            pair_maturities[pair] = max(pair_maturities.get(pair, 0.0), max_pay)
+        all_fx_pairs = sorted(pair_maturities)
         fx_pairs = sorted(pair for pair in all_fx_pairs if pair in set(inputs.stochastic_fx_pairs))
         if not fx_pairs:
             return None
@@ -2815,13 +2935,7 @@ class PythonLgmAdapter:
         rd_minus_rf = {}
         for pair in fx_pairs:
             pair6 = pair.replace("/", "")
-            max_maturity = max(
-                float(spec.trade.product.maturity_years)
-                for spec in inputs.trade_specs
-                if spec.kind == "FXForward"
-                and isinstance(spec.trade.product, FXForward)
-                and f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}" == pair
-            )
+            max_maturity = max(float(pair_maturities.get(pair, 0.0)), 1.0 / 365.25)
             fx_vol = _fx_vol_for_trade(inputs, pair6, max_maturity, default=0.15)
             fx_vols[pair] = (tuple(), (float(fx_vol),))
             spot = max(_spot_from_quotes(pair6, inputs, default=1.0), 1.0e-12)
@@ -3168,6 +3282,51 @@ class PythonLgmAdapter:
         flag = str(params.get("python.use_flows_csv", "")).strip().lower()
         return flag in {"y", "yes", "true", "1"}
 
+    def _parse_generic_cashflow_schedule(
+        self,
+        cashflow_node: ET.Element,
+        *,
+        asof: Any,
+        sign: float = 1.0,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        parse_date = self._irs_utils._parse_yyyymmdd
+        time_from_dates = self._irs_utils._time_from_dates
+        entries: list[tuple[Any, float]] = []
+        for flow_node in cashflow_node.findall("./Cashflow"):
+            for amount_node in flow_node.findall("./Amount"):
+                pay_date_txt = (amount_node.get("date") or amount_node.get("Date") or "").strip()
+                amount_txt = (amount_node.text or "").strip()
+                if not pay_date_txt or not amount_txt:
+                    continue
+                try:
+                    entries.append((parse_date(pay_date_txt), float(amount_txt)))
+                except Exception:
+                    continue
+        if not entries:
+            payment_date = (
+                (cashflow_node.findtext("./PaymentDate") or "").strip()
+                or (cashflow_node.findtext("./Date") or "").strip()
+            )
+            amount_txt = (
+                (cashflow_node.findtext("./Amount") or "").strip()
+                or (cashflow_node.findtext("./CashflowAmount") or "").strip()
+            )
+            if payment_date and amount_txt:
+                try:
+                    entries.append((parse_date(payment_date), float(amount_txt)))
+                except Exception:
+                    return None
+        if not entries:
+            return None
+        entries.sort(key=lambda item: item[0])
+        pay_time = np.asarray([time_from_dates(asof, pay_date, "A365F") for pay_date, _ in entries], dtype=float)
+        amount = float(sign) * np.asarray([cash_amount for _, cash_amount in entries], dtype=float)
+        live_mask = pay_time >= -1.0e-12
+        return {
+            "pay_time": pay_time[live_mask].copy(),
+            "amount": amount[live_mask].copy(),
+        }
+
     def _build_generic_rate_swap_legs(
         self,
         trade: Trade,
@@ -3203,6 +3362,7 @@ class PythonLgmAdapter:
         asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         parse_date = self._irs_utils._parse_yyyymmdd
         build_schedule = self._irs_utils._build_schedule
+        schedule_from_leg = getattr(self._irs_utils, "_schedule_from_leg", None)
         time_from_dates = self._irs_utils._time_from_dates
         year_fraction = self._irs_utils._year_fraction
         advance_business_days = self._irs_utils._advance_business_days
@@ -3213,23 +3373,54 @@ class PythonLgmAdapter:
         for leg in leg_nodes:
             leg_type = (leg.findtext("./LegType") or "").strip()
             leg_type_upper = leg_type.upper()
-            if leg_type_upper not in {"FIXED", "FLOATING", "CMS", "CMSSPREAD", "DIGITALCMSSPREAD"}:
+            if leg_type_upper not in {"FIXED", "FLOATING", "CMS", "CMSSPREAD", "DIGITALCMSSPREAD", "CASHFLOW"}:
                 return None
             leg_ccy = (leg.findtext("./Currency") or "").strip().upper() or snapshot.config.base_currency.upper()
             ccy = ccy or leg_ccy
             payer = (leg.findtext("./Payer") or "").strip().lower() == "true"
             sign = -1.0 if payer else 1.0
+            if leg_type_upper == "CASHFLOW":
+                cashflow = leg.find("./CashflowData")
+                if cashflow is None:
+                    return None
+                parsed_cashflows = self._parse_generic_cashflow_schedule(cashflow, asof=asof, sign=sign)
+                if parsed_cashflows is None:
+                    return None
+                if np.asarray(parsed_cashflows.get("pay_time", []), dtype=float).size == 0:
+                    continue
+                rate_legs.append(
+                    {
+                        "kind": "CASHFLOW",
+                        "ccy": leg_ccy,
+                        "sign": sign,
+                        "pay_time": np.asarray(parsed_cashflows["pay_time"], dtype=float),
+                        "amount": np.asarray(parsed_cashflows["amount"], dtype=float),
+                    }
+                )
+                continue
             dc = (leg.findtext("./DayCounter") or "A365").strip()
             pay_conv = (leg.findtext("./PaymentConvention") or "F").strip()
             rules = leg.find("./ScheduleData/Rules")
-            if rules is None:
-                return None
-            start = parse_date((rules.findtext("./StartDate") or "").strip())
-            end = parse_date((rules.findtext("./EndDate") or "").strip())
-            tenor = (rules.findtext("./Tenor") or "").strip()
-            cal = (rules.findtext("./Calendar") or "TARGET").strip()
-            conv = (rules.findtext("./Convention") or pay_conv).strip()
-            s_dates, e_dates, p_dates = build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
+            tenor = (rules.findtext("./Tenor") if rules is not None else "") or ""
+            cal = (
+                (rules.findtext("./Calendar") if rules is not None else None)
+                or leg.findtext("./Currency")
+                or snapshot.config.base_currency
+                or "TARGET"
+            ).strip()
+            if schedule_from_leg is not None:
+                try:
+                    s_dates, e_dates, p_dates = schedule_from_leg(leg, pay_convention=pay_conv)
+                except Exception:
+                    return None
+            else:
+                if rules is None:
+                    return None
+                start = parse_date((rules.findtext("./StartDate") or "").strip())
+                end = parse_date((rules.findtext("./EndDate") or "").strip())
+                tenor = (rules.findtext("./Tenor") or "").strip()
+                conv = (rules.findtext("./Convention") or pay_conv).strip()
+                s_dates, e_dates, p_dates = build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
             s_t = np.asarray([time_from_dates(asof, d, "A365F") for d in s_dates], dtype=float)
             e_t = np.asarray([time_from_dates(asof, d, "A365F") for d in e_dates], dtype=float)
             p_t = np.asarray([time_from_dates(asof, d, "A365F") for d in p_dates], dtype=float)
@@ -3393,33 +3584,15 @@ class PythonLgmAdapter:
         cashflow = trade_root.find("./CashflowData")
         if cashflow is None:
             return None
-        payment_date = (
-            (cashflow.findtext("./PaymentDate") or "").strip()
-            or (cashflow.findtext("./Date") or "").strip()
-        )
-        amount_txt = (
-            (cashflow.findtext("./Amount") or "").strip()
-            or (cashflow.findtext("./CashflowAmount") or "").strip()
-        )
         ccy = (cashflow.findtext("./Currency") or snapshot.config.base_currency).strip().upper()
-        if not payment_date or not amount_txt:
-            return None
         asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
-        pay_date = self._irs_utils._parse_yyyymmdd(payment_date)
-        pay_time = float(self._irs_utils._time_from_dates(asof, pay_date, "A365F"))
-        if pay_time < -1.0e-12:
-            result = {
-                "ccy": ccy,
-                "pay_time": np.asarray([], dtype=float),
-                "amount": np.asarray([], dtype=float),
-            }
-            self._generic_cashflow_state_cache[cache_key] = result
-            self._generic_cashflow_state_xml_cache[xml_cache_key] = result
-            return result
+        cashflow_state = self._parse_generic_cashflow_schedule(cashflow, asof=asof, sign=1.0)
+        if cashflow_state is None:
+            return None
         result = {
             "ccy": ccy,
-            "pay_time": np.asarray([pay_time], dtype=float),
-            "amount": np.asarray([float(amount_txt)], dtype=float),
+            "pay_time": np.asarray(cashflow_state["pay_time"], dtype=float),
+            "amount": np.asarray(cashflow_state["amount"], dtype=float),
         }
         self._generic_cashflow_state_cache[cache_key] = result
         self._generic_cashflow_state_xml_cache[xml_cache_key] = result
@@ -3460,20 +3633,35 @@ class PythonLgmAdapter:
         asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         parse_date = self._irs_utils._parse_yyyymmdd
         build_schedule = self._irs_utils._build_schedule
+        schedule_from_leg = getattr(self._irs_utils, "_schedule_from_leg", None)
         time_from_dates = self._irs_utils._time_from_dates
         year_fraction = self._irs_utils._year_fraction
         advance_business_days = self._irs_utils._advance_business_days
         rules = leg.find("./ScheduleData/Rules")
         fld = leg.find("./FloatingLegData")
-        if rules is None or fld is None:
+        if fld is None:
             return None
-        start = parse_date((rules.findtext("./StartDate") or "").strip())
-        end = parse_date((rules.findtext("./EndDate") or "").strip())
-        tenor = (rules.findtext("./Tenor") or "").strip()
-        cal = (rules.findtext("./Calendar") or "TARGET").strip()
         pay_conv = (leg.findtext("./PaymentConvention") or "F").strip()
-        conv = (rules.findtext("./Convention") or pay_conv).strip()
-        s_dates, e_dates, p_dates = build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
+        tenor = (rules.findtext("./Tenor") if rules is not None else "") or ""
+        cal = (
+            (rules.findtext("./Calendar") if rules is not None else None)
+            or leg.findtext("./Currency")
+            or snapshot.config.base_currency
+            or "TARGET"
+        ).strip()
+        if schedule_from_leg is not None:
+            try:
+                s_dates, e_dates, p_dates = schedule_from_leg(leg, pay_convention=pay_conv)
+            except Exception:
+                return None
+        else:
+            if rules is None:
+                return None
+            start = parse_date((rules.findtext("./StartDate") or "").strip())
+            end = parse_date((rules.findtext("./EndDate") or "").strip())
+            tenor = (rules.findtext("./Tenor") or "").strip()
+            conv = (rules.findtext("./Convention") or pay_conv).strip()
+            s_dates, e_dates, p_dates = build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
         dc = (leg.findtext("./DayCounter") or "A365").strip()
         start_t = np.asarray([time_from_dates(asof, d, "A365F") for d in s_dates], dtype=float)
         end_t = np.asarray([time_from_dates(asof, d, "A365F") for d in e_dates], dtype=float)
@@ -3888,8 +4076,10 @@ class PythonLgmAdapter:
 
     def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
         inputs = ctx.inputs
+        if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1 and ctx.shared_fx_sim is None:
+            return None, False
         if ctx.irs_backend is None or not self._supports_torch_rate_swap(spec):
-            return self._price_generic_rate_swap(spec, inputs, ctx.model, ctx.x_paths), False
+            return self._price_generic_rate_swap(spec, inputs, ctx.model, ctx.x_paths, ctx.shared_fx_sim), False
         torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _, _ = ctx.irs_backend
         rate_legs = list((spec.legs or {}).get("rate_legs", []))
         vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
@@ -4155,6 +4345,7 @@ class PythonLgmAdapter:
         if amount.size != pay.size:
             return None, False
         p_disc = ctx.inputs.discount_curves[spec.ccy]
+        report_ccy = ctx.inputs.model_ccy.upper()
         vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
         for i, t in enumerate(ctx.inputs.times):
             live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
@@ -4168,7 +4359,15 @@ class PythonLgmAdapter:
                 p_t,
                 np.asarray([float(p_disc(float(T))) for T in pay[live]], dtype=float),
             )
-            vals[i, :] = np.sum(amount[live][:, None] * disc, axis=0)
+            local_pv = np.sum(amount[live][:, None] * disc, axis=0)
+            vals[i, :] = self._convert_amount_to_reporting_ccy(
+                local_pv,
+                local_ccy=spec.ccy,
+                report_ccy=report_ccy,
+                inputs=ctx.inputs,
+                shared_fx_sim=ctx.shared_fx_sim,
+                time_index=i,
+            )
         return vals, False
 
     def _price_trade_inflation_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
@@ -4270,9 +4469,20 @@ class PythonLgmAdapter:
         index_name: str,
     ) -> Callable[[float], float]:
         key = str(index_name).strip().upper()
+        family = _forward_index_family(key, inputs.swap_index_forward_tenors)
         if key and key in inputs.forward_curves_by_name:
             return inputs.forward_curves_by_name[key]
+        normalized_key = _normalize_curve_lookup_key(key)
+        if normalized_key and normalized_key != key:
+            for candidate_name, curve in inputs.forward_curves_by_name.items():
+                if _normalize_curve_lookup_key(candidate_name) == normalized_key:
+                    return curve
         mapped_tenor = inputs.swap_index_forward_tenors.get(key, "")
+        if not mapped_tenor and normalized_key:
+            for candidate_name, candidate_tenor in inputs.swap_index_forward_tenors.items():
+                if _normalize_curve_lookup_key(candidate_name) == normalized_key:
+                    mapped_tenor = candidate_tenor
+                    break
         mapped_tenor = _normalize_forward_tenor_family(mapped_tenor)
         if mapped_tenor and mapped_tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
             return inputs.forward_curves_by_tenor[ccy][mapped_tenor]
@@ -4281,6 +4491,11 @@ class PythonLgmAdapter:
             tenor = _normalize_forward_tenor_family(tenor_match.group(1).upper())
             if tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
                 return inputs.forward_curves_by_tenor[ccy][tenor]
+        if family == "1D":
+            overnight_curve = inputs.forward_curves_by_tenor.get(ccy, {}).get("1D")
+            if overnight_curve is not None:
+                return overnight_curve
+            return inputs.discount_curves[ccy]
         return inputs.forward_curves.get(ccy, inputs.discount_curves[ccy])
 
     def _par_swap_rate_paths(
@@ -4924,32 +5139,55 @@ class PythonLgmAdapter:
         inputs: _PythonLgmInputs,
         model: Any,
         x_paths: np.ndarray,
+        shared_fx_sim: _SharedFxSimulation | None = None,
     ) -> np.ndarray:
         legs_payload = spec.legs or {}
         rate_legs = list(legs_payload.get("rate_legs", []))
         n_times = int(inputs.times.size)
         n_paths = int(x_paths.shape[1])
-        p_disc = inputs.discount_curves[spec.ccy]
+        report_ccy = inputs.model_ccy.upper()
+        multi_ccy = len(_rate_leg_currencies(legs_payload, spec.ccy)) > 1
         vals = np.zeros((n_times, n_paths), dtype=float)
         frozen_coupon_paths: Dict[int, np.ndarray] = {}
         for leg_idx, leg in enumerate(rate_legs):
             kind = str(leg.get("kind", "")).upper()
             if kind not in {"CMS", "CMSSPREAD", "DIGITALCMSSPREAD"}:
                 continue
+            leg_ccy = str(leg.get("ccy", spec.ccy)).strip().upper() or spec.ccy
+            if shared_fx_sim is not None and leg_ccy in shared_fx_sim.sim.get("x", {}):
+                leg_x_paths = np.asarray(shared_fx_sim.sim["x"][leg_ccy], dtype=float)
+            elif leg_ccy == inputs.model_ccy.upper():
+                leg_x_paths = x_paths
+            elif multi_ccy:
+                raise EngineRunError(
+                    f"missing shared FX/IR simulation state for xccy rate-swap leg currency '{leg_ccy}'"
+                )
+            else:
+                leg_x_paths = x_paths
             frozen_coupon_paths[leg_idx] = self._rate_leg_coupon_paths(
                 model,
                 leg,
-                spec.ccy,
+                leg_ccy,
                 inputs,
                 0.0,
-                x_paths[0, :],
+                leg_x_paths[0, :],
             )
         for i, t in enumerate(inputs.times):
-            x_t = x_paths[i, :]
-            p_t = float(p_disc(float(t)))
             pv = np.zeros((n_paths,), dtype=float)
             for leg_idx, leg in enumerate(rate_legs):
                 kind = str(leg.get("kind", "")).upper()
+                leg_ccy = str(leg.get("ccy", spec.ccy)).strip().upper() or spec.ccy
+                p_disc = inputs.discount_curves[leg_ccy]
+                if shared_fx_sim is not None and leg_ccy in shared_fx_sim.sim.get("x", {}):
+                    leg_x_t = np.asarray(shared_fx_sim.sim["x"][leg_ccy][i, :], dtype=float)
+                elif leg_ccy == inputs.model_ccy.upper():
+                    leg_x_t = x_paths[i, :]
+                elif multi_ccy:
+                    raise EngineRunError(
+                        f"missing shared FX/IR simulation state for xccy rate-swap leg currency '{leg_ccy}'"
+                    )
+                else:
+                    leg_x_t = x_paths[i, :]
                 pay = np.asarray(leg.get("pay_time", []), dtype=float)
                 start = np.asarray(leg.get("start_time", []), dtype=float)
                 accr = np.asarray(leg.get("accrual", []), dtype=float)
@@ -4957,27 +5195,89 @@ class PythonLgmAdapter:
                 if not np.any(live):
                     continue
                 pay_live = pay[live]
+                p_t = float(p_disc(float(t)))
                 disc = model.discount_bond_paths(
                     float(t),
                     pay_live,
-                    x_t,
+                    leg_x_t,
                     p_t,
                     np.asarray(self._irs_utils.curve_values(p_disc, pay_live), dtype=float),
                 )
+                if kind == "CASHFLOW":
+                    amount = np.asarray(leg.get("amount", np.zeros(pay.shape)), dtype=float)[live]
+                    leg_pv = np.sum(amount[:, None] * disc, axis=0)
+                    pv += self._convert_amount_to_reporting_ccy(
+                        leg_pv,
+                        local_ccy=leg_ccy,
+                        report_ccy=report_ccy,
+                        inputs=inputs,
+                        shared_fx_sim=shared_fx_sim,
+                        time_index=i,
+                    )
+                    continue
                 if kind == "FIXED":
                     amount = np.asarray(leg.get("amount", np.zeros(pay.shape)), dtype=float)[live]
-                    pv += np.sum(amount[:, None] * disc, axis=0)
+                    leg_pv = np.sum(amount[:, None] * disc, axis=0)
+                    pv += self._convert_amount_to_reporting_ccy(
+                        leg_pv,
+                        local_ccy=leg_ccy,
+                        report_ccy=report_ccy,
+                        inputs=inputs,
+                        shared_fx_sim=shared_fx_sim,
+                        time_index=i,
+                    )
                     continue
                 if float(t) > 1.0e-12 and leg_idx in frozen_coupon_paths:
                     coupons = frozen_coupon_paths[leg_idx][live, :]
                 else:
-                    coupons = self._rate_leg_coupon_paths(model, leg, spec.ccy, inputs, float(t), x_t)[live, :]
+                    coupons = self._rate_leg_coupon_paths(model, leg, leg_ccy, inputs, float(t), leg_x_t)[live, :]
                 notionals = np.asarray(leg.get("notional", np.zeros(pay.shape)), dtype=float)
                 sign = float(leg.get("sign", 1.0))
                 amount = sign * notionals[live, None] * accr[live, None] * coupons
-                pv += np.sum(amount * disc, axis=0)
+                leg_pv = np.sum(amount * disc, axis=0)
+                pv += self._convert_amount_to_reporting_ccy(
+                    leg_pv,
+                    local_ccy=leg_ccy,
+                    report_ccy=report_ccy,
+                    inputs=inputs,
+                    shared_fx_sim=shared_fx_sim,
+                    time_index=i,
+                )
             vals[i, :] = pv
         return vals
+
+    def _convert_amount_to_reporting_ccy(
+        self,
+        amount: np.ndarray,
+        *,
+        local_ccy: str,
+        report_ccy: str,
+        inputs: _PythonLgmInputs,
+        shared_fx_sim: _SharedFxSimulation | None,
+        time_index: int,
+    ) -> np.ndarray:
+        local = str(local_ccy).upper()
+        report = str(report_ccy).upper()
+        values = np.asarray(amount, dtype=float)
+        if local == report:
+            return values
+        spot_path = None
+        if shared_fx_sim is not None:
+            direct = f"{local}/{report}"
+            inverse = f"{report}/{local}"
+            if direct in shared_fx_sim.sim.get("s", {}):
+                spot_path = np.asarray(shared_fx_sim.sim["s"][direct][time_index, :], dtype=float)
+                return values * spot_path
+            if inverse in shared_fx_sim.sim.get("s", {}):
+                spot_path = np.asarray(shared_fx_sim.sim["s"][inverse][time_index, :], dtype=float)
+                return values / np.maximum(spot_path, 1.0e-12)
+        spot = _spot_from_quotes(local + report, inputs, default=0.0)
+        if spot > 0.0:
+            return values * spot
+        inverse = _spot_from_quotes(report + local, inputs, default=0.0)
+        if inverse > 0.0:
+            return values / max(inverse, 1.0e-12)
+        return values
 
     def _assemble_result(
         self,
@@ -6575,12 +6875,15 @@ def _quote_matches_discount_curve(
     return False
 
 
-def _quote_matches_forward_curve(key: str, ccy: str, tenor: str) -> bool:
+def _quote_matches_forward_curve(key: str, ccy: str, tenor: str, index_name: str = "") -> bool:
     parts = str(key).strip().upper().split("/")
     if len(parts) < 3 or parts[2] != ccy.upper():
         return False
     family = _normalize_forward_tenor_family(tenor)
+    exact_index = _normalize_curve_lookup_key(index_name)
     if parts[0] == "ZERO" and parts[1] == "RATE":
+        if exact_index:
+            return len(parts) >= 6 and _index_name_matches_quote_token(parts[3], exact_index, ccy)
         if family == "1D":
             return True
         if len(parts) == 4:
@@ -6589,10 +6892,16 @@ def _quote_matches_forward_curve(key: str, ccy: str, tenor: str) -> bool:
             return _normalize_forward_tenor_family(parts[3]) == family
         return False
     if parts[0] == "MM" and parts[1] == "RATE":
+        if exact_index:
+            return len(parts) >= 6 and _index_name_matches_quote_token(parts[3], exact_index, ccy)
         return True
     if parts[0] == "IR_SWAP" and parts[1] == "RATE":
+        if exact_index:
+            return len(parts) > 5 and _index_name_matches_quote_token(parts[3], exact_index, ccy)
         return len(parts) > 5 and _normalize_forward_tenor_family(parts[4]) == family
     if parts[0] == "FRA" and parts[1] == "RATE":
+        if exact_index:
+            return len(parts) > 4 and _index_name_matches_quote_token(parts[3], exact_index, ccy)
         return len(parts) > 4 and _normalize_forward_tenor_family(parts[-1]) == family
     return False
 

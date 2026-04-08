@@ -33,6 +33,11 @@ from pythonore.runtime.runtime import (
     DeterministicToyAdapter,
     PythonLgmAdapter,
     XVAEngine,
+    _PricingContext,
+    _PythonLgmInputs,
+    _SharedFxSimulation,
+    _TradeSpec,
+    _normalize_forward_tenor_family,
     _parse_market_overlay,
     _quote_matches_discount_curve,
     _quote_matches_forward_curve,
@@ -115,6 +120,42 @@ def _cashflow_trade_xml(*, payment_date: str, amount: float, currency: str = "EU
   <Currency>{currency}</Currency>
 </CashflowData>
 """.strip()
+
+
+def _cashflow_trade_xml_multi(*, payments: list[tuple[str, float]], currency: str = "EUR") -> str:
+    amounts = "\n".join(f'      <Amount date="{pay_date}">{amount}</Amount>' for pay_date, amount in payments)
+    return f"""
+<CashflowData>
+  <Currency>{currency}</Currency>
+  <Cashflow>
+{amounts}
+  </Cashflow>
+</CashflowData>
+""".strip()
+
+
+def _generic_cashflow_leg_swap_trade_xml(*, payments: list[tuple[str, float]], currency: str = "USD", payer: bool = False) -> str:
+    amounts = "\n".join(f'        <Amount date="{pay_date}">{amount}</Amount>' for pay_date, amount in payments)
+    return f"""
+<SwapData>
+  <LegData>
+    <Payer>{"true" if payer else "false"}</Payer>
+    <LegType>Cashflow</LegType>
+    <Currency>{currency}</Currency>
+    <CashflowData>
+      <Cashflow>
+{amounts}
+      </Cashflow>
+    </CashflowData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+class _UnitDiscountModel:
+    def discount_bond_paths(self, t, maturities, x_t, p_t, p_T):
+        mats = np.asarray(maturities, dtype=float)
+        return np.ones((mats.size, np.asarray(x_t, dtype=float).size), dtype=float)
 
 
 def _generic_capfloor_trade_xml() -> str:
@@ -487,6 +528,61 @@ def _generic_amortizing_capfloor_trade_xml() -> str:
 """.strip()
 
 
+def _generic_xccy_float_swap_trade_xml() -> str:
+    return """
+<SwapData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Payer>false</Payer>
+    <Currency>EUR</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-ESTR</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Payer>true</Payer>
+    <Currency>USD</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1100000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>USD</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SOFR</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
 def _simulation_xml_with_grid(grid: str) -> str:
     return f"""
 <Simulation>
@@ -723,6 +819,67 @@ def test_generic_cashflow_state_returns_empty_live_flows_for_fully_past_payment(
     assert state is not None
     assert np.asarray(state["pay_time"], dtype=float).size == 0
     assert np.asarray(state["amount"], dtype=float).size == 0
+
+
+def test_generic_cashflow_state_supports_multiple_payments_and_filters_past_nodes():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CF_MULTI_DIRECT",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Cashflow",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Cashflow",
+                "xml": _cashflow_trade_xml_multi(
+                    payments=[("2025-03-08", 1000.0), ("2026-09-08", 1500.0), ("2027-03-08", 2500.0)],
+                    currency="USD",
+                ),
+            }
+        ),
+    )
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    state = adapter._build_generic_cashflow_state(trade, snapshot)
+
+    assert state is not None
+    assert state["ccy"] == "USD"
+    np.testing.assert_allclose(np.asarray(state["amount"], dtype=float), np.array([1500.0, 2500.0], dtype=float))
+    assert np.asarray(state["pay_time"], dtype=float).size == 2
+    assert np.all(np.asarray(state["pay_time"], dtype=float) > 0.0)
+
+
+def test_generic_rate_swap_builder_supports_cashflow_legs():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="SWAP_CASHFLOW_LEG",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_cashflow_leg_swap_trade_xml(
+                    payments=[("2025-03-08", 1000.0), ("2027-03-08", 2500.0)],
+                    currency="USD",
+                    payer=True,
+                ),
+            }
+        ),
+    )
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+
+    assert state is not None
+    assert len(state["rate_legs"]) == 1
+    leg = state["rate_legs"][0]
+    assert leg["kind"] == "CASHFLOW"
+    assert leg["ccy"] == "USD"
+    np.testing.assert_allclose(np.asarray(leg["amount"], dtype=float), np.array([-2500.0], dtype=float))
+    assert np.asarray(leg["pay_time"], dtype=float).size == 1
 
 
 def test_generic_rate_swap_builder_drops_fully_past_coupons():
@@ -1230,6 +1387,389 @@ def test_quote_matches_forward_curve_accepts_zero_quotes_for_zero_tenor_family()
     assert _quote_matches_forward_curve("ZERO/RATE/EUR/EUR-ESTR/A365/2027-03-08", "EUR", "ON") is True
     assert _quote_matches_forward_curve("IR_SWAP/RATE/EUR/2D/1D/10Y", "EUR", "0D") is True
     assert _quote_matches_forward_curve("IR_SWAP/RATE/EUR/2D/6M/10Y", "EUR", "ON") is False
+
+
+def test_quote_matches_forward_curve_can_require_exact_named_overnight_index():
+    assert _quote_matches_forward_curve(
+        "ZERO/RATE/USD/USD-FEDFUNDS/A360/2027-03-08",
+        "USD",
+        "1D",
+        index_name="USD-FedFunds",
+    ) is True
+    assert _quote_matches_forward_curve(
+        "ZERO/RATE/USD/USD-SOFR/A360/2027-03-08",
+        "USD",
+        "1D",
+        index_name="USD-FedFunds",
+    ) is False
+    assert _quote_matches_forward_curve(
+        "MM/RATE/USD/SOFR/0D/1D",
+        "USD",
+        "1D",
+        index_name="USD-SOFR",
+    ) is True
+    assert _quote_matches_forward_curve(
+        "MM/RATE/USD/SOFR/0D/1D",
+        "USD",
+        "1D",
+        index_name="USD-FedFunds",
+    ) is False
+
+
+def test_normalize_forward_tenor_family_maps_estr_aliases_to_overnight():
+    assert _normalize_forward_tenor_family("ESTR") == "1D"
+    assert _normalize_forward_tenor_family("ESTER") == "1D"
+
+
+def test_resolve_index_curve_uses_overnight_family_before_generic_forward_fallback():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"USD": (lambda t: 0.97)},
+        forward_curves={"USD": (lambda t: 0.91)},
+        forward_curves_by_tenor={"USD": {"1D": (lambda t: 0.99), "6M": (lambda t: 0.95)}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=(),
+        torch_device=None,
+        trade_specs=(),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+
+    curve = adapter._resolve_index_curve(inputs, "USD", "USD-FedFunds")
+
+    assert curve(1.0) == 0.99
+
+
+def test_classify_portfolio_trades_collects_all_generic_xccy_swap_currencies():
+    snapshot = _make_snapshot()
+    xccy_trade = Trade(
+        trade_id="XCCY_SWAP_1",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_xccy_float_swap_trade_xml()}),
+    )
+    snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(xccy_trade,)))
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+
+    trade_specs, unsupported, ccy_set = adapter._classify_portfolio_trades(snapshot, map_snapshot(snapshot))
+
+    assert unsupported == []
+    assert len(trade_specs) == 1
+    assert ccy_set.issuperset({"EUR", "USD"})
+
+
+def test_generic_xccy_rate_swap_pricing_converts_each_leg_before_summing():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    spec = _TradeSpec(
+        trade=Trade(
+            trade_id="XCCY_FIXED_TEST",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="Swap",
+            product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_xccy_float_swap_trade_xml()}),
+        ),
+        kind="RateSwap",
+        notional=100.0,
+        ccy="EUR",
+        legs={
+            "rate_legs": [
+                {
+                    "kind": "FIXED",
+                    "ccy": "EUR",
+                    "pay_time": np.array([1.0], dtype=float),
+                    "start_time": np.array([0.0], dtype=float),
+                    "accrual": np.array([1.0], dtype=float),
+                    "amount": np.array([100.0], dtype=float),
+                },
+                {
+                    "kind": "FIXED",
+                    "ccy": "USD",
+                    "pay_time": np.array([1.0], dtype=float),
+                    "start_time": np.array([0.0], dtype=float),
+                    "accrual": np.array([1.0], dtype=float),
+                    "amount": np.array([-100.0], dtype=float),
+                },
+            ]
+        },
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves_by_tenor={"EUR": {}, "USD": {}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={"EURUSD": 2.0},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=("EUR/USD",),
+        torch_device=None,
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    shared_fx_sim = _SharedFxSimulation(
+        hybrid=None,
+        sim={
+            "x": {
+                "EUR": np.zeros((1, 2), dtype=float),
+                "USD": np.zeros((1, 2), dtype=float),
+            },
+            "s": {
+                "EUR/USD": np.full((1, 2), 2.0, dtype=float),
+            },
+        },
+        pair_keys=("EUR/USD",),
+    )
+    ctx = _PricingContext(
+        snapshot=_make_snapshot(),
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((1, 2), dtype=float),
+        irs_backend=None,
+        shared_fx_sim=shared_fx_sim,
+        n_times=1,
+        n_paths=2,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+
+    vals, _ = adapter._price_trade_rate_swap_paths(spec, ctx)
+
+    np.testing.assert_allclose(vals[0], np.array([100.0, 100.0], dtype=float))
+
+
+def test_standalone_cashflow_pricing_converts_to_reporting_currency():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    spec = _TradeSpec(
+        trade=Trade(
+            trade_id="CF_FX_TEST",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="Cashflow",
+            product=GenericProduct(payload={"trade_type": "Cashflow", "xml": _cashflow_trade_xml(payment_date="2027-03-08", amount=100.0, currency="USD")}),
+        ),
+        kind="Cashflow",
+        notional=100.0,
+        ccy="USD",
+        sticky_state={
+            "ccy": "USD",
+            "pay_time": np.array([1.0], dtype=float),
+            "amount": np.array([100.0], dtype=float),
+        },
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves_by_tenor={"EUR": {}, "USD": {}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="EUR",
+        seed=42,
+        fx_spots={"USDEUR": 0.5},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=("USD/EUR",),
+        torch_device=None,
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    shared_fx_sim = _SharedFxSimulation(
+        hybrid=None,
+        sim={
+            "x": {
+                "EUR": np.zeros((1, 2), dtype=float),
+                "USD": np.zeros((1, 2), dtype=float),
+            },
+            "s": {
+                "USD/EUR": np.full((1, 2), 0.5, dtype=float),
+            },
+        },
+        pair_keys=("USD/EUR",),
+    )
+    ctx = _PricingContext(
+        snapshot=_make_snapshot(),
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((1, 2), dtype=float),
+        irs_backend=None,
+        shared_fx_sim=shared_fx_sim,
+        n_times=1,
+        n_paths=2,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+
+    vals, _ = adapter._price_trade_cashflow_paths(spec, ctx)
+
+    np.testing.assert_allclose(vals[0], np.array([50.0, 50.0], dtype=float))
+
+
+def test_generic_cashflow_leg_pricing_converts_to_reporting_currency():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    spec = _TradeSpec(
+        trade=Trade(
+            trade_id="SWAP_CASHFLOW_PRICE",
+            counterparty="CP_A",
+            netting_set="NS_EUR",
+            trade_type="Swap",
+            product=GenericProduct(
+                payload={
+                    "trade_type": "Swap",
+                    "xml": _generic_cashflow_leg_swap_trade_xml(
+                        payments=[("2027-03-08", 100.0), ("2028-03-08", -20.0)],
+                        currency="USD",
+                    ),
+                }
+            ),
+        ),
+        kind="RateSwap",
+        notional=100.0,
+        ccy="USD",
+        legs={
+            "rate_legs": [
+                {
+                    "kind": "CASHFLOW",
+                    "ccy": "USD",
+                    "pay_time": np.array([1.0, 2.0], dtype=float),
+                    "amount": np.array([100.0, -20.0], dtype=float),
+                }
+            ]
+        },
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves={"EUR": (lambda t: 1.0), "USD": (lambda t: 1.0)},
+        forward_curves_by_tenor={"EUR": {}, "USD": {}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="EUR",
+        seed=42,
+        fx_spots={"USDEUR": 0.5},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=("USD/EUR",),
+        torch_device=None,
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    shared_fx_sim = _SharedFxSimulation(
+        hybrid=None,
+        sim={
+            "x": {
+                "EUR": np.zeros((1, 2), dtype=float),
+                "USD": np.zeros((1, 2), dtype=float),
+            },
+            "s": {
+                "USD/EUR": np.full((1, 2), 0.5, dtype=float),
+            },
+        },
+        pair_keys=("USD/EUR",),
+    )
+    ctx = _PricingContext(
+        snapshot=_make_snapshot(),
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((1, 2), dtype=float),
+        irs_backend=None,
+        shared_fx_sim=shared_fx_sim,
+        n_times=1,
+        n_paths=2,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+
+    vals, _ = adapter._price_trade_rate_swap_paths(spec, ctx)
+
+    np.testing.assert_allclose(vals[0], np.array([40.0, 40.0], dtype=float))
 
 
 def test_parse_swap_index_forward_tenors_caches_conventions_root():

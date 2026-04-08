@@ -26,6 +26,7 @@ import numpy as np
 
 _TIME_YEAR_BASIS = 365.25
 _ARRAY_CACHE_MAX_ITEMS = 256
+_SCHEDULE_ALIGNMENT_TOLERANCE_DAYS = 7
 
 
 def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], bytes]:
@@ -84,11 +85,18 @@ def _time_from_dates(start: date, end: date, day_counter: str) -> float:
 
 def _infer_index_day_counter(index_name: str, fallback: str = "A365F") -> str:
     name = (index_name or "").strip().upper()
-    if "USD-LIBOR" in name or "EUR-EURIBOR" in name or "EONIA" in name or "ESTER" in name:
+    if "USD-LIBOR" in name or "EUR-EURIBOR" in name or "EONIA" in name or "ESTR" in name or "ESTER" in name:
         return "A360"
     if "GBP-LIBOR" in name or "SONIA" in name or "CAD-CDOR" in name or "CAD-CORRA" in name:
         return "A365"
     return fallback
+
+
+def _normalize_curve_name(text: str) -> str:
+    token = re.sub(r"\s+", "", str(text or "").strip().upper())
+    token = token.replace("O/N", "ON")
+    token = token.replace("ESTER", "ESTR")
+    return token
 
 
 def _apply_amortization_rule(current: float, initial: float, amort_type: str, value: float) -> float:
@@ -112,58 +120,125 @@ def expand_leg_notionals(
     Supports:
     - one `<Notional>` per coupon period
     - a single initial `<Notional>` plus `<Amortizations>`
+    - dated `<Notional>` nodes where later notionals carry `StartDate` / `startDate`
     """
     n_periods = len(start_dates)
-    raw_notionals = [
-        float((node.text or "").strip())
+    if n_periods == 0:
+        return np.asarray([], dtype=float)
+    notional_nodes = [
+        node
         for node in leg.findall("./Notionals/Notional")
         if (node.text or "").strip()
     ]
-    if n_periods == 0:
-        return np.asarray([], dtype=float)
-    if not raw_notionals:
+    if not notional_nodes:
         return np.zeros(n_periods, dtype=float)
-    if len(raw_notionals) == n_periods:
-        return np.asarray(raw_notionals, dtype=float)
-    if len(raw_notionals) != 1:
-        raise ValueError(
-            f"expected one notional or one per coupon, got {len(raw_notionals)} for {n_periods} periods"
-        )
 
-    initial = float(raw_notionals[0])
+    base_notionals, reset_mask = _expand_notional_nodes(notional_nodes, start_dates)
     amort_nodes = list(leg.findall("./Amortizations/AmortizationData"))
     if not amort_nodes:
-        return np.full(n_periods, initial, dtype=float)
+        return base_notionals
 
     schedule_starts = list(start_dates)
-    events_by_index: dict[int, list[tuple[date | None, str, float]]] = {}
+    schedule_ends = list(end_dates)
+    events_by_index: dict[int, list[tuple[date, str, float, bool]]] = {}
+    initial = float(base_notionals[0])
     for node in amort_nodes:
-        start_txt = (node.findtext("./StartDate") or "").strip()
-        if not start_txt:
-            continue
-        start = _parse_yyyymmdd(start_txt)
-        end_txt = (node.findtext("./EndDate") or "").strip()
-        end = _parse_yyyymmdd(end_txt) if end_txt else None
         amort_type = (node.findtext("./Type") or "FixedAmount").strip()
         value = float((node.findtext("./Value") or "0").strip() or 0.0)
-        target_idx = None
-        for idx, sched_start in enumerate(schedule_starts):
-            if sched_start >= start:
-                target_idx = idx
-                break
-        if target_idx is None:
-            continue
-        events_by_index.setdefault(target_idx, []).append((end, amort_type, value))
+        allow_underflow = (node.findtext("./Underflow") or "false").strip().lower() == "true"
+        for event_date in _amortization_event_dates(node, schedule_starts[0], schedule_ends[-1]):
+            target_idx = _align_event_date_to_period_index(event_date, schedule_starts)
+            if target_idx is None:
+                continue
+            events_by_index.setdefault(target_idx, []).append((event_date, amort_type, value, allow_underflow))
 
     notionals = np.empty(n_periods, dtype=float)
     current = initial
-    for i, (_, end) in enumerate(zip(start_dates, end_dates)):
-        for amort_end, amort_type, value in events_by_index.get(i, []):
-            if amort_end is not None and amort_end > end:
-                continue
+    for i, _ in enumerate(zip(start_dates, end_dates)):
+        if i > 0 and reset_mask[i]:
+            current = float(base_notionals[i])
+        for _, amort_type, value, allow_underflow in sorted(events_by_index.get(i, []), key=lambda item: item[0]):
             current = _apply_amortization_rule(current, initial, amort_type, value)
+            if not allow_underflow:
+                current = max(current, 0.0)
         notionals[i] = current
     return notionals
+
+
+def _expand_notional_nodes(
+    nodes: Sequence[ET.Element],
+    period_starts: Sequence[date],
+) -> tuple[np.ndarray, np.ndarray]:
+    parsed: list[tuple[int, date | None, float]] = []
+    for order, node in enumerate(nodes):
+        text = (node.text or "").strip()
+        if not text:
+            continue
+        parsed.append((order, _optional_start_date(node), float(text)))
+    if not parsed:
+        n = len(period_starts)
+        return np.zeros(n, dtype=float), np.zeros(n, dtype=bool)
+    if len(parsed) == len(period_starts) and all(start is None for _, start, _ in parsed):
+        return (
+            np.asarray([value for _, _, value in parsed], dtype=float),
+            np.zeros(len(period_starts), dtype=bool),
+        )
+    if len(parsed) > 1 and all(start is None for _, start, _ in parsed):
+        raise ValueError(
+            f"expected one notional, one per coupon, or dated notionals; got {len(parsed)} undated nodes"
+        )
+
+    out = np.empty(len(period_starts), dtype=float)
+    reset = np.zeros(len(period_starts), dtype=bool)
+    undated = [value for _, start, value in parsed if start is None]
+    current = float(undated[0]) if undated else 0.0
+    reset_values: dict[int, float] = {}
+    dated = sorted(
+        ((start, order, value) for order, start, value in parsed if start is not None),
+        key=lambda item: (item[0], item[1]),
+    )
+    for start, _, value in dated:
+        target_idx = _align_event_date_to_period_index(start, period_starts)
+        if target_idx is None:
+            continue
+        reset_values[target_idx] = float(value)
+    for i, _ in enumerate(period_starts):
+        if i in reset_values:
+            current = reset_values[i]
+            reset[i] = True
+        out[i] = current
+    return out, reset
+
+
+def _align_event_date_to_period_index(
+    event_date: date,
+    period_starts: Sequence[date],
+    tolerance_days: int = _SCHEDULE_ALIGNMENT_TOLERANCE_DAYS,
+) -> int | None:
+    if len(period_starts) == 0:
+        return None
+    starts = list(period_starts)
+    best_idx = min(range(len(starts)), key=lambda idx: abs((starts[idx] - event_date).days))
+    best_diff = abs((starts[best_idx] - event_date).days)
+    if best_diff <= max(int(tolerance_days), 0):
+        return best_idx
+    for idx, sched_start in enumerate(starts):
+        if sched_start >= event_date:
+            return idx
+    return None
+
+
+def _optional_start_date(node: ET.Element) -> date | None:
+    txt = (
+        node.findtext("./StartDate")
+        or node.attrib.get("startDate")
+        or node.attrib.get("StartDate")
+        or node.attrib.get("startdate")
+        or ""
+    ).strip()
+    if not txt:
+        return None
+    return _parse_yyyymmdd(txt)
 
 
 def interpolate_linear_flat(
@@ -426,6 +501,38 @@ def _add_months(d: date, months: int) -> date:
     return date(y, m, day)
 
 
+def _amortization_event_dates(node: ET.Element, schedule_start: date, schedule_end: date) -> list[date]:
+    start_txt = (
+        node.findtext("./StartDate")
+        or node.attrib.get("startDate")
+        or node.attrib.get("StartDate")
+        or node.attrib.get("startdate")
+        or ""
+    ).strip()
+    start = _parse_yyyymmdd(start_txt) if start_txt else schedule_start
+    end_txt = (node.findtext("./EndDate") or "").strip()
+    end_limit = _parse_yyyymmdd(end_txt) if end_txt else schedule_end
+    frequency_txt = (node.findtext("./Frequency") or "").strip()
+    if not frequency_txt:
+        return [start]
+    try:
+        months = _parse_tenor_to_months(frequency_txt)
+    except Exception:
+        return [start]
+    if months <= 0:
+        return [start]
+    out: list[date] = []
+    current = start
+    limit = min(end_limit, schedule_end)
+    while current <= limit:
+        out.append(current)
+        nxt = _add_months(current, months)
+        if nxt <= current:
+            break
+        current = nxt
+    return out
+
+
 def _easter_sunday(year: int) -> date:
     a = year % 19
     b = year // 100
@@ -588,6 +695,37 @@ def _build_schedule(
     return np.asarray(starts, dtype=object), np.asarray(ends, dtype=object), pay
 
 
+def _schedule_from_leg(
+    leg: ET.Element,
+    pay_convention: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    explicit_dates = [
+        _parse_yyyymmdd((node.text or "").strip())
+        for node in leg.findall("./ScheduleData/Dates//Date")
+        if (node.text or "").strip()
+    ]
+    if len(explicit_dates) >= 2:
+        starts = explicit_dates[:-1]
+        ends = explicit_dates[1:]
+        return (
+            np.asarray(starts, dtype=object),
+            np.asarray(ends, dtype=object),
+            np.asarray(ends, dtype=object),
+        )
+    if explicit_dates:
+        raise ValueError("explicit ScheduleData/Dates requires at least two dates")
+
+    rules = leg.find("./ScheduleData/Rules")
+    if rules is None:
+        raise ValueError("missing ScheduleData/Rules")
+    start = _parse_yyyymmdd((rules.findtext("./StartDate") or "").strip())
+    end = _parse_yyyymmdd((rules.findtext("./EndDate") or "").strip())
+    tenor = (rules.findtext("./Tenor") or "").strip()
+    cal = (rules.findtext("./Calendar") or "TARGET").strip()
+    convention = (rules.findtext("./Convention") or pay_convention or "F").strip()
+    return _build_schedule(start, end, tenor, cal, convention, pay_convention=pay_convention)
+
+
 def build_irregular_exposure_grid(maturity: float) -> np.ndarray:
     """Monthly to 2Y, quarterly to 5Y, semiannual thereafter.
 
@@ -666,25 +804,35 @@ def load_ore_discount_pairs_by_columns(
         raise ValueError("curves.csv appears empty")
     if "Date" not in rows[0]:
         raise ValueError("curves.csv missing Date column")
-    missing = [c for c in requested if c not in rows[0]]
+    available_columns = [str(name) for name in rows[0].keys() if name is not None]
+    normalized_columns = {
+        _normalize_curve_name(column): column
+        for column in available_columns
+    }
+    resolved_columns: Dict[str, str] = {}
+    missing: list[str] = []
+    for requested_name in requested:
+        actual = normalized_columns.get(_normalize_curve_name(requested_name))
+        if actual is None:
+            missing.append(requested_name)
+            continue
+        resolved_columns[requested_name] = actual
     if missing:
         raise ValueError(f"curves.csv missing requested discount columns: {missing}")
 
     d0 = datetime.strptime(rows[0]["Date"], "%Y-%m-%d")
     times = []
-    by_col: Dict[str, list[float]] = {c: [] for c in requested}
     for r in rows:
         d = datetime.strptime(r["Date"], "%Y-%m-%d")
         times.append((d - d0).days / 365.0)
-        for c in requested:
-            by_col[c].append(float(r[c]))
 
     times_arr = np.asarray(times, dtype=float)
     uniq_t, idx = np.unique(times_arr, return_index=True)
 
     out: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     for c in requested:
-        dfs_arr = np.asarray(by_col[c], dtype=float)
+        actual_column = resolved_columns[c]
+        dfs_arr = np.asarray([float(r[actual_column]) for r in rows], dtype=float)
         uniq_df = dfs_arr[idx].copy()
         if uniq_t[0] > 1.0e-12:
             t = np.insert(uniq_t, 0, 0.0)
@@ -896,15 +1044,12 @@ def load_swap_legs_from_portfolio_root(
         dc = (lx.findtext("./DayCounter") or "A365").strip()
         pay_conv = (lx.findtext("./PaymentConvention") or "F").strip()
         rules = lx.find("./ScheduleData/Rules")
-        if rules is None:
-            raise ValueError("missing ScheduleData/Rules")
-        start = _parse_yyyymmdd((rules.findtext("./StartDate") or "").strip())
-        end = _parse_yyyymmdd((rules.findtext("./EndDate") or "").strip())
-        tenor = (rules.findtext("./Tenor") or "").strip()
-        cal = (rules.findtext("./Calendar") or "TARGET").strip()
-        conv = (rules.findtext("./Convention") or pay_conv).strip()
-
-        s_dates, e_dates, p_dates = _build_schedule(start, end, tenor, cal, conv, pay_convention=pay_conv)
+        cal = (
+            (rules.findtext("./Calendar") if rules is not None else None)
+            or (lx.findtext("./Currency") or "")
+            or "TARGET"
+        ).strip()
+        s_dates, e_dates, p_dates = _schedule_from_leg(lx, pay_convention=pay_conv)
         s_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in s_dates], dtype=float)
         e_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in e_dates], dtype=float)
         p_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in p_dates], dtype=float)

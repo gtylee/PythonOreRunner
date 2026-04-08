@@ -1,0 +1,47 @@
+{
+  "baseline_mode": "python",
+  "case": {
+    "baseline_mode": "python",
+    "case_id": "exposure_measure_lgm_xva",
+    "cli_args": [
+      "--price",
+      "--xva",
+      "--paths",
+      "32"
+    ],
+    "description": "Exposure measure LGM pricing plus XVA Python regression.",
+    "files_to_compare": [
+      "calibration.csv",
+      "calibration.xml",
+      "curves.csv",
+      "exposure_nettingset_CPTY_A.csv",
+      "exposure_trade_Swap_20.csv",
+      "flows.csv",
+      "npv.csv",
+      "xva.csv"
+    ],
+    "ore_xml": "Examples/Exposure/Input/ore_measure_lgm.xml",
+    "secondary_parity": true,
+    "tags": [
+      "pricing",
+      "xva",
+      "ore-snapshot"
+    ],
+    "tolerances": {},
+    "workflow": "python"
+  },
+  "exit_code": 1,
+  "files": [
+    "calibration.csv",
+    "calibration.xml",
+    "curves.csv",
+    "exposure_nettingset_CPTY_A.csv",
+    "exposure_trade_Swap_20.csv",
+    "flows.csv",
+    "input_validation.csv",
+    "npv.csv",
+    "report.md",
+    "summary.json",
+    "xva.csv"
+  ]
+}

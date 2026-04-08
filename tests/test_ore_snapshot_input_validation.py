@@ -11,6 +11,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from py_ore_tools.ore_snapshot import (
+    _load_ore_discount_pairs_by_columns_with_day_counter,
     _resolve_discount_column,
     ore_input_validation_dataframe,
     validate_ore_input_snapshot,
@@ -327,6 +328,28 @@ class TestOreSnapshotInputValidation(unittest.TestCase):
         )
 
         self.assertEqual(_resolve_discount_column(tm_root, "default", "EUR"), "EUR")
+
+    def test_load_discount_pairs_with_day_counter_matches_ester_alias_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            curves_csv = Path(tmp) / "curves.csv"
+            curves_csv.write_text(
+                "Date,EUR-ESTER\n"
+                "2026-03-08,1.0\n"
+                "2027-03-08,0.98\n",
+                encoding="utf-8",
+            )
+
+            payload = _load_ore_discount_pairs_by_columns_with_day_counter(
+                str(curves_csv),
+                ["eur-estr"],
+                asof_date="2026-03-08",
+                day_counter="A365F",
+            )
+
+        dates, times, dfs = payload["eur-estr"]
+        self.assertEqual(dates, ("2026-03-08", "2027-03-08"))
+        self.assertEqual(times.tolist(), [0.0, 1.0])
+        self.assertEqual(dfs.tolist(), [1.0, 0.98])
 
     def test_validation_does_not_force_default_or_irrelevant_index_quotes(self):
         with tempfile.TemporaryDirectory() as tmp:

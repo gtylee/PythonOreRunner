@@ -1349,7 +1349,7 @@ def _curve_family_from_source_column(source_column: str) -> str:
     for tenor in ("ON", "O/N", "1D", "1W", "1M", "3M", "6M", "12M"):
         if txt.endswith(f"-{tenor}") or txt.endswith(tenor):
             return tenor
-    if any(tag in txt for tag in ("EONIA", "FEDFUNDS", "SONIA", "TOIS", "TONAR")):
+    if any(tag in txt for tag in ("EONIA", "ESTR", "ESTER", "FEDFUNDS", "SOFR", "SONIA", "TOIS", "TONAR")):
         return "1D"
     return ""
 
