@@ -52,6 +52,18 @@ EXAMPLE22_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "
 SCRIPTED_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "ScriptedTrade" / "Input" / "ore.xml"
 
 
+def _clone_example28_eur_base_case(tmp_root: Path) -> Path:
+    case_root = tmp_root / "Examples" / "Legacy" / "Example_28"
+    shutil.copytree(TOOLS_DIR / "Examples" / "Legacy" / "Example_28", case_root)
+    shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp_root / "Examples" / "Input")
+    output_dir = case_root / "Output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_dir = case_root / "ExpectedOutput"
+    for name in ("npv_eur_base.csv", "curves_eur_base.csv", "flows_eur_base.csv"):
+        shutil.copy2(expected_dir / name, output_dir / name)
+    return case_root / "Input" / "ore_eur_base.xml"
+
+
 class TestOreSnapshotCli(unittest.TestCase):
     def test_simulate_with_fixing_grid_uses_exposure_grid_then_bridges_fixings_for_ore_path_major(self):
         class _DummyModel:
@@ -395,6 +407,22 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
             self.assertIn("py_t0_npv", payload["pricing"])
 
+    def test_price_only_fx_forward_matches_explicit_ore_npv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ore_xml = _clone_example28_eur_base_case(Path(tmp))
+            payload = ore_snapshot_cli._compute_price_only_case(ore_xml, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "FXFWD_1Y")
+        self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
+        self.assertFalse(payload["diagnostics"]["using_expected_output"])
+        self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), 1094.870785, places=6)
+        self.assertAlmostEqual(
+            float(payload["pricing"]["py_t0_npv"]),
+            float(payload["pricing"]["ore_t0_npv"]),
+            places=6,
+        )
+        self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 1.0e-4)
+
     def test_preflight_mode_writes_support_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -460,6 +488,20 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["pricing"]["fx_settlement_currency"], "USD")
             self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 1.0)
 
+    def test_price_only_fx_ndf_matches_explicit_ore_npv(self):
+        payload = ore_snapshot_cli._compute_price_only_case(FX_NDF_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "FXNDF")
+        self.assertEqual(payload["pricing"]["trade_type"], "FxForward")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_fx_forward")
+        self.assertTrue(payload["diagnostics"]["using_expected_output"])
+        self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), 227467.592353, places=6)
+        self.assertAlmostEqual(
+            float(payload["pricing"]["py_t0_npv"]),
+            float(payload["pricing"]["ore_t0_npv"]),
+            places=4,
+        )
+        self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 1.0e-3)
+
     def test_sensitivity_failure_falls_back_instead_of_crashing_case(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -518,6 +560,25 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_scripted_trade_ir_mc")
             self.assertEqual(payload["diagnostics"]["script_source"], "inline")
             self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_price_only_scripted_trade_default_trade_falls_back_for_wildcard_tenor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(SCRIPTED_EQUITY_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            payload = json.loads((root / "artifacts" / "ScriptedTrade" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["trade_id"], "1:EquityOption:AN")
+            self.assertEqual(payload["diagnostics"]["engine"], "ore_reference_expected_output")
+            self.assertEqual(payload["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
+            self.assertIn("Unsupported tenor '*'", payload["diagnostics"]["fallback_error"])
+            self.assertEqual(set(payload["pricing"].keys()), {"ore_t0_npv"})
 
     def test_price_only_swaption_runs_python_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -613,6 +674,62 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_capfloor_lgm")
             self.assertEqual(payload["trade_id"], "cap_01")
             self.assertIn("py_cva", payload["xva"])
+
+    def test_capfloor_price_only_surfaces_large_parity_break(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(CAPFLOOR_CASE_XML),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertEqual(rc, 1)
+            payload = json.loads((root / "artifacts" / "Example_6" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
+            self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_capfloor_lgm")
+            self.assertFalse(payload["pass_all"])
+            self.assertGreater(float(payload["pricing"]["t0_npv_abs_diff"]), 1000.0)
+
+    def test_capfloor_price_only_ignores_reference_artifacts_outside_parity_mode(self):
+        with patch(
+            "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter",
+            side_effect=AssertionError("curves.csv should not be used"),
+        ), patch(
+            "py_ore_tools.ore_snapshot_cli._build_capfloor_defs_from_flows",
+            side_effect=AssertionError("flows.csv should not be used"),
+        ):
+            payload = ore_snapshot_cli._compute_price_only_case(
+                CAPFLOOR_CASE_XML,
+                anchor_t0_npv=False,
+                use_reference_artifacts=False,
+            )
+        self.assertEqual(payload["trade_id"], "cap_01")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_capfloor_lgm")
+        self.assertIn("py_t0_npv", payload["pricing"])
+
+    def test_capfloor_price_only_python_mode_disables_reference_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch(
+                "py_ore_tools.ore_snapshot_cli._compute_price_only_case",
+                wraps=ore_snapshot_cli._compute_price_only_case,
+            ) as compute_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(CAPFLOOR_CASE_XML),
+                        "--price",
+                        "--engine",
+                        "python",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+            self.assertIn(rc, (0, 1))
+            self.assertTrue(compute_mock.called)
+            self.assertFalse(compute_mock.call_args.kwargs["use_reference_artifacts"])
 
     def test_fx_option_xva_runs_native_compare_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1435,6 +1552,48 @@ class TestOreSnapshotCli(unittest.TestCase):
             )
             self.assertEqual(payload["diagnostics"]["engine"], "python_price_only")
             self.assertIn("py_t0_npv", payload["pricing"])
+            self.assertIn(
+                payload["diagnostics"]["pricing_mode"],
+                {
+                    "python_swap_quantlib",
+                    "python_swap_lgm",
+                    "python_swap_quantlib_fixed_a365",
+                    "python_swap_quantlib_fixed_a365_unadjusted",
+                },
+            )
+
+    def test_quantlib_plain_swap_pricer_builds_supported_vanilla_swap(self):
+        payload = ore_snapshot_cli._build_minimal_pricing_payload(REAL_CASE_XML, anchor_t0_npv=False)
+        npv_local = ore_snapshot_cli._price_plain_vanilla_swap_with_quantlib(REAL_CASE_XML, payload)
+        self.assertIsNotNone(npv_local)
+        self.assertTrue(np.isfinite(float(npv_local)))
+
+    def test_price_only_swap_example2_uses_closer_fixed_daycount_candidate(self):
+        payload = ore_snapshot_cli._compute_price_only_case(
+            TOOLS_DIR / "Examples" / "Legacy" / "Example_2" / "Input" / "ore.xml",
+            anchor_t0_npv=False,
+        )
+        self.assertEqual(payload["trade_id"], "Swap_20")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swap_quantlib_fixed_a365_unadjusted")
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 80.0)
+
+    def test_price_only_swap_example9_stays_on_lgm_when_quantlib_conventions_are_worse(self):
+        payload = ore_snapshot_cli._compute_price_only_case(
+            TOOLS_DIR / "Examples" / "ORE-Python" / "Notebooks" / "Example_9" / "Input" / "ore.xml",
+            anchor_t0_npv=False,
+        )
+        self.assertEqual(payload["trade_id"], "Swap_20y")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swap_lgm")
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 20.0)
+
+    def test_price_only_swap_example12_stays_on_lgm_when_quantlib_conventions_are_worse(self):
+        payload = ore_snapshot_cli._compute_price_only_case(
+            TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore2.xml",
+            anchor_t0_npv=False,
+        )
+        self.assertEqual(payload["trade_id"], "Swap_50y_2")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swap_lgm")
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 5.0)
 
     def test_price_only_swap_run_calibrates_lgm_params_when_reference_calibration_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1688,6 +1847,138 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
 
+    def test_price_only_swap_without_simulation_analytic_rejects_cross_currency_discount_curve_without_curves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "Example_31"
+            shutil.copytree(TOOLS_DIR / "Examples" / "Legacy" / "Example_31", case_root)
+            shared_input_dir = tmp_root.parent / "Input"
+            if shared_input_dir.exists():
+                shutil.rmtree(shared_input_dir)
+            shutil.copytree(TOOLS_DIR / "Examples" / "Input", shared_input_dir)
+            input_dir = case_root / "Input"
+            ore_xml_path = input_dir / "ore.xml"
+            text = ore_xml_path.read_text(encoding="utf-8")
+            start = text.index('<Analytic type="simulation">')
+            end = text.index("</Analytic>", start) + len("</Analytic>")
+            ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
+            sim_xml = input_dir / "simulation.xml"
+            if sim_xml.exists():
+                sim_xml.unlink()
+            with self.assertRaisesRegex(ValueError, "cross-currency segments"):
+                ore_snapshot_cli._build_minimal_pricing_payload(ore_xml_path, anchor_t0_npv=False)
+
+    def test_price_only_swap_with_cross_currency_discount_curve_falls_back_to_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(TOOLS_DIR / "Examples" / "Legacy" / "Example_31" / "Input" / "ore.xml"),
+                    "--price",
+                    "--output-root",
+                    str(tmp_root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((tmp_root / "artifacts" / "Example_31" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["trade_id"], "Swap_1")
+            self.assertEqual(payload["diagnostics"]["engine"], "ore_reference_expected_output")
+            self.assertEqual(payload["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
+            self.assertIn("cross-currency segments", payload["diagnostics"]["fallback_error"])
+
+    def test_price_only_swap_replays_multicurrency_reference_flows_when_leg_reconstruction_is_inconsistent(self):
+        payload = ore_snapshot_cli._compute_price_only_case(
+            TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_A0.xml",
+            anchor_t0_npv=False,
+        )
+        self.assertEqual(payload["trade_id"], "Swap_2")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_swap_cashflow_replay")
+        self.assertTrue(payload["diagnostics"]["cashflow_replay"])
+        self.assertEqual(payload["pricing"]["cashflow_currencies"], ["EUR", "USD"])
+        self.assertAlmostEqual(payload["pricing"]["ore_t0_npv"], -19221.933964, places=6)
+        self.assertAlmostEqual(payload["pricing"]["py_t0_npv"], -19221.93396382034, places=6)
+        self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 1.0e-4)
+
+    def test_price_only_swap_ignores_reference_flows_and_curves_outside_parity_mode(self):
+        with patch(
+            "py_ore_tools.ore_snapshot_cli.ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter",
+            side_effect=AssertionError("curves.csv should not be used"),
+        ), patch(
+            "py_ore_tools.ore_snapshot_cli.load_trade_cashflows_from_flows",
+            side_effect=AssertionError("flows.csv trade replay should not be used"),
+        ), patch(
+            "py_ore_tools.ore_snapshot_cli.load_ore_legs_from_flows",
+            side_effect=AssertionError("flows.csv legs should not be used"),
+        ):
+            payload = ore_snapshot_cli._compute_price_only_case(
+                TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_A0.xml",
+                anchor_t0_npv=False,
+                use_reference_artifacts=False,
+            )
+        self.assertEqual(payload["trade_id"], "Swap_2")
+        self.assertNotEqual(payload["diagnostics"]["pricing_mode"], "python_swap_cashflow_replay")
+        self.assertFalse(payload["diagnostics"].get("cashflow_replay", False))
+
+    def test_price_only_swap_compare_mode_explicitly_enables_reference_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch(
+                "py_ore_tools.ore_snapshot_cli._compute_price_only_case",
+                wraps=ore_snapshot_cli._compute_price_only_case,
+            ) as compute_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_A0.xml"),
+                        "--price",
+                        "--engine",
+                        "compare",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+            self.assertIn(rc, (0, 1))
+            self.assertTrue(compute_mock.called)
+            self.assertTrue(compute_mock.call_args.kwargs["use_reference_artifacts"])
+
+    def test_price_only_swap_python_mode_disables_reference_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch(
+                "py_ore_tools.ore_snapshot_cli._compute_price_only_case",
+                wraps=ore_snapshot_cli._compute_price_only_case,
+            ) as compute_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(TOOLS_DIR / "Examples" / "Legacy" / "Example_13" / "Input" / "ore_A0.xml"),
+                        "--price",
+                        "--engine",
+                        "python",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+            self.assertIn(rc, (0, 1))
+            self.assertTrue(compute_mock.called)
+            self.assertFalse(compute_mock.call_args.kwargs["use_reference_artifacts"])
+
+    def test_price_only_swap_missing_trade_reference_row_falls_back_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = ore_snapshot_cli.main(
+                [
+                    str(TOOLS_DIR / "Examples" / "Legacy" / "Example_12" / "Input" / "ore.xml"),
+                    "--price",
+                    "--output-root",
+                    str(root / "artifacts"),
+                ]
+            )
+            self.assertIn(rc, (0, 1))
+            payload = json.loads((root / "artifacts" / "Example_12" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["trade_id"], "Swap_50y")
+            self.assertEqual(payload["diagnostics"]["engine"], "ore_reference_expected_output")
+            self.assertEqual(payload["diagnostics"]["fallback_reason"], "unsupported_python_snapshot")
+            self.assertIn("Trade 'Swap_50y' not found", payload["diagnostics"]["fallback_error"])
+
     def test_reference_curve_builder_does_not_fall_back_without_curves_csv(self):
         tm_path = ore_snapshot_io._resolve_ore_run_files(REAL_CASE_XML)[3]
         tm_root = ore_snapshot_io.ET.parse(tm_path).getroot()
@@ -1902,6 +2193,28 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertTrue(str(snap.simulation_xml_path).endswith("simulation.xml"))
             self.assertIsNone(snap.exposure_csv_path)
             self.assertIsNone(snap.xva_csv_path)
+
+    def test_load_from_ore_xml_supports_generic_fx_forward_price_only_case(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ore_xml = _clone_example28_eur_base_case(Path(tmpdir))
+
+            snap = ore_snapshot_io.load_from_ore_xml(ore_xml, trade_id="FXFWD_1Y")
+
+            self.assertEqual(snap.trade_id, "FXFWD_1Y")
+            self.assertEqual(snap.trade_type, "FxForward")
+            self.assertTrue(np.isfinite(snap.ore_t0_npv))
+            self.assertEqual(snap.ore_cva, 0.0)
+            self.assertEqual(snap.ore_dva, 0.0)
+            self.assertEqual(snap.ore_fba, 0.0)
+            self.assertEqual(snap.ore_fca, 0.0)
+            self.assertEqual(snap.exposure_times.size, 0)
+            self.assertEqual(snap.ore_epe.size, 0)
+            self.assertEqual(snap.ore_ene.size, 0)
+            self.assertTrue(str(snap.npv_csv_path).endswith("npv_eur_base.csv"))
+            self.assertTrue(str(snap.curves_csv_path).endswith("curves_eur_base.csv"))
+            self.assertTrue(str(snap.flows_csv_path).endswith("flows_eur_base.csv"))
+            self.assertIsNone(snap.xva_csv_path)
+            self.assertIsNone(snap.exposure_csv_path)
 
     def test_has_active_simulation_analytic_accepts_inactive_analytic_with_existing_simulation_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2316,6 +2629,16 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(payload["pricing"]["pricing_mode"], "python_equity_option_premium_surface")
         self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 0.1)
 
+    def test_ta001_equity_option_matches_explicit_ore_npv(self):
+        payload = ore_snapshot_cli._compute_price_only_case(TA001_EQUITY_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "EQ_CALL_STOXX50E")
+        self.assertEqual(payload["pricing"]["trade_type"], "EquityOption")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_equity_option_premium_surface")
+        self.assertTrue(payload["diagnostics"]["using_expected_output"])
+        self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), 236.649138, places=6)
+        self.assertAlmostEqual(float(payload["pricing"]["py_t0_npv"]), 236.7, places=6)
+        self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 0.1)
+
     def test_example22_equity_option_price_only_case_uses_native_black_path(self):
         payload = ore_snapshot_cli._compute_price_only_case(EXAMPLE22_EQUITY_CASE_XML, anchor_t0_npv=False)
         self.assertEqual(payload["trade_id"], "EQ_CALL_SP5")
@@ -2325,6 +2648,34 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertIn("py_t0_npv", payload["pricing"])
         self.assertGreater(payload["pricing"]["py_t0_npv"], 0.0)
         self.assertLess(payload["pricing"]["t0_npv_abs_diff"], 100.0)
+
+    def test_example22_equity_option_matches_explicit_ore_npv_within_black_tolerance(self):
+        payload = ore_snapshot_cli._compute_price_only_case(EXAMPLE22_EQUITY_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "EQ_CALL_SP5")
+        self.assertEqual(payload["pricing"]["trade_type"], "EquityOption")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_equity_option_black")
+        self.assertTrue(payload["diagnostics"]["using_expected_output"])
+        self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), 132179.29212, places=5)
+        self.assertAlmostEqual(
+            float(payload["pricing"]["py_t0_npv"]),
+            132103.23843732217,
+            places=6,
+        )
+        self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 100.0)
+
+    def test_inflation_capfloor_matches_explicit_ore_npv(self):
+        payload = ore_snapshot_cli._compute_price_only_case(INFLATION_CAPFLOOR_CASE_XML, anchor_t0_npv=False)
+        self.assertEqual(payload["trade_id"], "YearOnYear_Cap")
+        self.assertEqual(payload["pricing"]["trade_type"], "CapFloor")
+        self.assertEqual(payload["diagnostics"]["pricing_mode"], "python_inflation_yy_capfloor")
+        self.assertTrue(payload["diagnostics"]["using_expected_output"])
+        self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), 25065.914792, places=6)
+        self.assertAlmostEqual(
+            float(payload["pricing"]["py_t0_npv"]),
+            float(payload["pricing"]["ore_t0_npv"]),
+            places=6,
+        )
+        self.assertEqual(float(payload["pricing"]["t0_npv_abs_diff"]), 0.0)
 
     def test_unique_report_case_slug_avoids_collisions(self):
         first = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"

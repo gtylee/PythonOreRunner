@@ -1,0 +1,102 @@
+<CrossAssetModel>
+	<DomesticCcy>EUR</DomesticCcy>
+	<Currencies>
+		<Currency>EUR</Currency>
+		<Currency>GBP</Currency>
+	</Currencies>
+	<Equities/>
+	<InflationIndices/>
+	<CreditNames/>
+	<Commodities/>
+	<BootstrapTolerance>0.0001</BootstrapTolerance>
+	<Measure/>
+	<Discretization>Exact</Discretization>
+	<SalvagingAlgorithm>None</SalvagingAlgorithm>
+	<IntegrationPolicy/>
+	<PiecewiseIntegration>true</PiecewiseIntegration>
+	<InterestRateModels>
+		<LGM key="EUR">
+			<CalibrationType>Bootstrap</CalibrationType>
+			<Volatility>
+				<Calibrate>false</Calibrate>
+				<VolatilityType>Hagan</VolatilityType>
+				<ParamType>Piecewise</ParamType>
+				<TimeGrid>1.01944, 2.0305555555555554, 4.0583333333333336, 6.0944444444444441, 8.1166666666666671, 10.147222222222222, 12.180555555555555, 14.205555555555556, 16.233333333333334, 18.266666666666666</TimeGrid>
+				<InitialValue>0.00272333, 0.0028218651026151059, 0.0029708163857055667, 0.0031716879503726958, 0.0033702086859490996, 0.0035765005938922902, 0.0037759228567160459, 0.0039784622935951468, 0.0041910020607086786, 0.0043873536390236353, 0.004543448635332686</InitialValue>
+			</Volatility>
+			<Reversion>
+				<Calibrate>false</Calibrate>
+				<ReversionType>HullWhite</ReversionType>
+				<ParamType>Constant</ParamType>
+				<TimeGrid/>
+				<InitialValue>0.03</InitialValue>
+			</Reversion>
+			<ParameterTransformation>
+				<ShiftHorizon>0.0000000000000000</ShiftHorizon>
+				<Scaling>1</Scaling>
+			</ParameterTransformation>
+			<FloatSpreadMapping>ProRata</FloatSpreadMapping>
+			<CalibrationSwaptions>
+				<Expiries>1Y, 2Y, 4Y, 6Y, 8Y, 10Y, 12Y, 14Y, 16Y, 18Y, 19Y</Expiries>
+				<Terms>19Y, 18Y, 16Y, 14Y, 12Y, 10Y, 8Y, 6Y, 4Y, 2Y, 1Y</Terms>
+				<Strikes>ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM</Strikes>
+			</CalibrationSwaptions>
+		</LGM>
+		<LGM key="GBP">
+			<CalibrationType>Bootstrap</CalibrationType>
+			<Volatility>
+				<Calibrate>false</Calibrate>
+				<VolatilityType>Hagan</VolatilityType>
+				<ParamType>Piecewise</ParamType>
+				<TimeGrid>1.00548, 2.0027397260273974, 4.0027397260273974, 6.0109589041095894, 8.0054794520547947, 10.008219178082191, 12.013698630136986, 14.010958904109589, 16.010958904109589, 18.016438356164382</TimeGrid>
+				<InitialValue>0.00195929, 0.0020323634369181858, 0.0021428141504458036, 0.0022912808494739353, 0.0024392328486372216, 0.0025889914722892937, 0.002740225611149181, 0.0028890517854371143, 0.0030403419101360119, 0.0031921711162190636, 0.003297232123244803</InitialValue>
+			</Volatility>
+			<Reversion>
+				<Calibrate>false</Calibrate>
+				<ReversionType>HullWhite</ReversionType>
+				<ParamType>Constant</ParamType>
+				<TimeGrid/>
+				<InitialValue>0.03</InitialValue>
+			</Reversion>
+			<ParameterTransformation>
+				<ShiftHorizon>0.0000000000000000</ShiftHorizon>
+				<Scaling>1</Scaling>
+			</ParameterTransformation>
+			<FloatSpreadMapping>ProRata</FloatSpreadMapping>
+			<CalibrationSwaptions>
+				<Expiries>1Y, 2Y, 4Y, 6Y, 8Y, 10Y, 12Y, 14Y, 16Y, 18Y, 19Y</Expiries>
+				<Terms>19Y, 18Y, 16Y, 14Y, 12Y, 10Y, 8Y, 6Y, 4Y, 2Y, 1Y</Terms>
+				<Strikes>ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM, ATM</Strikes>
+			</CalibrationSwaptions>
+		</LGM>
+	</InterestRateModels>
+	<ForeignExchangeModels>
+		<CrossCcyLGM foreignCcy="GBP">
+			<DomesticCcy>EUR</DomesticCcy>
+			<CalibrationType>Bootstrap</CalibrationType>
+			<Sigma>
+				<Calibrate>false</Calibrate>
+				<ParamType>Piecewise</ParamType>
+				<TimeGrid>1.01667, 2.0305555555555554, 3.0444444444444443, 4.0583333333333336, 5.0750000000000002</TimeGrid>
+				<InitialValue>0.129309, 0.12884319287129506, 0.12844566254958834, 0.12803915413393752, 0.12761012791530996, 0.12613327580079778</InitialValue>
+			</Sigma>
+			<CalibrationOptions>
+				<Expiries>1Y, 2Y, 3Y, 4Y, 5Y, 10Y</Expiries>
+				<Strikes>ATMF, ATMF, ATMF, ATMF, ATMF, ATMF</Strikes>
+			</CalibrationOptions>
+		</CrossCcyLGM>
+	</ForeignExchangeModels>
+	<EquityModels/>
+	<InflationIndexModels/>
+	<CreditModels/>
+	<CommodityModels/>
+	<CreditStates>
+		<NumberOfFactors>0</NumberOfFactors>
+	</CreditStates>
+	<InstantaneousCorrelations>
+		<Correlation factor1="IR:EUR" index1="0" factor2="IR:GBP" index2="0">0.3</Correlation>
+		<Correlation factor1="IR:EUR" index1="0" factor2="FX:GBPEUR" index2="0">0</Correlation>
+		<Correlation factor1="IR:GBP" index1="0" factor2="FX:GBPEUR" index2="0">0</Correlation>
+	</InstantaneousCorrelations>
+</CrossAssetModel>
+

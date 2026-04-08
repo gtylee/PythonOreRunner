@@ -13,6 +13,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from py_ore_tools.ore_snapshot import load_from_ore_xml
+from test_ore_snapshot_cli import _clone_example28_eur_base_case
 
 
 class TestOreSnapshotParityReport(unittest.TestCase):
@@ -151,6 +152,19 @@ class TestOreSnapshotParityReport(unittest.TestCase):
             self.assertEqual(snap.alpha_source, "calibration")
             self.assertIsNotNone(snap.calibration_xml_path)
             self.assertTrue(str(snap.calibration_xml_path).endswith("Examples/Exposure/Output/measure_lgm/calibration.xml"))
+
+    def test_parity_completeness_report_supports_generic_price_only_case(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ore_xml = _clone_example28_eur_base_case(Path(tmpdir))
+
+            snap = load_from_ore_xml(ore_xml, trade_id="FXFWD_1Y")
+            report = snap.parity_completeness_report()
+
+            self.assertEqual(report["summary"]["trade_id"], "FXFWD_1Y")
+            self.assertEqual(report["summary"]["trade_type"], "FxForward")
+            self.assertTrue(report["comparability"]["NPV"])
+            self.assertFalse(report["comparability"]["CVA"])
+            self.assertTrue(report["parity_ready"])
 
 
 if __name__ == "__main__":

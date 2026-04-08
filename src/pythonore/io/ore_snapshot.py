@@ -149,6 +149,7 @@ class OreSnapshot:
 
     # --- Trade / portfolio --------------------------------------------------
     trade_id: str
+    trade_type: str
     counterparty: str
     netting_set_id: str
     legs: Dict                  # output of load_swap_legs_from_portfolio +
@@ -325,7 +326,14 @@ class OreSnapshot:
             key: (bool(path) and Path(str(path)).exists())
             for key, path in file_paths.items()
         }
-        trade_ok = bool(self.trade_id and self.counterparty and self.netting_set_id and self.legs)
+        is_swap_trade = str(self.trade_type).strip().upper() == "SWAP"
+        schedule_ok = bool(self.legs) if not is_swap_trade else bool(
+            self.legs and (
+                np.size(self.legs.get("fixed_pay_time", []))
+                or np.size(self.legs.get("float_pay_time", []))
+            )
+        )
+        trade_ok = bool(self.trade_id and self.trade_type and schedule_ok)
         curve_ok = bool(
             self.discount_column
             and self.forward_column
@@ -359,32 +367,44 @@ class OreSnapshot:
             and np.all(np.diff(self.exposure_times) > 0.0)
             and len(self.exposure_times) == len(self.exposure_dates) == len(self.exposure_model_times)
         )
+        needs_counterparty_credit = bool(
+            "CVA" in requested
+            or "DVA" in requested
+            or abs(float(self.ore_cva)) > 1.0e-12
+            or abs(float(self.ore_dva)) > 1.0e-12
+        )
+        needs_own_credit = bool("DVA" in requested or abs(float(self.ore_dva)) > 1.0e-12)
+        needs_funding = bool("FVA" in requested or abs(float(self.ore_fba)) > 1.0e-12 or abs(float(self.ore_fca)) > 1.0e-12)
+        needs_exposure = bool(requested or self.exposure_times.size > 0 or self.ore_epe.size > 0 or self.ore_ene.size > 0)
         issues: list[str] = []
         if not trade_ok:
             issues.append("trade/schedule inputs are incomplete")
-        if self.leg_source != "flows":
+        if is_swap_trade and self.leg_source != "flows":
             issues.append("legs are not sourced from flows.csv; portfolio-derived schedules may still differ from ORE cashflow signs")
         if not curve_ok:
             issues.append("discount/forward curve extraction is incomplete")
-        if not cpty_credit_ok:
+        if needs_counterparty_credit and not cpty_credit_ok:
             issues.append("counterparty hazard/recovery inputs are incomplete")
-        if ("DVA" in requested or abs(self.ore_dva) > 1.0e-12) and not own_credit_ok:
+        if needs_own_credit and not own_credit_ok:
             issues.append("own-name hazard/recovery inputs are incomplete for DVA parity")
-        if ("FVA" in requested or abs(self.ore_fba) > 1.0e-12 or abs(self.ore_fca) > 1.0e-12) and not funding_ok:
+        if needs_funding and not funding_ok:
             issues.append("borrowing/lending curve inputs are incomplete for FVA parity")
-        if not exposure_ok:
+        if needs_exposure and not exposure_ok:
             issues.append("exposure grid is incomplete or inconsistent")
 
         comparable_metrics = {
+            "NPV": trade_ok and curve_ok and bool(self.npv_csv_path),
             "CVA": trade_ok and curve_ok and cpty_credit_ok and exposure_ok,
             "DVA": trade_ok and curve_ok and cpty_credit_ok and own_credit_ok and exposure_ok,
             "FVA": trade_ok and curve_ok and funding_ok and exposure_ok,
             "MVA": trade_ok and curve_ok and exposure_ok and ("MVA" in requested or False),
         }
+        required_metrics = list(requested) if requested else ["NPV"]
 
         return {
             "summary": {
                 "trade_id": self.trade_id,
+                "trade_type": self.trade_type,
                 "counterparty": self.counterparty,
                 "netting_set_id": self.netting_set_id,
                 "leg_source": self.leg_source,
@@ -400,6 +420,7 @@ class OreSnapshot:
             },
             "trade_setup": {
                 "complete": trade_ok,
+                "trade_type": self.trade_type,
                 "fixed_leg_count": int(np.size(self.legs.get("fixed_pay_time", []))) if self.legs else 0,
                 "float_leg_count": int(np.size(self.legs.get("float_pay_time", []))) if self.legs else 0,
             },
@@ -438,7 +459,7 @@ class OreSnapshot:
                 for key, path in file_paths.items()
             },
             "issues": issues,
-            "parity_ready": bool(comparable_metrics["CVA"] and not issues),
+            "parity_ready": bool(all(comparable_metrics.get(metric, False) for metric in required_metrics) and not issues),
         }
 
     def parity_completeness_dataframe(self):
@@ -457,6 +478,7 @@ class OreSnapshot:
             f"OreSnapshot("
             f"asof_date={self.asof_date!r}, "
             f"trade_id={self.trade_id!r}, "
+            f"trade_type={self.trade_type!r}, "
             f"alpha_source={self.alpha_source!r}, "
             f"measure={self.measure!r}, "
             f"model_day_counter={self.model_day_counter!r}, "
@@ -2790,6 +2812,27 @@ def _fit_discount_and_forward_curves_from_market(
     return {"discount_fit": discount_fit, "forward_fit": forward_fit}
 
 
+def _analytic_params(ore_root: ET.Element, analytic_type: str) -> Dict[str, str]:
+    analytic = ore_root.find(f"./Analytics/Analytic[@type='{analytic_type}']")
+    if analytic is None:
+        return {}
+    return {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in analytic.findall("./Parameter")
+    }
+
+
+def _resolve_analytic_output_path(
+    ore_root: ET.Element,
+    output_path: Path,
+    analytic_type: str,
+    default_name: str,
+) -> Path:
+    params = _analytic_params(ore_root, analytic_type)
+    filename = (params.get("outputFileName") or "").strip() or default_name
+    return (output_path / filename).resolve()
+
+
 def fitted_curves_to_dataframe(
     fitted_curves_by_ccy: Dict[str, Dict[str, object]],
 ):
@@ -2940,45 +2983,47 @@ def load_from_ore_xml(
     pricing_config_id = markets_params.get("pricing", sim_config_id)
 
     # Simulation config file from Analytics section
-    sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
-    sim_params = (
-        {
-            n.attrib.get("name", ""): (n.text or "").strip()
-            for n in sim_analytic.findall("./Parameter")
-        }
-        if sim_analytic is not None else {}
-    )
-    sim_cfg_rel = sim_params.get("simulationConfigFile", "simulation.xml")
-    simulation_xml = _resolve_ore_path(sim_cfg_rel, input_dir)
-
-    # ------------------------------------------------------------------
-    # 2. Parse simulation.xml
-    # ------------------------------------------------------------------
+    sim_params = _analytic_params(ore_root, "simulation")
+    has_explicit_simulation_analytic = bool(sim_params)
+    simulation_xml = _resolve_ore_path(sim_params.get("simulationConfigFile", "simulation.xml"), input_dir)
     if not simulation_xml.exists():
-        raise FileNotFoundError(f"simulation xml not found: {simulation_xml}")
+        simulation_xml = input_dir / "simulation.xml"
 
-    sim_root = ET.parse(simulation_xml).getroot()
-    domestic_ccy = (
-        sim_root.findtext("./DomesticCcy")
-        or sim_root.findtext("./CrossAssetModel/DomesticCcy")
-        or "EUR"
-    ).strip()
-    measure = (
-        sim_root.findtext("./Measure")
-        or sim_root.findtext("./CrossAssetModel/Measure")
-        or "LGM"
-    ).strip()
-    model_day_counter = _normalize_day_counter_name(
-        (
-            sim_root.findtext("./DayCounter")
-            or sim_root.findtext("./Parameters/DayCounter")
-            or "A365F"
-        ).strip()
-    )
+    # ------------------------------------------------------------------
+    # 2. Parse simulation.xml when available; otherwise synthesise
+    #    deterministic defaults for generic price-only parity cases.
+    # ------------------------------------------------------------------
     report_day_counter = "ActualActual(ISDA)"
-    seed = int((sim_root.findtext("./Seed") or sim_root.findtext("./Parameters/Seed") or "42").strip())
-    n_samples = int((sim_root.findtext("./Samples") or sim_root.findtext("./Parameters/Samples") or "1000").strip())
-    node_tenors = load_simulation_yield_tenors(str(simulation_xml))
+    npv_params = _analytic_params(ore_root, "npv")
+    if simulation_xml.exists():
+        sim_root = ET.parse(simulation_xml).getroot()
+        domestic_ccy = (
+            sim_root.findtext("./DomesticCcy")
+            or sim_root.findtext("./CrossAssetModel/DomesticCcy")
+            or (npv_params.get("baseCurrency") or "EUR")
+        ).strip()
+        measure = (
+            sim_root.findtext("./Measure")
+            or sim_root.findtext("./CrossAssetModel/Measure")
+            or "LGM"
+        ).strip()
+        model_day_counter = _normalize_day_counter_name(
+            (
+                sim_root.findtext("./DayCounter")
+                or sim_root.findtext("./Parameters/DayCounter")
+                or "A365F"
+            ).strip()
+        )
+        seed = int((sim_root.findtext("./Seed") or sim_root.findtext("./Parameters/Seed") or "42").strip())
+        n_samples = int((sim_root.findtext("./Samples") or sim_root.findtext("./Parameters/Samples") or "1000").strip())
+        node_tenors = load_simulation_yield_tenors(str(simulation_xml))
+    else:
+        domestic_ccy = (npv_params.get("baseCurrency") or "EUR").strip() or "EUR"
+        measure = "LGM"
+        model_day_counter = "A365F"
+        seed = 42
+        n_samples = 0
+        node_tenors = np.asarray([], dtype=float)
 
     # ------------------------------------------------------------------
     # 3. Parse portfolio.xml: trade_id, cpty, netting_set, float_index
@@ -2990,11 +3035,17 @@ def load_from_ore_xml(
 
     if trade_id is None:
         trade_id = _get_first_trade_id(portfolio_root)
+    trade_type = _get_trade_type(portfolio_root, trade_id)
     if cpty is None:
         cpty = _get_cpty_from_portfolio(portfolio_root, trade_id)
 
+    if trade_type == "Swap" and not has_explicit_simulation_analytic:
+        trade_ccy = _get_single_trade_currency(portfolio_root, trade_id)
+        if trade_ccy:
+            domestic_ccy = trade_ccy
+
     netting_set_id = _get_netting_set_from_portfolio(portfolio_root, trade_id)
-    forward_column = _get_float_index(portfolio_root, trade_id)
+    float_index = _get_float_index(portfolio_root, trade_id) if trade_type == "Swap" else ""
 
     # ------------------------------------------------------------------
     # 4. Parse todaysmarket.xml → discount curve column
@@ -3005,12 +3056,9 @@ def load_from_ore_xml(
     tm_root = ET.parse(todaysmarket_xml).getroot()
     discount_column = _resolve_discount_column(tm_root, pricing_config_id, domestic_ccy)
     xva_discount_column = _resolve_discount_column(tm_root, sim_config_id, domestic_ccy)
+    forward_column = float_index or discount_column
 
-    xva_analytic = ore_root.find("./Analytics/Analytic[@type='xva']")
-    xva_params = (
-        {n.attrib.get("name", ""): (n.text or "").strip() for n in xva_analytic.findall("./Parameter")}
-        if xva_analytic is not None else {}
-    )
+    xva_params = _analytic_params(ore_root, "xva")
     requested_xva_metrics = tuple(
         metric
         for metric, enabled in (
@@ -3019,7 +3067,7 @@ def load_from_ore_xml(
             ("FVA", xva_params.get("fva", "N")),
             ("MVA", xva_params.get("mva", "N")),
         )
-        if str(enabled).strip().upper() == "Y"
+        if xva_params and str(enabled).strip().upper() == "Y"
     )
     borrowing_curve_column = (xva_params.get("fvaBorrowingCurve") or "").strip() or None
     lending_curve_column = (xva_params.get("fvaLendingCurve") or "").strip() or None
@@ -3027,19 +3075,54 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     # 5. Determine LGM parameters (calibration.xml preferred)
     # ------------------------------------------------------------------
-    params_dict, alpha_source, calibration_xml = resolve_lgm_params(
-        ore_xml_path=str(ore_xml_path),
-        input_dir=input_dir,
-        output_path=output_path,
-        market_data_path=market_data_file,
-        curve_config_path=curve_config_file,
-        conventions_path=conventions_path,
-        todaysmarket_xml_path=todaysmarket_xml,
-        simulation_xml_path=simulation_xml,
-        domestic_ccy=domestic_ccy,
-        lgm_param_source=lgm_param_source,
-        provided_lgm_params=provided_lgm_params,
-    )
+    if simulation_xml.exists():
+        params_dict, alpha_source, calibration_xml = resolve_lgm_params(
+            ore_xml_path=str(ore_xml_path),
+            input_dir=input_dir,
+            output_path=output_path,
+            market_data_path=market_data_file,
+            curve_config_path=curve_config_file,
+            conventions_path=conventions_path,
+            todaysmarket_xml_path=todaysmarket_xml,
+            simulation_xml_path=simulation_xml,
+            domestic_ccy=domestic_ccy,
+            lgm_param_source=lgm_param_source,
+            provided_lgm_params=provided_lgm_params,
+        )
+    else:
+        if str(lgm_param_source or "auto").strip().lower() in {"provided", "dataclass"}:
+            if provided_lgm_params is None:
+                raise ValueError("provided_lgm_params is required when lgm_param_source='provided'")
+            if isinstance(provided_lgm_params, LGMParams):
+                params_dict = {
+                    "alpha_times": np.asarray(provided_lgm_params.alpha_times, dtype=float),
+                    "alpha_values": np.asarray(provided_lgm_params.alpha_values, dtype=float),
+                    "kappa_times": np.asarray(provided_lgm_params.kappa_times, dtype=float),
+                    "kappa_values": np.asarray(provided_lgm_params.kappa_values, dtype=float),
+                    "shift": float(provided_lgm_params.shift),
+                    "scaling": float(provided_lgm_params.scaling),
+                }
+            else:
+                params_dict = {
+                    "alpha_times": np.asarray(provided_lgm_params.get("alpha_times", []), dtype=float),
+                    "alpha_values": np.asarray(provided_lgm_params.get("alpha_values", [0.01]), dtype=float),
+                    "kappa_times": np.asarray(provided_lgm_params.get("kappa_times", []), dtype=float),
+                    "kappa_values": np.asarray(provided_lgm_params.get("kappa_values", [0.03]), dtype=float),
+                    "shift": float(provided_lgm_params.get("shift", 0.0)),
+                    "scaling": float(provided_lgm_params.get("scaling", 1.0)),
+                }
+            alpha_source = "provided"
+        else:
+            params_dict = {
+                "alpha_times": np.asarray([1.0], dtype=float),
+                "alpha_values": np.asarray([0.01, 0.01], dtype=float),
+                "kappa_times": np.asarray([1.0], dtype=float),
+                "kappa_values": np.asarray([0.03, 0.03], dtype=float),
+                "shift": 0.0,
+                "scaling": 1.0,
+            }
+            alpha_source = "synthetic"
+        calibration_xml = None
 
     lgm_params = LGMParams(
         alpha_times=tuple(float(x) for x in params_dict["alpha_times"]),
@@ -3053,10 +3136,11 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     # 6. Load output CSVs
     # ------------------------------------------------------------------
-    curves_csv = output_path / "curves.csv"
+    curves_csv = _resolve_analytic_output_path(ore_root, output_path, "curves", "curves.csv")
+    cashflow_csv = _resolve_analytic_output_path(ore_root, output_path, "cashflow", "flows.csv")
     exposure_csv = output_path / f"exposure_trade_{trade_id}.csv"
-    xva_csv = output_path / "xva.csv"
-    npv_csv = output_path / "npv.csv"
+    xva_csv = _resolve_analytic_output_path(ore_root, output_path, "xva", "xva.csv")
+    npv_csv = _resolve_analytic_output_path(ore_root, output_path, "npv", "npv.csv")
 
     if not npv_csv.exists():
         raise FileNotFoundError(
@@ -3188,32 +3272,35 @@ def load_from_ore_xml(
     # 7. Build swap legs: prefer flows.csv when present (ORE Amount signs = canonical
     #    for parity; see SKILL.md "Use ORE cashflow signs as canonical truth").
     # ------------------------------------------------------------------
-    flows_csv = output_path / "flows.csv"
-    legs = None
-    leg_source = "portfolio"
-    if flows_csv.exists():
-        try:
-            legs = load_ore_legs_from_flows(
-                str(flows_csv),
-                trade_id=trade_id,
-                asof_date=asof_date,
-                time_day_counter=model_day_counter,
-                index_day_counter=_infer_index_day_counter(forward_column, fallback=model_day_counter),
+    flows_csv = cashflow_csv
+    legs = {"node_tenors": node_tenors}
+    leg_source = "generic"
+    if trade_type == "Swap":
+        legs = None
+        leg_source = "portfolio"
+        if flows_csv.exists():
+            try:
+                legs = load_ore_legs_from_flows(
+                    str(flows_csv),
+                    trade_id=trade_id,
+                    asof_date=asof_date,
+                    time_day_counter=model_day_counter,
+                    index_day_counter=_infer_index_day_counter(forward_column, fallback=model_day_counter),
+                )
+                leg_source = "flows"
+            except (ValueError, FileNotFoundError):
+                pass
+        if legs is None:
+            legs = load_swap_legs_from_portfolio(
+                str(portfolio_xml), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
             )
-            leg_source = "flows"
-        except (ValueError, FileNotFoundError):
-            pass
-    if legs is None:
-        legs = load_swap_legs_from_portfolio(
-            str(portfolio_xml), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
-        )
-    legs["node_tenors"] = node_tenors
-    legs = calibrate_float_spreads_from_coupon(legs, p0_fwd, t0=0.0)
+        legs["node_tenors"] = node_tenors
+        legs = calibrate_float_spreads_from_coupon(legs, p0_fwd, t0=0.0)
 
     # Optional: anchor Python t=0 NPV to ORE's reported NPV.
     # This applies a parallel float-spread shift that absorbs residual
     # day-count and curve-convention differences between ORE and Python.
-    if anchor_t0_npv:
+    if anchor_t0_npv and trade_type == "Swap":
         legs = apply_parallel_float_spread_shift_to_match_npv(
             legs, p0_disc, ore_t0_npv, t0=0.0
         )
@@ -3221,23 +3308,25 @@ def load_from_ore_xml(
     # ------------------------------------------------------------------
     # 8. Load credit inputs (hazard + recovery): counterparty and own (DVA)
     # ------------------------------------------------------------------
-    if not market_data_file.exists():
-        raise FileNotFoundError(f"market data file not found: {market_data_file}")
-
-    credit = load_ore_default_curve_inputs(
-        str(todaysmarket_xml), str(market_data_file), cpty_name=cpty
-    )
-
-    # Own (bank) credit for DVA: from ore.xml dvaName when present in market
-    dva_name = (xva_params.get("dvaName") or "BANK").strip() or "BANK"
+    credit = {
+        "recovery": 0.0,
+        "hazard_times": np.asarray([], dtype=float),
+        "hazard_rates": np.asarray([], dtype=float),
+    }
+    dva_name = (xva_params.get("dvaName") or "").strip() or None
     own_credit = None
-    if dva_name and dva_name != cpty:
-        try:
-            own_credit = load_ore_default_curve_inputs(
-                str(todaysmarket_xml), str(market_data_file), cpty_name=dva_name
-            )
-        except (ValueError, FileNotFoundError):
-            pass
+    if (requested_xva_metrics or xva_csv.exists()) and market_data_file.exists():
+        credit = load_ore_default_curve_inputs(
+            str(todaysmarket_xml), str(market_data_file), cpty_name=cpty
+        )
+        dva_name = dva_name or "BANK"
+        if dva_name and dva_name != cpty:
+            try:
+                own_credit = load_ore_default_curve_inputs(
+                    str(todaysmarket_xml), str(market_data_file), cpty_name=dva_name
+                )
+            except (ValueError, FileNotFoundError):
+                pass
 
     return OreSnapshot(
         ore_xml_path=str(ore_xml_path),
@@ -3252,6 +3341,7 @@ def load_from_ore_xml(
         model_day_counter=model_day_counter,
         report_day_counter=report_day_counter,
         trade_id=trade_id,
+        trade_type=trade_type,
         counterparty=cpty,
         netting_set_id=netting_set_id,
         legs=legs,
@@ -3301,7 +3391,7 @@ def load_from_ore_xml(
         portfolio_xml_path=str(portfolio_xml),
         todaysmarket_xml_path=str(todaysmarket_xml),
         market_data_path=str(market_data_file),
-        simulation_xml_path=str(simulation_xml),
+        simulation_xml_path=str(simulation_xml) if simulation_xml.exists() else None,
         calibration_xml_path=str(calibration_xml) if calibration_xml is not None and calibration_xml.exists() else None,
         curves_csv_path=str(curves_csv) if curves_csv.exists() else None,
         exposure_csv_path=str(exposure_csv) if exposure_csv.exists() else None,
@@ -3377,6 +3467,20 @@ def _get_float_index(portfolio_root: ET.Element, trade_id: str) -> str:
     raise ValueError(
         f"FloatingLegData/Index not found for trade '{trade_id}' in portfolio XML"
     )
+
+
+def _get_single_trade_currency(portfolio_root: ET.Element, trade_id: str) -> str:
+    trade = _portfolio_trade_lookup(portfolio_root).get(trade_id)
+    if trade is None:
+        return ""
+    currencies = {
+        (node.text or "").strip()
+        for node in trade.findall("./SwapData/LegData/Currency")
+        if (node.text or "").strip()
+    }
+    if len(currencies) == 1:
+        return next(iter(currencies))
+    return ""
 
 
 def _handle_to_curve_name(tm_root: ET.Element, handle: str) -> str:

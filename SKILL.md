@@ -258,6 +258,49 @@ Important implications:
 - Native runtime calibration must not depend on `oreapp` outputs like `curves.csv`, `npv.csv`, or `flows.csv`.
 - Common ORE cases labeled with `VolatilityType=Hagan` should still go through the Python QuantLib/GSR calibration path; do not reject them just because the XML label says `Hagan`.
 
+### Do not use `flows.csv` / `curves.csv` in plain price-only mode unless parity is explicitly requested
+
+This became an important fault line in the native price-only CLI path.
+
+There are now two distinct behaviors that must stay separate:
+
+- plain native pricing
+  - build from trade XML + market inputs
+  - do **not** consume ORE-produced `flows.csv` or `curves.csv`
+- parity / compare mode
+  - it is acceptable to use ORE reference artifacts deliberately
+  - this is where `flows.csv` cashflow replay or `curves.csv` exact discount-column loading belongs
+
+Why this matters:
+
+- If plain pricing silently uses `flows.csv`, it is no longer proving the Python product builder or schedule logic.
+- If plain pricing silently uses `curves.csv`, it is no longer proving native curve reconstruction / market fitting.
+- The result can look numerically "better" while actually hiding a broken native implementation.
+
+Practical guidance:
+
+- `--engine python --price`
+  - should run with reference artifacts disabled
+  - if native pricing cannot stand on its own, let it fail or surface the gap
+- `--engine compare`
+  - may enable reference artifacts intentionally for parity scoring or controlled replay
+
+Current codebase findings:
+
+- swap price-only had to be hardened so non-parity mode does not read `flows.csv` / `curves.csv`
+- once that gate was enforced, a real bug surfaced: the QuantLib plain-swap candidate could throw on missing historical fixings; the correct behavior is to drop that candidate and continue with the native path, not crash
+- cap/floor price-only previously depended on `flows.csv` just to define coupons; standard floating cap/floors are rich enough in `portfolio.xml` to rebuild from:
+  - `ScheduleData`
+  - `FloatingLegData`
+  - `Notionals`
+  - `Caps` / `Floors`
+  - fixing days / arrears / payment convention
+
+Testing rule:
+
+- When adding or reviewing native price-only tests, include at least one regression that makes any `flows.csv` / `curves.csv` read fail loudly in non-parity mode.
+- This is the fastest way to catch accidental reintroduction of parity assistance into the native path.
+
 Current known smoke result:
 
 - `Examples/Legacy/Example_25/Input/ore.xml`
@@ -4043,3 +4086,49 @@ So the right current summary is:
   `1%` whole-curve PFE p95
 - any new “large late-life 10Y failure” should first be checked for a
   raw-vs-deflated comparison mistake before touching coupon logic
+
+---
+
+## Overnight Cap/Floor Findings
+
+### The exact QuantExt binding is still missing, so the Python path uses a local shim
+
+For Example_59 `Cap_USD_SOFR`, the existing ORE-SWIG module already exposes:
+
+- `OvernightIndexedCoupon`
+- `CappedFlooredOvernightIndexedCoupon`
+- `BlackCompoundingOvernightIndexedCouponPricer`
+
+What it does not expose is the QuantExt-specific proxy-volatility stack used by
+the ORE overnight cap/floor path:
+
+- `QuantExt::ProxyOptionletVolatility`
+- `QuantExt::AtmAdjustedSmileSection`
+- `QuantExt::BlackOvernightIndexedCouponPricer`
+
+Because of that, the Python implementation currently keeps the overnight
+cap/floor logic in a local shim:
+
+- `src/pythonore/compute/overnight_capfloor_shim.py`
+
+The shim is intentionally isolated so the runtime stays thin and the
+approximation is easy to find, but it is still an approximation, not a native
+QuantExt binding.
+
+### Practical parity status
+
+- The shim keeps the current Example_59 regression runnable in Python.
+- The test remains expected-fail for exact ORE parity.
+- The overnight pricing code path is now cleanly separated from the rest of the
+  swap runtime, so future binding work can replace the shim without changing the
+  surrounding orchestration.
+
+### Operational rule
+
+If the task is exact parity for ORE overnight cap/floor coupons, do not try to
+paper over it in `runtime.py`.
+
+Use one of these routes instead:
+
+1. add the missing QuantExt bindings
+2. keep the shim and label the case as approximation-based

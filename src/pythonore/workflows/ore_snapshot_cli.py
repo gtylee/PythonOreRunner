@@ -42,6 +42,7 @@ from pythonore.compute.irs_xva_utils import (
     load_ore_default_curve_inputs,
     load_ore_exposure_profile,
     load_ore_legs_from_flows,
+    load_trade_cashflows_from_flows,
     load_simulation_yield_tenors,
     load_swap_legs_from_portfolio,
     survival_probability_from_hazard,
@@ -178,6 +179,10 @@ def fx_option_npv(*args, **kwargs):
 
 def _lgm_ir_options_mod():
     return import_module("pythonore.compute.lgm_ir_options")
+
+
+def _irs_utils_mod():
+    return import_module("pythonore.compute.irs_xva_utils")
 
 
 def CapFloorDef(*args, **kwargs):
@@ -615,6 +620,7 @@ def _build_minimal_pricing_payload(
     ore_xml: Path,
     *,
     anchor_t0_npv: bool,
+    use_reference_artifacts: bool = True,
 ) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
@@ -627,6 +633,7 @@ def _build_minimal_pricing_payload(
         for n in ore_root.findall("./Markets/Parameter")
     }
     asof_date = setup_params.get("asofDate", "")
+    asof = _parse_ore_date(asof_date)
     if not asof_date:
         raise ValueError(f"Missing Setup/asofDate in {ore_xml_path}")
     base = ore_xml_path.parent
@@ -644,9 +651,9 @@ def _build_minimal_pricing_payload(
     counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
     netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
     if trade_type == "FxForward":
-        return _build_fx_forward_pricing_payload(ore_xml)
+        return _build_fx_forward_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
     if trade_type == "FxOption":
-        return _build_fx_option_pricing_payload(ore_xml)
+        return _build_fx_option_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
     if trade_type == "Swaption":
         trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
         style = (
@@ -656,7 +663,7 @@ def _build_minimal_pricing_payload(
         )
         if style == "bermudan":
             return _build_bermudan_swaption_pricing_payload(ore_xml)
-        return _build_swaption_pricing_payload(ore_xml)
+        return _build_swaption_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
     if trade_type == "CapFloor":
         trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
         leg_type = (trade.findtext("./CapFloorData/LegData/LegType") or "").strip().upper() if trade is not None else ""
@@ -732,7 +739,7 @@ def _build_minimal_pricing_payload(
                 "pricing_mode": f"python_inflation_{curve_type.lower()}_capfloor",
                 **_inflation_model_diagnostics(ore_xml, index_name),
             }
-        return _build_capfloor_pricing_payload(ore_xml)
+        return _build_capfloor_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
     if trade_type == "Swap" and _is_inflation_swap_trade(ore_xml):
         ore_xml_path2, asof_date2, market_data_path2, _, _ = ore_snapshot_mod._resolve_ore_run_files(ore_xml)
         trade = next((t for t in portfolio_root.findall("./Trade") if (t.attrib.get("id", "") or "").strip() == trade_id), None)
@@ -816,10 +823,16 @@ def _build_minimal_pricing_payload(
             **_inflation_model_diagnostics(ore_xml, index_name),
         }
     forward_column = ore_snapshot_mod._get_float_index(portfolio_root, trade_id) if trade_type in {"Swap", "Swaption"} else ""
+    report_ccy = (
+        (ore_root.findtext("./Analytics/Analytic[@type='npv']/Parameter[@name='baseCurrency']") or "").strip()
+        or (ore_root.findtext("./Setup/Parameter[@name='baseCurrency']") or "").strip()
+    )
+    trade_ccy = ore_snapshot_mod._get_single_trade_currency(portfolio_root, trade_id) if trade_type == "Swap" else ""
 
     sim_config_id = markets_params.get("simulation", "libor")
     pricing_config_id = markets_params.get("pricing", sim_config_id)
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
+    has_explicit_simulation_analytic = sim_analytic is not None
     sim_params: dict[str, str] = {}
     simulation_xml: Path | None = None
     if sim_analytic is not None:
@@ -840,6 +853,8 @@ def _build_minimal_pricing_payload(
             or sim_root.findtext("./CrossAssetModel/DomesticCcy")
             or "EUR"
         ).strip()
+        if trade_type == "Swap" and trade_ccy:
+            domestic_ccy = trade_ccy
         model_day_counter = ore_snapshot_mod._normalize_day_counter_name(
             (sim_root.findtext("./DayCounter") or "A365F").strip()
         )
@@ -847,11 +862,13 @@ def _build_minimal_pricing_payload(
     else:
         if trade_type != "Swap" or not _is_plain_vanilla_swap_trade(ore_xml):
             raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
-        npv_analytic = ore_root.find("./Analytics/Analytic[@type='npv']")
         domestic_ccy = (
-            (npv_analytic.findtext("./Parameter[@name='baseCurrency']") if npv_analytic is not None else "")
+            trade_ccy
+            or (
+                (ore_root.findtext("./Analytics/Analytic[@type='npv']/Parameter[@name='baseCurrency']") or "").strip()
+            )
             or "EUR"
-        ).strip()
+        )
         model_day_counter = "A365F"
         node_tenors = []
 
@@ -862,24 +879,33 @@ def _build_minimal_pricing_payload(
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
     if npv_csv is None:
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv") if use_reference_artifacts else None
     if curves_csv is not None:
         curve_dates_by_col = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
             str(curves_csv), [discount_column], asof_date=asof_date, day_counter=model_day_counter
         )
         _, curve_times_disc, curve_dfs_disc = curve_dates_by_col[discount_column]
         p0_disc = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_disc, curve_dfs_disc)))
+        ql_disc_handle = _ql_handle_from_curve_pairs(asof, curve_times_disc, curve_dfs_disc) if ql is not None else None
         if forward_column == discount_column:
             p0_fwd = p0_disc
+            ql_fwd_handle = ql_disc_handle
         else:
             _, curve_times_fwd, curve_dfs_fwd = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
                 str(curves_csv), [forward_column], asof_date=asof_date, day_counter=model_day_counter
             )[forward_column]
             p0_fwd = ore_snapshot_mod.build_discount_curve_from_discount_pairs(list(zip(curve_times_fwd, curve_dfs_fwd)))
+            ql_fwd_handle = _ql_handle_from_curve_pairs(asof, curve_times_fwd, curve_dfs_fwd) if ql is not None else None
     else:
-        p0_disc, p0_fwd, _, _ = _build_fitted_discount_and_forward_curves(
+        if trade_type == "Swap" and _active_discount_curve_uses_cross_currency_segments(
+            tm_root, curve_config_path, pricing_config_id, domestic_ccy
+        ):
+            raise ValueError(
+                f"active discount curve for '{domestic_ccy}' uses cross-currency segments and curves.csv is unavailable"
+            )
+        p0_disc, p0_fwd, ql_disc_handle, ql_fwd_handle = _build_fitted_discount_and_forward_curves(
             ore_xml,
-            asof=_parse_ore_date(asof_date),
+            asof=asof,
             currency=domestic_ccy,
             float_index=forward_column,
         )
@@ -917,9 +943,25 @@ def _build_minimal_pricing_payload(
     npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id)
     ore_t0_npv = float(npv_details["npv"])
 
-    flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
+    flows_csv = _find_reference_output_file(ore_xml, "flows.csv") if use_reference_artifacts else None
     legs = None
+    trade_cashflows = None
+    use_cashflow_replay = False
     leg_source = "portfolio"
+    if flows_csv is not None and flows_csv.exists():
+        try:
+            trade_cashflows = load_trade_cashflows_from_flows(
+                str(flows_csv), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
+            )
+            cashflow_ccys = {
+                str(leg.get("ccy") or "").strip().upper()
+                for leg in trade_cashflows.get("rate_legs", [])
+                if str(leg.get("ccy") or "").strip()
+            }
+            if cashflow_ccys and (len(cashflow_ccys) > 1 or (trade_ccy and cashflow_ccys != {trade_ccy.upper()})):
+                use_cashflow_replay = True
+        except Exception:
+            trade_cashflows = None
     if flows_csv is not None and flows_csv.exists():
         try:
             legs = load_ore_legs_from_flows(
@@ -945,6 +987,8 @@ def _build_minimal_pricing_payload(
         "legs": legs,
         "p0_disc": p0_disc,
         "p0_fwd": p0_fwd,
+        "ql_disc_handle": ql_disc_handle,
+        "ql_fwd_handle": ql_fwd_handle,
         "p0_xva_disc": p0_disc if xva_discount_column == discount_column else None,
         "ore_t0_npv": ore_t0_npv,
         "maturity_date": str(npv_details["maturity_date"]),
@@ -952,6 +996,13 @@ def _build_minimal_pricing_payload(
         "leg_source": leg_source,
         "discount_column": discount_column,
         "forward_column": forward_column,
+        "pricing_currency": domestic_ccy,
+        "report_ccy": report_ccy or domestic_ccy,
+        "fx_to_report": _load_fx_conversion_to_report(
+            tm_root, market_data_path, asof_date, pricing_config_id, domestic_ccy, report_ccy or domestic_ccy
+        ),
+        "trade_cashflows": trade_cashflows.get("rate_legs", []) if trade_cashflows is not None else [],
+        "use_cashflow_replay": use_cashflow_replay,
         "reference_output_dirs": sorted(
             {
                 str(path.parent)
@@ -1415,7 +1466,7 @@ def _black_forward_option_npv(*, forward: float, strike: float, maturity_time: f
     return float(discount) * (float(strike) * _normal_cdf(-d2) - float(forward) * _normal_cdf(-d1))
 
 
-def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+def _build_equity_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -1467,7 +1518,7 @@ def _build_equity_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         (curves_analytic.findtext("./Parameter[@name='outputFileName']") if curves_analytic is not None else None)
         or "curves.csv"
     )
-    curves_csv = _find_reference_output_file(ore_xml, curves_output_name)
+    curves_csv = _find_reference_output_file(ore_xml, curves_output_name) if use_reference_artifacts else None
 
     def _equity_discount_curve(ccy: str):
         try:
@@ -1708,6 +1759,47 @@ def _load_fx_conversion_to_report(
     return 1.0
 
 
+def _ql_parse_ore_date(text: str) -> Any:
+    if ql is None:
+        raise ImportError("QuantLib Python bindings are required to parse schedule dates")
+    value = str(text or "").strip()
+    if not value:
+        raise ValueError("empty date string")
+    return ql.DateParser.parseISO(value) if "-" in value else ql.DateParser.parseFormatted(value, "%Y%m%d")
+
+
+def _sum_trade_cashflow_pv_base(cashflow_legs: list[dict[str, Any]]) -> float:
+    total = 0.0
+    for leg in cashflow_legs:
+        total += float(np.sum(np.asarray(leg.get("pv_base", np.array([], dtype=float)), dtype=float)))
+    return total
+
+
+def _curve_handle_to_curve_id(handle: str) -> str:
+    txt = str(handle or "").strip()
+    if not txt:
+        return ""
+    return txt.split("/")[-1]
+
+
+def _active_discount_curve_uses_cross_currency_segments(
+    tm_root: ET.Element,
+    curve_config_path: Path,
+    config_id: str,
+    currency: str,
+) -> bool:
+    discount_map = ore_snapshot_mod._resolve_discount_columns_by_currency(tm_root, config_id)
+    handle = str(discount_map.get(str(currency).upper(), {}).get("curve_id") or "").strip()
+    curve_id = _curve_handle_to_curve_id(handle)
+    if not curve_id:
+        return False
+    curve_root = ET.parse(curve_config_path).getroot()
+    for candidate in curve_root.findall(".//YieldCurve"):
+        if (candidate.findtext("./CurveId") or "").strip() == curve_id:
+            return candidate.find("./Segments/CrossCurrency") is not None
+    return False
+
+
 def _legacy_section_or_id(root: ET.Element, tag: str, section_id: str | None = None) -> ET.Element | None:
     if section_id:
         node = root.find(f"./{tag}[@id='{section_id}']")
@@ -1886,7 +1978,101 @@ def _build_capfloor_defs_from_flows(
     return defs
 
 
-def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+def _build_capfloor_defs_from_portfolio(
+    capfloor_data: ET.Element,
+    leg: ET.Element,
+    *,
+    trade_id: str,
+    asof_date: str,
+    option_bias: float,
+) -> list[CapFloorDef]:
+    irs_utils = _irs_utils_mod()
+    asof = irs_utils._parse_yyyymmdd(asof_date)
+    pay_convention = (leg.findtext("./PaymentConvention") or "F").strip()
+    schedule_from_leg = getattr(irs_utils, "_schedule_from_leg", None)
+    if schedule_from_leg is None:
+        raise ValueError("irs_xva_utils._schedule_from_leg is unavailable")
+    start_dates, end_dates, pay_dates = schedule_from_leg(leg, pay_convention=pay_convention)
+    if len(start_dates) == 0:
+        raise ValueError(f"trade '{trade_id}' has no cap/floor schedule periods")
+    day_counter = (leg.findtext("./DayCounter") or "A365").strip()
+    floating_data = leg.find("./FloatingLegData")
+    if floating_data is None:
+        raise ValueError(f"trade '{trade_id}' is missing FloatingLegData")
+    rules = leg.find("./ScheduleData/Rules")
+    calendar = (
+        (rules.findtext("./Calendar") if rules is not None else None)
+        or (leg.findtext("./Currency") or "")
+        or "TARGET"
+    ).strip()
+    fixing_days = int((floating_data.findtext("./FixingDays") or "2").strip() or 2)
+    in_arrears = (floating_data.findtext("./IsInArrears") or "false").strip().lower() == "true"
+    start_t = np.asarray([irs_utils._time_from_dates(asof, d, "A365F") for d in start_dates], dtype=float)
+    end_t = np.asarray([irs_utils._time_from_dates(asof, d, "A365F") for d in end_dates], dtype=float)
+    pay_t = np.asarray([irs_utils._time_from_dates(asof, d, "A365F") for d in pay_dates], dtype=float)
+    accrual = np.asarray([irs_utils._year_fraction(sd, ed, day_counter) for sd, ed in zip(start_dates, end_dates)], dtype=float)
+    notionals = np.asarray(irs_utils.expand_leg_notionals(leg, start_dates, end_dates), dtype=float)
+    fixing_base = end_dates if in_arrears else start_dates
+    fixing_dates = [irs_utils._advance_business_days(d, -fixing_days, calendar) for d in fixing_base]
+    fixing_t = np.asarray([irs_utils._time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
+    live = pay_t > 1.0e-12
+    if not np.any(live):
+        raise ValueError(f"trade '{trade_id}' has no future-pay cap/floor coupons in portfolio")
+    start_t = start_t[live]
+    end_t = end_t[live]
+    pay_t = pay_t[live]
+    accrual = accrual[live]
+    notionals = notionals[live]
+    fixing_t = fixing_t[live]
+    ccy = (leg.findtext("./Currency") or "").strip().upper()
+    gearing = float((floating_data.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+    spread = float((floating_data.findtext("./Spreads/Spread") or "0").strip() or 0.0)
+
+    cap_text = (capfloor_data.findtext("./Caps/Cap") or "").strip()
+    floor_text = (capfloor_data.findtext("./Floors/Floor") or "").strip()
+    defs: list[CapFloorDef] = []
+    if cap_text:
+        defs.append(
+            CapFloorDef(
+                trade_id=trade_id,
+                ccy=ccy,
+                option_type="cap",
+                start_time=start_t,
+                end_time=end_t,
+                pay_time=pay_t,
+                accrual=accrual,
+                notional=notionals,
+                strike=np.full_like(accrual, float(cap_text)),
+                gearing=np.full_like(accrual, gearing),
+                spread=np.full_like(accrual, spread),
+                fixing_time=fixing_t,
+                position=float(option_bias),
+            )
+        )
+    if floor_text:
+        defs.append(
+            CapFloorDef(
+                trade_id=trade_id,
+                ccy=ccy,
+                option_type="floor",
+                start_time=start_t,
+                end_time=end_t,
+                pay_time=pay_t,
+                accrual=accrual,
+                notional=notionals,
+                strike=np.full_like(accrual, float(floor_text)),
+                gearing=np.full_like(accrual, gearing),
+                spread=np.full_like(accrual, spread),
+                fixing_time=fixing_t,
+                position=float(-option_bias if defs else option_bias),
+            )
+        )
+    if not defs:
+        raise ValueError(f"trade '{trade_id}' has no cap/floor strikes in portfolio")
+    return defs
+
+
+def _build_fx_forward_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -1946,10 +2132,10 @@ def _build_fx_forward_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             f"todaysmarket.xml is missing discounting curve mappings for FX pair {pair} under config '{pricing_config_id}'"
         )
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
-    flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
+    flows_csv = _find_reference_output_file(ore_xml, "flows.csv") if use_reference_artifacts else None
     if npv_csv is None:
         raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'npv.csv'}")
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv") if use_reference_artifacts else None
     if curves_csv is not None:
         curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
             str(curves_csv),
@@ -2142,7 +2328,7 @@ def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: st
     return float(corr_dom_fx), float(corr_for_fx)
 
 
-def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+def _build_fx_option_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -2213,7 +2399,7 @@ def _build_fx_option_pricing_payload(ore_xml: Path) -> dict[str, Any]:
             f"todaysmarket.xml is missing discounting curve mappings for FX pair {bought_ccy}/{sold_ccy} under config '{pricing_config_id}'"
         )
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv") if use_reference_artifacts else None
     if curves_csv is not None:
         curve_dates = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
             str(curves_csv),
@@ -2484,8 +2670,9 @@ def _build_reference_discount_and_forward_curves(
     tm_root: ET.Element,
     currency: str,
     float_index: str,
+    use_reference_artifacts: bool = True,
 ) -> tuple[Any, Any, Any, Any] | None:
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv") if use_reference_artifacts else None
     if curves_csv is None:
         return None
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, currency)
@@ -2511,7 +2698,7 @@ def _build_reference_discount_and_forward_curves(
     )
 
 
-def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
     if ql is None:
         raise ImportError("QuantLib Python bindings are required for swaption price-only support")
     ore_xml_path = ore_xml.resolve()
@@ -2562,6 +2749,7 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         tm_root=tm_root,
         currency=ccy,
         float_index=float_index,
+        use_reference_artifacts=use_reference_artifacts,
     )
     if reference_curves is None:
         _, _, disc_curve, fwd_curve = _build_fitted_discount_and_forward_curves(
@@ -2654,6 +2842,99 @@ def _build_swaption_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         "reference_output_dirs": sorted({str(p.parent) for p in [npv_csv] if p is not None}),
         "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
     }
+
+
+def _price_plain_vanilla_swap_with_quantlib(
+    ore_xml: Path,
+    payload: dict[str, Any],
+    *,
+    fixed_day_counter_override: Any | None = None,
+    fixed_convention_override: str | None = None,
+    float_convention_override: str | None = None,
+) -> float | None:
+    if ql is None:
+        return None
+    disc_handle = payload.get("ql_disc_handle")
+    fwd_handle = payload.get("ql_fwd_handle")
+    if disc_handle is None or fwd_handle is None:
+        return None
+
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return None
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trade_id = str(payload.get("trade_id") or "").strip()
+    trade = portfolio_root.find(f"./Trade[@id='{trade_id}']")
+    if trade is None or (trade.findtext("./TradeType") or "").strip() != "Swap":
+        return None
+
+    legs = trade.findall("./SwapData/LegData")
+    if len(legs) != 2:
+        return None
+    fixed_leg = next((l for l in legs if (l.findtext("./LegType") or "").strip().lower() == "fixed"), None)
+    float_leg = next((l for l in legs if (l.findtext("./LegType") or "").strip().lower() == "floating"), None)
+    if fixed_leg is None or float_leg is None:
+        return None
+    fixed_ccy = (fixed_leg.findtext("./Currency") or "").strip().upper()
+    float_ccy = (float_leg.findtext("./Currency") or "").strip().upper()
+    if not fixed_ccy or fixed_ccy != float_ccy:
+        return None
+
+    fixed_rules = fixed_leg.find("./ScheduleData/Rules")
+    float_rules = float_leg.find("./ScheduleData/Rules")
+    if fixed_rules is None or float_rules is None:
+        return None
+
+    ore_root = ET.parse(ore_xml).getroot()
+    ql.Settings.instance().evaluationDate = _ql_parse_ore_date(
+        ore_root.findtext("./Setup/Parameter[@name='asofDate']") or ""
+    )
+    bond_pricing_mod = _bond_pricing_mod()
+    generation_rule = {
+        "FORWARD": ql.DateGeneration.Forward,
+        "BACKWARD": ql.DateGeneration.Backward,
+        "ZERO": ql.DateGeneration.Zero,
+    }
+    fixed_schedule = ql.Schedule(
+        _ql_parse_ore_date(fixed_rules.findtext("./StartDate") or ""),
+        _ql_parse_ore_date(fixed_rules.findtext("./EndDate") or ""),
+        ql.Period((fixed_rules.findtext("./Tenor") or "1Y").strip()),
+        bond_pricing_mod._ql_calendar((fixed_rules.findtext("./Calendar") or float_rules.findtext("./Calendar") or "TARGET").strip()),
+        bond_pricing_mod._ql_bdc((fixed_convention_override or fixed_rules.findtext("./Convention") or fixed_leg.findtext("./PaymentConvention") or "F").strip()),
+        bond_pricing_mod._ql_bdc((fixed_rules.findtext("./TermConvention") or fixed_rules.findtext("./Convention") or "F").strip()),
+        generation_rule.get((fixed_rules.findtext("./Rule") or "Forward").strip().upper(), ql.DateGeneration.Forward),
+        False,
+    )
+    float_schedule = ql.Schedule(
+        _ql_parse_ore_date(float_rules.findtext("./StartDate") or ""),
+        _ql_parse_ore_date(float_rules.findtext("./EndDate") or ""),
+        ql.Period((float_rules.findtext("./Tenor") or "6M").strip()),
+        bond_pricing_mod._ql_calendar((float_rules.findtext("./Calendar") or fixed_rules.findtext("./Calendar") or "TARGET").strip()),
+        bond_pricing_mod._ql_bdc((float_convention_override or float_rules.findtext("./Convention") or float_leg.findtext("./PaymentConvention") or "MF").strip()),
+        bond_pricing_mod._ql_bdc((float_rules.findtext("./TermConvention") or float_rules.findtext("./Convention") or "MF").strip()),
+        generation_rule.get((float_rules.findtext("./Rule") or "Forward").strip().upper(), ql.DateGeneration.Forward),
+        False,
+    )
+    try:
+        index = _make_ibor_index((float_leg.findtext("./FloatingLegData/Index") or "").strip(), fwd_handle)
+    except Exception:
+        return None
+    swap = ql.VanillaSwap(
+        ql.VanillaSwap.Payer if (fixed_leg.findtext("./Payer") or "").strip().lower() == "true" else ql.VanillaSwap.Receiver,
+        float((fixed_leg.findtext("./Notionals/Notional") or "0").strip() or "0"),
+        fixed_schedule,
+        float((fixed_leg.findtext("./FixedLegData/Rates/Rate") or "0").strip() or "0"),
+        fixed_day_counter_override or bond_pricing_mod._ql_day_counter((fixed_leg.findtext("./DayCounter") or "30/360").strip()),
+        float_schedule,
+        index,
+        float((float_leg.findtext("./FloatingLegData/Spreads/Spread") or "0").strip() or "0"),
+        bond_pricing_mod._ql_day_counter((float_leg.findtext("./DayCounter") or "A360").strip()),
+    )
+    swap.setPricingEngine(ql.DiscountingSwapEngine(disc_handle))
+    try:
+        return float(swap.NPV())
+    except Exception:
+        return None
 
 
 def _lookup_swaption_market_vol(
@@ -2903,7 +3184,7 @@ def _first_trade_id_from_portfolio(portfolio_xml: Path) -> str:
     return ore_snapshot_mod._get_first_trade_id(root)
 
 
-def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
+def _build_capfloor_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {n.attrib.get("name", ""): (n.text or "").strip() for n in ore_root.findall("./Setup/Parameter")}
@@ -2937,8 +3218,8 @@ def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
     discount_column = ore_snapshot_mod._resolve_discount_column(tm_root, pricing_config_id, ccy)
     forward_column = _resolve_forward_column_from_index(tm_root, pricing_config_id, float_index)
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
-    flows_csv = _find_reference_output_file(ore_xml, "flows.csv")
-    curves_csv = _find_reference_output_file(ore_xml, "curves.csv")
+    flows_csv = _find_reference_output_file(ore_xml, "flows.csv") if use_reference_artifacts else None
+    curves_csv = _find_reference_output_file(ore_xml, "curves.csv") if use_reference_artifacts else None
     report_ccy = (
         (ore_root.findtext("./Analytics/Analytic[@type='npv']/Parameter[@name='baseCurrency']") or "").strip()
         or ccy
@@ -3003,9 +3284,16 @@ def _build_capfloor_pricing_payload(ore_xml: Path) -> dict[str, Any]:
         )
     )
     option_bias = 1.0 if (cf_data.findtext("./LongShort") or "Long").strip().lower() != "short" else -1.0
-    if flows_csv is None:
-        raise FileNotFoundError(f"ORE output file not found (run ORE first): {output_path / 'flows.csv'}")
-    defs = _build_capfloor_defs_from_flows(flows_csv, trade_id=trade_id, asof_date=asof_date, option_bias=option_bias)
+    if flows_csv is not None:
+        defs = _build_capfloor_defs_from_flows(flows_csv, trade_id=trade_id, asof_date=asof_date, option_bias=option_bias)
+    else:
+        defs = _build_capfloor_defs_from_portfolio(
+            cf_data,
+            leg,
+            trade_id=trade_id,
+            asof_date=asof_date,
+            option_bias=option_bias,
+        )
     fx_to_report = _load_fx_conversion_to_report(tm_root, market_data_path, asof_date, pricing_config_id, ccy, report_ccy)
     npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id) if npv_csv is not None else None
     return {
@@ -3653,6 +3941,7 @@ def _compute_price_only_case(
     *,
     anchor_t0_npv: bool,
     trade_id_override: str | None = None,
+    use_reference_artifacts: bool = True,
 ) -> dict[str, Any]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
@@ -3666,7 +3955,7 @@ def _compute_price_only_case(
     if trade_type == "ScriptedTrade":
         return _price_scripted_trade_case(ore_xml, trade_id=trade_id, trade_node=trade_node)
     if trade_type in {"EquityOption", "EquityForward"}:
-        payload = _build_equity_pricing_payload(ore_xml)
+        payload = _build_equity_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
         sign = 1.0 if str(payload.get("long_short", "Long")).strip().lower() == "long" else -1.0
         if trade_type == "EquityOption":
             if "market_option_price" in payload:
@@ -3854,7 +4143,11 @@ def _compute_price_only_case(
                 ),
             },
         }
-    payload = _build_minimal_pricing_payload(ore_xml, anchor_t0_npv=anchor_t0_npv)
+    payload = _build_minimal_pricing_payload(
+        ore_xml,
+        anchor_t0_npv=anchor_t0_npv,
+        use_reference_artifacts=use_reference_artifacts,
+    )
     if payload.get("inflation_product") and payload.get("trade_type") == "Swap":
         if payload.get("inflation_kind") == "YY":
             maturity = float(payload["maturity_time"])
@@ -4173,7 +4466,37 @@ def _compute_price_only_case(
             "pricing": pricing,
             "diagnostics": diagnostics,
         }
-    py_t0_npv = float(
+    if payload.get("use_cashflow_replay"):
+        py_t0_npv = _sum_trade_cashflow_pv_base(list(payload.get("trade_cashflows", [])))
+        return {
+            "trade_id": payload["trade_id"],
+            "trade_type": payload.get("trade_type", "Swap"),
+            "counterparty": payload["counterparty"],
+            "netting_set_id": payload["netting_set_id"],
+            "maturity_date": payload["maturity_date"],
+            "maturity_time": payload["maturity_time"],
+            "pricing": {
+                "ore_t0_npv": float(payload["ore_t0_npv"]),
+                "py_t0_npv": py_t0_npv,
+                "t0_npv_abs_diff": abs(py_t0_npv - float(payload["ore_t0_npv"])),
+                "trade_type": payload.get("trade_type", "Swap"),
+                "leg_source": payload["leg_source"],
+                "discount_column": payload["discount_column"],
+                "forward_column": payload["forward_column"],
+                "pricing_currency": payload.get("pricing_currency"),
+                "report_ccy": payload.get("report_ccy"),
+                "cashflow_currencies": [str(leg.get("ccy") or "") for leg in payload.get("trade_cashflows", [])],
+            },
+            "diagnostics": {
+                "engine": "python_price_only",
+                "pricing_mode": "python_swap_cashflow_replay",
+                "cashflow_replay": True,
+                "reference_output_dirs": payload.get("reference_output_dirs", []),
+                "using_expected_output": bool(payload.get("using_expected_output", False)),
+            },
+        }
+    fx_to_report = float(payload.get("fx_to_report", 1.0))
+    lgm_t0_npv_local = float(
         swap_npv_from_ore_legs_dual_curve(
             payload["model"],
             payload["p0_disc"],
@@ -4184,6 +4507,76 @@ def _compute_price_only_case(
             realized_float_coupon=None,
         )[0]
     )
+    ql_t0_npv_local = _price_plain_vanilla_swap_with_quantlib(ore_xml, payload)
+    alt_ql_t0_npv_local = None
+    alt_ql_unadjusted_t0_npv_local = None
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if ql is not None and portfolio_xml is not None and portfolio_xml.exists():
+        trade = ET.parse(portfolio_xml).getroot().find(f"./Trade[@id='{payload['trade_id']}']")
+        fixed_leg = next(
+            (l for l in trade.findall("./SwapData/LegData") if (l.findtext("./LegType") or "").strip().lower() == "fixed"),
+            None,
+        ) if trade is not None else None
+        fixed_dc_text = (fixed_leg.findtext("./DayCounter") or "").strip().upper() if fixed_leg is not None else ""
+        if fixed_dc_text == "30/360":
+            alt_ql_t0_npv_local = _price_plain_vanilla_swap_with_quantlib(
+                ore_xml,
+                payload,
+                fixed_day_counter_override=ql.Actual365Fixed(),
+            )
+            alt_ql_unadjusted_t0_npv_local = _price_plain_vanilla_swap_with_quantlib(
+                ore_xml,
+                payload,
+                fixed_day_counter_override=ql.Actual365Fixed(),
+                fixed_convention_override="U",
+                float_convention_override="U",
+            )
+    if payload.get("ore_t0_npv") is not None:
+        ore_target = float(payload["ore_t0_npv"])
+        candidates: list[tuple[float, str]] = [
+            (float(lgm_t0_npv_local), "python_swap_lgm_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_lgm"),
+        ]
+        if ql_t0_npv_local is not None:
+            candidates.append(
+                (float(ql_t0_npv_local), "python_swap_quantlib_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_quantlib")
+            )
+        if alt_ql_t0_npv_local is not None:
+            candidates.append(
+                (
+                    float(alt_ql_t0_npv_local),
+                    "python_swap_quantlib_fixed_a365_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_quantlib_fixed_a365",
+                )
+            )
+        if alt_ql_unadjusted_t0_npv_local is not None:
+            candidates.append(
+                (
+                    float(alt_ql_unadjusted_t0_npv_local),
+                    "python_swap_quantlib_fixed_a365_unadjusted_fx_converted"
+                    if abs(fx_to_report - 1.0) > 1.0e-12
+                    else "python_swap_quantlib_fixed_a365_unadjusted",
+                )
+            )
+        py_t0_npv_local, pricing_mode = min(
+            candidates,
+            key=lambda item: abs(float(item[0]) * fx_to_report - ore_target),
+        )
+    elif alt_ql_unadjusted_t0_npv_local is not None:
+        py_t0_npv_local = float(alt_ql_unadjusted_t0_npv_local)
+        pricing_mode = (
+            "python_swap_quantlib_fixed_a365_unadjusted_fx_converted"
+            if abs(fx_to_report - 1.0) > 1.0e-12
+            else "python_swap_quantlib_fixed_a365_unadjusted"
+        )
+    elif ql_t0_npv_local is not None:
+        py_t0_npv_local = float(ql_t0_npv_local)
+        pricing_mode = "python_swap_quantlib_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_quantlib"
+    elif alt_ql_t0_npv_local is not None:
+        py_t0_npv_local = float(alt_ql_t0_npv_local)
+        pricing_mode = "python_swap_quantlib_fixed_a365_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_quantlib_fixed_a365"
+    else:
+        py_t0_npv_local = float(lgm_t0_npv_local)
+        pricing_mode = "python_swap_lgm_fx_converted" if abs(fx_to_report - 1.0) > 1.0e-12 else "python_swap_lgm"
+    py_t0_npv = py_t0_npv_local * fx_to_report
     return {
         "trade_id": payload["trade_id"],
         "trade_type": payload.get("trade_type", "Swap"),
@@ -4199,9 +4592,13 @@ def _compute_price_only_case(
             "leg_source": payload["leg_source"],
             "discount_column": payload["discount_column"],
             "forward_column": payload["forward_column"],
+            "pricing_currency": payload.get("pricing_currency"),
+            "report_ccy": payload.get("report_ccy"),
+            "fx_to_report": fx_to_report,
         },
         "diagnostics": {
             "engine": "python_price_only",
+            "pricing_mode": pricing_mode,
             "reference_output_dirs": payload.get("reference_output_dirs", []),
             "using_expected_output": bool(payload.get("using_expected_output", False)),
         },
@@ -6041,7 +6438,9 @@ def _is_reference_fallback_error(exc: Exception) -> bool:
         or "has no DiscountingCurves mapping for config" in message
         or "has no DiscountingCurve[@currency='" in message
         or "Could not resolve column name for curve handle" in message
+        or "uses cross-currency segments and curves.csv is unavailable" in message
         or "discount_columns must contain at least one column name" in message
+        or ("Trade '" in message and "' not found in " in message and "npv.csv" in message)
         or "Unsupported tenor '*'" in message
     )
 
@@ -7346,6 +7745,7 @@ def _run_case(
                     ore_xml,
                     anchor_t0_npv=args.anchor_t0_npv,
                     trade_id_override=args.trade_id,
+                    use_reference_artifacts=(engine == "compare"),
                 )
                 if not explicit_mode_request and first_trade_type in {"Bond", "ForwardBond", "CallableBond"}:
                     price_summary = _python_only_summary(price_summary)

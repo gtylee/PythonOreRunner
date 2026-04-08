@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
 from pythonore.compute.irs_xva_utils import _schedule_from_leg
@@ -37,7 +38,7 @@ def _run_python(snapshot, run_id: str):
         )
 
 
-def _clone_pricing_only_case(case_name: str, *, trade_ids):
+def _clone_pricing_only_case(case_name: str, *, trade_ids, ore_file: str = "ore.xml"):
     tmp = tempfile.TemporaryDirectory()
     tmp_root = Path(tmp.name)
     case_root = tmp_root / "Examples" / "Legacy" / case_name
@@ -52,14 +53,24 @@ def _clone_pricing_only_case(case_name: str, *, trade_ids):
             root.remove(trade)
     portfolio.write(case_root / "Input" / "portfolio.xml", encoding="utf-8", xml_declaration=True)
 
-    ore_tree = ET.parse(case_root / "Input" / "ore.xml")
+    ore_tree = ET.parse(case_root / "Input" / ore_file)
     ore_root = ore_tree.getroot()
     for analytic in ore_root.findall(".//Analytic"):
         kind = analytic.get("type")
         active = analytic.find("./Parameter[@name='active']")
         if active is not None:
             active.text = "Y" if kind in {"npv", "cashflow", "curves"} else "N"
-    ore_tree.write(case_root / "Input" / "ore.xml", encoding="utf-8", xml_declaration=True)
+    analytics_root = ore_root.find("./Analytics")
+    if analytics_root is not None and not any(node.get("type") == "cashflow" for node in analytics_root.findall("./Analytic")):
+        npv_analytic = next((node for node in analytics_root.findall("./Analytic") if node.get("type") == "npv"), None)
+        if npv_analytic is not None:
+            cashflow_analytic = ET.fromstring(ET.tostring(npv_analytic, encoding="unicode"))
+            cashflow_analytic.set("type", "cashflow")
+            active = cashflow_analytic.find("./Parameter[@name='active']")
+            if active is not None:
+                active.text = "Y"
+            analytics_root.append(cashflow_analytic)
+    ore_tree.write(case_root / "Input" / ore_file, encoding="utf-8", xml_declaration=True)
     return tmp, case_root
 
 
@@ -132,6 +143,219 @@ def test_schedule_reconstruction_applies_payment_lag_to_xccy_leg():
     assert ends[0].isoformat() == "2024-04-02"
     assert pays[0].isoformat() == "2024-04-04"
     assert pays[1].isoformat() == "2024-07-04"
+
+
+def test_generic_rate_swap_parses_xccy_fx_reset_metadata():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    fx_reset = usd_leg["fx_reset"]
+    assert fx_reset is not None
+    assert fx_reset["foreign_currency"] == "EUR"
+    assert fx_reset["foreign_amount"] == 95000000.0
+    assert fx_reset["fx_index"] == "FX-ECB-EUR-USD"
+    assert usd_leg["notional_initial_exchange"] is True
+    assert usd_leg["notional_final_exchange"] is True
+
+
+def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    pytest.xfail("Example_59 Cap_USD_SOFR still uses the local overnight cap/floor shim; exact QuantExt parity is not wired in")
+    tmp, case_root = _clone_pricing_only_case("Example_59", trade_ids=("Cap_USD_SOFR",))
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        with (case_root / "Output" / "npv.csv").open(newline="", encoding="utf-8") as handle:
+            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "Cap_USD_SOFR")
+        ore_npv_base = float(ore_row["NPV(Base)"])
+
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=8,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.use_flows_csv": "Y",
+                    "python.use_ore_output_curves": "Y",
+                },
+            ),
+        )
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            result = adapter.run(snapshot, mapped=map_snapshot(snapshot), run_id="example59-cap-ore-flows-parity")
+
+        assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
+        assert math.isclose(
+            float(result.cubes["npv_cube"].payload["Cap_USD_SOFR"]["npv_mean"][0]),
+            ore_npv_base,
+            rel_tol=1.0e-12,
+            abs_tol=1.0e-9,
+        )
+    finally:
+        tmp.cleanup()
+
+
+def test_example63_xccy_notional_rows_follow_fx_reset_ladder():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    root = ET.parse(TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Input" / "portfolio.xml").getroot()
+    leg = root.find("./Trade[@id='XccySwap']/SwapData/LegData")
+    assert leg is not None
+    _, ends, _ = _schedule_from_leg(leg, pay_convention=(leg.findtext("./PaymentConvention") or "F").strip())
+    flows_csv = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "flows.csv"
+    with flows_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = [row for row in reader if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap" and row["LegNo"] in {"2", "3"}]
+    usd_rows = [row for row in rows if row["LegNo"] == "2"]
+    eur_rows = [row for row in rows if row["LegNo"] == "3"]
+    assert len(usd_rows) == 15
+    assert len(eur_rows) == 1
+
+    boundary_dates = [d.isoformat() for d in ends]
+    assert [usd_rows[i]["PayDate"] for i in range(0, len(usd_rows), 2)] == boundary_dates
+    assert [usd_rows[i]["PayDate"] for i in range(1, len(usd_rows), 2)] == boundary_dates[:-1]
+
+    assert float(usd_rows[0]["Amount"]) == -usd_leg["notional"][0]
+    assert float(eur_rows[0]["Amount"]) == 95000000.0
+    assert eur_rows[0]["PayDate"] == ends[-1].isoformat()
+
+    for row in usd_rows[1:]:
+        fixing_value = row.get("fixingValue", "").strip()
+        if fixing_value and fixing_value not in {"#N/A", "N/A"}:
+            expected = 95000000.0 * float(fixing_value)
+            assert math.isclose(abs(float(row["Amount"])), expected, rel_tol=1.0e-10, abs_tol=5.0e-4)
+
+
+def test_example63_xccy_trade_runs_natively_without_swig():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
+    )
+    result = _run_python(snapshot, "xccy-native-only")
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+    assert math.isfinite(float(result.pv_total))
+
+
+def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={
+                **dict(snapshot.config.params),
+                "python.use_ore_output_curves": "Y",
+                "python.use_flows_csv": "Y",
+            },
+        ),
+    )
+    with (TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "npv.csv").open(
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        ore_rows = csv.DictReader(handle)
+        ore_npv_row = next(row for row in ore_rows if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap")
+    ore_npv_base = float(ore_npv_row["NPV(Base)"])
+
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        result = adapter.run(
+            snapshot,
+            mapped=map_snapshot(snapshot),
+            run_id="xccy-ore-flows-parity",
+        )
+
+    assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
+    assert math.isclose(
+        float(result.cubes["npv_cube"].payload["XccySwap"]["npv_mean"][0]),
+        ore_npv_base,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-9,
+    )
+
+
+def test_example63_cap_trade_matches_ore_npv_when_replaying_flows_csv():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_pricing_only_case("Example_63", trade_ids=("Cap",), ore_file="ore_valid_cap.xml")
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore_valid_cap.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        with (case_root / "Output" / "valid_cap" / "npv.csv").open(newline="", encoding="utf-8") as handle:
+            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "Cap")
+        ore_npv_base = float(ore_row["NPV(Base)"])
+
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore_valid_cap.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=8,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.use_flows_csv": "Y",
+                    "python.use_ore_output_curves": "Y",
+                },
+            ),
+        )
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            result = adapter.run(snapshot, mapped=map_snapshot(snapshot), run_id="example63-cap-ore-flows-parity")
+
+        assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
+        assert math.isclose(
+            float(result.cubes["npv_cube"].payload["Cap"]["npv_mean"][0]),
+            ore_npv_base,
+            rel_tol=1.0e-12,
+            abs_tol=1.0e-9,
+        )
+    finally:
+        tmp.cleanup()
 
 
 def test_runtime_exposure_profiles_include_pfe_and_basel_fields():
@@ -329,7 +553,7 @@ def test_native_runtime_ignores_residual_output_curves_and_calibration_by_defaul
 </LGM></InterestRateModels></Root>"""
         (output_dir / "calibration.xml").write_text(poisoned_calibration, encoding="utf-8")
 
-        snapshot = XVALoader.from_files(str(input_dir), ore_file="ore.xml")
+        snapshot = XVALoader.from_files(str(case_root), ore_file="Input/ore.xml")
         snapshot = replace(
             snapshot,
             config=replace(

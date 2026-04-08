@@ -147,7 +147,8 @@ class XVALoader:
         collateral = _parse_collateral(_resolve_ref("collateralbalances.xml", ore_path, input_path), required=False)
 
         base_currency = (
-            analytics.get("xva", {}).get("baseCurrency")
+            setup.get("baseCurrency")
+            or analytics.get("xva", {}).get("baseCurrency")
             or analytics.get("simulation", {}).get("baseCurrency")
             or analytics.get("npv", {}).get("baseCurrency")
             or "EUR"
@@ -982,7 +983,7 @@ def _load_known_xml_buffers(ore_path: Path, setup: Dict[str, str], analytics: Di
         "pricingengine.xml": setup.get("pricingEnginesFile"),
         "portfolio.xml": setup.get("portfolioFile"),
         "counterparty.xml": setup.get("counterpartyFile"),
-        "simulation.xml": analytics.get("simulation", {}).get("simulationConfigFile"),
+        "simulation.xml": analytics.get("simulation", {}).get("simulationConfigFile") or "simulation.xml",
         "netting.xml": analytics.get("xva", {}).get("csaFile") or setup.get("nettingSetFile") or "netting.xml",
         "collateralbalances.xml": "collateralbalances.xml",
     }

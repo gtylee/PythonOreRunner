@@ -1,0 +1,43 @@
+NOTICE   [2026-Apr-08 20:24:44.943101]    (OREAnalytics/orea/app/parameters.cpp:133) : Parameters:
+NOTICE   [2026-Apr-08 20:24:44.943262]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : active = Y
+NOTICE   [2026-Apr-08 20:24:44.943366]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : outputFileName = flows.csv
+NOTICE   [2026-Apr-08 20:24:44.943466]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : active = Y
+NOTICE   [2026-Apr-08 20:24:44.943563]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : configuration = default
+NOTICE   [2026-Apr-08 20:24:44.943657]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : grid = 240,1M
+NOTICE   [2026-Apr-08 20:24:44.943749]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : outputFileName = curves.csv
+NOTICE   [2026-Apr-08 20:24:44.943853]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : fxcalibration = default
+NOTICE   [2026-Apr-08 20:24:44.943949]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : lgmcalibration = inccy
+NOTICE   [2026-Apr-08 20:24:44.944091]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : pricing = default
+NOTICE   [2026-Apr-08 20:24:44.944197]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : sensitivity = default
+NOTICE   [2026-Apr-08 20:24:44.944303]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : simulation = default
+NOTICE   [2026-Apr-08 20:24:44.944435]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : active = Y
+NOTICE   [2026-Apr-08 20:24:44.944543]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : baseCurrency = EUR
+NOTICE   [2026-Apr-08 20:24:44.944651]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : outputFileName = npv.csv
+NOTICE   [2026-Apr-08 20:24:44.944771]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : asofDate = 2024-03-05
+NOTICE   [2026-Apr-08 20:24:44.944867]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : conventionsFile = conventions.xml
+NOTICE   [2026-Apr-08 20:24:44.944964]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : curveConfigFile = curveconfig.xml
+NOTICE   [2026-Apr-08 20:24:44.945055]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : fixingDataFile = fixings.csv
+NOTICE   [2026-Apr-08 20:24:44.945151]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : implyTodaysFixings = N
+NOTICE   [2026-Apr-08 20:24:44.945248]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : inputPath = Input
+NOTICE   [2026-Apr-08 20:24:44.945352]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logFile = log.txt
+NOTICE   [2026-Apr-08 20:24:44.945442]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logMask = 255
+NOTICE   [2026-Apr-08 20:24:44.945541]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketConfigFile = todaysmarket.xml
+NOTICE   [2026-Apr-08 20:24:44.945654]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketDataFile = marketdata_xccy.csv
+NOTICE   [2026-Apr-08 20:24:44.945762]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : observationModel = None
+NOTICE   [2026-Apr-08 20:24:44.945858]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : outputPath = Output/valid_xccy
+NOTICE   [2026-Apr-08 20:24:44.945955]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : portfolioFile = portfolio.xml
+NOTICE   [2026-Apr-08 20:24:44.946054]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : pricingEnginesFile = pricingengine.xml
+NOTICE   [2026-Apr-08 20:24:44.946154]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : active = N
+NOTICE   [2026-Apr-08 20:24:44.946250]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : marketConfigFile = simulation.xml
+NOTICE   [2026-Apr-08 20:24:44.946340]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : outputThreshold = 0.000001
+NOTICE   [2026-Apr-08 20:24:44.946442]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : pricingEnginesFile = pricingengine.xml
+NOTICE   [2026-Apr-08 20:24:44.946544]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : scenarioOutputFile = stresstest.csv
+NOTICE   [2026-Apr-08 20:24:44.946644]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : sensitivityConfigFile = sensitivity.xml
+NOTICE   [2026-Apr-08 20:24:44.946739]    (OREAnalytics/orea/app/parameters.cpp:136) : group = stress : stressConfigFile = stresstest_xccy_basis.xml
+NOTICE   [2026-Apr-08 20:24:44.946870]        (OREAnalytics/orea/app/oreapp.cpp:660) : load OREAppInputParameters called
+WARNING  [2026-Apr-08 20:24:44.946976]        (OREAnalytics/orea/app/oreapp.cpp:681) : Calendar adjustments not found, using defaults
+WARNING  [2026-Apr-08 20:24:44.947072]        (OREAnalytics/orea/app/oreapp.cpp:691) : Currency configurations not found, using defaults
+NOTICE   [2026-Apr-08 20:24:44.947173]        (OREAnalytics/orea/app/oreapp.cpp:759) : Observation Mode is None
+WARNING  [2026-Apr-08 20:24:44.947278]        (OREAnalytics/orea/app/oreapp.cpp:804) : Reference data not found
+WARNING  [2026-Apr-08 20:24:44.947379]        (OREAnalytics/orea/app/oreapp.cpp:813) : Script library not loaded
+NOTICE   [2026-Apr-08 20:24:44.947484]        (OREAnalytics/orea/app/oreapp.cpp:818) : Loading conventions from file: "Input/conventions.xml"

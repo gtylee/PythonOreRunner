@@ -27,6 +27,7 @@ def test_ore_snapshot_to_dict_exposes_lgm_params():
         model_day_counter="A365F",
         report_day_counter="ActualActual(ISDA)",
         trade_id="T1",
+        trade_type="Swap",
         counterparty="CPTY_A",
         netting_set_id="CPTY_A",
         legs={

@@ -1060,6 +1060,7 @@ def load_ore_legs_from_flows(
     out["float_sign"] = np.full(len(floating), float_leg_sign, dtype=float)
     out["float_coupon"] = np.asarray([float(r["Coupon"]) for r in floating], dtype=float)
     out["float_amount"] = np.asarray([float(r["Amount"]) for r in floating], dtype=float)
+    out["ore_replay"] = True
     # Flow exports typically contain the all-in projected coupon rather than a clean
     # decomposition into index forward + spread.  Start with zero spread and let a
     # later calibration helper infer the spread if the user wants dual-curve parity.
@@ -1080,6 +1081,84 @@ def load_ore_legs_from_flows(
     out["float_index_day_counter"] = idx_dc
 
     return out
+
+
+def load_trade_cashflows_from_flows(
+    flows_csv: str,
+    trade_id: str = "Swap_20",
+    asof_date: Optional[str] = None,
+    time_day_counter: str = "ActualActual(ISDA)",
+) -> Dict[str, object]:
+    """Parse all ORE cashflows for a trade into cashflow legs grouped by currency.
+
+    This is useful for multi-currency swaps where the ORE ``flows.csv`` already
+    contains the exact coupon and notional rows we want to replay in Python.
+    """
+    rows = []
+    with open(flows_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        trade_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        for row in reader:
+            if row.get(trade_key, "") == trade_id:
+                rows.append(row)
+
+    if not rows:
+        raise ValueError(f"no cashflows for trade_id='{trade_id}' found in {flows_csv}")
+
+    if asof_date is None:
+        asof = min(_parse_yyyymmdd(r["PayDate"]) for r in rows if _has_real_value(r.get("PayDate", "")))
+    else:
+        asof = _parse_yyyymmdd(asof_date)
+
+    def to_time(date_str: str) -> float:
+        d = _parse_yyyymmdd(date_str)
+        return _time_from_dates(asof, d, time_day_counter)
+
+    def _has_real_value(value: str) -> bool:
+        txt = (value or "").strip()
+        return bool(txt) and txt.upper() not in {"#N/A", "N/A", "NA"}
+
+    buckets: Dict[str, list[tuple[float, float, float]]] = {}
+    for row in rows:
+        pay_date = (row.get("PayDate") or "").strip()
+        amount_txt = (row.get("Amount") or "").strip()
+        ccy = (row.get("Currency") or "").strip().upper()
+        flow_type = (row.get("FlowType") or "").strip().upper()
+        if not pay_date or not amount_txt or not ccy:
+            continue
+        if flow_type not in {"INTEREST", "INTERESTPROJECTED", "NOTIONAL", "NOTIONALPROJECTED"}:
+            continue
+        try:
+            pay_time = to_time(pay_date)
+            amount = float(amount_txt)
+        except Exception:
+            continue
+        if pay_time < -1.0e-12:
+            continue
+        pv_base_txt = (
+            (row.get("PresentValue(Base)") or "").strip()
+            or (row.get("PresentValue(BaseCurrency)") or "").strip()
+            or (row.get("PresentValue") or "").strip()
+        )
+        try:
+            pv_base = float(pv_base_txt) if pv_base_txt else amount
+        except Exception:
+            pv_base = amount
+        buckets.setdefault(ccy, []).append((pay_time, amount, pv_base))
+
+    cashflow_legs: list[dict[str, object]] = []
+    for ccy, entries in sorted(buckets.items()):
+        entries.sort(key=lambda item: item[0])
+        cashflow_legs.append(
+            {
+                "kind": "CASHFLOW",
+                "ccy": ccy,
+                "pay_time": np.asarray([t for t, _, _ in entries], dtype=float),
+                "amount": np.asarray([a for _, a, _ in entries], dtype=float),
+                "pv_base": np.asarray([pv for _, _, pv in entries], dtype=float),
+            }
+        )
+    return {"ccy": (rows[0].get("BaseCurrency") or "").strip().upper(), "rate_legs": cashflow_legs}
 
 
 def load_swap_legs_from_portfolio_root(
@@ -1487,6 +1566,12 @@ def swap_npv_from_ore_legs_dual_curve(
 
         p_tp_d = interp_from_nodes_batch(pay)
         amount = np.zeros((pay.size, x.size), dtype=float)
+
+        if bool(legs.get("ore_replay", False)) and "float_amount" in legs:
+            replay_amount = np.asarray(legs["float_amount"][live], dtype=float)
+            amount[:] = np.tile(replay_amount[:, None], (1, x.size))
+            pv += np.sum(amount * p_tp_d, axis=0)
+            return pv
 
         # Fixed coupons: fixing already known, only discounting remains.
         if np.any(fixed):

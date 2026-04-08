@@ -1,0 +1,5 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+CDS,CreditDefaultSwap,1,0,0
+Cap,Swap,1,0,0
+EUR6MSwap,Swap,1,0,0
+XccySwap,Swap,1,0,0
