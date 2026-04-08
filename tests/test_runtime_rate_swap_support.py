@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
+from pythonore.compute.irs_xva_utils import _schedule_from_leg
 from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
 from pythonore.runtime.runtime import XVAEngine
@@ -108,6 +109,29 @@ def test_python_runtime_supports_real_cms_spread_case_without_fallback():
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
+
+
+def test_schedule_reconstruction_preserves_stubbed_swap_dates():
+    root = ET.parse(TOOLS_DIR / "Examples" / "Legacy" / "Example_10" / "Input" / "portfolio.xml").getroot()
+    leg = root.find("./Trade[@id='Swap_1']/SwapData/LegData")
+    assert leg is not None
+    starts, ends, pays = _schedule_from_leg(leg, pay_convention=(leg.findtext("./PaymentConvention") or "F").strip())
+    iso_ends = [d.isoformat() for d in ends]
+    idx = iso_ends.index("2016-03-07")
+    assert starts[idx].isoformat() == "2015-09-07"
+    assert ends[idx].isoformat() == "2016-03-07"
+    assert pays[idx].isoformat() == "2016-03-07"
+
+
+def test_schedule_reconstruction_applies_payment_lag_to_xccy_leg():
+    root = ET.parse(TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Input" / "portfolio.xml").getroot()
+    leg = root.find("./Trade[@id='XccySwap']/SwapData/LegData")
+    assert leg is not None
+    starts, ends, pays = _schedule_from_leg(leg, pay_convention=(leg.findtext("./PaymentConvention") or "F").strip())
+    assert starts[0].isoformat() == "2024-01-02"
+    assert ends[0].isoformat() == "2024-04-02"
+    assert pays[0].isoformat() == "2024-04-04"
+    assert pays[1].isoformat() == "2024-07-04"
 
 
 def test_runtime_exposure_profiles_include_pfe_and_basel_fields():

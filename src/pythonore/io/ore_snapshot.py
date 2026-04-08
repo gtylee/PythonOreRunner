@@ -2941,13 +2941,14 @@ def load_from_ore_xml(
 
     # Simulation config file from Analytics section
     sim_analytic = ore_root.find("./Analytics/Analytic[@type='simulation']")
-    if sim_analytic is None:
-        raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
-    sim_params = {
-        n.attrib.get("name", ""): (n.text or "").strip()
-        for n in sim_analytic.findall("./Parameter")
-    }
-    sim_cfg_rel = sim_params.get("simulationConfigFile", "simulation_lgm.xml")
+    sim_params = (
+        {
+            n.attrib.get("name", ""): (n.text or "").strip()
+            for n in sim_analytic.findall("./Parameter")
+        }
+        if sim_analytic is not None else {}
+    )
+    sim_cfg_rel = sim_params.get("simulationConfigFile", "simulation.xml")
     simulation_xml = _resolve_ore_path(sim_cfg_rel, input_dir)
 
     # ------------------------------------------------------------------
@@ -3057,11 +3058,10 @@ def load_from_ore_xml(
     xva_csv = output_path / "xva.csv"
     npv_csv = output_path / "npv.csv"
 
-    for f in (exposure_csv, xva_csv, npv_csv):
-        if not f.exists():
-            raise FileNotFoundError(
-                f"ORE output file not found (run ORE first): {f}"
-            )
+    if not npv_csv.exists():
+        raise FileNotFoundError(
+            f"ORE output file not found (run ORE first): {npv_csv}"
+        )
 
     if curves_csv.exists():
         curve_dates_by_col = _load_ore_discount_pairs_by_columns_with_day_counter(
@@ -3141,27 +3141,44 @@ def load_from_ore_xml(
         )
 
     # Exposure profile
-    exposure = load_ore_exposure_profile(str(exposure_csv))
-    exposure_times = exposure["time"]
-    exposure_dates = exposure["date"]
-    exposure_model_times = np.asarray(
-        [_year_fraction_from_day_counter(asof_date, d, model_day_counter) for d in exposure_dates],
-        dtype=float,
-    )
-    ore_epe = exposure["epe"]
-    ore_ene = exposure["ene"]
+    if exposure_csv.exists():
+        exposure = load_ore_exposure_profile(str(exposure_csv))
+        exposure_times = exposure["time"]
+        exposure_dates = exposure["date"]
+        exposure_model_times = np.asarray(
+            [_year_fraction_from_day_counter(asof_date, d, model_day_counter) for d in exposure_dates],
+            dtype=float,
+        )
+        ore_epe = exposure["epe"]
+        ore_ene = exposure["ene"]
+    else:
+        exposure_times = np.asarray([], dtype=float)
+        exposure_dates = np.asarray([], dtype=str)
+        exposure_model_times = np.asarray([], dtype=float)
+        ore_epe = np.asarray([], dtype=float)
+        ore_ene = np.asarray([], dtype=float)
 
     # ORE XVA: prefer the trade row when xva.csv contains one, otherwise fall
     # back to the aggregate netting-set row.
-    xva_row, _ = _load_ore_xva_reference_row(
-        xva_csv,
-        trade_id=trade_id,
-        netting_set_id=netting_set_id or cpty,
-    )
-    ore_cva = xva_row["cva"]
-    ore_dva = xva_row["dva"]
-    ore_fba = xva_row["fba"]
-    ore_fca = xva_row["fca"]
+    if xva_csv.exists():
+        xva_row, _ = _load_ore_xva_reference_row(
+            xva_csv,
+            trade_id=trade_id,
+            netting_set_id=netting_set_id or cpty,
+        )
+        ore_cva = xva_row["cva"]
+        ore_dva = xva_row["dva"]
+        ore_fba = xva_row["fba"]
+        ore_fca = xva_row["fca"]
+        ore_basel_epe = xva_row["basel_epe"]
+        ore_basel_eepe = xva_row["basel_eepe"]
+    else:
+        ore_cva = 0.0
+        ore_dva = 0.0
+        ore_fba = 0.0
+        ore_fca = 0.0
+        ore_basel_epe = 0.0
+        ore_basel_eepe = 0.0
 
     # ORE t0 NPV
     npv_row = _load_ore_npv_details(npv_csv, trade_id=trade_id)
@@ -3267,8 +3284,8 @@ def load_from_ore_xml(
         ore_cva=ore_cva,
         ore_maturity_date=npv_row["maturity_date"],
         ore_maturity_time=npv_row["maturity_time"],
-        ore_basel_epe=xva_row["basel_epe"],
-        ore_basel_eepe=xva_row["basel_eepe"],
+        ore_basel_epe=ore_basel_epe,
+        ore_basel_eepe=ore_basel_eepe,
         recovery=float(credit["recovery"]),
         hazard_times=credit["hazard_times"],
         hazard_rates=credit["hazard_rates"],
@@ -3287,8 +3304,8 @@ def load_from_ore_xml(
         simulation_xml_path=str(simulation_xml),
         calibration_xml_path=str(calibration_xml) if calibration_xml is not None and calibration_xml.exists() else None,
         curves_csv_path=str(curves_csv) if curves_csv.exists() else None,
-        exposure_csv_path=str(exposure_csv),
-        xva_csv_path=str(xva_csv),
+        exposure_csv_path=str(exposure_csv) if exposure_csv.exists() else None,
+        xva_csv_path=str(xva_csv) if xva_csv.exists() else None,
         npv_csv_path=str(npv_csv),
         flows_csv_path=str(flows_csv) if flows_csv.exists() else None,
     )

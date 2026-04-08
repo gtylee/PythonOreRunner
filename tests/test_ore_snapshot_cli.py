@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
@@ -1662,6 +1663,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                     shutil.copy2(src, output_dir / name)
             ore_xml_path = input_dir / "ore.xml"
             text = ore_xml_path.read_text(encoding="utf-8")
+            text = text.replace(str(REAL_CASE_XML.parent), str(input_dir))
+            text = text.replace(str(REAL_CASE_XML.parents[1] / "Output"), str(output_dir))
             start = text.index('<Analytic type="simulation">')
             end = text.index("</Analytic>", start) + len("</Analytic>")
             ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
@@ -1833,6 +1836,8 @@ class TestOreSnapshotCli(unittest.TestCase):
                     shutil.copy2(src, output_dir / name)
             ore_xml_path = input_dir / "ore.xml"
             text = ore_xml_path.read_text(encoding="utf-8")
+            text = text.replace(str(REAL_CASE_XML.parent), str(input_dir))
+            text = text.replace(str(REAL_CASE_XML.parents[1] / "Output"), str(output_dir))
             start = text.index('<Analytic type="simulation">')
             end = text.index("</Analytic>", start) + len("</Analytic>")
             ore_xml_path.write_text(text[:start] + text[end:], encoding="utf-8")
@@ -1853,6 +1858,50 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertIn("py_t0_npv", payload["pricing"])
             self.assertIn("ore_t0_npv", payload["pricing"])
             self.assertTrue(payload["pass_all"])
+
+    def test_load_from_ore_xml_supports_price_only_case_without_xva_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            case_root = tmp_root / "price_only_case"
+            input_dir = case_root / "Input"
+            output_dir = case_root / "Output"
+            shutil.copytree(REAL_CASE_XML.parent, input_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            real_output = REAL_CASE_XML.parents[1] / "Output"
+            for name in ("curves.csv", "npv.csv", "flows.csv"):
+                src = real_output / name
+                if src.exists():
+                    shutil.copy2(src, output_dir / name)
+            ore_xml_path = input_dir / "ore.xml"
+            root = ET.parse(ore_xml_path).getroot()
+            for node in root.findall("./Setup/Parameter"):
+                name = node.attrib.get("name", "")
+                if name == "inputPath":
+                    node.text = str(input_dir)
+                elif name == "outputPath":
+                    node.text = str(output_dir)
+                elif name == "portfolioFile":
+                    node.text = str(input_dir / "portfolio.xml")
+            analytics = root.find("./Analytics")
+            if analytics is not None:
+                for analytic in list(analytics.findall("./Analytic")):
+                    if analytic.attrib.get("type", "") == "simulation":
+                        analytics.remove(analytic)
+            ET.ElementTree(root).write(ore_xml_path, encoding="utf-8")
+
+            snap = ore_snapshot_io.load_from_ore_xml(ore_xml_path)
+
+            self.assertTrue(np.isfinite(snap.ore_t0_npv))
+            self.assertEqual(snap.ore_cva, 0.0)
+            self.assertEqual(snap.ore_dva, 0.0)
+            self.assertEqual(snap.ore_fba, 0.0)
+            self.assertEqual(snap.ore_fca, 0.0)
+            self.assertEqual(snap.exposure_times.size, 0)
+            self.assertEqual(snap.ore_epe.size, 0)
+            self.assertEqual(snap.ore_ene.size, 0)
+            self.assertTrue(str(snap.simulation_xml_path).endswith("simulation.xml"))
+            self.assertIsNone(snap.exposure_csv_path)
+            self.assertIsNone(snap.xva_csv_path)
 
     def test_has_active_simulation_analytic_accepts_inactive_analytic_with_existing_simulation_file(self):
         with tempfile.TemporaryDirectory() as tmp:

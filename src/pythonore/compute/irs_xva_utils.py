@@ -241,6 +241,20 @@ def _optional_start_date(node: ET.Element) -> date | None:
     return _parse_yyyymmdd(txt)
 
 
+def _optional_date_text(node: ET.Element) -> date | None:
+    txt = (node.text or "").strip()
+    if not txt:
+        return None
+    return _parse_yyyymmdd(txt)
+
+
+def _optional_int_text(text: str | None, default: int = 0) -> int:
+    txt = (text or "").strip()
+    if not txt:
+        return default
+    return int(float(txt))
+
+
 def interpolate_linear_flat(
     x: np.ndarray | Sequence[float] | float,
     xp: np.ndarray | Sequence[float],
@@ -676,22 +690,65 @@ def _build_schedule(
     calendar: str,
     convention: str,
     pay_convention: Optional[str] = None,
+    payment_lag: int = 0,
+    rule: str = "Forward",
+    first_date: date | None = None,
+    last_date: date | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     # Build coupon period boundaries from the same rule ingredients ORE stores in
     # ``ScheduleData/Rules``. ORE advances the unadjusted anchor dates and only then
     # applies business-day adjustment to each boundary independently.
     months = _parse_tenor_to_months(tenor)
-    boundaries = [start]
-    s = start
-    while s < end:
-        s = _add_months(s, months)
-        if s > end:
-            s = end
-        boundaries.append(s)
+    rule_name = (rule or "Forward").strip().upper()
+    boundaries: list[date]
+    if rule_name == "BACKWARD":
+        boundaries = [end]
+        cur = last_date if last_date is not None else end
+        if cur != end:
+            boundaries.append(cur)
+        while cur > start:
+            prev = _add_months(cur, -months)
+            if first_date is not None and prev < first_date:
+                if boundaries[-1] != first_date:
+                    boundaries.append(first_date)
+                cur = first_date
+                continue
+            if prev <= start:
+                if boundaries[-1] != start:
+                    boundaries.append(start)
+                break
+            boundaries.append(prev)
+            cur = prev
+        boundaries = list(reversed(boundaries))
+    else:
+        boundaries = [start]
+        cur = first_date if first_date is not None else start
+        if first_date is not None and first_date > start:
+            boundaries.append(first_date)
+            cur = first_date
+        while cur < end:
+            nxt = _add_months(cur, months)
+            if last_date is not None and last_date > cur and nxt > last_date:
+                boundaries.append(last_date)
+                cur = last_date
+                continue
+            if nxt >= end:
+                if boundaries[-1] != end:
+                    boundaries.append(end)
+                break
+            boundaries.append(nxt)
+            cur = nxt
+    if boundaries[-1] != end:
+        boundaries.append(end)
     adjusted = [_adjust_date(d, convention, calendar) for d in boundaries]
     starts = adjusted[:-1]
     ends = adjusted[1:]
-    pay = [_adjust_date(d, pay_convention or convention, calendar) for d in boundaries[1:]]
+    pay = []
+    for d in boundaries[1:]:
+        pay_date = d
+        if payment_lag:
+            pay_date = _advance_business_days(pay_date, payment_lag, calendar)
+        pay.append(_adjust_date(pay_date, pay_convention or convention, calendar))
     return np.asarray(starts, dtype=object), np.asarray(ends, dtype=object), pay
 
 
@@ -699,6 +756,8 @@ def _schedule_from_leg(
     leg: ET.Element,
     pay_convention: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rules = leg.find("./ScheduleData/Rules")
+    payment_lag = _optional_int_text(leg.findtext("./PaymentLag"), default=0)
     explicit_dates = [
         _parse_yyyymmdd((node.text or "").strip())
         for node in leg.findall("./ScheduleData/Dates//Date")
@@ -707,15 +766,22 @@ def _schedule_from_leg(
     if len(explicit_dates) >= 2:
         starts = explicit_dates[:-1]
         ends = explicit_dates[1:]
+        pay = []
+        calendar = (rules.findtext("./Calendar") if rules is not None else None) or "TARGET"
+        convention = (rules.findtext("./Convention") if rules is not None else None) or pay_convention or "F"
+        for d in ends:
+            pay_date = d
+            if payment_lag:
+                pay_date = _advance_business_days(pay_date, payment_lag, calendar)
+            pay.append(_adjust_date(pay_date, pay_convention or convention, calendar))
         return (
             np.asarray(starts, dtype=object),
             np.asarray(ends, dtype=object),
-            np.asarray(ends, dtype=object),
+            np.asarray(pay, dtype=object),
         )
     if explicit_dates:
         raise ValueError("explicit ScheduleData/Dates requires at least two dates")
 
-    rules = leg.find("./ScheduleData/Rules")
     if rules is None:
         raise ValueError("missing ScheduleData/Rules")
     start = _parse_yyyymmdd((rules.findtext("./StartDate") or "").strip())
@@ -723,7 +789,21 @@ def _schedule_from_leg(
     tenor = (rules.findtext("./Tenor") or "").strip()
     cal = (rules.findtext("./Calendar") or "TARGET").strip()
     convention = (rules.findtext("./Convention") or pay_convention or "F").strip()
-    return _build_schedule(start, end, tenor, cal, convention, pay_convention=pay_convention)
+    first_date = _optional_date_text(rules.find("./FirstDate")) if rules.find("./FirstDate") is not None else None
+    last_date = _optional_date_text(rules.find("./LastDate")) if rules.find("./LastDate") is not None else None
+    rule = (rules.findtext("./Rule") or "Forward").strip()
+    return _build_schedule(
+        start,
+        end,
+        tenor,
+        cal,
+        convention,
+        pay_convention=pay_convention,
+        payment_lag=payment_lag,
+        rule=rule,
+        first_date=first_date,
+        last_date=last_date,
+    )
 
 
 def build_irregular_exposure_grid(maturity: float) -> np.ndarray:
