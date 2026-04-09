@@ -628,9 +628,9 @@ def _advance_business_days(d: date, n: int, calendar: str) -> date:
 
 def _year_fraction(start: date, end: date, day_counter: str) -> float:
     dc = day_counter.upper().replace(" ", "")
-    if dc == "A360":
+    if dc in ("A360", "ACT/360", "ACTUAL/360", "ACTUAL360"):
         return (end - start).days / 360.0
-    if dc == "A365":
+    if dc in ("A365", "A365F", "ACT/365", "ACT/365(FIXED)", "ACTUAL/365", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
         return (end - start).days / 365.0
     if dc in ("ACT/ACT", "ACT/ACT(ISDA)", "AAISDA", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)"):
         return _year_fraction_actual_actual(start, end)

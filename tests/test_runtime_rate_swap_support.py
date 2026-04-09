@@ -310,6 +310,40 @@ def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
     )
 
 
+def test_example76_floor_usd_maturing_matches_ore_trade_npv():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_76"), ore_file="Input/ore_maturing.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "FLOOR_USD_Maturing")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
+    )
+    with (TOOLS_DIR / "Examples" / "Legacy" / "Example_76" / "ExpectedOutput" / "npv.csv").open(
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        ore_rows = csv.DictReader(handle)
+        ore_npv_row = next(row for row in ore_rows if (row.get("TradeId") or row.get("#TradeId")) == "FLOOR_USD_Maturing")
+    ore_npv = float(ore_npv_row["NPV"])
+
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        result = adapter.run(
+            snapshot,
+            mapped=map_snapshot(snapshot),
+            run_id="example76-floor-usd-maturing-ore-trade-npv",
+        )
+
+    assert math.isclose(float(result.pv_total), ore_npv, rel_tol=1.0e-12, abs_tol=1.0e-6)
+
+
 def test_example63_cap_trade_matches_ore_npv_when_replaying_flows_csv():
     if not LOCAL_ORE_BINARY.exists():
         return

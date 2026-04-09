@@ -51,6 +51,7 @@ class CapFloorDef:
     gearing: np.ndarray | None = None
     spread: np.ndarray | None = None
     fixing_time: np.ndarray | None = None
+    fixing_date: np.ndarray | None = None
     position: float = 1.0  # +1 long, -1 short
 
     def __post_init__(self) -> None:
@@ -80,6 +81,10 @@ class CapFloorDef:
             tf = np.asarray(self.fixing_time, dtype=float)
             if tf.shape != t0.shape:
                 raise ValueError("fixing_time must match coupon array shape")
+        if self.fixing_date is not None:
+            fd = np.asarray(self.fixing_date, dtype=object)
+            if fd.shape != t0.shape:
+                raise ValueError("fixing_date must match coupon array shape")
 
 
 @dataclass(frozen=True)
@@ -242,7 +247,9 @@ def capfloor_npv(
     strike = np.asarray(capfloor.strike, dtype=float)
     fixing = _fixing_times(capfloor)
 
-    live = pay > t + 1.0e-12
+    # ORE includes cashflows that pay on the valuation date when today events are
+    # enabled, so keep coupons with pay_time == t in scope.
+    live = pay >= t - 1.0e-12
     if not np.any(live):
         return np.zeros_like(x)
 
@@ -354,6 +361,8 @@ def capfloor_npv_paths(
     times: Iterable[float],
     x_paths: np.ndarray,
     lock_fixings: bool = True,
+    fixings: Mapping[tuple[str, str], float] | None = None,
+    fixing_index: str | None = None,
 ) -> np.ndarray:
     """Pathwise cap/floor NPV profile on a simulation grid.
 
@@ -382,7 +391,7 @@ def capfloor_npv_paths(
 
     out = np.empty_like(x_paths)
     for i, ti in enumerate(t):
-        live = np.asarray(capfloor.pay_time, dtype=float) > ti + 1.0e-12
+        live = np.asarray(capfloor.pay_time, dtype=float) >= ti - 1.0e-12
         rf_live = None
         if lock_fixings and np.any(live):
             idx_live = np.where(live)[0]
@@ -391,6 +400,12 @@ def capfloor_npv_paths(
                 tf = float(fixing[j])
                 if tf > ti + 1.0e-12:
                     continue
+                if fixings is not None and fixing_index is not None and capfloor.fixing_date is not None:
+                    fixing_date = str(np.asarray(capfloor.fixing_date, dtype=object)[j])
+                    fixing_key = (fixing_index.upper(), fixing_date)
+                    if fixing_key in fixings:
+                        rf_live[k_local, :] = float(fixings[fixing_key])
+                        continue
                 if tf <= 1.0e-12:
                     ps = float(p0_fwd(max(0.0, float(start[j]))))
                     pe = float(p0_fwd(float(end[j])))

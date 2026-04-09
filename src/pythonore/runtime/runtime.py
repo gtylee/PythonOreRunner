@@ -423,6 +423,8 @@ class DeterministicToyAdapter:
 class _CurveBundle:
     """Curve artefacts produced by the market-curve building paths."""
     discount_curves: dict[str, Callable[[float], float]]
+    discount_curve_dates: dict[str, tuple[str, ...]]
+    discount_curve_dfs: dict[str, tuple[float, ...]]
     forward_curves: dict[str, Callable[[float], float]]
     forward_curves_by_tenor: dict[str, dict[str, Callable[[float], float]]]
     forward_curves_by_name: dict[str, Callable[[float], float]]
@@ -526,6 +528,8 @@ class _PythonLgmInputs:
     observation_times: np.ndarray  # Subset of times used as XVA observation points (from simulation.xml or fallback).
     observation_closeout_times: np.ndarray  # Sticky closeout times associated with observation_times.
     discount_curves: Dict[str, Callable[[float], float]]   # Risk-free discount curves keyed by ISO currency.
+    discount_curve_dates: Dict[str, Tuple[str, ...]]
+    discount_curve_dfs: Dict[str, Tuple[float, ...]]
     forward_curves: Dict[str, Callable[[float], float]]    # Composite forward/index curves keyed by ISO currency.
     forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]  # Forward curves keyed by (ccy, tenor string).
     forward_curves_by_name: Dict[str, Callable[[float], float]]  # Forward curves keyed by exact index name.
@@ -2168,6 +2172,8 @@ class PythonLgmAdapter:
         curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs)
         if curve_payload is not None:
             discount_curves = curve_payload.discount_curves
+            discount_curve_dates = curve_payload.discount_curve_dates
+            discount_curve_dfs = curve_payload.discount_curve_dfs
             forward_curves = curve_payload.forward_curves
             forward_curves_by_tenor = curve_payload.forward_curves_by_tenor
             forward_curves_by_name = curve_payload.forward_curves_by_name
@@ -2176,6 +2182,8 @@ class PythonLgmAdapter:
             funding_lend_curve = curve_payload.funding_lend_curve
             curve_source = "ore_output_curves"
         else:
+            discount_curve_dates = {}
+            discount_curve_dfs = {}
             for c in list(ccy_set):
                 if c not in zero_curves:
                     input_fallbacks.append(f"missing_zero_curve:{c}")
@@ -2410,6 +2418,8 @@ class PythonLgmAdapter:
             observation_times=observation_times,
             observation_closeout_times=observation_closeout_times,
             discount_curves=discount_curves,
+            discount_curve_dates=discount_curve_dates,
+            discount_curve_dfs=discount_curve_dfs,
             forward_curves=forward_curves,
             forward_curves_by_tenor=forward_curves_by_tenor,
             forward_curves_by_name=forward_curves_by_name,
@@ -2579,8 +2589,13 @@ class PythonLgmAdapter:
             )
 
             discount_curves: Dict[str, Callable[[float], float]] = {}
+            discount_curve_dates: Dict[str, tuple[str, ...]] = {}
+            discount_curve_dfs: Dict[str, tuple[float, ...]] = {}
             for ccy, meta in discount_meta.items():
                 discount_curves[ccy] = self._curve_from_column(curve_data, meta["source_column"])
+                dates, _, dfs = curve_data[meta["source_column"]]
+                discount_curve_dates[ccy] = tuple(str(d) for d in dates)
+                discount_curve_dfs[ccy] = tuple(float(df) for df in dfs)
 
             forward_curves: Dict[str, Callable[[float], float]] = {}
             forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]] = {}
@@ -2613,6 +2628,8 @@ class PythonLgmAdapter:
 
             return _CurveBundle(
                 discount_curves=discount_curves,
+                discount_curve_dates=discount_curve_dates,
+                discount_curve_dfs=discount_curve_dfs,
                 forward_curves=forward_curves,
                 forward_curves_by_tenor=forward_curves_by_tenor,
                 forward_curves_by_name=forward_curves_by_name,
@@ -2717,6 +2734,8 @@ class PythonLgmAdapter:
             }
 
             discount_curves: Dict[str, Callable[[float], float]] = {}
+            discount_curve_dates: Dict[str, tuple[str, ...]] = {}
+            discount_curve_dfs: Dict[str, tuple[float, ...]] = {}
             for ccy in sorted(ccy_set):
                 source_column = str(
                     discount_meta.get(ccy, {}).get("source_column")
@@ -2742,6 +2761,8 @@ class PythonLgmAdapter:
                 ).get(ccy)
                 if not payload:
                     continue
+                discount_curve_dates[ccy] = tuple(str(d) for d in payload["dates"])
+                discount_curve_dfs[ccy] = tuple(float(df) for df in payload["dfs"])
                 discount_curves[ccy] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
                     list(zip(payload["times"], payload["dfs"]))
                 )
@@ -2818,6 +2839,8 @@ class PythonLgmAdapter:
             base_curve = discount_curves.get(snapshot.config.base_currency.upper())
             result = _CurveBundle(
                 discount_curves=discount_curves,
+                discount_curve_dates=discount_curve_dates,
+                discount_curve_dfs=discount_curve_dfs,
                 forward_curves=forward_curves,
                 forward_curves_by_tenor=forward_curves_by_tenor,
                 forward_curves_by_name=forward_curves_by_name,
@@ -3876,6 +3899,13 @@ class PythonLgmAdapter:
         accr = accr[live]
         fixing_t = fixing_t[live]
         notionals = np.asarray(self._irs_utils.expand_leg_notionals(leg, s_dates, e_dates), dtype=float)
+        if notionals.size == live.size:
+            notionals = notionals[live]
+        elif notionals.size != start_t.size:
+            if notionals.size >= live.size:
+                notionals = notionals[live][: start_t.size]
+            else:
+                notionals = np.resize(notionals, start_t.size)
         spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
         gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
         cap_text = (data.findtext("./Caps/Cap") or "").strip()
@@ -3905,6 +3935,7 @@ class PythonLgmAdapter:
             gearing=np.full_like(accr, gearing),
             spread=np.full_like(accr, spread),
             fixing_time=fixing_t,
+            fixing_date=np.asarray([d.isoformat() for d in fixing_dates], dtype=object)[live],
             position=position,
         )
         result = {"definition": definition, "ccy": ccy, "index_name": index_name}
@@ -4481,6 +4512,8 @@ class PythonLgmAdapter:
                 times=ctx.inputs.times,
                 x_paths=ctx.x_paths,
                 lock_fixings=True,
+                fixings=self._fixings_lookup(ctx.snapshot),
+                fixing_index=index_name,
             ), False
         torch_curve_ctor, _, _, torch_device, _, _, torch_capfloor_pricer = ctx.irs_backend
         disc_key = ("capfloor_disc", spec.ccy)
