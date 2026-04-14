@@ -18,7 +18,11 @@ from .curve_trace import (
     trace_discount_curve_from_ore,
     trace_index_curve_from_ore,
 )
-from .interpolation import build_log_linear_discount_interpolator
+from .interpolation import (
+    build_cubic_discount_interpolator,
+    build_log_cubic_discount_interpolator,
+    build_log_linear_discount_interpolator,
+)
 
 
 @dataclass(frozen=True)
@@ -205,12 +209,9 @@ def compare_python_vs_ore(
     curve_config = payload["curve_config"]
     nodes = payload.get("native_curve_nodes", {})
     points = payload["ore_curve_points"]
-    supported = (
-        curve.family == "yield_curve"
-        and curve_config.get("interpolation_variable") == "Discount"
-        and curve_config.get("interpolation_method") == "LogLinear"
-        and len(nodes.get("times", [])) >= 2
-    )
+    interpolation_variable = curve_config.get("interpolation_variable")
+    interpolation_method = curve_config.get("interpolation_method")
+    supported = curve.family == "yield_curve" and interpolation_variable == "Discount" and len(nodes.get("times", [])) >= 2
 
     if not supported:
         return CurveComparison(
@@ -222,13 +223,27 @@ def compare_python_vs_ore(
             max_rel_error=None,
             points=(),
             tolerances={"abs": abs_tolerance, "rel": rel_tolerance},
-            message="Python comparator currently supports only yield curves with Discount/LogLinear interpolation",
+            message="Python comparator currently supports Discount curves with log-linear or cubic interpolation",
         )
 
-    interpolator = build_log_linear_discount_interpolator(
-        list(nodes["times"]),
-        list(nodes["discount_factors"]),
-    )
+    if interpolation_method == "LogLinear":
+        interpolator = build_log_linear_discount_interpolator(list(nodes["times"]), list(nodes["discount_factors"]))
+    elif interpolation_method in {"NaturalCubic", "FinancialCubic", "CubicSpline"}:
+        interpolator = build_cubic_discount_interpolator(list(nodes["times"]), list(nodes["discount_factors"]))
+    elif interpolation_method in {"LogNaturalCubic", "LogFinancialCubic", "LogCubicSpline", "MonotonicLogCubicSpline"}:
+        interpolator = build_log_cubic_discount_interpolator(list(nodes["times"]), list(nodes["discount_factors"]))
+    else:
+        return CurveComparison(
+            curve_handle=curve.curve_handle,
+            curve_id=curve.curve_id,
+            engine=selected_engine,
+            status="not_implemented",
+            max_abs_error=None,
+            max_rel_error=None,
+            points=(),
+            tolerances={"abs": abs_tolerance, "rel": rel_tolerance},
+            message=f"Python comparator does not yet support interpolation method '{interpolation_method}'",
+        )
     comparison_points = []
     max_abs_error = 0.0
     max_rel_error = 0.0

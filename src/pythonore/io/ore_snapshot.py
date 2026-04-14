@@ -2754,6 +2754,8 @@ def _forward_family_tokens(index_name: str) -> set[str]:
     text = str(index_name or "").strip().upper()
     if text.endswith(("0D", "1D", "ON", "O/N")) or "EONIA" in text or "ESTR" in text or "ESTER" in text or "SOFR" in text:
         return {"1D"}
+    if "BMA" in text or "SIFMA" in text:
+        return {"BMA", "SIFMA"}
     if text.endswith("1M"):
         return {"1M"}
     if text.endswith("3M"):
@@ -3656,6 +3658,14 @@ def _normalize_day_counter_name(day_counter: str) -> str:
         "ACTUALACTUAL(ISDA)": "ActualActual(ISDA)",
         "ACT/ACT(ISDA)": "ActualActual(ISDA)",
         "ACTUALACTUALISDA": "ActualActual(ISDA)",
+        "ACT/ACT": "ActualActual(ISDA)",
+        "ACTUAL/ACTUAL": "ActualActual(ISDA)",
+        "ACTUALACTUAL": "ActualActual(ISDA)",
+        "ACT": "ActualActual(ISDA)",
+        "30E/360": "30E/360",
+        "30E/360E": "30E/360E",
+        "30E/360.ISDA": "30E/360.ISDA",
+        "30E/360.ICMA": "30E/360",
     }
     return aliases.get(dc, day_counter)
 
@@ -3672,6 +3682,10 @@ def _year_fraction_from_day_counter(
         return (end_date - start_date).days / 365.0
     if dc == "ActualActual(ISDA)":
         return _year_fraction_actual_actual_isda(start_date, end_date)
+    if dc in {"30E/360", "30E/360E", "30E/360.ISDA"}:
+        d1 = min(start_date.day, 30)
+        d2 = min(end_date.day, 30) if d1 == 30 else end_date.day
+        return ((end_date.year - start_date.year) * 360 + (end_date.month - start_date.month) * 30 + (d2 - d1)) / 360.0
     raise ValueError(f"Unsupported day counter '{day_counter}'")
 
 

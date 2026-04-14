@@ -590,7 +590,7 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
             )
         if generic_rate_leg is not None:
             return GenericProduct(payload={"trade_type": trade_type, "subtype": "GenericRateSwap", "xml": _product_inner_xml(trade)})
-        if fixed_leg is not None:
+        if fixed_leg is not None and float_leg is not None:
             ccy = _text(fixed_leg, "./Currency") or "EUR"
             notional = float(_text(fixed_leg, "./Notionals/Notional") or 0.0)
             fixed_rate = float(_text(fixed_leg, "./FixedLegData/Rates/Rate") or 0.0)
@@ -632,6 +632,8 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
                     fixing_days=int(_text(float_leg, "./FloatingLegData/FixingDays") or 2),
                     float_spread=float(_text(float_leg, "./FloatingLegData/Spreads/Spread") or 0.0),
                 )
+        if fixed_leg is not None or float_leg is not None:
+            return GenericProduct(payload={"trade_type": trade_type, "subtype": "SingleLegSwap", "xml": _product_inner_xml(trade)})
 
     if trade_type == "FxForward":
         bought_ccy = _text(trade, ".//FxForwardData/BoughtCurrency") or "EUR"

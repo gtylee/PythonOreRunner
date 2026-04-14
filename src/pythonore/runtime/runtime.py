@@ -784,6 +784,8 @@ class PythonLgmAdapter:
             "index_name_2",
             "fixing_days",
             "is_in_arrears",
+            "is_averaged",
+            "has_sub_periods",
             "day_counter",
             "call_strike",
             "call_payoff",
@@ -806,6 +808,10 @@ class PythonLgmAdapter:
             "pay_time",
             "start_time",
             "end_time",
+            "pay_date",
+            "start_date",
+            "end_date",
+            "fixing_date",
             "fixing_time",
             "amount",
             "spread",
@@ -1272,7 +1278,7 @@ class PythonLgmAdapter:
                 pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
 
             if xva_deflated:
-                if spec.kind == "IRS" and irs_backend is not None:
+                if spec.kind == "IRS" and irs_backend is not None and not bool((spec.legs or {}).get("float_is_averaged", False)):
                     _, _, torch_deflator, _, _, _, _ = irs_backend
                     curve_key = (
                         spec.ccy,
@@ -2128,6 +2134,8 @@ class PythonLgmAdapter:
         zero_curves = overlay["zero"]
         named_zero_curves = overlay.get("named_zero", {})
         fwd_curves_raw = overlay.get("fwd", {})
+        fwd_curves_by_index = overlay.get("fwd_by_index", {})
+        bma_ratio_curves = overlay.get("bma_ratio", {})
         hazards = overlay["hazard"]
         recoveries = overlay["recovery"]
 
@@ -2157,6 +2165,11 @@ class PythonLgmAdapter:
                         tenor = swap_index_forward_tenors.get(index_name, "")
                         if tenor:
                             needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+        market_cache_key = id(snapshot.market.raw_quotes)
+        quote_dicts = self._quote_dict_cache.get(market_cache_key)
+        if quote_dicts is None:
+            quote_dicts = tuple({"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes)
+            self._quote_dict_cache[market_cache_key] = quote_dicts
         input_fallbacks: List[str] = []
         strict_ore_inputs = self._is_ore_case_snapshot(snapshot)
 
@@ -2257,6 +2270,7 @@ class PythonLgmAdapter:
                     discount_curves[ccy] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(sorted_pts)
                     fwd_pts = []
                     buckets: Mapping[str, List[Tuple[float, float]]] = fwd_curves_raw.get(ccy, {})
+                    index_buckets: Mapping[str, List[Tuple[float, float]]] = fwd_curves_by_index.get(ccy, {})
                     tenor_curves: Dict[str, Callable[[float], float]] = {}
                     for tenor_key, bucket_pts in buckets.items():
                         tenor_by_t: Dict[float, List[float]] = {}
@@ -2288,11 +2302,50 @@ class PythonLgmAdapter:
                     else:
                         forward_curves[ccy] = discount_curves[ccy]
                     forward_curves_by_tenor[ccy] = tenor_curves
+                    for index_name, bucket_pts in index_buckets.items():
+                        by_time: Dict[float, List[float]] = {}
+                        for t, r in bucket_pts:
+                            by_time.setdefault(float(t), []).append(float(r))
+                        if by_time:
+                            pts_index = sorted(
+                                ((t, min(vals, key=lambda x: abs(x))) for t, vals in by_time.items()),
+                                key=lambda x: x[0],
+                            )
+                            if len(pts_index) == 1:
+                                pts_index = [
+                                    (0.0, pts_index[0][1]),
+                                    (max(float(snapshot.config.horizon_years), 1.0), pts_index[0][1]),
+                                ]
+                            forward_curves_by_name[index_name.upper()] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(
+                                pts_index
+                            )
                 for index_name, tenor in swap_index_forward_tenors.items():
                     index_ccy = index_name.split("-", 1)[0].upper()
                     curve = forward_curves_by_tenor.get(index_ccy, {}).get(str(tenor).upper())
                     if curve is not None:
                         forward_curves_by_name.setdefault(index_name.upper(), curve)
+                for ccy, names in needed_forward_names.items():
+                    for index_name in sorted(names):
+                        family = _forward_index_family(index_name, swap_index_forward_tenors)
+                        if not family:
+                            continue
+                        index_quotes = [
+                            q
+                            for q in quote_dicts
+                            if _quote_matches_forward_curve(str(q["key"]), ccy, family, index_name=index_name)
+                        ]
+                        if not index_quotes:
+                            continue
+                        payload = self._ore_snapshot_mod.fit_discount_curves_from_programmatic_quotes(
+                            snapshot.config.asof,
+                            index_quotes,
+                            fit_method="bootstrap_mm_irs_v1",
+                        ).get(ccy)
+                        if not payload:
+                            continue
+                        forward_curves_by_name[index_name.upper()] = self._ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                            list(zip(payload["times"], payload["dfs"]))
+                        )
                 for ccy, names in needed_forward_names.items():
                     for index_name in sorted(names):
                         payload = named_zero_curves.get(index_name)
@@ -2301,6 +2354,54 @@ class PythonLgmAdapter:
                         forward_curves_by_name[index_name] = self._irs_utils.build_discount_curve_from_zero_rate_pairs(
                             sorted(payload, key=lambda x: x[0])
                         )
+                for ccy, pts in bma_ratio_curves.items():
+                    if not pts:
+                        continue
+                    by_time: Dict[float, List[float]] = {}
+                    for t, r in pts:
+                        by_time.setdefault(float(t), []).append(float(r))
+                    ratio_pts = sorted(
+                        ((t, min(vals, key=lambda x: abs(x))) for t, vals in by_time.items()),
+                        key=lambda x: x[0],
+                    )
+                    if len(ratio_pts) == 1:
+                        ratio_pts = [
+                            (0.0, ratio_pts[0][1]),
+                            (max(float(snapshot.config.horizon_years), 1.0), ratio_pts[0][1]),
+                        ]
+                    ratio_times = np.asarray([float(t) for t, _ in ratio_pts], dtype=float)
+                    ratio_vals = np.asarray([float(v) for _, v in ratio_pts], dtype=float)
+                    libor_curve = (
+                        forward_curves_by_name.get(f"{ccy.upper()}-LIBOR-3M")
+                        or forward_curves_by_tenor.get(ccy.upper(), {}).get("3M")
+                        or forward_curves.get(ccy.upper(), discount_curves.get(ccy.upper()))
+                    )
+                    if libor_curve is None:
+                        continue
+
+                    def _make_bma_curve(
+                        base_curve: Callable[[float], float],
+                        times: np.ndarray,
+                        ratios: np.ndarray,
+                    ) -> Callable[[float], float]:
+                        scalar_cache: Dict[float, float] = {}
+
+                        def curve(t: float) -> float:
+                            tt = float(t)
+                            cached = scalar_cache.get(tt)
+                            if cached is not None:
+                                return cached
+                            rr = float(self._irs_utils.interpolate_linear_flat(tt, times, ratios))
+                            rr = float(np.clip(rr, 0.01, 10.0))
+                            out = float(max(float(base_curve(tt)) ** rr, 1.0e-12))
+                            scalar_cache[tt] = out
+                            return out
+
+                        return curve
+
+                    bma_curve = _make_bma_curve(libor_curve, ratio_times, ratio_vals)
+                    forward_curves_by_name.setdefault(f"{ccy.upper()}-SIFMA", bma_curve)
+                    forward_curves_by_name.setdefault(f"{ccy.upper()}-BMA", bma_curve)
                 curve_source = "market_overlay"
 
         runtime = snapshot.config.runtime
@@ -3413,6 +3514,8 @@ class PythonLgmAdapter:
         legs["float_local_cap_floor"] = (fld.findtext("./LocalCapFloor") or "false").strip().lower() == "true"
         legs["float_apply_observation_shift"] = (fld.findtext("./ApplyObservationShift") or "false").strip().lower() == "true"
         legs["float_is_in_arrears"] = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
+        legs["float_is_averaged"] = (fld.findtext("./IsAveraged") or "false").strip().lower() == "true"
+        legs["float_has_sub_periods"] = (fld.findtext("./HasSubPeriods") or "false").strip().lower() == "true"
         legs["float_fixing_days"] = int((fld.findtext("./FixingDays") or "2").strip() or 2)
         spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
         gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
@@ -3648,6 +3751,8 @@ class PythonLgmAdapter:
                 rate_cutoff_txt = (fld.findtext("./RateCutoff") or "").strip()
                 naked_option = (fld.findtext("./NakedOption") or "false").strip().lower() == "true"
                 local_cap_floor = (fld.findtext("./LocalCapFloor") or "false").strip().lower() == "true"
+                is_averaged = (fld.findtext("./IsAveraged") or "false").strip().lower() == "true"
+                has_sub_periods = (fld.findtext("./HasSubPeriods") or "false").strip().lower() == "true"
                 index_dc = infer_index_day_counter(index_name, fallback=dc)
                 fix_base_dates = e_dates if in_arrears else s_dates
                 fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
@@ -3670,6 +3775,8 @@ class PythonLgmAdapter:
                 leg_info["cap"] = float(cap_txt) if cap_txt else None
                 leg_info["floor"] = float(floor_txt) if floor_txt else None
                 leg_info["overnight_indexed"] = overnight_indexed
+                leg_info["is_averaged"] = is_averaged
+                leg_info["has_sub_periods"] = has_sub_periods
                 leg_info["lookback_days"] = lookback_days
                 leg_info["rate_cutoff"] = rate_cutoff
                 leg_info["apply_observation_shift"] = (fld.findtext("./ApplyObservationShift") or "false").strip().lower() == "true"
@@ -3678,6 +3785,10 @@ class PythonLgmAdapter:
                 leg_info["is_in_arrears"] = in_arrears
                 leg_info["fixing_days"] = fixing_days
                 leg_info["fixing_time"] = np.asarray([time_from_dates(asof, fd, "A365F") for fd in fix_dates], dtype=float)
+                leg_info["start_date"] = np.asarray([d.isoformat() for d in s_dates], dtype=object)
+                leg_info["end_date"] = np.asarray([d.isoformat() for d in e_dates], dtype=object)
+                leg_info["pay_date"] = np.asarray([d.isoformat() for d in p_dates], dtype=object)
+                leg_info["fixing_date"] = np.asarray([d.isoformat() for d in fix_dates], dtype=object)
                 leg_info["index_accrual"] = np.asarray([year_fraction(sd, ed, index_dc) for sd, ed in zip(s_dates, e_dates)], dtype=float)
                 leg_info["quoted_coupon"] = np.zeros_like(accr)
             elif leg_type_upper == "CMS":
@@ -4005,9 +4116,9 @@ class PythonLgmAdapter:
             or trade_root.findtext("./SwaptionData/LegData/Currency")
             or snapshot.config.base_currency
         ).strip().upper()
-        pay_fixed = (fixed_leg.findtext("./Payer") or "true").strip().lower() == "true" if fixed_leg is not None else True
         long_short = (trade_root.findtext("./SwaptionData/OptionData/LongShort") or "Long").strip().lower()
-        exercise_sign = 1.0 if pay_fixed else -1.0
+        option_type = (trade_root.findtext("./SwaptionData/OptionData/OptionType") or "Call").strip().lower()
+        exercise_sign = 1.0 if option_type == "call" else -1.0
         if long_short == "short":
             exercise_sign *= -1.0
         bermudan = self._ir_options_mod.BermudanSwaptionDef(
@@ -4068,7 +4179,8 @@ class PythonLgmAdapter:
             [float(self._irs_utils._time_from_dates(asof_date, dt, "A365F")) for dt in live_exercise_dates],
             dtype=float,
         )
-        exercise_sign = 1.0 if bool(product.pay_fixed) else -1.0
+        option_type = str(getattr(product, "option_type", "Call")).strip().lower()
+        exercise_sign = 1.0 if option_type == "call" else -1.0
         if str(product.long_short).strip().lower() == "short":
             exercise_sign *= -1.0
         definition = self._ir_options_mod.BermudanSwaptionDef(
@@ -4233,9 +4345,89 @@ class PythonLgmAdapter:
             sim_times=inputs.times,
             x_paths_on_sim_grid=x_paths,
         )
+        use_exact_overnight = bool(legs.get("float_overnight_indexed", False)) and bool(legs.get("float_is_averaged", False))
+        if use_exact_overnight:
+            overnight_leg = {
+                "kind": "FLOATING",
+                "ccy": spec.ccy,
+                "notional": np.asarray(legs.get("float_notional", []), dtype=float),
+                "sign": np.asarray(legs.get("float_sign", []), dtype=float),
+                "start_time": np.asarray(legs.get("float_start_time", []), dtype=float),
+                "end_time": np.asarray(legs.get("float_end_time", []), dtype=float),
+                "pay_time": np.asarray(legs.get("float_pay_time", []), dtype=float),
+                "accrual": np.asarray(legs.get("float_accrual", []), dtype=float),
+                "schedule_tenor": "",
+                "calendar": "",
+                "day_counter": "A365",
+                "index_name": str(legs.get("float_index", "")),
+                "spread": np.asarray(legs.get("float_spread", []), dtype=float),
+                "gearing": np.asarray(legs.get("float_gearing", np.ones_like(np.asarray(legs.get("float_accrual", []), dtype=float))), dtype=float),
+                "cap": legs.get("float_cap"),
+                "floor": legs.get("float_floor"),
+                "overnight_indexed": True,
+                "is_averaged": True,
+                "has_sub_periods": bool(legs.get("float_has_sub_periods", False)),
+                "lookback_days": int(legs.get("float_lookback_days", 0) or 0),
+                "rate_cutoff": int(legs.get("float_rate_cutoff", 0) or 0),
+                "apply_observation_shift": bool(legs.get("float_apply_observation_shift", False)),
+                "local_cap_floor": bool(legs.get("float_local_cap_floor", False)),
+                "naked_option": bool(legs.get("float_naked_option", False)),
+                "is_in_arrears": bool(legs.get("float_is_in_arrears", False)),
+                "fixing_days": int(legs.get("float_fixing_days", 2) or 2),
+                "fixing_time": np.asarray(legs.get("float_fixing_time", []), dtype=float),
+                "index_accrual": np.asarray(legs.get("float_index_accrual", legs.get("float_accrual", [])), dtype=float),
+                "quoted_coupon": np.asarray(legs.get("float_coupon", []), dtype=float),
+            }
+            vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+            for i, t in enumerate(inputs.times):
+                pv = np.zeros((ctx.n_paths,), dtype=float)
+                p_t_d = float(p_disc(float(t)))
+                pay = np.asarray(legs.get("float_pay_time", []), dtype=float)
+                if pay.size > 0:
+                    live = (pay >= 0.0) & (pay > float(t) + 1.0e-12)
+                    if np.any(live):
+                        x_t = x_paths[i, :]
+                        disc = model.discount_bond_paths(
+                            float(t),
+                            pay[live],
+                            x_t,
+                            p_t_d,
+                            np.asarray(self._irs_utils.curve_values(p_disc, pay[live]), dtype=float),
+                        )
+                        coupons = self._rate_leg_coupon_paths(
+                            model,
+                            overnight_leg,
+                            spec.ccy,
+                            inputs,
+                            float(t),
+                            x_t,
+                            snapshot=ctx.snapshot,
+                        )[live, :]
+                        notionals = np.asarray(legs.get("float_notional", []), dtype=float)[live]
+                        accr = np.asarray(legs.get("float_accrual", []), dtype=float)[live]
+                        sign = np.asarray(legs.get("float_sign", []), dtype=float)[live]
+                        amount = sign[:, None] * notionals[:, None] * accr[:, None] * coupons
+                        pv += np.sum(amount * disc, axis=0)
+                fixed_pay = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+                if fixed_pay.size > 0:
+                    live_fixed = (fixed_pay >= 0.0) & (fixed_pay > float(t) + 1.0e-12)
+                    if np.any(live_fixed):
+                        x_t = x_paths[i, :]
+                        disc = model.discount_bond_paths(
+                            float(t),
+                            fixed_pay[live_fixed],
+                            x_t,
+                            p_t_d,
+                            np.asarray(self._irs_utils.curve_values(p_disc, fixed_pay[live_fixed]), dtype=float),
+                        )
+                        amount = np.asarray(legs.get("fixed_amount", []), dtype=float)[live_fixed]
+                        pv += np.sum(amount[:, None] * disc, axis=0)
+                vals[i, :] = pv
+            return vals, True
         if ctx.irs_backend is None or bool(legs.get("float_overnight_indexed", False)):
             vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
             for i, t in enumerate(inputs.times):
+                overnight_leg = None
                 if float(t) <= 1.0e-12 and bool(legs.get("float_overnight_indexed", False)):
                     overnight_leg = {
                         "kind": "FLOATING",
@@ -4255,6 +4447,8 @@ class PythonLgmAdapter:
                         "cap": legs.get("float_cap"),
                         "floor": legs.get("float_floor"),
                         "overnight_indexed": True,
+                        "is_averaged": bool(legs.get("float_is_averaged", False)),
+                        "has_sub_periods": bool(legs.get("float_has_sub_periods", False)),
                         "lookback_days": int(legs.get("float_lookback_days", 0) or 0),
                         "rate_cutoff": int(legs.get("float_rate_cutoff", 0) or 0),
                         "apply_observation_shift": bool(legs.get("float_apply_observation_shift", False)),
@@ -4266,17 +4460,35 @@ class PythonLgmAdapter:
                         "index_accrual": np.asarray(legs.get("float_index_accrual", legs.get("float_accrual", [])), dtype=float),
                         "quoted_coupon": np.asarray(legs.get("float_coupon", []), dtype=float),
                     }
-                    overnight_coupon = self._rate_leg_coupon_paths(
-                        model,
-                        overnight_leg,
-                        spec.ccy,
-                        inputs,
-                        float(t),
-                        x_paths[0, :],
-                        snapshot=ctx.snapshot,
-                    )
+                    overnight_coupon_paths = None
+                    if use_exact_overnight:
+                        overnight_coupon_paths = self._rate_leg_coupon_paths(
+                            model,
+                            overnight_leg,
+                            spec.ccy,
+                            inputs,
+                            float(t),
+                            x_paths[i, :],
+                            snapshot=ctx.snapshot,
+                        )
                     overnight_legs = dict(legs)
-                    overnight_legs["float_fixing_time"] = np.zeros_like(np.asarray(legs.get("float_fixing_time", []), dtype=float))
+                    if use_exact_overnight and overnight_coupon_paths is not None:
+                        overnight_legs["float_fixing_time"] = np.asarray(legs.get("float_fixing_time", []), dtype=float)
+                        realized_overnight_coupon = np.asarray(overnight_coupon_paths, dtype=float)
+                    else:
+                        overnight_legs["float_fixing_time"] = np.zeros_like(np.asarray(legs.get("float_fixing_time", []), dtype=float))
+                        realized_overnight_coupon = np.asarray(
+                            self._rate_leg_coupon_paths(
+                                model,
+                                overnight_leg,
+                                spec.ccy,
+                                inputs,
+                                float(t),
+                                x_paths[0, :],
+                                snapshot=ctx.snapshot,
+                            ),
+                            dtype=float,
+                        )
                     vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
                         model,
                         p_disc,
@@ -4284,7 +4496,8 @@ class PythonLgmAdapter:
                         overnight_legs,
                         float(t),
                         x_paths[i, :],
-                        realized_float_coupon=np.asarray(overnight_coupon[:, 0], dtype=float),
+                        realized_float_coupon=realized_overnight_coupon,
+                        live_float_coupon=realized_overnight_coupon if use_exact_overnight else None,
                     )
                     continue
                 vals[i, :] = self._irs_utils.swap_npv_from_ore_legs_dual_curve(
@@ -4295,6 +4508,7 @@ class PythonLgmAdapter:
                     float(t),
                     x_paths[i, :],
                     realized_float_coupon=realized_coupon,
+                    live_float_coupon=realized_coupon if use_exact_overnight else None,
                 )
             return vals, True
         torch_curve_ctor, torch_pricer, _, torch_device, _, _, _ = ctx.irs_backend
@@ -4340,13 +4554,14 @@ class PythonLgmAdapter:
         vals = torch_pricer(
             model,
             curve_state["disc_curve"],
-            curve_state["fwd_curve"],
-            legs,
-            np.asarray(inputs.times, dtype=float),
-            x_paths,
-            realized_float_coupon=realized_coupon,
-            return_numpy=True,
-        )
+                curve_state["fwd_curve"],
+                legs,
+                np.asarray(inputs.times, dtype=float),
+                x_paths,
+                realized_float_coupon=realized_coupon,
+                live_float_coupon=realized_coupon if use_exact_overnight else None,
+                return_numpy=True,
+            )
         return vals, True
 
     def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
@@ -5297,9 +5512,23 @@ class PythonLgmAdapter:
         coupons = np.zeros((start.size, x_arr.size), dtype=float)
 
         if bool(leg.get("overnight_indexed", False)) and snapshot is not None:
-            from pythonore.compute.overnight_capfloor_shim import price_overnight_capfloor_coupon_paths
+            from pythonore.compute.overnight_capfloor_shim import price_average_overnight_coupon_paths, price_overnight_capfloor_coupon_paths
 
-            coupons = price_overnight_capfloor_coupon_paths(self, inputs=inputs, leg=leg, ccy=ccy, t=t, x_t=x_arr, snapshot=snapshot)
+            if bool(leg.get("is_averaged", False)):
+                coupons = price_average_overnight_coupon_paths(
+                    self,
+                    model=model,
+                    inputs=inputs,
+                    leg=leg,
+                    ccy=ccy,
+                    t=t,
+                    x_t=x_arr,
+                    snapshot=snapshot,
+                )
+            else:
+                coupons = price_overnight_capfloor_coupon_paths(
+                    self, inputs=inputs, leg=leg, ccy=ccy, t=t, x_t=x_arr, snapshot=snapshot
+                )
             self._coupon_path_cache[cache_key] = coupons
             return coupons
         for i in range(start.size):
@@ -6791,6 +7020,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
     zero: Dict[str, List[Tuple[float, float]]] = {}
     named_zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
+    fwd_by_index: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
+    bma_ratio: Dict[str, List[Tuple[float, float]]] = {}
     fx: Dict[str, float] = {}
     fx_vol: Dict[str, List[Tuple[float, float]]] = {}
     swaption_normal_vols: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
@@ -6871,7 +7102,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             continue
         if len(parts) >= 6 and parts[0] == "IR_SWAP" and parts[1] == "RATE":
             ccy = parts[2]
-            idx_tenor = parts[4].upper()
+            idx_name = parts[4].upper()
+            idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
                 t = _parse_tenor_to_years(tenor)
@@ -6881,11 +7113,23 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                 if idx_tenor in ("1D", "ON", "O/N"):
                     zero.setdefault(ccy, []).append((t, val))
                 else:
+                    fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
+            continue
+        if len(parts) >= 5 and parts[0] == "BMA_SWAP" and parts[1] == "RATIO":
+            ccy = parts[2]
+            tenor = parts[-1]
+            try:
+                t = _parse_tenor_to_years(tenor)
+            except Exception:
+                continue
+            if 0.0 < t <= 80.0:
+                bma_ratio.setdefault(ccy, []).append((t, val))
             continue
         if len(parts) >= 5 and parts[0] == "MM" and parts[1] == "RATE":
             ccy = parts[2]
-            idx_tenor = parts[4].upper()
+            idx_name = parts[4].upper()
+            idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
                 t = _parse_tenor_to_years(tenor)
@@ -6895,6 +7139,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                 if idx_tenor in ("1D", "ON", "O/N"):
                     zero.setdefault(ccy, []).append((t, val))
                 else:
+                    fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
             continue
         if len(parts) >= 6 and parts[0] == "HAZARD_RATE":
@@ -6929,6 +7174,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         "zero": zero,
         "named_zero": named_zero,
         "fwd": fwd,
+        "fwd_by_index": fwd_by_index,
+        "bma_ratio": bma_ratio,
         "fx": fx,
         "fx_vol": fx_vol,
         "swaption_normal_vols": swaption_normal_vols,

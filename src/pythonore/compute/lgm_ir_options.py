@@ -195,6 +195,7 @@ def forward_rate_from_bonds(
     start: np.ndarray,
     end: np.ndarray,
     accrual: np.ndarray,
+    fixing_time: float | None = None,
 ) -> np.ndarray:
     """Pathwise simple forward rates for a coupon set at valuation time t.
 
@@ -208,6 +209,8 @@ def forward_rate_from_bonds(
     tau = _to_1d(accrual, "accrual")
     if not (s.size == e.size == tau.size):
         raise ValueError("start/end/accrual size mismatch")
+    if fixing_time is not None:
+        s = np.maximum(s, float(fixing_time))
     p_t = float(p0_disc(t))
     p_ts_d = model.discount_bond_paths(t, s, x, p_t, lambda u: float(p0_disc(float(u))))
     p_te_d = model.discount_bond_paths(t, e, x, p_t, lambda u: float(p0_disc(float(u))))
@@ -430,6 +433,7 @@ def capfloor_npv_paths(
                     np.array([float(start[j])], dtype=float),
                     np.array([float(end[j])], dtype=float),
                     np.array([float(tau[j])], dtype=float),
+                    fixing_time=tf,
                 )[0, :]
                 rf_live[k_local, :] = fwd
         out[i, :] = capfloor_npv(model, p0_disc, p0_fwd, capfloor, float(ti), x_paths[i, :], realized_forward=rf_live)

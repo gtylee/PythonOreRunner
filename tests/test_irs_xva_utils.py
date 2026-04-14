@@ -8,6 +8,7 @@ import numpy as np
 from pythonore.compute.irs_xva_utils import _discount_bond_block
 from pythonore.compute.irs_xva_utils import expand_leg_notionals
 from pythonore.compute.irs_xva_utils import interpolate_linear_flat
+from ore_curve_fit_parity.interpolation import build_cubic_discount_interpolator, build_log_linear_discount_interpolator
 from py_ore_tools.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
     calibrate_float_spreads_from_coupon,
@@ -217,6 +218,42 @@ class TestIrsXvaUtils(unittest.TestCase):
 
         self.assertAlmostEqual(p0(0.5), float(np.exp(-0.01)), places=12)
         self.assertAlmostEqual(p0(2.5), float(np.exp(-0.05)), places=12)
+
+    def test_log_linear_discount_helpers_match_ore_tail_extrapolation(self):
+        try:
+            import QuantLib as ql
+        except Exception:  # pragma: no cover
+            self.skipTest("QuantLib bindings are required for curve extrapolation parity")
+
+        times = [0.0, 10.0, 20.0]
+        dfs = [1.0, float(np.exp(-0.02 * 10.0)), float(np.exp(-0.03 * 20.0))]
+        python_interp = build_log_linear_discount_interpolator(times, dfs)
+        python_curve = build_discount_curve_from_discount_pairs(list(zip(times, dfs)))
+
+        ref = ql.Date(1, 1, 2020)
+        ql.Settings.instance().evaluationDate = ref
+        dates = [ref + int(round(365.0 * t)) for t in times]
+        q_curve = ql.DiscountCurve(dates, dfs, ql.Actual365Fixed())
+        q_curve.enableExtrapolation()
+
+        query_date = ref + int(round(365.0 * 30.0))
+        ore_like = float(q_curve.discount(query_date))
+        self.assertAlmostEqual(float(python_interp(30.0)), ore_like, places=12)
+        self.assertAlmostEqual(float(python_curve(30.0)), ore_like, places=12)
+
+    def test_cubic_discount_interpolator_matches_quantlib_inside_range(self):
+        try:
+            import QuantLib as ql
+        except Exception:  # pragma: no cover
+            self.skipTest("QuantLib bindings are required for cubic interpolation parity")
+
+        times = [0.0, 1.0, 2.0, 4.0]
+        dfs = [1.0, 0.985, 0.965, 0.925]
+        python_cubic = build_cubic_discount_interpolator(times, dfs)
+        q_cubic = ql.CubicNaturalSpline(times, dfs)
+
+        for t in [0.25, 0.5, 1.5, 3.0]:
+            self.assertAlmostEqual(float(python_cubic(t)), float(q_cubic(t)), places=12)
 
     def test_interpolate_linear_flat_handles_scalar_vector_and_flat_extrapolation(self):
         x = np.array([1.0, 2.0, 4.0], dtype=float)

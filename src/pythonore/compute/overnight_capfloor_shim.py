@@ -122,7 +122,7 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
 
     if i < n:
         curve = ql_index.forwardingTermStructure()
-        if curve.empty():
+        if curve is None:
             raise ValueError(f"null term structure set to this instance of {ql_index.name()}")
 
         start_discount = curve.discount(value_dates[i])
@@ -145,6 +145,124 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
     if not coupon.includeSpread():
         swaplet_rate += coupon.spread()
     return float(swaplet_rate)
+
+
+def _average_overnight_coupon_rate_exact(
+    *,
+    ql_index: Any,
+    runtime: Any,
+    snapshot: Any,
+    leg: Mapping[str, object],
+    t: float,
+    coupon_index: int,
+) -> float:
+    """Replicate QuantExt::AverageONIndexedCouponPricer::swapletRate().
+
+    The future part uses the Takada/log-discount forecast rather than a simple
+    forward-rate approximation.
+    """
+    import QuantLib as ql
+
+    start_dates = np.asarray(leg.get("start_date", []), dtype=object)
+    end_dates = np.asarray(leg.get("end_date", []), dtype=object)
+    pay_dates = np.asarray(leg.get("pay_date", []), dtype=object)
+    fixing_dates = np.asarray(leg.get("fixing_date", []), dtype=object)
+
+    def _to_qdate(value: object) -> ql.Date:
+        if isinstance(value, str):
+            return ql.DateParser.parseISO(value)
+        if hasattr(value, "year") and hasattr(value, "month"):
+            day = int(getattr(value, "dayOfMonth", lambda: getattr(value, "day", 1))())
+            month = int(value.month())
+            year = int(value.year())
+            return ql.Date(day, month, year)
+        raise ValueError("invalid date value")
+
+    if coupon_index < start_dates.size:
+        start_date = _to_qdate(start_dates[coupon_index])
+    else:
+        start_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(np.asarray(leg.get("start_time", []), dtype=float)[coupon_index])))
+    if coupon_index < end_dates.size:
+        end_date = _to_qdate(end_dates[coupon_index])
+    else:
+        end_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(np.asarray(leg.get("end_time", []), dtype=float)[coupon_index])))
+    if fixing_dates.size > coupon_index:
+        fixing_date = _to_qdate(fixing_dates[coupon_index])
+    else:
+        fixing_time = float(np.asarray(leg.get("fixing_time", leg.get("start_time", [])), dtype=float)[coupon_index])
+        fixing_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, fixing_time))
+    if coupon_index < pay_dates.size:
+        pay_date = _to_qdate(pay_dates[coupon_index])
+    else:
+        pay_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(np.asarray(leg.get("pay_time", leg.get("end_time", [])), dtype=float)[coupon_index])))
+    _ = pay_date  # keep parity with the C++ coupon shape even though pay date is not used directly here
+
+    fixing_calendar = ql_index.fixingCalendar()
+    day_counter = ql_index.dayCounter()
+
+    lookback_days = int(leg.get("lookback_days", 0) or 0)
+    rate_cutoff = int(leg.get("rate_cutoff", 0) or 0)
+    fixing_days = int(leg.get("fixing_days", 2) or 2)
+    gearing = float(np.asarray(leg.get("gearing", [1.0]), dtype=float)[coupon_index])
+    spread = float(np.asarray(leg.get("spread", [0.0]), dtype=float)[coupon_index])
+
+    value_start = start_date
+    value_end = end_date
+    if lookback_days != 0:
+        bdc = ql.Preceding if lookback_days > 0 else ql.Following
+        value_start = fixing_calendar.advance(value_start, -lookback_days, ql.Days, bdc)
+        value_end = fixing_calendar.advance(value_end, -lookback_days, ql.Days, bdc)
+
+    try:
+        schedule = ql.MakeSchedule().from_(value_start).to(value_end).withTenor(ql.Period(1, ql.Days)).withCalendar(
+            fixing_calendar
+        ).withConvention(fixing_calendar.businessDayConvention()).backwards()
+        value_dates = list(schedule.dates())
+    except Exception:
+        value_dates = [value_start, value_end]
+    if value_dates[0] != value_start:
+        value_dates[0] = value_start
+    if value_dates[-1] != value_end:
+        value_dates[-1] = value_end
+    n = len(value_dates) - 1
+    if n <= 0:
+        raise ValueError("degenerate average overnight schedule")
+    n_cutoff = max(0, n - rate_cutoff)
+    fixing_dates_schedule = [
+        fixing_calendar.advance(value_dates[i], -fixing_days, ql.Days, ql.Preceding) for i in range(n)
+    ]
+    dts = [day_counter.yearFraction(value_dates[i], value_dates[i + 1]) for i in range(n)]
+    today = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(t)))
+    accumulated_rate = 0.0
+    i = 0
+    while i < n and fixing_dates_schedule[min(i, n_cutoff)] < today:
+        past_fixing = ql_index.pastFixing(fixing_dates_schedule[min(i, n_cutoff)])
+        if past_fixing == ql.NullReal():
+            raise ValueError(f"missing fixing for {fixing_dates_schedule[min(i, n_cutoff)]}")
+        accumulated_rate += past_fixing * dts[i]
+        i += 1
+    if i < n and fixing_dates_schedule[min(i, n_cutoff)] == today:
+        try:
+            past_fixing = ql_index.pastFixing(today)
+            if past_fixing != ql.NullReal():
+                accumulated_rate += past_fixing * dts[i]
+                i += 1
+        except Exception:
+            pass
+    if i < n:
+        curve = ql_index.forwardingTermStructure()
+        if curve is None:
+            raise ValueError(f"null term structure set to this instance of {ql_index.name()}")
+        start_discount = curve.discount(value_dates[i])
+        end_discount = curve.discount(value_dates[max(n_cutoff, i)])
+        if n_cutoff < n:
+            discount_cutoff_date = curve.discount(value_dates[n_cutoff] + 1) / curve.discount(value_dates[n_cutoff])
+            end_discount *= discount_cutoff_date ** (value_dates[n] - value_dates[n_cutoff])
+        accumulated_rate += math.log(start_discount / end_discount)
+    tau = day_counter.yearFraction(value_dates[0], value_dates[-1])
+    if tau <= 0.0:
+        raise ValueError("invalid average overnight coupon accrual period")
+    return float(gearing * accumulated_rate / tau + spread)
 
 
 def _parse_overnight_index_name(index_name: str) -> str | None:
@@ -390,6 +508,215 @@ def _maybe_adjust_strike(
     return proxy.adjusted_strike(fixing_dates[-1], strike)
 
 
+def _overnight_static_cache_key(
+    runtime: Any,
+    snapshot: Any,
+    *,
+    ccy: str,
+    index_name: str,
+    surface_period: str,
+    target_period: str,
+    leg: Mapping[str, object],
+) -> tuple[Any, ...]:
+    start = np.asarray(leg.get("start_time", []), dtype=float)
+    end = np.asarray(leg.get("end_time", []), dtype=float)
+    pay = np.asarray(leg.get("pay_time", []), dtype=float)
+    return (
+        id(snapshot),
+        id(leg),
+        str(ccy).upper(),
+        str(index_name).upper(),
+        str(surface_period).strip(),
+        str(target_period).strip(),
+        int(leg.get("lookback_days", 0) or 0),
+        int(leg.get("rate_cutoff", 0) or 0),
+        bool(leg.get("apply_observation_shift", False)),
+        bool(leg.get("naked_option", False)),
+        bool(leg.get("local_cap_floor", False)),
+        start.size,
+        end.size,
+        pay.size,
+    )
+
+
+def _build_overnight_static_state(
+    runtime: Any,
+    inputs: Any,
+    snapshot: Any,
+    *,
+    ccy: str,
+    index_name: str,
+    surface_period: str,
+    target_period: str,
+    leg: Mapping[str, object],
+) -> dict[str, Any] | None:
+    try:
+        import QuantLib as ql
+    except Exception:
+        return None
+
+    eval_date = ql.DateParser.parseISO(runtime._normalized_asof(snapshot))
+    ql.Settings.instance().evaluationDate = eval_date
+    overnight_index = _parse_overnight_index_name(index_name)
+    if overnight_index is None:
+        return None
+    index_curve = runtime._resolve_index_curve(inputs, ccy, index_name)
+    date_nodes = getattr(inputs, "discount_curve_dates", {}).get(ccy.upper())
+    df_nodes = getattr(inputs, "discount_curve_dfs", {}).get(ccy.upper())
+    overnight_handle = _curve_handle_from_curve(
+        eval_date,
+        index_curve,
+        extra_times=list(getattr(inputs, "times", [])),
+        dates=list(date_nodes) if date_nodes else None,
+        dfs=list(df_nodes) if df_nodes else None,
+    )
+    ql_index = _build_ql_overnight_index(overnight_index, overnight_handle)
+    proxy = ProxyOptionletVolatilityReplica(
+        runtime,
+        inputs,
+        snapshot,
+        ccy=ccy,
+        index_name=index_name,
+        base_rate_computation_period=surface_period,
+        target_rate_computation_period=target_period,
+        scaling_factor=1.0,
+    )
+    pricer = BlackOvernightIndexedCouponPricerReplica(
+        runtime,
+        inputs,
+        snapshot,
+        ccy=ccy,
+        index_name=index_name,
+        base_rate_computation_period=surface_period,
+        target_rate_computation_period=target_period,
+        scaling_factor=1.0,
+        effective_volatility_input=True,
+    )
+
+    start = np.asarray(leg.get("start_time", []), dtype=float)
+    end = np.asarray(leg.get("end_time", []), dtype=float)
+    pay_times = np.asarray(leg.get("pay_time", end), dtype=float)
+    lookback_days = int(leg.get("lookback_days", 0) or 0)
+    lockout_days = int(leg.get("rate_cutoff", 0) or 0)
+    apply_observation_shift = bool(leg.get("apply_observation_shift", False))
+    is_averaged = bool(leg.get("is_averaged", False))
+    raw_rates = np.zeros(start.size, dtype=float)
+    fixing_dates: list[Any] = []
+    expiry_times = np.zeros(start.size, dtype=float)
+    asof_date = datetime.fromisoformat(runtime._normalized_asof(snapshot)).date()
+    for i in range(start.size):
+        if is_averaged:
+            if "fixing_date" in leg and i < len(np.asarray(leg.get("fixing_date", []), dtype=object)):
+                fixing_py = datetime.fromisoformat(str(np.asarray(leg.get("fixing_date", []), dtype=object)[i])).date()
+            else:
+                fixing_py = datetime.fromisoformat(runtime._date_from_time_cached(snapshot, float(start[i]))).date()
+            fixing_dates.append(ql.Date(fixing_py.day, fixing_py.month, fixing_py.year))
+            expiry_times[i] = float(runtime._irs_utils._time_from_dates(asof_date, fixing_py, "A365F"))
+            raw_rates[i] = 0.0
+            continue
+        start_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(start[i])))
+        end_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(end[i])))
+        pay_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(pay_times[i])))
+        coupon = ql.OvernightIndexedCoupon(
+            pay_date,
+            1.0,
+            start_date,
+            end_date,
+            ql_index,
+            1.0,
+            0.0,
+            start_date,
+            end_date,
+            ql.Actual360(),
+            False,
+            ql.RateAveraging.Compound,
+            lookback_days,
+            lockout_days,
+            apply_observation_shift,
+        )
+        coupon_fixings = list(coupon.fixingDates())
+        if not coupon_fixings:
+            continue
+        fixing_dates.append(coupon_fixings[-1])
+        fixing_py = datetime(coupon_fixings[-1].year(), coupon_fixings[-1].month(), coupon_fixings[-1].dayOfMonth()).date()
+        expiry_times[i] = float(runtime._irs_utils._time_from_dates(asof_date, fixing_py, "A365F"))
+        raw_rates[i] = _overnight_coupon_rate_exact(coupon, ql_index=ql_index, eval_date=eval_date)
+    return {
+        "ql_index": ql_index,
+        "pricer": pricer,
+        "proxy": proxy,
+        "raw_rates": raw_rates,
+        "fixing_dates": fixing_dates,
+        "expiry_times": expiry_times,
+        "asof_date": asof_date,
+    }
+
+
+def price_average_overnight_coupon_paths(
+    runtime: Any,
+    *,
+    model: Any,
+    inputs: Any,
+    leg: Mapping[str, object],
+    ccy: str,
+    t: float,
+    x_t: np.ndarray,
+    snapshot: Any,
+) -> np.ndarray:
+    """Price an averaged overnight leg using the Takada/log-DF forecast."""
+    x_arr = np.asarray(x_t, dtype=float)
+    start = np.asarray(leg.get("start_time", []), dtype=float)
+    coupons = np.zeros((start.size, x_arr.size), dtype=float)
+    if not bool(leg.get("overnight_indexed", False)) or not bool(leg.get("is_averaged", False)):
+        return coupons
+
+    index_name = str(leg.get("index_name", "")).strip().upper()
+    surface_period = capfloor_surface_rate_computation_period(snapshot, ccy=ccy) or ""
+    target_period = str(leg.get("schedule_tenor", "")).strip() or "3M"
+    cache = getattr(runtime, "_overnight_capfloor_static_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(runtime, "_overnight_capfloor_static_cache", cache)
+    cache_key = _overnight_static_cache_key(
+        runtime,
+        snapshot,
+        ccy=ccy,
+        index_name=index_name,
+        surface_period=surface_period,
+        target_period=target_period,
+        leg=leg,
+    )
+    static_state = cache.get(cache_key)
+    if static_state is None:
+        static_state = _build_overnight_static_state(
+            runtime,
+            inputs,
+            snapshot,
+            ccy=ccy,
+            index_name=index_name,
+            surface_period=surface_period,
+            target_period=target_period,
+            leg=leg,
+        )
+        cache[cache_key] = static_state
+    if static_state is None:
+        return coupons
+
+    for i in range(start.size):
+        try:
+            coupons[i, :] = _average_overnight_coupon_rate_exact(
+                ql_index=static_state["ql_index"],
+                runtime=runtime,
+                snapshot=snapshot,
+                leg=leg,
+                t=t,
+                coupon_index=i,
+            )
+        except Exception:
+            coupons[i, :] = 0.0
+    return coupons
+
+
 def _apply_local_cap_floor(
     runtime: Any,
     raw_rate: np.ndarray,
@@ -430,99 +757,57 @@ def price_overnight_capfloor_coupon_paths(
 ) -> np.ndarray:
     """Price the current Python approximation for an overnight cap/floor leg."""
 
-    try:
-        import QuantLib as ql
-    except Exception:
-        return np.zeros((0, np.asarray(x_t, dtype=float).size), dtype=float)
-
     x_arr = np.asarray(x_t, dtype=float)
     start = np.asarray(leg.get("start_time", []), dtype=float)
     end = np.asarray(leg.get("end_time", []), dtype=float)
-    fixing = np.asarray(leg.get("fixing_time", start), dtype=float)
     coupons = np.zeros((start.size, x_arr.size), dtype=float)
 
     if not bool(leg.get("overnight_indexed", False)):
         return coupons
 
     index_name = str(leg.get("index_name", "")).strip().upper()
-    overnight_index = _parse_overnight_index_name(index_name)
-    if overnight_index is None:
-        return coupons
-
-    eval_date = ql.DateParser.parseISO(runtime._normalized_asof(snapshot))
-    ql.Settings.instance().evaluationDate = eval_date
-    index_curve = runtime._resolve_index_curve(inputs, ccy, index_name)
-    date_nodes = getattr(inputs, "discount_curve_dates", {}).get(ccy.upper())
-    df_nodes = getattr(inputs, "discount_curve_dfs", {}).get(ccy.upper())
-    overnight_handle = _curve_handle_from_curve(
-        eval_date,
-        index_curve,
-        extra_times=list(getattr(inputs, "times", [])),
-        dates=list(date_nodes) if date_nodes else None,
-        dfs=list(df_nodes) if df_nodes else None,
-    )
-    ql_index = _build_ql_overnight_index(overnight_index, overnight_handle)
     surface_period = capfloor_surface_rate_computation_period(snapshot, ccy=ccy) or ""
     target_period = str(leg.get("schedule_tenor", "")).strip() or "3M"
-    proxy = ProxyOptionletVolatilityReplica(
+    cache = getattr(runtime, "_overnight_capfloor_static_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(runtime, "_overnight_capfloor_static_cache", cache)
+    cache_key = _overnight_static_cache_key(
         runtime,
-        inputs,
         snapshot,
         ccy=ccy,
         index_name=index_name,
-        base_rate_computation_period=surface_period,
-        target_rate_computation_period=target_period,
-        scaling_factor=1.0,
+        surface_period=surface_period,
+        target_period=target_period,
+        leg=leg,
     )
-    lookback_days = int(leg.get("lookback_days", 0) or 0)
-    lockout_days = int(leg.get("rate_cutoff", 0) or 0)
-    apply_observation_shift = bool(leg.get("apply_observation_shift", False))
+    static_state = cache.get(cache_key)
+    if static_state is None:
+        static_state = _build_overnight_static_state(
+            runtime,
+            inputs,
+            snapshot,
+            ccy=ccy,
+            index_name=index_name,
+            surface_period=surface_period,
+            target_period=target_period,
+            leg=leg,
+        )
+        cache[cache_key] = static_state
+    if static_state is None:
+        return coupons
+
+    pricer = static_state["pricer"]
+    proxy = static_state["proxy"]
+    raw_rates = np.asarray(static_state["raw_rates"], dtype=float)
+    fixing_dates = list(static_state["fixing_dates"])
+    expiry_times = np.asarray(static_state["expiry_times"], dtype=float)
+    asof_date = static_state["asof_date"]
     naked_option = bool(leg.get("naked_option", False))
     local_cap_floor = bool(leg.get("local_cap_floor", False))
-    asof_date = datetime.fromisoformat(runtime._normalized_asof(snapshot)).date()
-    pricer = BlackOvernightIndexedCouponPricerReplica(
-        runtime,
-        inputs,
-        snapshot,
-        ccy=ccy,
-        index_name=index_name,
-        base_rate_computation_period=surface_period,
-        target_rate_computation_period=target_period,
-        scaling_factor=1.0,
-        effective_volatility_input=True,
-    )
 
     for i in range(start.size):
-        start_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(start[i])))
-        end_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(end[i])))
-        pay_times = np.asarray(leg.get("pay_time", end), dtype=float)
-        pay_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(pay_times[i])))
-        coupon = ql.OvernightIndexedCoupon(
-            pay_date,
-            1.0,
-            start_date,
-            end_date,
-            ql_index,
-            1.0,
-            0.0,
-            start_date,
-            end_date,
-            ql.Actual360(),
-            False,
-            ql.RateAveraging.Compound,
-            lookback_days,
-            lockout_days,
-            apply_observation_shift,
-        )
-        fixing_dates = list(coupon.fixingDates())
-        last_fixing_date = fixing_dates[-1]
-        fixing_py = datetime(last_fixing_date.year(), last_fixing_date.month(), last_fixing_date.dayOfMonth()).date()
-        expiry_time = float(runtime._irs_utils._time_from_dates(asof_date, fixing_py, "A365F"))
-        try:
-            raw_rate_value = _overnight_coupon_rate_exact(coupon, ql_index=ql_index, eval_date=eval_date)
-        except Exception:
-            raw_rate_value = float(coupon.rate())
-        raw_rate = np.full_like(x_arr, raw_rate_value, dtype=float)
+        raw_rate = np.full_like(x_arr, float(raw_rates[i]), dtype=float)
         floor = leg.get("floor")
         cap = leg.get("cap")
         if local_cap_floor:
@@ -531,7 +816,7 @@ def price_overnight_capfloor_coupon_paths(
                 cap=cap,
                 floor=floor,
                 naked_option=naked_option,
-                option_stddev=None,
+                option_stddev=np.full_like(x_arr, 0.0, dtype=float),
             )
             continue
 
@@ -540,8 +825,8 @@ def price_overnight_capfloor_coupon_paths(
             cap=cap,
             floor=floor,
             naked_option=naked_option,
-            expiry_time=expiry_time,
-            fixing_date=fixing_dates[-1],
+            expiry_time=float(expiry_times[i]),
+            fixing_date=fixing_dates[i] if i < len(fixing_dates) else None,
             fixing_dates=fixing_dates,
             asof_date=asof_date,
         )

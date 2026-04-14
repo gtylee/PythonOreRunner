@@ -58,6 +58,7 @@ except Exception:  # pragma: no cover - QuantLib is optional in some environment
 
 from pythonore.compute.irs_xva_utils import (
     _parse_yyyymmdd,
+    _year_fraction_actual_actual,
     load_ore_default_curve_inputs,
     parse_lgm_params_from_simulation_xml,
     survival_probability_from_hazard,
@@ -108,6 +109,10 @@ def _time_from_dates(asof: date, d: date, day_counter: str) -> float:
         return (d - asof).days / 365.0
     if dc in {"A360", "ACT/360"}:
         return (d - asof).days / 360.0
+    if dc in {"ACT/ACT", "ACT/ACT(ISDA)", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)", "ACT"}:
+        return _year_fraction_actual_actual(asof, d)
+    if dc in {"30/360", "30E/360", "30E/360E", "30E/360.ISDA", "30E/360.ICMA"}:
+        return _year_fraction(asof, d, "30E/360")
     return (d - asof).days / 365.0
 
 
@@ -115,7 +120,9 @@ def _year_fraction(start: date, end: date, day_counter: str) -> float:
     dc = _norm_dc(day_counter)
     if dc in {"A360", "ACT/360"}:
         return (end - start).days / 360.0
-    if dc in {"30/360", "30E/360"}:
+    if dc in {"ACT/ACT", "ACT/ACT(ISDA)", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)", "ACT"}:
+        return _year_fraction_actual_actual(start, end)
+    if dc in {"30/360", "30E/360", "30E/360E", "30E/360.ISDA", "30E/360.ICMA"}:
         d1 = min(start.day, 30)
         d2 = min(end.day, 30) if d1 == 30 else end.day
         return ((end.year - start.year) * 360 + (end.month - start.month) * 30 + (d2 - d1)) / 360.0

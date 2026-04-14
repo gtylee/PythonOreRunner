@@ -548,8 +548,9 @@ def _build_trade_specific_lgm_params(snapshot: XVASnapshot, trade: Trade, curve_
         fixed_leg_dc = _infer_fixed_leg_day_counter(curve_bundle["portfolio_xml_path"], trade.trade_id, ql)
         fixed_leg_tenor = _infer_fixed_leg_tenor(curve_bundle["portfolio_xml_path"], trade.trade_id, ql)
         helpers = []
-        for expiry_period, term_period, market_vol, _ in basket:
+        for expiry_period, term_period, market_vol, _, vol_kind in basket:
             vol_handle = ql.QuoteHandle(ql.SimpleQuote(float(market_vol)))
+            ql_vol_type = ql.Normal if str(vol_kind).strip().lower() == "normal" else ql.ShiftedLognormal
             helper = ql.SwaptionHelper(
                 expiry_period,
                 term_period,
@@ -562,12 +563,12 @@ def _build_trade_specific_lgm_params(snapshot: XVASnapshot, trade: Trade, curve_
                 ql.BlackCalibrationHelper.RelativePriceError,
                 ql.nullDouble(),
                 1.0,
-                ql.ShiftedLognormal,
+                ql_vol_type,
                 0.0,
             )
             helpers.append(helper)
 
-        step_dates = [yts.referenceDate() + p for p, _, _, _ in basket[:-1]]
+        step_dates = [yts.referenceDate() + p for p, _, _, _, _ in basket[:-1]]
         sigma_quotes = [ql.QuoteHandle(ql.SimpleQuote(float(engine_spec["volatility"]))) for _ in range(len(step_dates) + 1)]
         rev_quotes = [ql.QuoteHandle(ql.SimpleQuote(float(engine_spec["reversion"])))]
         model = ql.Gsr(yts, step_dates, sigma_quotes, rev_quotes)
@@ -664,37 +665,49 @@ def _build_trade_specific_basket(snapshot: XVASnapshot, trade: Trade, curve_bund
         market_vol = _lookup_atm_swaption_vol(snapshot.market.raw_quotes, trade.product.ccy, expiry_period, term_period)
         if market_vol is None:
             return []
-        basket.append((expiry_period, term_period, market_vol, expiry_years))
+        basket.append((expiry_period, term_period, market_vol[0], expiry_years, market_vol[1]))
     return basket
 
 
-def _lookup_atm_swaption_vol(quotes: Iterable[MarketQuote], ccy: str, expiry_period, term_period) -> float | None:
+def _lookup_atm_swaption_vol(
+    quotes: Iterable[MarketQuote],
+    ccy: str,
+    expiry_period,
+    term_period,
+) -> tuple[float, str] | None:
     exp = _period_to_ore_tenor(expiry_period)
     term = _period_to_ore_tenor(term_period)
-    exact_key = f"SWAPTION/RATE_LNVOL/{str(ccy).upper()}/{exp}/{term}/ATM"
-    surface: list[tuple[float, float, float]] = []
-    for q in quotes:
-        key = str(q.key).strip().upper()
-        if key == exact_key:
-            return float(q.value)
-        parts = key.split("/")
-        if len(parts) != 6:
-            continue
-        if parts[0] != "SWAPTION" or parts[1] != "RATE_LNVOL" or parts[2] != str(ccy).upper() or parts[5] != "ATM":
-            continue
-        exp_y = _ore_tenor_to_years(parts[3])
-        term_y = _ore_tenor_to_years(parts[4])
-        if exp_y is None or term_y is None:
-            continue
-        surface.append((exp_y, term_y, float(q.value)))
-    if not surface:
-        return None
     target_e = _ore_tenor_to_years(exp)
     target_t = _ore_tenor_to_years(term)
     if target_e is None or target_t is None:
         return None
-    best = min(surface, key=lambda x: (x[0] - target_e) ** 2 + (x[1] - target_t) ** 2)
-    return float(best[2])
+    for vol_kind in ("RATE_NVOL", "RATE_LNVOL"):
+        exact_key = f"SWAPTION/{vol_kind}/{str(ccy).upper()}/{exp}/{term}/ATM"
+        surface: list[tuple[float, float, float]] = []
+        for q in quotes:
+            key = str(q.key).strip().upper()
+            if key == exact_key:
+                return float(q.value), ("normal" if vol_kind == "RATE_NVOL" else "lognormal")
+            parts = key.split("/")
+            if len(parts) not in (6, 7):
+                continue
+            if parts[0] != "SWAPTION" or parts[1] != vol_kind or parts[2] != str(ccy).upper():
+                continue
+            if len(parts) == 6:
+                exp_token, term_token, atm_token = parts[3], parts[4], parts[5]
+            else:
+                exp_token, term_token, atm_token = parts[4], parts[5], parts[6]
+            if atm_token != "ATM":
+                continue
+            exp_y = _ore_tenor_to_years(exp_token)
+            term_y = _ore_tenor_to_years(term_token)
+            if exp_y is None or term_y is None:
+                continue
+            surface.append((exp_y, term_y, float(q.value)))
+        if surface:
+            best = min(surface, key=lambda x: (x[0] - target_e) ** 2 + (x[1] - target_t) ** 2)
+            return float(best[2]), ("normal" if vol_kind == "RATE_NVOL" else "lognormal")
+    return None
 
 
 def _build_quantlib_discount_curve(snapshot: XVASnapshot, p0_disc: Callable[[float], float], ql):
@@ -717,6 +730,10 @@ def _build_quantlib_ibor_index(index_name: str, yts, ql):
         return ql.Euribor6M(yts)
     if name == "EUR-EURIBOR-3M":
         return ql.Euribor3M(yts)
+    if name == "USD-LIBOR-3M":
+        return ql.USDLibor(ql.Period("3M"), yts)
+    if name == "USD-LIBOR-6M":
+        return ql.USDLibor(ql.Period("6M"), yts)
     return None
 
 
@@ -966,11 +983,12 @@ def _simulation_grid_times_from_xml_text(simulation_xml_text: str) -> np.ndarray
 
 
 def _exercise_sign(product: BermudanSwaption) -> float:
+    option_type = str(getattr(product, "option_type", "Call")).strip().lower()
     long_short = str(product.long_short).strip().lower()
-    # ORE's payer/receiver swaption orientation is determined by the underlying swap.
-    # If the fixed leg is payer, the option is a payer swaption: max(swap, 0).
-    # If the fixed leg is receiver, it is a receiver swaption: max(-swap, 0).
-    sign = 1.0 if bool(product.pay_fixed) else -1.0
+    # The underlying swap cashflows already encode payer/receiver orientation.
+    # Bermudan payoff direction should therefore follow the option type:
+    # Call -> max(swap, 0), Put -> max(-swap, 0).
+    sign = 1.0 if option_type == "call" else -1.0
     if long_short == "short":
         sign *= -1.0
     return sign

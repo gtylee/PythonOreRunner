@@ -18,6 +18,7 @@ from functools import lru_cache
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import csv
+import math
 from datetime import date, datetime, timedelta
 import re
 import xml.etree.ElementTree as ET
@@ -78,13 +79,32 @@ def _time_from_dates(start: date, end: date, day_counter: str) -> float:
         return (end - start).days / 360.0
     if dc in ("A365F", "A365", "ACT/365(FIXED)", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
         return (end - start).days / 365.0
-    if dc in ("AAISDA", "ACTUALACTUAL(ISDA)", "ACT/ACT(ISDA)", "ACTUALACTUALISDA"):
+    if dc in (
+        "AAISDA",
+        "ACTUALACTUAL(ISDA)",
+        "ACT/ACT(ISDA)",
+        "ACTUALACTUALISDA",
+        "ACT/ACT",
+        "ACTUAL/ACTUAL",
+        "ACTUALACTUAL",
+        "ACT",
+    ):
         return _year_fraction_actual_actual(start, end)
+    if dc in ("30/360", "30E/360", "30E/360E", "30E/360.ISDA", "30E/360 ICMA", "30E/360.ICMA"):
+        d1 = min(start.day, 30)
+        d2 = min(end.day, 30) if d1 == 30 else end.day
+        if dc in ("30E/360", "30E/360E", "30E/360.ISDA", "30E/360 ICMA", "30E/360.ICMA"):
+            return ((end.year - start.year) * 360 + (end.month - start.month) * 30 + (d2 - d1)) / 360.0
+        return ((end.year - start.year) * 360 + (end.month - start.month) * 30 + (d2 - d1)) / 360.0
     return _year_fraction_actual_actual(start, end)
 
 
 def _infer_index_day_counter(index_name: str, fallback: str = "A365F") -> str:
     name = (index_name or "").strip().upper()
+    if "SOFR" in name:
+        return "ACT/ACT"
+    if "FEDFUNDS" in name or "FED FUNDS" in name or "FED-FUNDS" in name:
+        return "A360"
     if "USD-LIBOR" in name or "EUR-EURIBOR" in name or "EONIA" in name or "ESTR" in name or "ESTER" in name:
         return "A360"
     if "GBP-LIBOR" in name or "SONIA" in name or "CAD-CDOR" in name or "CAD-CORRA" in name:
@@ -632,9 +652,9 @@ def _year_fraction(start: date, end: date, day_counter: str) -> float:
         return (end - start).days / 360.0
     if dc in ("A365", "A365F", "ACT/365", "ACT/365(FIXED)", "ACTUAL/365", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
         return (end - start).days / 365.0
-    if dc in ("ACT/ACT", "ACT/ACT(ISDA)", "AAISDA", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)"):
+    if dc in ("ACT/ACT", "ACT/ACT(ISDA)", "AAISDA", "ACTUAL/ACTUAL", "ACTUALACTUAL", "ACTUALACTUAL(ISDA)", "ACT"):
         return _year_fraction_actual_actual(start, end)
-    if dc == "30/360":
+    if dc in ("30/360", "30E/360", "30E/360E", "30E/360.ISDA", "30E/360 ICMA", "30E/360.ICMA"):
         d1 = min(start.day, 30)
         d2 = min(end.day, 30) if d1 == 30 else end.day
         return ((end.year - start.year) * 360 + (end.month - start.month) * 30 + (d2 - d1)) / 360.0
@@ -1230,6 +1250,7 @@ def load_swap_legs_from_portfolio_root(
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
             float_index = (lx.findtext("./FloatingLegData/Index") or "").strip().upper()
             float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
+            is_averaged = (lx.findtext("./FloatingLegData/IsAveraged") or "false").strip().lower() == "true"
             index_dc = _infer_index_day_counter(float_index, fallback=dc)
             out["float_pay_time"] = p_t
             out["float_start_time"] = s_t
@@ -1244,13 +1265,17 @@ def load_swap_legs_from_portfolio_root(
             out["float_spread"] = np.full_like(accr, spread)
             out["float_coupon"] = np.zeros_like(accr)
             out["float_amount"] = np.zeros_like(accr)
-            # ORE stores fixing lag as business days relative to the accrual start.
-            fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
+            # Averaged OIS coupons fix against the end-of-period lag, not the accrual start.
+            if is_averaged:
+                fix_dates = [_advance_business_days(ed, -fixing_days, cal) for ed in e_dates]
+            else:
+                fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
             out["float_fixing_time"] = np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
             out["float_fixing_source"] = "portfolio_fixing_days"
             out["float_index"] = float_index
             out["float_index_tenor"] = float_index_tenor
             out["float_index_day_counter"] = index_dc
+            out["float_is_averaged"] = np.full_like(accr, is_averaged, dtype=bool)
         else:
             raise ValueError(f"unsupported leg type '{ltype}'")
 
@@ -1435,6 +1460,7 @@ def swap_npv_from_ore_legs_dual_curve(
     t: float,
     x_t: np.ndarray,
     realized_float_coupon: Optional[np.ndarray] = None,
+    live_float_coupon: Optional[np.ndarray] = None,
     use_node_interpolation: bool = False,
     exercise_into_whole_periods: bool = False,
     deterministic_fixings_cutoff: Optional[float] = None,
@@ -1596,10 +1622,27 @@ def swap_npv_from_ore_legs_dual_curve(
             n2 = n[~fixed]
             sign2 = sign[~fixed]
             spread2 = spread[~fixed]
-            p_ts_f2 = forward_bond_batch(s2)
-            p_te_f2 = forward_bond_batch(e2)
-            fwd2 = np.nan_to_num((p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None], nan=0.0, posinf=0.0, neginf=0.0)
-            amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
+            if bool(np.asarray(legs.get("float_is_averaged", False), dtype=bool).any()) and live_float_coupon is not None:
+                live_coupon = np.asarray(live_float_coupon, dtype=float)
+                if live_coupon.shape[0] != s.size:
+                    raise ValueError("live_float_coupon must match coupon array shape")
+                amount[~fixed, :] = sign2[:, None] * n2[:, None] * np.nan_to_num(
+                    live_coupon[~fixed], nan=0.0, posinf=0.0, neginf=0.0
+                ) * tau2[:, None]
+            else:
+                s2_eff = np.maximum(s2, float(t))
+                p_ts_f2 = forward_bond_batch(s2_eff)
+                p_te_f2 = forward_bond_batch(e2)
+                if bool(np.asarray(legs.get("float_is_averaged", False), dtype=bool).any()):
+                    fwd2 = np.nan_to_num(
+                        np.log(np.clip(p_ts_f2 / p_te_f2, 1.0e-18, None)) / index_tau2[:, None],
+                        nan=0.0,
+                        posinf=0.0,
+                        neginf=0.0,
+                    )
+                else:
+                    fwd2 = np.nan_to_num((p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None], nan=0.0, posinf=0.0, neginf=0.0)
+                amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv += np.sum(amount * p_tp_d, axis=0)
 
@@ -1643,14 +1686,21 @@ def compute_realized_float_coupons(
         if ft <= 1.0e-12:
             ps = float(p0_fwd(max(0.0, float(s[i]))))
             pe = float(p0_fwd(float(e[i])))
-            fwd = (ps / pe - 1.0) / float(index_tau[i])
+            if bool(legs.get("float_is_averaged", False)):
+                fwd = math.log(max(ps / pe, 1.0e-18)) / float(index_tau[i])
+            else:
+                fwd = (ps / pe - 1.0) / float(index_tau[i])
             out[i, :] = fwd + float(spr[i])
             continue
         x_fix = interpolate_path_grid(sim_times, x_paths_on_sim_grid, ft)[0, :]
         p_ft_f = float(p0_fwd(ft))
-        p_t_s_f = model.discount_bond(ft, float(s[i]), x_fix, p_ft_f, float(p0_fwd(float(s[i]))))
+        s_eff = max(float(s[i]), ft)
+        p_t_s_f = model.discount_bond(ft, s_eff, x_fix, p_ft_f, float(p0_fwd(s_eff)))
         p_t_e_f = model.discount_bond(ft, float(e[i]), x_fix, p_ft_f, float(p0_fwd(float(e[i]))))
-        fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
+        if bool(legs.get("float_is_averaged", False)):
+            fwd_path = np.log(np.clip(p_t_s_f / p_t_e_f, 1.0e-18, None)) / float(index_tau[i])
+        else:
+            fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
         out[i, :] = fwd_path + float(spr[i])
     return out
 

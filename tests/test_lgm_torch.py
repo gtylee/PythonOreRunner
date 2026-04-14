@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from py_ore_tools.lgm import LGM1F, LGMParams
+from ore_curve_fit_parity.interpolation import build_cubic_discount_interpolator, build_log_linear_discount_interpolator
 
 try:
     import torch
@@ -11,6 +12,7 @@ except ImportError:  # pragma: no cover - torch-specific tests skip without torc
 
 if torch is not None:
     from py_ore_tools.lgm_torch import TorchLGM1F, simulate_lgm_measure_torch
+    from py_ore_tools.lgm_torch_xva import TorchDiscountCurve, swap_npv_from_ore_legs_dual_curve_torch
 
 
 @unittest.skipIf(torch is None, "torch is required for torch LGM tests")
@@ -73,6 +75,57 @@ class TestTorchLGM(unittest.TestCase):
             antithetic=True,
         )
         self.assertTrue(np.allclose(actual[:, :4] + actual[:, 4:], 0.0, atol=1.0e-12))
+
+    def test_torch_discount_curve_matches_numpy_loglinear_and_cubic(self):
+        times = np.array([0.0, 5.0, 10.0, 20.0], dtype=float)
+        dfs = np.array([1.0, 0.93, 0.84, 0.68], dtype=float)
+
+        loglinear_np = build_log_linear_discount_interpolator(times.tolist(), dfs.tolist())
+        cubic_np = build_cubic_discount_interpolator(times.tolist(), dfs.tolist())
+        loglinear_torch = TorchDiscountCurve(times, dfs, interpolation="loglinear")
+        cubic_torch = TorchDiscountCurve(times, dfs, interpolation="cubic")
+
+        for t in [0.0, 2.5, 12.0, 30.0]:
+            self.assertAlmostEqual(float(loglinear_torch.discount(t)), float(loglinear_np(t)), places=12)
+            self.assertAlmostEqual(float(cubic_torch.discount(t)), float(cubic_np(t)), places=12)
+
+        self.assertNotAlmostEqual(float(loglinear_torch.discount(30.0)), float(cubic_torch.discount(30.0)), places=8)
+
+    def test_torch_swap_npv_uses_explicit_live_coupons_for_averaged_overnight_legs(self):
+        disc_curve = TorchDiscountCurve(np.array([0.0, 1.0], dtype=float), np.array([1.0, 0.98], dtype=float))
+        fwd_curve = TorchDiscountCurve(np.array([0.0, 1.0], dtype=float), np.array([1.0, 0.99], dtype=float))
+        legs = {
+            "fixed_pay_time": np.array([], dtype=float),
+            "fixed_start_time": np.array([], dtype=float),
+            "fixed_end_time": np.array([], dtype=float),
+            "fixed_amount": np.array([], dtype=float),
+            "float_start_time": np.array([0.10], dtype=float),
+            "float_end_time": np.array([0.40], dtype=float),
+            "float_pay_time": np.array([0.50], dtype=float),
+            "float_accrual": np.array([0.30], dtype=float),
+            "float_index_accrual": np.array([0.30], dtype=float),
+            "float_notional": np.array([100.0], dtype=float),
+            "float_sign": np.array([1.0], dtype=float),
+            "float_spread": np.array([0.0], dtype=float),
+            "float_coupon": np.array([0.0], dtype=float),
+            "float_fixing_time": np.array([0.60], dtype=float),
+            "float_is_averaged": np.array([True], dtype=bool),
+        }
+        live_coupon = np.array([[0.123]], dtype=float)
+        pv = swap_npv_from_ore_legs_dual_curve_torch(
+            self.torch_model,
+            disc_curve,
+            fwd_curve,
+            legs,
+            0.0,
+            np.zeros(1, dtype=float),
+            realized_float_coupon=live_coupon,
+            live_float_coupon=live_coupon,
+            return_numpy=True,
+        )
+        expected = 100.0 * 0.30 * 0.123 * float(disc_curve.discount(0.50))
+        self.assertEqual(pv.shape, (1,))
+        self.assertAlmostEqual(float(pv[0]), expected, places=12)
 
 
 if __name__ == "__main__":

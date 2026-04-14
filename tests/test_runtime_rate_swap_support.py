@@ -1,5 +1,6 @@
 import csv
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 import math
 import shutil
@@ -12,9 +13,17 @@ import numpy as np
 import pytest
 
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
-from pythonore.compute.irs_xva_utils import _schedule_from_leg
+from pythonore.compute.irs_xva_utils import (
+    _infer_index_day_counter,
+    _schedule_from_leg,
+    _year_fraction,
+    compute_realized_float_coupons,
+    swap_npv_from_ore_legs_dual_curve,
+)
+from pythonore.compute.overnight_capfloor_shim import price_overnight_capfloor_coupon_paths
 from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
+from pythonore.runtime.bermudan import _exercise_sign, price_bermudan_from_ore_case
 from pythonore.runtime.runtime import XVAEngine
 
 
@@ -247,6 +256,38 @@ def test_example63_xccy_notional_rows_follow_fx_reset_ladder():
             assert math.isclose(abs(float(row["Amount"])), expected, rel_tol=1.0e-10, abs_tol=5.0e-4)
 
 
+def test_overnight_static_state_uses_exact_helper(monkeypatch):
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_59" / "Input"), ore_file="ore.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "Cap_USD_SOFR")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, num_paths=4),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    leg = next(leg for leg in state["rate_legs"] if leg.get("overnight_indexed", False))
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("exact helper called")
+
+    monkeypatch.setattr("pythonore.compute.overnight_capfloor_shim._overnight_coupon_rate_exact", _boom)
+    with pytest.raises(RuntimeError, match="exact helper called"):
+        price_overnight_capfloor_coupon_paths(
+            adapter,
+            inputs=inputs,
+            leg=leg,
+            ccy=str(leg["ccy"]),
+            t=0.0,
+            x_t=np.zeros(1, dtype=float),
+            snapshot=snapshot,
+        )
+
+
 def test_example63_xccy_trade_runs_natively_without_swig():
     snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
@@ -308,6 +349,33 @@ def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
         rel_tol=1.0e-12,
         abs_tol=1.0e-9,
     )
+
+
+def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orientation():
+    snapshot = XVALoader.from_files(
+        str(TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_134PerType" / "Input"),
+        ore_file="ore.xml",
+    )
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "BERMUDAN_SWAPTION_USD_0001")
+    assert trade.product.option_type == "Call"
+    assert trade.product.pay_fixed is False
+    assert _exercise_sign(trade.product) == 1.0
+
+
+def test_bermudan_swaption_uses_trade_specific_gsr_calibration_when_available():
+    case_dir = TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_134PerType" / "Input"
+    result = price_bermudan_from_ore_case(
+        case_dir,
+        ore_file="ore.xml",
+        trade_id="BERMUDAN_SWAPTION_USD_0001",
+        method="backward",
+        num_paths=256,
+        seed=42,
+        basis_degree=2,
+        curve_mode="auto",
+    )
+    assert result.model_param_source == "trade_specific_gsr"
+    assert result.curve_source == "ore_quote_fit"
 
 
 def test_example76_floor_usd_maturing_matches_ore_trade_npv():
@@ -792,6 +860,109 @@ def test_build_irs_legs_can_use_flows_csv_when_explicitly_requested():
 
     flow_loader.assert_called_once()
     np.testing.assert_allclose(np.asarray(legs["fixed_notional"], dtype=float), np.array([1_234_567.0]))
+
+
+def test_compute_realized_float_coupons_clamps_start_to_fixing_time():
+    class _DummyModel:
+        def __init__(self):
+            self.calls = []
+
+        def discount_bond(self, t, maturity, x, p_t, p0_maturity):
+            self.calls.append((float(t), float(maturity), float(p_t), float(p0_maturity)))
+            return np.full_like(np.asarray(x, dtype=float), float(p0_maturity), dtype=float)
+
+    model = _DummyModel()
+    p0_disc = lambda t: 1.0 / (1.0 + 0.02 * float(t))
+    p0_fwd = lambda t: 1.0 / (1.0 + 0.015 * float(t))
+    legs = {
+        "float_start_time": np.array([0.10], dtype=float),
+        "float_end_time": np.array([0.40], dtype=float),
+        "float_accrual": np.array([0.30], dtype=float),
+        "float_index_accrual": np.array([0.30], dtype=float),
+        "float_spread": np.array([0.0], dtype=float),
+        "float_fixing_time": np.array([0.25], dtype=float),
+    }
+    sim_times = np.array([0.0, 0.25, 0.5], dtype=float)
+    x_paths = np.zeros((sim_times.size, 1), dtype=float)
+
+    realized = compute_realized_float_coupons(model, p0_disc, p0_fwd, legs, sim_times, x_paths)
+
+    assert realized.shape == (1, 1)
+    assert model.calls, "expected the coupon helper to call the discount bond helper"
+    # The helper must clamp the effective start to the fixing time, otherwise this
+    # call would still use the accrual start at 0.10.
+    assert math.isclose(model.calls[0][1], 0.25, rel_tol=0.0, abs_tol=1.0e-12)
+
+
+def test_swap_npv_uses_explicit_live_coupons_for_averaged_overnight_legs():
+    class _DummyModel:
+        def discount_bond(self, t, maturity, x, p_t, p0_maturity):
+            return np.full_like(np.asarray(x, dtype=float), float(p0_maturity), dtype=float)
+
+        def discount_bond_paths(self, t, maturities, x_paths, p_t, p0_T):
+            p0_T = np.asarray(p0_T, dtype=float)
+            x_paths = np.asarray(x_paths, dtype=float)
+            return np.tile((p0_T / float(p_t))[:, None], (1, x_paths.size))
+
+    model = _DummyModel()
+    p0_disc = lambda t: 1.0 / (1.0 + 0.02 * float(t))
+    p0_fwd = lambda t: 1.0 / (1.0 + 0.01 * float(t))
+    legs = {
+        "fixed_pay_time": np.array([], dtype=float),
+        "fixed_start_time": np.array([], dtype=float),
+        "fixed_end_time": np.array([], dtype=float),
+        "fixed_amount": np.array([], dtype=float),
+        "float_start_time": np.array([0.10], dtype=float),
+        "float_end_time": np.array([0.40], dtype=float),
+        "float_pay_time": np.array([0.50], dtype=float),
+        "float_accrual": np.array([0.30], dtype=float),
+        "float_index_accrual": np.array([0.30], dtype=float),
+        "float_notional": np.array([100.0], dtype=float),
+        "float_sign": np.array([1.0], dtype=float),
+        "float_spread": np.array([0.0], dtype=float),
+        "float_coupon": np.array([0.0], dtype=float),
+        "float_fixing_time": np.array([0.60], dtype=float),
+        "float_is_averaged": np.array([True], dtype=bool),
+    }
+    live_coupon = np.array([[0.123]], dtype=float)
+    pv = swap_npv_from_ore_legs_dual_curve(
+        model,
+        p0_disc,
+        p0_fwd,
+        legs,
+        t=0.0,
+        x_t=np.zeros(1, dtype=float),
+        realized_float_coupon=live_coupon,
+        live_float_coupon=live_coupon,
+    )
+    expected = 100.0 * 0.30 * 0.123 * p0_disc(0.50)
+    assert pv.shape == (1,)
+    assert math.isclose(float(pv[0]), expected, rel_tol=0.0, abs_tol=1.0e-12)
+
+
+def test_year_fraction_supports_30e_360_and_bare_act():
+    assert math.isclose(_year_fraction(date(2024, 1, 31), date(2024, 2, 28), "30E/360"), 28.0 / 360.0, rel_tol=0.0, abs_tol=1.0e-12)
+    assert math.isclose(_year_fraction(date(2024, 2, 28), date(2024, 3, 1), "ACT"), 2.0 / 366.0, rel_tol=0.0, abs_tol=1.0e-12)
+
+
+def test_sofr_index_day_counter_defaults_to_act_act():
+    assert _infer_index_day_counter("USD-SOFR", fallback="A365F") == "ACT/ACT"
+
+
+def test_average_ois_uses_end_lagged_fixings():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_23" / "Input"), ore_file="ore.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "averageOIS")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, analytics=(), num_paths=4),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    legs = adapter._build_irs_legs(trade, mapped, snapshot)
+    assert bool(legs.get("float_is_averaged", False)) is True
+    assert np.asarray(legs["float_fixing_time"], dtype=float)[0] > np.asarray(legs["float_start_time"], dtype=float)[0]
 
 
 def test_python_runtime_compares_example25_digital_cmsspread_with_local_ore_run():

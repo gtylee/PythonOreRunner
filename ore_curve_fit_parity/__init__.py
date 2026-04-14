@@ -6,7 +6,7 @@ from .curve_trace import (
     trace_index_curve_from_ore,
     trace_usd_curve_from_ore,
 )
-from .interpolation import build_log_linear_discount_interpolator
+from .interpolation import build_cubic_discount_interpolator, build_log_cubic_discount_interpolator, build_log_linear_discount_interpolator
 from .service import (
     CurveBuildRequest,
     CurveBuildResult,
@@ -26,6 +26,8 @@ __all__ = [
     "CurveComparison",
     "CurveComparisonPoint",
     "CurveTrace",
+    "build_cubic_discount_interpolator",
+    "build_log_cubic_discount_interpolator",
     "build_log_linear_discount_interpolator",
     "build_curves_from_ore_inputs",
     "compare_python_vs_ore",

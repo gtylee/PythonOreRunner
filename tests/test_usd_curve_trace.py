@@ -1,13 +1,15 @@
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from ore_curve_fit_parity.curve_trace import (
     trace_curve_graph_from_ore,
     trace_discount_curve_from_ore,
     trace_index_curve_from_ore,
     trace_usd_curve_from_ore,
 )
-from ore_curve_fit_parity.interpolation import build_log_linear_discount_interpolator
+from ore_curve_fit_parity.interpolation import build_cubic_discount_interpolator, build_log_linear_discount_interpolator
 
 
 class TestUsdCurveTrace(unittest.TestCase):
@@ -27,9 +29,25 @@ class TestUsdCurveTrace(unittest.TestCase):
         self.assertAlmostEqual(curve(2.0), 0.90)
 
         expected_mid = (1.0 * 0.95) ** 0.5
+        expected_right = float(np.exp(np.log(0.90) + (np.log(0.90) - np.log(0.95)) * 3.0))
         self.assertAlmostEqual(curve(0.5), expected_mid, places=12)
         self.assertAlmostEqual(curve(-1.0), 1.0)
-        self.assertAlmostEqual(curve(5.0), 0.90)
+        self.assertAlmostEqual(curve(5.0), expected_right, places=12)
+
+    def test_cubic_discount_interpolator_differs_from_loglinear_on_long_tail(self):
+        loglinear = build_log_linear_discount_interpolator(
+            [0.0, 5.0, 10.0, 20.0],
+            [1.0, 0.93, 0.84, 0.68],
+        )
+        cubic = build_cubic_discount_interpolator(
+            [0.0, 5.0, 10.0, 20.0],
+            [1.0, 0.93, 0.84, 0.68],
+        )
+
+        ll_30 = loglinear(30.0)
+        cubic_30 = cubic(30.0)
+        self.assertNotAlmostEqual(ll_30, cubic_30, places=8)
+        self.assertGreater(abs(cubic_30 - ll_30), 1.0e-4)
 
     def test_trace_existing_usd_case(self):
         payload = trace_usd_curve_from_ore(self.ORE_XML)

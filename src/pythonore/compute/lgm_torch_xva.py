@@ -35,12 +35,49 @@ def _clamp_nonnegative_times(times) -> np.ndarray:
     return out
 
 
+def _natural_cubic_spline_coefficients(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if x.ndim != 1 or y.ndim != 1 or x.size != y.size:
+        raise ValueError("x and y must be one-dimensional with matching size")
+    if x.size < 3:
+        raise ValueError("curve requires at least three points for cubic interpolation")
+    if np.any(np.diff(x) <= 0.0):
+        raise ValueError("curve times must be strictly increasing")
+
+    h = np.diff(x)
+    alpha = np.zeros_like(x)
+    for i in range(1, x.size - 1):
+        alpha[i] = 3.0 * (y[i + 1] - y[i]) / h[i] - 3.0 * (y[i] - y[i - 1]) / h[i - 1]
+
+    l = np.ones_like(x)
+    mu = np.zeros_like(x)
+    z = np.zeros_like(x)
+    for i in range(1, x.size - 1):
+        l[i] = 2.0 * (x[i + 1] - x[i - 1]) - h[i - 1] * mu[i - 1]
+        if abs(l[i]) <= 1.0e-14:
+            l[i] = 1.0e-14
+        mu[i] = h[i] / l[i]
+        z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i]
+
+    a = y[:-1].copy()
+    b = np.zeros(x.size - 1, dtype=float)
+    c = np.zeros(x.size, dtype=float)
+    d = np.zeros(x.size - 1, dtype=float)
+    for j in range(x.size - 2, -1, -1):
+        c[j] = z[j] - mu[j] * c[j + 1]
+        b[j] = (y[j + 1] - y[j]) / h[j] - h[j] * (c[j + 1] + 2.0 * c[j]) / 3.0
+        d[j] = (c[j + 1] - c[j]) / (3.0 * h[j])
+    return a, b, c[:-1], d
+
+
 @dataclass
 class TorchDiscountCurve:
     times: np.ndarray
     dfs: np.ndarray
     device: Optional[str] = None
     dtype: object = None
+    interpolation: str = "loglinear"
+    left_flat: bool = True
+    right_flat: bool = False
 
     def __post_init__(self) -> None:
         torch = _require_torch()
@@ -56,56 +93,131 @@ class TorchDiscountCurve:
             raise ValueError("curve discount factors must be positive")
         self.times = times
         self.dfs = dfs
+        self.log_dfs = np.log(dfs)
+        self.left_log_slope = (self.log_dfs[1] - self.log_dfs[0]) / max(self.times[1] - self.times[0], 1.0e-12)
+        self.right_log_slope = (self.log_dfs[-1] - self.log_dfs[-2]) / max(self.times[-1] - self.times[-2], 1.0e-12)
+        mode = str(self.interpolation).strip().lower()
+        if mode not in {"loglinear", "cubic", "logcubic"}:
+            raise ValueError("interpolation must be 'loglinear', 'cubic', or 'logcubic'")
+        self.interpolation = mode
         device_obj = torch.device(self.device) if self.device is not None else torch.device("cpu")
         self.device = str(device_obj)
         if self.dtype is None:
             self.dtype = torch.float32 if device_obj.type == "mps" else torch.float64
         self._times_t = torch.as_tensor(times, dtype=self.dtype, device=device_obj)
         self._dfs_t = torch.as_tensor(dfs, dtype=self.dtype, device=device_obj)
+        if self.interpolation in {"cubic", "logcubic"}:
+            basis = np.log(dfs) if self.interpolation == "logcubic" else dfs
+            a, b, c, d = _natural_cubic_spline_coefficients(times, np.asarray(basis, dtype=float))
+            self._cubic_a = torch.as_tensor(a, dtype=self.dtype, device=device_obj)
+            self._cubic_b = torch.as_tensor(b, dtype=self.dtype, device=device_obj)
+            self._cubic_c = torch.as_tensor(c, dtype=self.dtype, device=device_obj)
+            self._cubic_d = torch.as_tensor(d, dtype=self.dtype, device=device_obj)
 
     @property
     def device_obj(self):
         torch = _require_torch()
         return torch.device(self.device)
 
-    def discount(self, t):
+    def _eval_cubic(self, t_t):
         torch = _require_torch()
-        t_t = torch.as_tensor(t, dtype=self.dtype, device=self.device_obj)
-        if t_t.ndim == 0:
-            return self._discount_scalar(t_t)
         flat = t_t.reshape(-1)
         out = torch.empty_like(flat)
         left = flat <= self._times_t[0]
         right = flat >= self._times_t[-1]
         interior = ~(left | right)
-        out[left] = self._dfs_t[0]
-        out[right] = self._dfs_t[-1]
+        if torch.any(left):
+            if self.left_flat:
+                out[left] = self._dfs_t[0]
+            else:
+                idx = torch.zeros(int(left.sum().item()), dtype=torch.long, device=flat.device)
+                s = flat[left] - self._times_t[idx]
+                val = self._cubic_a[idx] + self._cubic_b[idx] * s + self._cubic_c[idx] * s * s + self._cubic_d[idx] * s * s * s
+                out[left] = torch.exp(val) if self.interpolation == "logcubic" else val
+        if torch.any(right):
+            idx = torch.full((int(right.sum().item()),), self._times_t.numel() - 2, dtype=torch.long, device=flat.device)
+            s = flat[right] - self._times_t[idx]
+            val = self._cubic_a[idx] + self._cubic_b[idx] * s + self._cubic_c[idx] * s * s + self._cubic_d[idx] * s * s * s
+            if self.right_flat:
+                out[right] = self._dfs_t[-1]
+            else:
+                out[right] = torch.exp(val) if self.interpolation == "logcubic" else val
+        if torch.any(interior):
+            idx = torch.searchsorted(self._times_t, flat[interior], right=False)
+            idx = torch.clamp(idx, 1, self._times_t.numel() - 1)
+            idx0 = idx - 1
+            s = flat[interior] - self._times_t[idx0]
+            val = self._cubic_a[idx0] + self._cubic_b[idx0] * s + self._cubic_c[idx0] * s * s + self._cubic_d[idx0] * s * s * s
+            out[interior] = torch.exp(val) if self.interpolation == "logcubic" else val
+        return out.reshape(t_t.shape)
+
+    def discount(self, t):
+        torch = _require_torch()
+        t_t = torch.as_tensor(t, dtype=self.dtype, device=self.device_obj)
+        if t_t.ndim == 0:
+            return self._discount_scalar(t_t)
+        if self.interpolation in {"cubic", "logcubic"}:
+            return self._eval_cubic(t_t)
+        flat = t_t.reshape(-1)
+        out = torch.empty_like(flat)
+        left = flat <= self._times_t[0]
+        right = flat >= self._times_t[-1]
+        interior = ~(left | right)
+        if torch.any(left):
+            vals = flat[left]
+            left_out = torch.exp(torch.as_tensor(self.log_dfs[0], dtype=self.dtype, device=self.device_obj) + (vals - self._times_t[0]) * torch.as_tensor(self.left_log_slope, dtype=self.dtype, device=self.device_obj))
+            left_out = torch.where(vals <= 1.0e-14, torch.as_tensor(1.0, dtype=self.dtype, device=self.device_obj), left_out)
+            out[left] = left_out
+        if torch.any(right):
+            vals = flat[right]
+            out[right] = torch.exp(torch.as_tensor(self.log_dfs[-1], dtype=self.dtype, device=self.device_obj) + (vals - self._times_t[-1]) * torch.as_tensor(self.right_log_slope, dtype=self.dtype, device=self.device_obj))
         if torch.any(interior):
             x = flat[interior]
             idx = torch.searchsorted(self._times_t, x, right=False)
             idx = torch.clamp(idx, 1, self._times_t.numel() - 1)
             t0 = self._times_t[idx - 1]
             t1 = self._times_t[idx]
-            y0 = self._dfs_t[idx - 1]
-            y1 = self._dfs_t[idx]
+            y0 = torch.as_tensor(self.log_dfs, dtype=self.dtype, device=self.device_obj)[idx - 1]
+            y1 = torch.as_tensor(self.log_dfs, dtype=self.dtype, device=self.device_obj)[idx]
             w = (x - t0) / torch.clamp(t1 - t0, min=torch.as_tensor(1.0e-12, dtype=self.dtype, device=self.device_obj))
-            out[interior] = y0 + w * (y1 - y0)
+            out[interior] = torch.exp((1.0 - w) * y0 + w * y1)
         return out.reshape(t_t.shape)
 
     def _discount_scalar(self, t_t):
         torch = _require_torch()
+        if self.interpolation in {"cubic", "logcubic"}:
+            if t_t <= self._times_t[0]:
+                if self.left_flat:
+                    return self._dfs_t[0]
+                idx = 0
+            elif t_t >= self._times_t[-1]:
+                if self.right_flat:
+                    return self._dfs_t[-1]
+                idx = self._times_t.numel() - 2
+            else:
+                idx = int(torch.searchsorted(self._times_t, t_t, right=False).item())
+                idx = max(1, min(idx, self._times_t.numel() - 1)) - 1
+            s = t_t - self._times_t[idx]
+            val = self._cubic_a[idx] + self._cubic_b[idx] * s + self._cubic_c[idx] * s * s + self._cubic_d[idx] * s * s * s
+            return torch.exp(val) if self.interpolation == "logcubic" else val
         if t_t <= self._times_t[0]:
-            return self._dfs_t[0]
+            return torch.exp(
+                torch.as_tensor(self.log_dfs[0], dtype=self.dtype, device=self.device_obj)
+                + (t_t - self._times_t[0]) * torch.as_tensor(self.left_log_slope, dtype=self.dtype, device=self.device_obj)
+            )
         if t_t >= self._times_t[-1]:
-            return self._dfs_t[-1]
+            return torch.exp(
+                torch.as_tensor(self.log_dfs[-1], dtype=self.dtype, device=self.device_obj)
+                + (t_t - self._times_t[-1]) * torch.as_tensor(self.right_log_slope, dtype=self.dtype, device=self.device_obj)
+            )
         idx = int(torch.searchsorted(self._times_t, t_t, right=False).item())
         idx = max(1, min(idx, self._times_t.numel() - 1))
         t0 = self._times_t[idx - 1]
         t1 = self._times_t[idx]
-        y0 = self._dfs_t[idx - 1]
-        y1 = self._dfs_t[idx]
+        y0 = torch.as_tensor(self.log_dfs, dtype=self.dtype, device=self.device_obj)[idx - 1]
+        y1 = torch.as_tensor(self.log_dfs, dtype=self.dtype, device=self.device_obj)[idx]
         w = (t_t - t0) / max(float((t1 - t0).item()), 1.0e-12)
-        return y0 + w * (y1 - y0)
+        return torch.exp((1.0 - w) * y0 + w * y1)
 
 
 def _tensorize_legs(legs: Mapping[str, np.ndarray], *, device: str, dtype):
@@ -202,6 +314,7 @@ def forward_rate_from_bonds_torch(
     s = torch.as_tensor(start, dtype=disc_curve.dtype, device=disc_curve.device_obj)
     e = torch.as_tensor(end, dtype=disc_curve.dtype, device=disc_curve.device_obj)
     tau = torch.as_tensor(accrual, dtype=disc_curve.dtype, device=disc_curve.device_obj)
+    s = torch.maximum(s, torch.as_tensor(float(t), dtype=disc_curve.dtype, device=disc_curve.device_obj))
     p_t_disc = disc_curve.discount(float(t))
     p_ts_d = discount_bond_paths_torch(model, float(t), s, x, p_t_disc, disc_curve.discount(s))
     p_te_d = discount_bond_paths_torch(model, float(t), e, x, p_t_disc, disc_curve.discount(e))
@@ -222,6 +335,7 @@ def swap_npv_from_ore_legs_dual_curve_torch(
     x_t,
     *,
     realized_float_coupon: Optional[np.ndarray] = None,
+    live_float_coupon: Optional[np.ndarray] = None,
     return_numpy: bool = True,
 ):
     torch = _require_torch()
@@ -286,25 +400,33 @@ def swap_npv_from_ore_legs_dual_curve_torch(
             n2 = n[~fixed]
             sign2 = sign[~fixed]
             spread2 = spread[~fixed]
-            p_ts_f2 = discount_bond_paths_torch(
-                model,
-                float(t),
-                s2,
-                x,
-                p_t_f,
-                fwd_curve.discount(s2),
-            )
-            p_te_f2 = discount_bond_paths_torch(
-                model,
-                float(t),
-                e2,
-                x,
-                p_t_f,
-                fwd_curve.discount(e2),
-            )
-            fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None]
-            fwd2 = torch.nan_to_num(fwd2, nan=0.0, posinf=0.0, neginf=0.0)
-            amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
+            if bool(np.asarray(legs.get("float_is_averaged", False), dtype=bool).any()) and live_float_coupon is not None:
+                live_coupon = torch.as_tensor(np.asarray(live_float_coupon, dtype=float), dtype=x.dtype, device=x.device)
+                if live_coupon.shape[0] != pay.numel():
+                    raise ValueError("live_float_coupon must match coupon array shape")
+                amount[~fixed, :] = sign2[:, None] * n2[:, None] * torch.nan_to_num(
+                    live_coupon[~fixed], nan=0.0, posinf=0.0, neginf=0.0
+                ) * tau2[:, None]
+            else:
+                p_ts_f2 = discount_bond_paths_torch(
+                    model,
+                    float(t),
+                    s2,
+                    x,
+                    p_t_f,
+                    fwd_curve.discount(s2),
+                )
+                p_te_f2 = discount_bond_paths_torch(
+                    model,
+                    float(t),
+                    e2,
+                    x,
+                    p_t_f,
+                    fwd_curve.discount(e2),
+                )
+                fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None]
+                fwd2 = torch.nan_to_num(fwd2, nan=0.0, posinf=0.0, neginf=0.0)
+                amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv = pv + torch.sum(amount * p_tp_d, dim=0)
 
@@ -362,6 +484,7 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
     x_paths,
     *,
     realized_float_coupon: Optional[np.ndarray] = None,
+    live_float_coupon: Optional[np.ndarray] = None,
     exercise_into_whole_periods: bool = False,
     deterministic_fixings_cutoff: Optional[float] = None,
     return_numpy: bool = True,
@@ -475,12 +598,23 @@ def swap_npv_paths_from_ore_legs_dual_curve_torch(
 
         unfixed = live & ~fixed
         if torch.any(unfixed):
-            p_ts_f = gather_grid(fwd_grid_union, fwd_meta["float_start"])
-            p_te_f = gather_grid(fwd_grid_union, fwd_meta["float_end"])
-            fwd = (p_ts_f / p_te_f - 1.0) / index_tau[None, :, None]
-            fwd = torch.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0)
-            float_amounts = sign[None, :, None] * notionals[None, :, None] * (fwd + spread[None, :, None]) * tau[None, :, None]
-            amount = amount + float_amounts * unfixed[:, :, None]
+            if bool(np.asarray(legs.get("float_is_averaged", False), dtype=bool).any()) and live_float_coupon is not None:
+                coupons_live = torch.as_tensor(np.asarray(live_float_coupon, dtype=float), dtype=x.dtype, device=x.device)
+                if coupons_live.shape[0] != pay.numel():
+                    raise ValueError("live_float_coupon must match coupon array shape")
+                amount = amount + (
+                    sign[None, :, None]
+                    * notionals[None, :, None]
+                    * torch.nan_to_num(coupons_live[:, None, :], nan=0.0, posinf=0.0, neginf=0.0)
+                    * tau[None, :, None]
+                ) * unfixed[:, :, None]
+            else:
+                p_ts_f = gather_grid(fwd_grid_union, fwd_meta["float_start"])
+                p_te_f = gather_grid(fwd_grid_union, fwd_meta["float_end"])
+                fwd = (p_ts_f / p_te_f - 1.0) / index_tau[None, :, None]
+                fwd = torch.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0)
+                float_amounts = sign[None, :, None] * notionals[None, :, None] * (fwd + spread[None, :, None]) * tau[None, :, None]
+                amount = amount + float_amounts * unfixed[:, :, None]
 
         pv = pv + torch.sum(amount * p_tp_d * live[:, :, None], dim=1)
 
