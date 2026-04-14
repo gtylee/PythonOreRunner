@@ -36,6 +36,8 @@ PALETTE = {
     "sand": "#fef3c7",
 }
 
+_SWIG_STATUS_CACHE: dict[str, Any] | None = None
+
 
 def _is_pythonorerunner_root(path: Path) -> bool:
     return (
@@ -149,21 +151,32 @@ def apply_plot_style() -> None:
 
 
 def swig_status() -> dict[str, Any]:
+    global _SWIG_STATUS_CACHE
+    if _SWIG_STATUS_CACHE is not None:
+        return _SWIG_STATUS_CACHE
     bootstrap_notebook_env()
     try:
-        import ORE  # type: ignore
+        repo = find_repo_root()
+        from native_xva_interface import ORESwigAdapter
+        from pythonore.mapping.mapper import map_snapshot
 
-        return {
+        app_ore_xml = default_live_parity_ore_xml(repo)
+        live_snapshot, _, _ = load_case_snapshots(app_ore_xml, num_paths=1)
+        adapter = ORESwigAdapter()
+        adapter.run(live_snapshot, map_snapshot(live_snapshot), run_id="swig-status-probe")
+        _SWIG_STATUS_CACHE = {
             "available": True,
-            "module_path": getattr(ORE, "__file__", "<builtin>"),
+            "module_path": getattr(sys.modules.get("ORE"), "__file__", "<builtin>"),
             "message": "ORE-SWIG is available in this kernel.",
         }
+        return _SWIG_STATUS_CACHE
     except Exception as exc:  # pragma: no cover - environment dependent
-        return {
+        _SWIG_STATUS_CACHE = {
             "available": False,
             "module_path": "",
             "message": f"ORE-SWIG unavailable: {exc}",
         }
+        return _SWIG_STATUS_CACHE
 
 
 def default_input_bundle(repo: Path | None = None) -> tuple[Path, str]:

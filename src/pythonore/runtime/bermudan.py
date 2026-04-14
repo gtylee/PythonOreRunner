@@ -15,11 +15,7 @@ from pythonore.domain.dataclasses import BermudanSwaption, MarketQuote, Trade, X
 from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
 from pythonore.runtime.exceptions import EngineRunError, ValidationError
-from pythonore.runtime.runtime import (
-    _build_zero_rate_shocked_curve,
-    _quote_matches_discount_curve,
-    _quote_matches_forward_curve,
-)
+from pythonore.runtime.lgm import market as lgm_market
 
 
 @dataclass(frozen=True)
@@ -876,12 +872,12 @@ def _build_curves(snapshot: XVASnapshot, mapped, trade: Trade, curve_mode: str) 
     if p0_disc is None or p0_fwd is None:
         quote_dicts = [{"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes]
         disc_quotes = [
-            q for q in quote_dicts if _quote_matches_discount_curve(str(q["key"]), trade.product.ccy.upper(), discount_column)
+            q for q in quote_dicts if lgm_market._quote_matches_discount_curve(str(q["key"]), trade.product.ccy.upper(), discount_column)
         ]
         fwd_quotes = [
             q
             for q in quote_dicts
-            if _quote_matches_forward_curve(str(q["key"]), trade.product.ccy.upper(), _float_index_tenor(forward_column))
+            if lgm_market._quote_matches_forward_curve(str(q["key"]), trade.product.ccy.upper(), _float_index_tenor(forward_column))
         ]
         if not disc_quotes:
             raise EngineRunError(f"No discount quotes found for {trade.product.ccy} using source column '{discount_column}'")
@@ -1011,10 +1007,10 @@ def _relevant_market_factors(snapshot: XVASnapshot, trade: Trade) -> List[str]:
     out = []
     for q in snapshot.market.raw_quotes:
         key = str(q.key)
-        if _quote_matches_discount_curve(key, trade.product.ccy.upper(), discount_column):
+        if lgm_market._quote_matches_discount_curve(key, trade.product.ccy.upper(), discount_column):
             out.append(key)
             continue
-        if _quote_matches_forward_curve(key, trade.product.ccy.upper(), tenor):
+        if lgm_market._quote_matches_forward_curve(key, trade.product.ccy.upper(), tenor):
             out.append(key)
     return sorted(dict.fromkeys(out))
 
@@ -1167,13 +1163,13 @@ def _curve_node_deltas(
         shifts = np.zeros(node_times.size, dtype=float)
         shifts[i] = float(shift_size)
         if curve_side == "discount":
-            up_disc = _build_zero_rate_shocked_curve(base_disc, list(node_times), list(shifts))
-            dn_disc = _build_zero_rate_shocked_curve(base_disc, list(node_times), list(-shifts))
+            up_disc = lgm_market._build_zero_rate_shocked_curve(base_disc, list(node_times), list(shifts))
+            dn_disc = lgm_market._build_zero_rate_shocked_curve(base_disc, list(node_times), list(-shifts))
             up = _price_bermudan_frozen(ctx, up_disc, base_fwd)
             dn = _price_bermudan_frozen(ctx, dn_disc, base_fwd)
         else:
-            up_fwd = _build_zero_rate_shocked_curve(base_fwd, list(node_times), list(shifts))
-            dn_fwd = _build_zero_rate_shocked_curve(base_fwd, list(node_times), list(-shifts))
+            up_fwd = lgm_market._build_zero_rate_shocked_curve(base_fwd, list(node_times), list(shifts))
+            dn_fwd = lgm_market._build_zero_rate_shocked_curve(base_fwd, list(node_times), list(-shifts))
             up = _price_bermudan_frozen(ctx, base_disc, up_fwd)
             dn = _price_bermudan_frozen(ctx, base_disc, dn_fwd)
         deltas[i] = (up - dn) / (2.0 * float(shift_size))

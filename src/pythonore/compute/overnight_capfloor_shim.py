@@ -13,6 +13,36 @@ from typing import Any, Mapping
 import numpy as np
 
 
+def _coupon_include_spread(coupon: Any) -> bool:
+    fn = getattr(coupon, "includeSpread", None)
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+    return False
+
+
+def _past_fixing_or_none(ql_index: Any, fixing_date: Any) -> float | None:
+    try:
+        past_fixing = ql_index.pastFixing(fixing_date)
+    except Exception:
+        return None
+    try:
+        import QuantLib as ql
+
+        null_real = getattr(ql, "NullReal", None)
+        if callable(null_real):
+            try:
+                if past_fixing == null_real():
+                    return None
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return float(past_fixing)
+
+
 def _build_ql_overnight_index(overnight_index: str, overnight_handle: Any) -> Any:
     import QuantLib as ql
 
@@ -99,10 +129,10 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
 
     while i < n and fixing_dates[min(i, n_cutoff)] < today:
         fixing_date = fixing_dates[min(i, n_cutoff)]
-        past_fixing = ql_index.pastFixing(fixing_date)
-        if past_fixing == ql.NullReal():
+        past_fixing = _past_fixing_or_none(ql_index, fixing_date)
+        if past_fixing is None:
             raise ValueError(f"missing fixing for {fixing_date}")
-        if coupon.includeSpread():
+        if _coupon_include_spread(coupon):
             compound_factor_without_spread *= 1.0 + past_fixing * dts[i]
             past_fixing += coupon.spread()
         compound_factor *= 1.0 + past_fixing * dts[i]
@@ -110,9 +140,9 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
 
     if i < n and fixing_dates[min(i, n_cutoff)] == today:
         try:
-            past_fixing = ql_index.pastFixing(today)
-            if past_fixing != ql.NullReal():
-                if coupon.includeSpread():
+            past_fixing = _past_fixing_or_none(ql_index, today)
+            if past_fixing is not None:
+                if _coupon_include_spread(coupon):
                     compound_factor_without_spread *= 1.0 + past_fixing * dts[i]
                     past_fixing += coupon.spread()
                 compound_factor *= 1.0 + past_fixing * dts[i]
@@ -132,7 +162,7 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
             end_discount *= discount_cutoff_date ** (value_dates[n] - value_dates[n_cutoff])
 
         compound_factor *= start_discount / end_discount
-        if coupon.includeSpread():
+        if _coupon_include_spread(coupon):
             compound_factor_without_spread *= start_discount / end_discount
             tau = ql_index.dayCounter().yearFraction(value_dates[i], value_dates[-1]) / (value_dates[-1] - value_dates[i])
             compound_factor *= (1.0 + tau * coupon.spread()) ** int(value_dates[-1] - value_dates[i])
@@ -142,7 +172,7 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
         raise ValueError("invalid overnight coupon accrual period")
     rate = (compound_factor - 1.0) / tau
     swaplet_rate = coupon.gearing() * rate
-    if not coupon.includeSpread():
+    if not _coupon_include_spread(coupon):
         swaplet_rate += coupon.spread()
     return float(swaplet_rate)
 
@@ -236,15 +266,15 @@ def _average_overnight_coupon_rate_exact(
     accumulated_rate = 0.0
     i = 0
     while i < n and fixing_dates_schedule[min(i, n_cutoff)] < today:
-        past_fixing = ql_index.pastFixing(fixing_dates_schedule[min(i, n_cutoff)])
-        if past_fixing == ql.NullReal():
+        past_fixing = _past_fixing_or_none(ql_index, fixing_dates_schedule[min(i, n_cutoff)])
+        if past_fixing is None:
             raise ValueError(f"missing fixing for {fixing_dates_schedule[min(i, n_cutoff)]}")
         accumulated_rate += past_fixing * dts[i]
         i += 1
     if i < n and fixing_dates_schedule[min(i, n_cutoff)] == today:
         try:
-            past_fixing = ql_index.pastFixing(today)
-            if past_fixing != ql.NullReal():
+            past_fixing = _past_fixing_or_none(ql_index, today)
+            if past_fixing is not None:
                 accumulated_rate += past_fixing * dts[i]
                 i += 1
         except Exception:

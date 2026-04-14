@@ -31,7 +31,7 @@ _CANONICAL_BENCHMARKS = (
 )
 
 for module_name in _CANONICAL_BENCHMARKS:
-    sys.modules.setdefault(
-        f"{__name__}.{module_name}",
-        import_module(f"pythonore.benchmarks.{module_name}"),
-    )
+    module = import_module(f"pythonore.benchmarks.{module_name}")
+    sys.modules[f"{__name__}.{module_name}"] = module
+    sys.modules.setdefault(f"pythonore.benchmarks.{module_name}", module)
+    globals()[module_name] = module

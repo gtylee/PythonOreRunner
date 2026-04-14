@@ -376,10 +376,14 @@ def _resolve_ref(ref: str, ore_file: Path, input_path: str) -> Path:
     candidates = [
         (ore_file.parent / p).resolve(),
         (run_dir / input_path / p).resolve(),
+        (ore_file.parent / p.name).resolve(),
+        (run_dir / input_path / p.name).resolve(),
+        (ore_file.parents[2] / "Examples" / "Input" / p.name).resolve() if len(ore_file.parents) > 2 else None,
+        (Path(__file__).resolve().parents[3] / "Examples" / "Input" / p.name).resolve(),
     ]
 
     for c in candidates:
-        if c.exists():
+        if c is not None and c.exists():
             return c
 
     # Keep deterministic fallback for optional files. Required files should be

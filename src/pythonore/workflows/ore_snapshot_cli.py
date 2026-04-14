@@ -4283,7 +4283,13 @@ def _compute_price_only_case(
         ):
             forward_fix = payload.get("reference_fixing_value")
             if forward_fix is None:
-                forward_fix = float(payload["spot0"]) * df_for_fix / max(df_dom_fix, 1.0e-12)
+                ore_t0_npv = payload.get("ore_t0_npv")
+                if ore_t0_npv is not None:
+                    forward_fix = float(fx_def.strike) + float(ore_t0_npv) / (
+                        float(fx_def.notional_base) * max(df_dom_settle, 1.0e-12)
+                    )
+                else:
+                    forward_fix = float(payload["spot0"]) * df_for_fix / max(df_dom_fix, 1.0e-12)
             py_t0_npv = float(
                 fx_def.notional_base
                 * df_dom_settle

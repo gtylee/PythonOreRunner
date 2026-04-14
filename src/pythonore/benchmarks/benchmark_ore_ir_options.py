@@ -842,6 +842,9 @@ def _build_berm_from_ore_flows(flows_csv: Path, asof: date, trade_id: str) -> Be
         time_day_counter="A365F",
         index_day_counter="A360",
     )
+    # Benchmark pricing should project floating coupons from the supplied curve
+    # rather than replaying the exported ORE amounts verbatim.
+    legs["ore_replay"] = False
     exercise_times = np.array([_t(f"{d[:4]}-{d[4:6]}-{d[6:]}") for d in BERM_EXERCISE_DATES], dtype=float)
     return BermudanSwaptionDef(
         trade_id=trade_id,

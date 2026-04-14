@@ -12,8 +12,10 @@ from datetime import datetime
 
 from pythonore.domain.dataclasses import IRS, MarketData, MarketQuote, XVASnapshot
 from pythonore.mapping.mapper import MappedInputs, map_snapshot
+from pythonore.runtime.core import XVAEngine
 from pythonore.runtime.exceptions import EngineRunError
-from pythonore.runtime.runtime import XVAEngine, _PythonLgmInputs, _apply_curve_node_shocks
+from pythonore.runtime.lgm import market as lgm_market
+from pythonore.runtime.lgm.types import _PythonLgmInputs
 
 
 @dataclass(frozen=True)
@@ -538,7 +540,7 @@ class OreSnapshotPythonLgmSensitivityComparator:
             forward_curves_by_tenor,
             forward_curves_by_name,
             xva_discount_curve,
-        ) = _apply_curve_node_shocks(
+        ) = lgm_market._apply_curve_node_shocks(
             snapshot,
             base_inputs.discount_curves,
             base_inputs.forward_curves,

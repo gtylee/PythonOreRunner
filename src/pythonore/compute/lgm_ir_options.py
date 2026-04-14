@@ -393,7 +393,11 @@ def capfloor_npv_paths(
             fix_to_idx[j] = max(min(k, t.size - 1), 1)
 
     out = np.empty_like(x_paths)
+    final_pay = float(np.max(np.asarray(capfloor.pay_time, dtype=float))) if capfloor.pay_time.size else 0.0
     for i, ti in enumerate(t):
+        if ti >= final_pay - 1.0e-12:
+            out[i, :] = 0.0
+            continue
         live = np.asarray(capfloor.pay_time, dtype=float) >= ti - 1.0e-12
         rf_live = None
         if lock_fixings and np.any(live):

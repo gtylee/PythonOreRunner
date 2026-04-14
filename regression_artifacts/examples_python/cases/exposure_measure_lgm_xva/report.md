@@ -11,18 +11,18 @@
 - discount_column: `EUR-EURIBOR-6M`
 - forward_column: `EUR-EURIBOR-6M`
 - leg_source: `flows`
-- py_t0_npv: `602.3421823545359`
+- py_t0_npv: `602.3422395223752`
 
 ## XVA
 
 - own_credit_source: `market`
-- py_basel_eepe: `248720.5350385722`
-- py_basel_epe: `247214.70345924492`
-- py_cva: `43663.237641230786`
-- py_dva: `61613.78108976491`
-- py_fba: `30216.586111728328`
-- py_fca: `-4558.845657651169`
-- py_fva: `25657.740454077164`
+- py_basel_eepe: `52304.03041350203`
+- py_basel_epe: `52300.48786141324`
+- py_cva: `4598.2043143641`
+- py_dva: `159.08205897150376`
+- py_fba: `77.73232929484129`
+- py_fca: `-469.24507253485115`
+- py_fva: `-391.51274324000985`
 
 ## Parity
 

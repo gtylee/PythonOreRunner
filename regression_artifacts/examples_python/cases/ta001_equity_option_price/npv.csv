@@ -1,2 +1,2 @@
 #TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
-EQ_CALL_STOXX50E,EquityOption,2021-12-17,0.482192,236.700000,EUR,236.700000,EUR,10000000.00,EUR,10000000.00,,
+EQ_CALL_STOXX50E,EquityOption,2021-12-17,0.482192,236.700000,EUR,236.700000,EUR,0.00,EUR,0.00,,

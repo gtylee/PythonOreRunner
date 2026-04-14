@@ -441,3 +441,7 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+sys.modules.setdefault("pythonore.benchmarks.benchmark_lgm_torch", sys.modules[__name__])
+sys.modules.setdefault("py_ore_tools.benchmarks.benchmark_lgm_torch", sys.modules[__name__])

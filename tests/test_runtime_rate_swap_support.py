@@ -673,7 +673,7 @@ def test_native_runtime_ignores_residual_output_curves_and_calibration_by_defaul
             "scaling": 1.0,
         }
         with patch(
-            "pythonore.runtime.runtime._parse_lgm_params_from_calibration_xml_text",
+            "pythonore.runtime.lgm.market._parse_lgm_params_from_calibration_xml_text",
             side_effect=AssertionError("residual calibration.xml should not be used"),
         ), patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python",

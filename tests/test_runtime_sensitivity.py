@@ -27,7 +27,7 @@ def test_ore_swig_adapter_primes_engine_swig_paths(tmp_path, monkeypatch):
     build_lib = swig_root / "build" / "lib.fake"
     build_lib.mkdir(parents=True)
     swig_root.mkdir(exist_ok=True)
-    monkeypatch.setattr("pythonore.runtime.runtime.find_engine_repo_root", lambda: engine_root)
+    monkeypatch.setattr("pythonore.runtime.swig.find_engine_repo_root", lambda: engine_root)
     original_path = list(sys.path)
     try:
         adapter = object.__new__(ORESwigAdapter)
@@ -158,7 +158,7 @@ def test_parse_model_params_honors_simulation_xml_source_for_ore_case():
         "scaling": 1.0,
     }
     with patch.object(adapter, "_is_ore_case_snapshot", return_value=True):
-        with patch("pythonore.runtime.runtime._parse_lgm_params_from_simulation_xml_text", return_value=expected) as mocked:
+        with patch("pythonore.runtime.lgm.market._parse_lgm_params_from_simulation_xml_text", return_value=expected) as mocked:
             params, source = adapter._parse_model_params({"simulation.xml": "<Simulation/>"}, "USD", snapshot)
     assert source == "simulation"
     assert params is expected
