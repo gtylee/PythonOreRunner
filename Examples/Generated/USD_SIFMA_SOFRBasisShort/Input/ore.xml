@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2025-02-10</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="logFile">log.txt</Parameter>
+    <Parameter name="logMask">31</Parameter>
+    <Parameter name="marketDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/marketdata.csv</Parameter>
+    <Parameter name="fixingDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/fixings.csv</Parameter>
+    <Parameter name="implyTodaysFixings">N</Parameter>
+    <Parameter name="curveConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/todaysmarket.xml</Parameter>
+    <Parameter name="pricingEnginesFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+    <Parameter name="referenceDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/referencedata.xml</Parameter>
+    <Parameter name="scriptLibrary">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/scriptlibrary.xml</Parameter>
+    <Parameter name="observationModel">None</Parameter>
+    <Parameter name="continueOnError">false</Parameter>
+    <Parameter name="buildFailedTrades">true</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="lgmcalibration">default</Parameter>
+    <Parameter name="fxcalibration">default</Parameter>
+    <Parameter name="pricing">default</Parameter>
+    <Parameter name="simulation">default</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="npv">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+      <Parameter name="outputFileName">npv.csv</Parameter>
+    </Analytic>
+    <Analytic type="cashflow">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="outputFileName">flows.csv</Parameter>
+    </Analytic>
+    <Analytic type="curves">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="configuration">default</Parameter>
+      <Parameter name="grid">240,1M</Parameter>
+      <Parameter name="outputFileName">curves.csv</Parameter>
+    </Analytic>
+    <Analytic type="simulation">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="simulationConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_SOFRBasisSnapshot/Input/simulation.xml</Parameter>
+      <Parameter name="pricingEnginesFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+    <Analytic type="xva">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="csaFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Generated/USD_SOFRBasisSnapshot/Input/netting.xml</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>

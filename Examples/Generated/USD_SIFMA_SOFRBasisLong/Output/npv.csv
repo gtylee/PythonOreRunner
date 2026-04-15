@@ -1,0 +1,2 @@
+#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
+USD_SIFMA_SOFR_BASIS_PAY_SOFR,Swap,2026-02-03,0.980822,-120463.206785,USD,-120463.206785,USD,10000000.00,USD,10000000.00,CPTY_A,CPTY_A

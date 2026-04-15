@@ -5588,14 +5588,6 @@ def _compute_snapshot_case(
         rng=rng,
         draw_order=draw_order,
     )
-    realized_coupon = compute_realized_float_coupons(
-        model=model,
-        p0_disc=snap.p0_disc,
-        p0_fwd=snap.p0_fwd,
-        legs=snap.legs,
-        sim_times=sim_times,
-        x_paths_on_sim_grid=x_all,
-    )
 
     npv = np.zeros((snap.exposure_model_times.size, effective_paths), dtype=float)
     ore_style_xva = str(xva_mode).strip().lower() == "ore"
@@ -5605,16 +5597,190 @@ def _compute_snapshot_case(
             f"XVA: Build Cube 1 x 121 x {effective_paths}", message_width=48, bar_width=40
         )
         xva_cube_bar.update(0, max(snap.exposure_model_times.size, 1))
-    for i, t in enumerate(snap.exposure_model_times):
-        npv[i, :] = swap_npv_from_ore_legs_dual_curve(
-            model,
-            snap.p0_disc,
-            snap.p0_fwd,
-            snap.legs,
-            float(t),
-            x[i, :],
-            realized_float_coupon=realized_coupon,
+
+    def _empty_float_leg_block(legs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        out = {k: np.array(v, copy=True) for k, v in legs.items()}
+        for key in (
+            "float_pay_time",
+            "float_start_time",
+            "float_end_time",
+            "float_accrual",
+            "float_notional",
+            "float_sign",
+            "float_spread",
+            "float_coupon",
+            "float_amount",
+            "float_fixing_time",
+            "float_index_accrual",
+        ):
+            if key in out:
+                arr = np.asarray(out[key], dtype=float if key != "float_sign" else float)
+                out[key] = arr[:0].copy()
+        if "float_is_averaged" in out:
+            out["float_is_averaged"] = np.asarray(out["float_is_averaged"], dtype=bool)[:0].copy()
+        if "float_leg_index" in out:
+            out["float_leg_index"] = np.asarray(out["float_leg_index"], dtype=int)[:0].copy()
+        return out
+
+    def _float_leg_subset(legs: dict[str, np.ndarray], mask: np.ndarray, index_name: str) -> dict[str, np.ndarray]:
+        out = {k: np.array(v, copy=True) for k, v in legs.items()}
+        mask = np.asarray(mask, dtype=bool)
+        for key in (
+            "float_pay_time",
+            "float_start_time",
+            "float_end_time",
+            "float_accrual",
+            "float_notional",
+            "float_sign",
+            "float_spread",
+            "float_coupon",
+            "float_amount",
+            "float_fixing_time",
+            "float_index_accrual",
+        ):
+            if key in out:
+                out[key] = np.asarray(out[key], dtype=float)[mask].copy()
+        if "float_is_averaged" in out:
+            out["float_is_averaged"] = np.asarray(out["float_is_averaged"], dtype=bool)[mask].copy()
+        if "float_leg_index" in out:
+            out["float_leg_index"] = np.zeros(int(mask.sum()), dtype=int)
+        out["float_index"] = str(index_name).upper()
+        out["float_index_tenor"] = str(index_name).split("-")[-1].upper() if "-" in str(index_name) else ""
+        out["float_index_by_leg"] = np.asarray([str(index_name).upper()], dtype=object)
+        return out
+
+    ore_root = ET.parse(ore_xml).getroot()
+    markets_params = {
+        n.attrib.get("name", ""): (n.text or "").strip()
+        for n in ore_root.findall("./Markets/Parameter")
+    }
+    pricing_config_id = markets_params.get("pricing", markets_params.get("simulation", "libor"))
+    tm_root = None
+    todaysmarket_xml = Path(str(getattr(snap, "todaysmarket_xml_path", "") or "")).expanduser()
+    if todaysmarket_xml.exists():
+        tm_root = ET.parse(todaysmarket_xml).getroot()
+
+    forward_curve_cache: dict[str, Any] = {str(snap.forward_column).strip().upper(): snap.p0_fwd}
+
+    def _forward_curve_for_index(index_name: str):
+        key = str(index_name).strip().upper()
+        cached = forward_curve_cache.get(key)
+        if cached is not None:
+            return cached
+        curve_column = key
+        if tm_root is not None:
+            try:
+                curve_column = _resolve_forward_column_from_index(tm_root, pricing_config_id, key)
+            except Exception:
+                curve_column = key
+        curve = None
+        if curve_column == str(snap.forward_column).strip().upper():
+            curve = snap.p0_fwd
+        else:
+            curves_csv_path = Path(str(getattr(snap, "curves_csv_path", "") or "")).expanduser()
+            if curves_csv_path.exists():
+                try:
+                    curve_pairs = ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter(
+                        str(curves_csv_path),
+                        [curve_column],
+                        asof_date=str(snap.asof_date),
+                        day_counter=str(getattr(snap, "model_day_counter", "A365F")),
+                    )
+                    _, curve_times_fwd, curve_dfs_fwd = curve_pairs[curve_column]
+                    curve = ore_snapshot_mod.build_discount_curve_from_discount_pairs(
+                        list(zip(curve_times_fwd, curve_dfs_fwd))
+                    )
+                except Exception:
+                    curve = None
+        if curve is None:
+            curve = snap.p0_fwd
+        forward_curve_cache[key] = curve
+        return curve
+
+    float_leg_index = np.asarray(snap.legs.get("float_leg_index", []), dtype=int)
+    float_index_by_leg = np.asarray(snap.legs.get("float_index_by_leg", []), dtype=object)
+    trade_float_index_names = tuple(
+        dict.fromkeys(
+            str(name).strip().upper()
+            for name in float_index_by_leg
+            if str(name).strip()
         )
+    )
+    for index_name in trade_float_index_names:
+        _forward_curve_for_index(index_name)
+    use_split_float_legs = (
+        float_leg_index.size > 0
+        and len(trade_float_index_names) > 1
+        and np.unique(float_leg_index).size > 1
+    )
+    if use_split_float_legs:
+        fixed_only_legs = _empty_float_leg_block(snap.legs)
+        float_leg_payloads: list[tuple[int, str, dict[str, np.ndarray], Any, np.ndarray]] = []
+        for leg_id in np.unique(float_leg_index):
+            leg_idx = int(leg_id)
+            if leg_idx < 0 or leg_idx >= float_index_by_leg.size:
+                continue
+            index_name = str(float_index_by_leg[leg_idx]).strip().upper()
+            if not index_name:
+                continue
+            mask = float_leg_index == leg_idx
+            if not np.any(mask):
+                continue
+            subset_legs = _float_leg_subset(snap.legs, mask, index_name)
+            curve = _forward_curve_for_index(index_name)
+            realized_coupon = compute_realized_float_coupons(
+                model=model,
+                p0_disc=snap.p0_disc,
+                p0_fwd=curve,
+                legs=subset_legs,
+                sim_times=sim_times,
+                x_paths_on_sim_grid=x_all,
+            )
+            float_leg_payloads.append((leg_idx, index_name, subset_legs, curve, realized_coupon))
+    else:
+        fixed_only_legs = None
+        float_leg_payloads = []
+        realized_coupon = compute_realized_float_coupons(
+            model=model,
+            p0_disc=snap.p0_disc,
+            p0_fwd=snap.p0_fwd,
+            legs=snap.legs,
+            sim_times=sim_times,
+            x_paths_on_sim_grid=x_all,
+        )
+
+    for i, t in enumerate(snap.exposure_model_times):
+        if use_split_float_legs:
+            pv = swap_npv_from_ore_legs_dual_curve(
+                model,
+                snap.p0_disc,
+                snap.p0_fwd,
+                fixed_only_legs,
+                float(t),
+                x[i, :],
+                realized_float_coupon=None,
+            )
+            for _, _, subset_legs, curve, realized in float_leg_payloads:
+                pv += swap_npv_from_ore_legs_dual_curve(
+                    model,
+                    snap.p0_disc,
+                    curve,
+                    subset_legs,
+                    float(t),
+                    x[i, :],
+                    realized_float_coupon=realized,
+                )
+            npv[i, :] = pv
+        else:
+            npv[i, :] = swap_npv_from_ore_legs_dual_curve(
+                model,
+                snap.p0_disc,
+                snap.p0_fwd,
+                snap.legs,
+                float(t),
+                x[i, :],
+                realized_float_coupon=realized_coupon,
+            )
         if xva_cube_bar is not None:
             xva_cube_bar.update(i + 1, max(snap.exposure_model_times.size, 1))
     if ore_style_xva:

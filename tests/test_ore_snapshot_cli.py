@@ -202,6 +202,200 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertEqual(y_exp is None, True)
         self.assertEqual(y_all is None, True)
 
+    def test_compute_snapshot_case_splits_float_legs_by_index(self):
+        class _DummyModel:
+            _measure = "LGM"
+
+            @staticmethod
+            def zeta(t):
+                return np.asarray(t, dtype=float)
+
+        class _DummySnapshot:
+            trade_id = "TEST_SWAP"
+            counterparty = "CP_1"
+            netting_set_id = "NET_1"
+            asof_date = "2024-01-02"
+            measure = "LGM"
+            discount_column = "USD-OIS"
+            forward_column = "USD-LIBOR-3M"
+            xva_discount_column = "USD-OIS"
+            p0_disc = staticmethod(lambda t: 1.0 - 0.01 * float(t))
+            p0_fwd = staticmethod(lambda t: 1.0 - 0.02 * float(t))
+            p0_xva_disc = staticmethod(lambda t: 1.0 - 0.01 * float(t))
+            recovery = 0.4
+            ore_t0_npv = 0.0
+            ore_cva = 0.0
+            ore_dva = 0.0
+            ore_fba = 0.0
+            ore_fca = 0.0
+            ore_basel_epe = 0.0
+            ore_basel_eepe = 0.0
+            ore_maturity_date = "2025-01-02"
+            ore_maturity_time = 1.0
+            ore_epe = np.array([0.0, 0.0], dtype=float)
+            ore_ene = np.array([0.0, 0.0], dtype=float)
+            hazard_times = np.array([1.0], dtype=float)
+            hazard_rates = np.array([0.01], dtype=float)
+            own_hazard_times = None
+            own_hazard_rates = None
+            own_recovery = None
+            borrowing_curve_column = None
+            lending_curve_column = None
+            p0_borrow = None
+            p0_lend = None
+            model_day_counter = "A365F"
+            report_day_counter = "ActualActual(ISDA)"
+            exposure_model_times = np.array([0.0, 1.0], dtype=float)
+            exposure_dates = np.array(["2024-01-02", "2025-01-02"], dtype=object)
+            exposure_times = np.array([0.0, 1.0], dtype=float)
+            n_samples = 4
+            curves_csv_path = ""
+            todaysmarket_xml_path = ""
+            leg_source = "portfolio"
+            requested_xva_metrics = ()
+            portfolio_xml_path = None
+            trade_float_index2 = "USD-SOFR-3M"
+
+            def build_model(self):
+                return _DummyModel()
+
+            def survival_probability(self, times):
+                return np.ones_like(np.asarray(times, dtype=float))
+
+            def parity_completeness_report(self):
+                return {"summary": {"trade_id": self.trade_id}}
+
+            legs = {
+                "fixed_pay_time": np.array([], dtype=float),
+                "fixed_start_time": np.array([], dtype=float),
+                "fixed_end_time": np.array([], dtype=float),
+                "fixed_accrual": np.array([], dtype=float),
+                "fixed_rate": np.array([], dtype=float),
+                "fixed_notional": np.array([], dtype=float),
+                "fixed_sign": np.array([], dtype=float),
+                "fixed_amount": np.array([], dtype=float),
+                "float_pay_time": np.array([0.5, 1.0, 0.5, 1.0], dtype=float),
+                "float_start_time": np.array([0.1, 0.6, 0.1, 0.6], dtype=float),
+                "float_end_time": np.array([0.5, 1.0, 0.5, 1.0], dtype=float),
+                "float_accrual": np.array([0.4, 0.4, 0.4, 0.4], dtype=float),
+                "float_notional": np.array([1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0], dtype=float),
+                "float_sign": np.array([-1.0, -1.0, 1.0, 1.0], dtype=float),
+                "float_spread": np.array([0.001, 0.001, -0.0005, -0.0005], dtype=float),
+                "float_coupon": np.zeros(4, dtype=float),
+                "float_amount": np.zeros(4, dtype=float),
+                "float_fixing_time": np.array([0.0, 0.5, 0.0, 0.5], dtype=float),
+                "float_index_accrual": np.array([0.4, 0.4, 0.4, 0.4], dtype=float),
+                "float_is_averaged": np.array([False, False, False, False], dtype=bool),
+                "float_leg_index": np.array([0, 0, 1, 1], dtype=int),
+                "float_index": "USD-LIBOR-3M",
+                "float_index_tenor": "3M",
+                "float_index_day_counter": "A365F",
+                "float_fixing_source": "portfolio_fixing_days",
+                "float_index_by_leg": np.array(["USD-LIBOR-3M", "USD-SOFR-3M"], dtype=object),
+                "node_tenors": np.array([], dtype=float),
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ore_xml = root / "ore.xml"
+            ore_xml.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2024-01-02</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="pricing">libor</Parameter>
+  </Markets>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            curves_csv = root / "curves.csv"
+            curves_csv.write_text("Date,USD-LIBOR-3M,USD-SOFR-3M\n2024-01-02,1.0,1.0\n2025-01-02,0.98,0.97\n", encoding="utf-8")
+
+            fake_snap = _DummySnapshot()
+            fake_snap.curves_csv_path = str(curves_csv)
+            fake_snap.todaysmarket_xml_path = str(root / "missing_todaysmarket.xml")
+
+            curve_load_calls: list[str] = []
+            realized_calls: list[tuple[str, float]] = []
+            price_calls: list[tuple[str, float]] = []
+
+            def _fake_curve_pairs(path, columns, **kwargs):
+                column = str(columns[0])
+                curve_load_calls.append(column)
+                if column == "USD-SOFR-3M":
+                    dfs = np.array([1.0, 0.97], dtype=float)
+                else:
+                    dfs = np.array([1.0, 0.98], dtype=float)
+                return {column: (np.array(["2024-01-02", "2025-01-02"], dtype=object), np.array([0.0, 1.0], dtype=float), dfs)}
+
+            def _fake_realized(*, p0_fwd, legs, **kwargs):
+                realized_calls.append((str(legs.get("float_index", "")), float(p0_fwd(1.0))))
+                count = int(np.asarray(legs.get("float_pay_time", []), dtype=float).size)
+                return np.zeros((count, 2), dtype=float)
+
+            def _fake_swap_npv(model, p0_disc, p0_fwd, legs, t, x_t, realized_float_coupon=None, **kwargs):
+                size = int(np.asarray(legs.get("float_pay_time", []), dtype=float).size)
+                price_calls.append((size, str(legs.get("float_index", "")), float(p0_fwd(1.0))))
+                if size == 0:
+                    return np.zeros_like(np.asarray(x_t, dtype=float), dtype=float)
+                return np.full_like(np.asarray(x_t, dtype=float), float(p0_fwd(1.0)), dtype=float)
+
+            with patch("pythonore.workflows.ore_snapshot_cli.load_from_ore_xml", return_value=fake_snap), patch(
+                "pythonore.workflows.ore_snapshot_cli._simulate_with_fixing_grid",
+                return_value=(
+                    np.array([[0.0, 0.0], [0.0, 0.0]], dtype=float),
+                    np.array([[0.0, 0.0], [0.0, 0.0]], dtype=float),
+                    np.array([0.0, 1.0], dtype=float),
+                    None,
+                    None,
+                ),
+            ), patch(
+                "pythonore.workflows.ore_snapshot_cli._ore_exposure_quantile",
+                return_value=0.95,
+                ), patch(
+                    "pythonore.workflows.ore_snapshot_cli.build_ore_exposure_profile_from_paths",
+                    side_effect=lambda entity_id, *args, **kwargs: {
+                        "entity_id": entity_id,
+                        "dates": ["2024-01-02", "2025-01-02"],
+                        "times": [0.0, 1.0],
+                        "pfe": [0.0, 0.0],
+                        "time_weighted_basel_epe": [0.0, 0.0],
+                        "time_weighted_basel_eepe": [0.0, 0.0],
+                    },
+                ), patch(
+                "pythonore.workflows.ore_snapshot_cli.compute_realized_float_coupons",
+                side_effect=_fake_realized,
+            ), patch(
+                "pythonore.workflows.ore_snapshot_cli.swap_npv_from_ore_legs_dual_curve",
+                side_effect=_fake_swap_npv,
+            ), patch(
+                "pythonore.workflows.ore_snapshot_cli.ore_snapshot_mod._load_ore_discount_pairs_by_columns_with_day_counter",
+                side_effect=_fake_curve_pairs,
+            ):
+                result = ore_snapshot_cli._compute_snapshot_case(
+                    ore_xml,
+                    paths=2,
+                    seed=7,
+                    rng_mode="numpy",
+                    anchor_t0_npv=False,
+                    own_hazard=0.01,
+                    own_recovery=0.4,
+                    xva_mode="numpy",
+                )
+
+        self.assertEqual(curve_load_calls.count("USD-SOFR-3M"), 1)
+        self.assertEqual(realized_calls, [("USD-LIBOR-3M", 0.98), ("USD-SOFR-3M", 0.97)])
+        expected_price_calls = [
+            (0, "USD-LIBOR-3M", 0.98),
+            (2, "USD-LIBOR-3M", 0.98),
+            (2, "USD-SOFR-3M", 0.97),
+        ]
+        self.assertEqual(price_calls, expected_price_calls * 2)
+        self.assertAlmostEqual(float(result.pricing["py_t0_npv"]), 1.95, places=12)
+
     @staticmethod
     def _real_case_buffers() -> tuple[dict[str, str], dict[str, str]]:
         input_files = {

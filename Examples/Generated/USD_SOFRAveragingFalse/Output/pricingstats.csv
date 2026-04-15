@@ -1,0 +1,2 @@
+#TradeId,TradeType,NumberOfPricings,CumulativeTiming,AverageTiming
+USD_SOFR_OIS_AVG_FALSE,Swap,1,0,0

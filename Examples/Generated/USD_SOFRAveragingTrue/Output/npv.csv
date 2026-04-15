@@ -1,0 +1,2 @@
+#TradeId,TradeType,Maturity,MaturityTime,NPV,NpvCurrency,NPV(Base),BaseCurrency,Notional,NotionalCurrency,Notional(Base),NettingSet,CounterParty
+USD_SOFR_OIS_AVG_TRUE,Swap,2026-05-04,1.227397,-99059.274386,USD,-99059.274386,USD,10000000.00,USD,10000000.00,CPTY_A,CPTY_A

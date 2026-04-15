@@ -1243,6 +1243,7 @@ def load_swap_legs_from_portfolio_root(
     float_fixing_source_values: list[str] = []
     float_index_accrual_parts: list[np.ndarray] = []
     float_index_names_by_leg: list[str] = []
+    float_leg_index_parts: list[np.ndarray] = []
     float_leg_count = 0
     fixed_leg_count = 0
     for lx in legs_xml:
@@ -1297,6 +1298,7 @@ def load_swap_legs_from_portfolio_root(
             float_parts["float_spread"].append(np.full_like(accr, spread))
             float_parts["float_coupon"].append(np.zeros_like(accr))
             float_parts["float_amount"].append(np.zeros_like(accr))
+            float_leg_index_parts.append(np.full(accr.shape, float_leg_count, dtype=int))
             # Averaged OIS coupons fix against the end-of-period lag, not the accrual start.
             if is_averaged:
                 fix_dates = [_advance_business_days(ed, -fixing_days, cal) for ed in e_dates]
@@ -1331,6 +1333,7 @@ def load_swap_legs_from_portfolio_root(
         out[key] = _stack(parts, dtype=float)
     for key, parts in float_parts.items():
         out[key] = _stack(parts, dtype=float if key != "float_is_averaged" else bool)
+    out["float_leg_index"] = _stack(float_leg_index_parts, dtype=int)
 
     if out["fixed_pay_time"].size > 1:
         fixed_order = np.argsort(out["fixed_pay_time"], kind="mergesort")
@@ -1341,6 +1344,8 @@ def load_swap_legs_from_portfolio_root(
         float_order = np.argsort(out["float_pay_time"], kind="mergesort")
         for key in float_parts:
             out[key] = out[key][float_order]
+        if out["float_leg_index"].size > 1:
+            out["float_leg_index"] = out["float_leg_index"][float_order]
 
     out["float_index_accrual"] = _stack(float_index_accrual_parts, dtype=float)
     if out["float_index_accrual"].size > 1 and out["float_pay_time"].size > 1:
@@ -1349,8 +1354,18 @@ def load_swap_legs_from_portfolio_root(
     out["float_index_tenor"] = float_index_tenor_values[0] if float_index_tenor_values else ""
     out["float_index_day_counter"] = float_index_day_counter_values[0] if float_index_day_counter_values else "A365"
     out["float_fixing_source"] = float_fixing_source_values[0] if len(set(float_fixing_source_values)) <= 1 else "mixed"
-    if len(set(float_index_names_by_leg)) > 1:
-        out["float_index_by_leg"] = np.asarray(float_index_names_by_leg, dtype=object)
+    out["float_index_by_leg"] = np.asarray(float_index_names_by_leg, dtype=object)
+
+    if out["float_start_time"].size:
+        keep = out["float_start_time"] >= 0.0
+        if not np.all(keep):
+            for key in float_parts:
+                out[key] = np.asarray(out[key])[keep]
+            out["float_leg_index"] = np.asarray(out["float_leg_index"], dtype=int)[keep]
+            out["float_index_accrual"] = np.asarray(out["float_index_accrual"], dtype=float)[keep]
+            for key in ("float_index", "float_index_tenor", "float_index_day_counter", "float_fixing_source"):
+                if key in out:
+                    out[key] = out[key]
     out["fixed_leg_count"] = np.asarray([fixed_leg_count], dtype=int)
     out["float_leg_count"] = np.asarray([float_leg_count], dtype=int)
     return out

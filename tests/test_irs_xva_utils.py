@@ -666,8 +666,77 @@ class TestIrsXvaUtils(unittest.TestCase):
         self.assertEqual(np.asarray(legs["fixed_pay_time"], dtype=float).size, 0)
         self.assertEqual(np.asarray(legs["fixed_amount"], dtype=float).size, 0)
         self.assertEqual(np.asarray(legs["float_pay_time"], dtype=float).size, 2)
+        self.assertEqual(list(np.asarray(legs["float_index_by_leg"], dtype=object)), ["USD-LIBOR-3M", "USD-LIBOR-3M"])
         np.testing.assert_allclose(np.asarray(legs["float_sign"], dtype=float), np.array([-1.0, 1.0]))
         self.assertTrue(np.all(np.isfinite(np.asarray(legs["float_fixing_time"], dtype=float))))
+
+    def test_load_swap_legs_from_portfolio_root_keeps_float_leg_indices_and_drops_live_accrual(self):
+        root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="FLOAT_FLOAT_SPLIT">
+                <TradeType>Swap</TradeType>
+                <SwapData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>true</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                    </Notionals>
+                    <DayCounter>ACT/360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FloatingLegData>
+                      <Index>USD-LIBOR-3M</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>0.001</Spread></Spreads>
+                    </FloatingLegData>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2024-01-02</Date>
+                          <Date>2024-04-02</Date>
+                          <Date>2024-07-02</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                  </LegData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>false</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                    </Notionals>
+                    <DayCounter>ACT/360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FloatingLegData>
+                      <Index>USD-SOFR-3M</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>-0.0005</Spread></Spreads>
+                    </FloatingLegData>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2024-01-02</Date>
+                          <Date>2024-04-02</Date>
+                          <Date>2024-07-02</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        legs = load_swap_legs_from_portfolio_root(root, "FLOAT_FLOAT_SPLIT", "2024-03-15")
+
+        self.assertEqual(list(np.asarray(legs["float_index_by_leg"], dtype=object)), ["USD-LIBOR-3M", "USD-SOFR-3M"])
+        self.assertTrue(np.all(np.asarray(legs["float_start_time"], dtype=float) >= 0.0))
+        self.assertEqual(list(np.asarray(legs["float_leg_index"], dtype=int)), [0, 1])
+        self.assertEqual(np.asarray(legs["float_pay_time"], dtype=float).size, 2)
 
     def test_build_schedule_backward_with_first_date_advances_past_stub(self):
         from pythonore.compute.irs_xva_utils import _build_schedule

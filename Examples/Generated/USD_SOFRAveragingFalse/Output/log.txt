@@ -1,0 +1,783 @@
+NOTICE   [2026-Apr-15 17:24:50.212607]    (OREAnalytics/orea/app/parameters.cpp:133) : Parameters:
+NOTICE   [2026-Apr-15 17:24:50.212828]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : active = Y
+NOTICE   [2026-Apr-15 17:24:50.212942]    (OREAnalytics/orea/app/parameters.cpp:136) : group = cashflow : outputFileName = flows.csv
+NOTICE   [2026-Apr-15 17:24:50.213045]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : active = Y
+NOTICE   [2026-Apr-15 17:24:50.213148]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : configuration = default
+NOTICE   [2026-Apr-15 17:24:50.213249]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : grid = 240,1M
+NOTICE   [2026-Apr-15 17:24:50.213344]    (OREAnalytics/orea/app/parameters.cpp:136) : group = curves : outputFileName = curves.csv
+NOTICE   [2026-Apr-15 17:24:50.213439]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : fxcalibration = default
+NOTICE   [2026-Apr-15 17:24:50.213531]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : lgmcalibration = default
+NOTICE   [2026-Apr-15 17:24:50.213623]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : pricing = default
+NOTICE   [2026-Apr-15 17:24:50.213723]    (OREAnalytics/orea/app/parameters.cpp:136) : group = markets : simulation = default
+NOTICE   [2026-Apr-15 17:24:50.213816]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : active = Y
+NOTICE   [2026-Apr-15 17:24:50.213913]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : baseCurrency = USD
+NOTICE   [2026-Apr-15 17:24:50.214005]    (OREAnalytics/orea/app/parameters.cpp:136) : group = npv : outputFileName = npv.csv
+NOTICE   [2026-Apr-15 17:24:50.214097]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : asofDate = 2025-02-10
+NOTICE   [2026-Apr-15 17:24:50.214187]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : buildFailedTrades = true
+NOTICE   [2026-Apr-15 17:24:50.214278]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : continueOnError = false
+NOTICE   [2026-Apr-15 17:24:50.214368]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : conventionsFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/conventions.xml
+NOTICE   [2026-Apr-15 17:24:50.214465]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : curveConfigFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/curveconfig.xml
+NOTICE   [2026-Apr-15 17:24:50.214556]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : fixingDataFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/fixings.csv
+NOTICE   [2026-Apr-15 17:24:50.214647]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : implyTodaysFixings = N
+NOTICE   [2026-Apr-15 17:24:50.214742]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : inputPath = Input
+NOTICE   [2026-Apr-15 17:24:50.214836]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logFile = log.txt
+NOTICE   [2026-Apr-15 17:24:50.214931]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : logMask = 31
+NOTICE   [2026-Apr-15 17:24:50.215028]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketConfigFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/todaysmarket.xml
+NOTICE   [2026-Apr-15 17:24:50.215122]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : marketDataFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/marketdata.csv
+NOTICE   [2026-Apr-15 17:24:50.215216]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : observationModel = None
+NOTICE   [2026-Apr-15 17:24:50.215310]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : outputPath = Output
+NOTICE   [2026-Apr-15 17:24:50.215403]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : portfolioFile = portfolio.xml
+NOTICE   [2026-Apr-15 17:24:50.215496]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : pricingEnginesFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml
+NOTICE   [2026-Apr-15 17:24:50.215598]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : referenceDataFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/referencedata.xml
+NOTICE   [2026-Apr-15 17:24:50.215692]    (OREAnalytics/orea/app/parameters.cpp:136) : group = setup : scriptLibrary = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/scriptlibrary.xml
+NOTICE   [2026-Apr-15 17:24:50.215789]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : active = N
+NOTICE   [2026-Apr-15 17:24:50.215882]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : baseCurrency = USD
+NOTICE   [2026-Apr-15 17:24:50.215975]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : pricingEnginesFile = /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml
+NOTICE   [2026-Apr-15 17:24:50.216068]    (OREAnalytics/orea/app/parameters.cpp:136) : group = simulation : simulationConfigFile = simulation.xml
+NOTICE   [2026-Apr-15 17:24:50.216162]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : active = N
+NOTICE   [2026-Apr-15 17:24:50.216256]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : baseCurrency = USD
+NOTICE   [2026-Apr-15 17:24:50.216351]    (OREAnalytics/orea/app/parameters.cpp:136) : group = xva : csaFile = netting.xml
+NOTICE   [2026-Apr-15 17:24:50.216522]        (OREAnalytics/orea/app/oreapp.cpp:660) : load OREAppInputParameters called
+WARNING  [2026-Apr-15 17:24:50.222737]        (OREAnalytics/orea/app/oreapp.cpp:681) : Calendar adjustments not found, using defaults
+WARNING  [2026-Apr-15 17:24:50.222897]        (OREAnalytics/orea/app/oreapp.cpp:691) : Currency configurations not found, using defaults
+NOTICE   [2026-Apr-15 17:24:50.223032]        (OREAnalytics/orea/app/oreapp.cpp:759) : Observation Mode is None
+NOTICE   [2026-Apr-15 17:24:50.223140]        (OREAnalytics/orea/app/oreapp.cpp:801) : Loading reference data from file: "/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/referencedata.xml"
+NOTICE   [2026-Apr-15 17:24:50.226035]        (OREAnalytics/orea/app/oreapp.cpp:810) : Loading script library from file: "/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/scriptlibrary.xml"
+NOTICE   [2026-Apr-15 17:24:50.226887]        (OREAnalytics/orea/app/oreapp.cpp:818) : Loading conventions from file: "/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/conventions.xml"
+WARNING  [2026-Apr-15 17:24:50.227366]        (OREAnalytics/orea/app/oreapp.cpp:829) : Using default Ibor fallback config
+WARNING  [2026-Apr-15 17:24:50.227477]        (OREAnalytics/orea/app/oreapp.cpp:837) : Using default Basel Traffic Light config
+NOTICE   [2026-Apr-15 17:24:50.227579]        (OREAnalytics/orea/app/oreapp.cpp:842) : Load curve configurations from file: 
+NOTICE   [2026-Apr-15 17:24:50.230805]        (OREAnalytics/orea/app/oreapp.cpp:851) : Load pricing engine data from file: "/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml"
+NOTICE   [2026-Apr-15 17:24:50.231192]        (OREAnalytics/orea/app/oreapp.cpp:860) : Loading today's market parameters from file"/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/todaysmarket.xml"
+NOTICE   [2026-Apr-15 17:24:50.231580]  (...lytics/orea/app/inputparameters.cpp:279) : Loading portfolio from file: Input/portfolio.xml
+NOTICE   [2026-Apr-15 17:24:50.231735]    (OREData/ored/portfolio/portfolio.cpp:100) : Finished Parsing XML doc
+WARNING  [2026-Apr-15 17:24:50.231835]        (OREAnalytics/orea/app/oreapp.cpp:881) : CounterpartyManager not found
+NOTICE   [2026-Apr-15 17:24:50.231929]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::fxcalibration = default
+NOTICE   [2026-Apr-15 17:24:50.232021]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::lgmcalibration = default
+NOTICE   [2026-Apr-15 17:24:50.232112]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::pricing = default
+NOTICE   [2026-Apr-15 17:24:50.232210]        (OREAnalytics/orea/app/oreapp.cpp:891) : MarketContext::simulation = default
+NOTICE   [2026-Apr-15 17:24:50.232313]       (OREAnalytics/orea/app/oreapp.cpp:1580) : SIMM
+NOTICE   [2026-Apr-15 17:24:50.232406]       (OREAnalytics/orea/app/oreapp.cpp:1683) : IM SCHEDULE
+WARNING  [2026-Apr-15 17:24:50.232514]       (OREAnalytics/orea/app/oreapp.cpp:2602) : ScenarioSimMarket parameters for sensitivity not loaded
+WARNING  [2026-Apr-15 17:24:50.232606]       (OREAnalytics/orea/app/oreapp.cpp:2610) : Sensitivity scenario data not loaded
+NOTICE   [2026-Apr-15 17:24:50.232713]       (OREAnalytics/orea/app/oreapp.cpp:3343) : analytics: 2
+NOTICE   [2026-Apr-15 17:24:50.232804]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: CASHFLOW
+NOTICE   [2026-Apr-15 17:24:50.232894]       (OREAnalytics/orea/app/oreapp.cpp:3345) : analytic: NPV
+NOTICE   [2026-Apr-15 17:24:50.232986]       (OREAnalytics/orea/app/oreapp.cpp:3349) : buildInputParameters done
+NOTICE   [2026-Apr-15 17:24:50.233170]  (...lytics/orea/app/inputparameters.cpp:983) : OutputFileNameMap called
+NOTICE   [2026-Apr-15 17:24:50.233357]  (...ytics/orea/app/inputparameters.cpp:1080) : OutputFileNameMap complete
+NOTICE   [2026-Apr-15 17:24:50.233473]        (OREAnalytics/orea/app/oreapp.cpp:410) : initFromParameters done, requested analytics:CASHFLOW,NPV
+NOTICE   [2026-Apr-15 17:24:50.233593]        (OREAnalytics/orea/app/oreapp.cpp:469) : Global IncludeTodaysCashFlows is set false, value: na
+NOTICE   [2026-Apr-15 17:24:50.233696]        (OREAnalytics/orea/app/oreapp.cpp:238) : ORE analytics starting
+WARNING  [2026-Apr-15 17:24:50.233798]        (OREAnalytics/orea/app/oreapp.cpp:239) : Starting OREApp::analytics(): 26492928|26492928 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Apr-15 17:24:50.233911]       (OREData/ored/marketdata/market.cpp:87) : No Default Correlation present
+WARNING  [2026-Apr-15 17:24:50.234022]        (OREAnalytics/orea/app/oreapp.cpp:219) : dividend data file not found
+WARNING  [2026-Apr-15 17:24:50.234115]        (OREAnalytics/orea/app/oreapp.cpp:227) : fixing cutoff date not set
+NOTICE   [2026-Apr-15 17:24:50.234210]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/marketdata.csv
+NOTICE   [2026-Apr-15 17:24:50.407739]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/marketdata.csv
+NOTICE   [2026-Apr-15 17:24:50.410475]    (OREData/ored/marketdata/csvloader.cpp:80) : CSVLoader loaded 52290 market data points for February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:50.411712]   (OREData/ored/marketdata/csvloader.cpp:101) : CSVLoader loading from /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/fixings.csv
+NOTICE   [2026-Apr-15 17:24:50.416523]   (OREData/ored/marketdata/csvloader.cpp:194) : CSVLoader completed processing /Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/fixings.csv
+NOTICE   [2026-Apr-15 17:24:50.416741]    (OREData/ored/marketdata/csvloader.cpp:85) : CSVLoader loaded 3496 fixings
+NOTICE   [2026-Apr-15 17:24:50.416849]    (OREData/ored/marketdata/csvloader.cpp:90) : CSVLoader loaded 0 dividends
+NOTICE   [2026-Apr-15 17:24:50.416945]    (OREData/ored/marketdata/csvloader.cpp:92) : CSVLoader complete.
+NOTICE   [2026-Apr-15 17:24:50.417070]  (...lytics/orea/app/analyticsmanager.cpp:51) : register analytic with label 'PRICING' and sub-analytics CASHFLOW,CASHFLOWNPV,NPV,SENSITIVITY
+NOTICE   [2026-Apr-15 17:24:50.417172]        (OREAnalytics/orea/app/oreapp.cpp:263) : Available analytics: CASHFLOW,CASHFLOWNPV,NPV,SENSITIVITY
+NOTICE   [2026-Apr-15 17:24:50.417270]        (OREAnalytics/orea/app/oreapp.cpp:266) : Requested analytics: CASHFLOW,NPV
+NOTICE   [2026-Apr-15 17:24:50.417410]  (...ytics/orea/app/analyticsmanager.cpp:123) : AnalyticsManager::runAnalytics: populate loader for dates: February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:50.417528]  (...ytics/orea/app/marketdataloader.cpp:185) : Asking portfolio for its required fixings
+NOTICE   [2026-Apr-15 17:24:50.417703]  (...ytics/orea/app/marketdataloader.cpp:192) : The portfolio depends on fixings from 0 indices
+NOTICE   [2026-Apr-15 17:24:50.417836]  (...ytics/orea/app/marketdataloader.cpp:197) : Add fixings possibly required for bootstrapping TodaysMarket
+NOTICE   [2026-Apr-15 17:24:50.417939]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'default'
+NOTICE   [2026-Apr-15 17:24:50.421813]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'default'
+NOTICE   [2026-Apr-15 17:24:50.421971]  (OREData/ored/portfolio/fixingdates.cpp:928) : Start adding market fixing dates for configuration 'inccy'
+NOTICE   [2026-Apr-15 17:24:50.424107]  (...ata/ored/portfolio/fixingdates.cpp:1125) : Finished adding market fixing dates for configuration 'inccy'
+NOTICE   [2026-Apr-15 17:24:50.424220]  (...ytics/orea/app/marketdataloader.cpp:201) : Add fixing possibly required for equity index delta risk decomposition
+NOTICE   [2026-Apr-15 17:24:50.424490]  (...ics/orea/app/marketdatacsvloader.cpp:70) : MarketDataCsvLoader::retrieveFixings called: all fixings ? Y
+NOTICE   [2026-Apr-15 17:24:50.432692]      (OREData/ored/marketdata/fixings.cpp:68) : Added 3427 of 3496 fixings in 0.010000 seconds
+NOTICE   [2026-Apr-15 17:24:50.432909]  (...ytics/orea/app/marketdataloader.cpp:279) : Adding the loaded fixings to the IndexManager
+NOTICE   [2026-Apr-15 17:24:50.433012]  (...ytics/orea/app/marketdataloader.cpp:280) : Fixings size = 136
+NOTICE   [2026-Apr-15 17:24:50.433106]  (...ytics/orea/app/marketdataloader.cpp:283) : Generating market datum set
+NOTICE   [2026-Apr-15 17:24:50.441884]  (...ytics/orea/app/marketdataloader.cpp:301) : CurveConfigs require 8503 quotes
+NOTICE   [2026-Apr-15 17:24:50.463182]  (...ytics/orea/app/marketdataloader.cpp:309) : Got market data
+NOTICE   [2026-Apr-15 17:24:50.464281]  (...nalytics/orea/app/reportwriter.cpp:1176) : Writing MarketData report
+NOTICE   [2026-Apr-15 17:24:51.246378]  (...nalytics/orea/app/reportwriter.cpp:1215) : MarketData report written
+NOTICE   [2026-Apr-15 17:24:51.247330]  (...nalytics/orea/app/reportwriter.cpp:1220) : Writing Fixings report
+NOTICE   [2026-Apr-15 17:24:51.247767]  (...nalytics/orea/app/reportwriter.cpp:1229) : Fixings report written
+NOTICE   [2026-Apr-15 17:24:51.247873]  (...nalytics/orea/app/reportwriter.cpp:1234) : Writing Dividends report
+NOTICE   [2026-Apr-15 17:24:51.247968]  (...nalytics/orea/app/reportwriter.cpp:1246) : Dividends report written
+NOTICE   [2026-Apr-15 17:24:51.248063]  (...ytics/orea/app/analyticsmanager.cpp:149) : run analytic with label 'PRICING'
+WARNING  [2026-Apr-15 17:24:51.248164]       (OREAnalytics/orea/app/analytic.cpp:97) : Starting PRICING Analytic::runAnalytic(): 84197376|84197376 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Apr-15 17:24:51.248274]      (OREAnalytics/orea/app/analytic.cpp:241) : Analytic::buildMarket called
+NOTICE   [2026-Apr-15 17:24:51.248400]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration default
+NOTICE   [2026-Apr-15 17:24:51.248813]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:DE000A3H2WP2
+WARNING  [2026-Apr-15 17:24:51.248973]  (.../ored/marketdata/bondspreadimply.cpp:96) : non-empty spread, non-empty price, will not overwrite existing spread for security ISIN:IE00BH3SQ895
+WARNING  [2026-Apr-15 17:24:51.249083]  (.../ored/marketdata/bondspreadimply.cpp:96) : non-empty spread, non-empty price, will not overwrite existing spread for security ISIN:IT0005177909
+NOTICE   [2026-Apr-15 17:24:51.249205]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:51.249321]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:51.249497]  (.../ored/marketdata/bondspreadimply.cpp:51) : identify securities that require a spread imply for configuration inccy
+NOTICE   [2026-Apr-15 17:24:51.249796]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:DE000A3H2WP2
+WARNING  [2026-Apr-15 17:24:51.249895]  (.../ored/marketdata/bondspreadimply.cpp:96) : non-empty spread, non-empty price, will not overwrite existing spread for security ISIN:IE00BH3SQ895
+WARNING  [2026-Apr-15 17:24:51.249991]  (.../ored/marketdata/bondspreadimply.cpp:96) : non-empty spread, non-empty price, will not overwrite existing spread for security ISIN:IT0005177909
+NOTICE   [2026-Apr-15 17:24:51.250103]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:51.250222]  (.../ored/marketdata/bondspreadimply.cpp:84) : empty spread, non-empty price: will imply spread for security ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:51.250385]  (...ored/marketdata/bondspreadimply.cpp:108) : got 3 securities
+NOTICE   [2026-Apr-15 17:24:51.250506]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Apr-15 17:24:51.250616]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 24 quotes, 14 currencies.
+NOTICE   [2026-Apr-15 17:24:51.252867]  (...ta/ored/marketdata/todaysmarket.cpp:230) : Build objects in TodaysMarket lazily, i.e. when requested.
+NOTICE   [2026-Apr-15 17:24:51.253112]  (...ored/marketdata/bondspreadimply.cpp:119) : run bond spread imply
+NOTICE   [2026-Apr-15 17:24:51.267416]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:51.267620]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:51.267740]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve ISIN:DE000A3H2WP2 using 1 default quotes of 1 requested quotes.
+NOTICE   [2026-Apr-15 17:24:51.267850]  (...ta/ored/marketdata/defaultcurve.cpp:696) : DefaultCurve: add asof (February 10th, 2025), hazard rate 0, as not given
+NOTICE   [2026-Apr-15 17:24:51.268006]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Apr-15 17:24:51.268148]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:51.269143]  (...ta/ored/marketdata/todaysmarket.cpp:705) : Building EquityVol for asof February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:51.269474]  (...a/ored/marketdata/equityvolcurve.cpp:67) : EquityVolCurve: start building equity volatility structure with ID RIC:DHER.DE
+NOTICE   [2026-Apr-15 17:24:51.271855]  (.../ored/marketdata/equityvolcurve.cpp:127) : EquityVolCurve: finished building equity volatility structure with ID RIC:DHER.DE
+NOTICE   [2026-Apr-15 17:24:51.289209]  (...ored/marketdata/bondspreadimply.cpp:150) : spread imply succeded for security ISIN:DE000A3H2WP2, got 0.01978066297
+NOTICE   [2026-Apr-15 17:24:51.314849]  (...ta/ored/marketdata/defaultcurve.cpp:878) : Start building null default curve for ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:51.315079]  (...ta/ored/marketdata/defaultcurve.cpp:886) : Finished building default curve of type Null for curve ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:51.315368]  (...ta/ored/marketdata/todaysmarket.cpp:705) : Building EquityVol for asof February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:51.315485]  (...a/ored/marketdata/equityvolcurve.cpp:67) : EquityVolCurve: start building equity volatility structure with ID RIC:LYV.N
+NOTICE   [2026-Apr-15 17:24:51.315906]  (.../ored/marketdata/equityvolcurve.cpp:127) : EquityVolCurve: finished building equity volatility structure with ID RIC:LYV.N
+ALERT    [2026-Apr-15 17:24:52.266110]          (OREData/ored/utilities/log.cpp:215) : StructuredMessage { "category": "Error", "group": "Curve", "message": "DefaultableEquityJumpDiffusionModel: creditCurve implies zero survival probability at t = 15.0082, this can not be handled. Check the credit curve / security spread provided in the market data. If this happens during a spread imply, the target price might not be attainable even for high spreads.", "sub_fields": [ { "name": "curveId", "value": "ISIN:US531229AR32" }, { "name": "exceptionType", "value": "bond spread imply failed (target price = 1.493569). Will continue the calculations with a zero security spread." } ] }
+NOTICE   [2026-Apr-15 17:24:52.266751]  (...ta/ored/marketdata/defaultcurve.cpp:878) : Start building null default curve for ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:52.266894]  (...ta/ored/marketdata/defaultcurve.cpp:886) : Finished building default curve of type Null for curve ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:52.267142]  (...ta/ored/marketdata/todaysmarket.cpp:705) : Building EquityVol for asof February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:52.267264]  (...a/ored/marketdata/equityvolcurve.cpp:67) : EquityVolCurve: start building equity volatility structure with ID RIC:ON.O
+NOTICE   [2026-Apr-15 17:24:52.267582]  (.../ored/marketdata/equityvolcurve.cpp:127) : EquityVolCurve: finished building equity volatility structure with ID RIC:ON.O
+NOTICE   [2026-Apr-15 17:24:52.327463]  (...ored/marketdata/bondspreadimply.cpp:150) : spread imply succeded for security ISIN:US682189AS48, got 0.002341835276
+NOTICE   [2026-Apr-15 17:24:52.327668]  (...ored/marketdata/bondspreadimply.cpp:171) : bond spread imply finished.
+NOTICE   [2026-Apr-15 17:24:52.330583]  (.../ored/marketdata/fxtriangulation.cpp:65) : FXTriangulation: initializing
+NOTICE   [2026-Apr-15 17:24:52.330800]  (...ored/marketdata/fxtriangulation.cpp:112) : FXTriangulation: initialized with 24 quotes, 14 currencies.
+NOTICE   [2026-Apr-15 17:24:52.332709]  (...ta/ored/marketdata/todaysmarket.cpp:230) : Build objects in TodaysMarket lazily, i.e. when requested.
+NOTICE   [2026-Apr-15 17:24:52.332939]      (OREAnalytics/orea/app/analytic.cpp:279) : Market Build time 1.090000 sec
+NOTICE   [2026-Apr-15 17:24:52.333053]     (OREData/ored/portfolio/portfolio.cpp:48) : Reset portfolio of size 1
+NOTICE   [2026-Apr-15 17:24:52.333167]      (OREAnalytics/orea/app/analytic.cpp:296) : Build the portfolio
+NOTICE   [2026-Apr-15 17:24:52.333269]      (OREAnalytics/orea/app/analytic.cpp:197) : Analytic::engineFactory() called
+NOTICE   [2026-Apr-15 17:24:52.333469]      (OREAnalytics/orea/app/analytic.cpp:207) : MarketContext::pricing = default
+NOTICE   [2026-Apr-15 17:24:52.333612]    (OREData/ored/portfolio/portfolio.cpp:134) : Building Portfolio of size 1 for context = 'analytic/PRICING'
+NOTICE   [2026-Apr-15 17:24:52.410012]    (OREData/ored/portfolio/portfolio.cpp:162) : Built Portfolio. Initial size = 1, size now 1, built 0 failed trades, context is analytic/PRICING
+NOTICE   [2026-Apr-15 17:24:52.410175]    (OREData/ored/portfolio/portfolio.cpp:163) : Build stats:
+NOTICE   [2026-Apr-15 17:24:52.410273]    (OREData/ored/portfolio/portfolio.cpp:167) : Swap                              1             80 ms (avg = 80)
+NOTICE   [2026-Apr-15 17:24:52.410373]      (OREAnalytics/orea/app/analytic.cpp:305) : Filter trades that expire before February 10th, 2025
+NOTICE   [2026-Apr-15 17:24:52.410551]  (OREAnalytics/orea/app/reportwriter.cpp:140) : Writing cashflow report
+NOTICE   [2026-Apr-15 17:24:52.410727]  (OREAnalytics/orea/app/reportwriter.cpp:215) : Cashflow report written
+NOTICE   [2026-Apr-15 17:24:52.410826]   (OREAnalytics/orea/app/reportwriter.cpp:69) : portfolio valuation
+NOTICE   [2026-Apr-15 17:24:52.411018]  (OREAnalytics/orea/app/reportwriter.cpp:132) : NPV file written
+NOTICE   [2026-Apr-15 17:24:52.411136]  (...a/app/analytics/pricinganalytic.cpp:113) : Write curves report
+NOTICE   [2026-Apr-15 17:24:52.411295]  (OREAnalytics/orea/app/reportwriter.cpp:282) : Write curves... 
+WARNING  [2026-Apr-15 17:24:52.419419]  (.../ored/configuration/conventions.cpp:649) : receiveFrequency_ empty set to index tenor.
+WARNING  [2026-Apr-15 17:24:52.419706]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+WARNING  [2026-Apr-15 17:24:52.935846]  (.../ored/configuration/conventions.cpp:649) : receiveFrequency_ empty set to index tenor.
+WARNING  [2026-Apr-15 17:24:52.936158]  (.../ored/configuration/conventions.cpp:660) : payFrequency_ empty set to index tenor.
+NOTICE   [2026-Apr-15 17:24:53.153349]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:53.153634]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:53.153766]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve ISIN:DE000A3H2WP2 using 1 default quotes of 1 requested quotes.
+NOTICE   [2026-Apr-15 17:24:53.153882]  (...ta/ored/marketdata/defaultcurve.cpp:696) : DefaultCurve: add asof (February 10th, 2025), hazard rate 0, as not given
+NOTICE   [2026-Apr-15 17:24:53.153987]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Apr-15 17:24:53.154098]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve ISIN:DE000A3H2WP2
+NOTICE   [2026-Apr-15 17:24:53.154213]  (...ta/ored/marketdata/defaultcurve.cpp:892) : Start building default curve from yield curve for FundingCurveAsCreditCurve
+NOTICE   [2026-Apr-15 17:24:53.154305]  (...ta/ored/marketdata/defaultcurve.cpp:907) : Finished building default curve from yield curve for FundingCurveAsCreditCurve
+NOTICE   [2026-Apr-15 17:24:53.154410]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve ISIN:IE00BH3SQ895
+NOTICE   [2026-Apr-15 17:24:53.154499]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve ISIN:IE00BH3SQ895
+NOTICE   [2026-Apr-15 17:24:53.154599]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve ISIN:IE00BH3SQ895 using 1 default quotes of 1 requested quotes.
+NOTICE   [2026-Apr-15 17:24:53.154688]  (...ta/ored/marketdata/defaultcurve.cpp:696) : DefaultCurve: add asof (February 10th, 2025), hazard rate 0, as not given
+NOTICE   [2026-Apr-15 17:24:53.154782]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Apr-15 17:24:53.154871]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve ISIN:IE00BH3SQ895
+NOTICE   [2026-Apr-15 17:24:53.154975]  (...ta/ored/marketdata/defaultcurve.cpp:674) : Start building default curve of type HazardRate for curve ISIN:IT0005177909
+NOTICE   [2026-Apr-15 17:24:53.155062]  (...ta/ored/marketdata/defaultcurve.cpp:174) : Loading explicit quotes for default curve ISIN:IT0005177909
+NOTICE   [2026-Apr-15 17:24:53.155154]  (...ta/ored/marketdata/defaultcurve.cpp:202) : DefaultCurve ISIN:IT0005177909 using 1 default quotes of 1 requested quotes.
+NOTICE   [2026-Apr-15 17:24:53.155242]  (...ta/ored/marketdata/defaultcurve.cpp:696) : DefaultCurve: add asof (February 10th, 2025), hazard rate 0, as not given
+NOTICE   [2026-Apr-15 17:24:53.155328]  (...ta/ored/marketdata/defaultcurve.cpp:706) : DefaultCurve: set up interpolated hazard rate curve
+NOTICE   [2026-Apr-15 17:24:53.155415]  (...ta/ored/marketdata/defaultcurve.cpp:724) : Finished building default curve of type HazardRate for curve ISIN:IT0005177909
+NOTICE   [2026-Apr-15 17:24:53.155515]  (...ta/ored/marketdata/defaultcurve.cpp:878) : Start building null default curve for ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:53.155604]  (...ta/ored/marketdata/defaultcurve.cpp:886) : Finished building default curve of type Null for curve ISIN:US531229AR32
+NOTICE   [2026-Apr-15 17:24:53.155702]  (...ta/ored/marketdata/defaultcurve.cpp:878) : Start building null default curve for ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:53.155789]  (...ta/ored/marketdata/defaultcurve.cpp:886) : Finished building default curve of type Null for curve ISIN:US682189AS48
+NOTICE   [2026-Apr-15 17:24:53.155900]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:007G93|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.156018]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:007G93|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.156493]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:007G93|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.158535]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:007G93|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.158705]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:027A8A|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.158798]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:027A8A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.159113]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:027A8A|SNRFOR|USD|XR14 loaded and using 12 quotes.
+NOTICE   [2026-Apr-15 17:24:53.160913]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:027A8A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.161087]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:027D97|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.161193]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:027D97|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.161529]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:027D97|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.163254]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:027D97|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.163402]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:028EFB|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.163581]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:028EFB|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.164071]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:028EFB|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.165815]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:028EFB|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.165984]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:03AB52|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.166079]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:03AB52|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.166389]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:03AB52|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.168183]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:03AB52|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.168351]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:058B87|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.168453]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:058B87|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.168873]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:058B87|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.170777]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:058B87|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.171000]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:06DG91|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.171211]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:06DG91|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.171585]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:06DG91|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.173308]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:06DG91|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.173452]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:08CAD7|SNRFOR|USD|MR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.173601]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:08CAD7|SNRFOR|USD|MR14
+NOTICE   [2026-Apr-15 17:24:53.174114]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:08CAD7|SNRFOR|USD|MR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.176020]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:08CAD7|SNRFOR|USD|MR14
+NOTICE   [2026-Apr-15 17:24:53.176177]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:08CAD7|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.176280]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:08CAD7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.176616]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:08CAD7|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.178349]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:08CAD7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.178494]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:08EB67|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.178594]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:08EB67|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.178916]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:08EB67|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.180624]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:08EB67|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.180773]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:09C9BK|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.180864]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:09C9BK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.181173]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:09C9BK|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.182992]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:09C9BK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.183138]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:09G725|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.183228]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:09G725|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.183543]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:09G725|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.185340]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:09G725|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.185530]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:09IG96|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.185625]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:09IG96|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.185950]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:09IG96|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.188086]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:09IG96|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.188288]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0A143H|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.188380]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0A143H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.188723]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0A143H|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.190500]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0A143H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.190729]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0A226X|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.190850]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0A226X|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.191240]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0A226X|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.192987]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0A226X|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.193127]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0C2002|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.193219]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0C2002|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.193519]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0C2002|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.195267]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0C2002|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.195481]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0C205P|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.195577]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0C205P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.195981]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0C205P|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.197684]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0C205P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.197828]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0C4291|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.197916]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0C4291|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.198218]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0C4291|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.199944]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0C4291|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.200110]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0C5448|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.200203]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0C5448|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.200567]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0C5448|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.202374]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0C5448|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.202541]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0D4278|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.202633]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0D4278|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.203030]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0D4278|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.205066]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0D4278|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.205257]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0E69A8|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.205348]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0E69A8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.205727]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0E69A8|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.207675]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0E69A8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.207854]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0F8665|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.207960]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0F8665|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.208280]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0F8665|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.210029]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0F8665|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.210174]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:0H8994|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.210276]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:0H8994|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.210580]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:0H8994|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.212386]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:0H8994|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.212525]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:138A48|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.212612]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:138A48|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.212908]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:138A48|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.214718]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:138A48|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.214944]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:138CBK|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.215037]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:138CBK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.215457]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:138CBK|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.217165]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:138CBK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.217326]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1B124A|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.217429]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1B124A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.217782]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1B124A|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.219618]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1B124A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.219807]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1C1134|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.219923]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1C1134|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.220311]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1C1134|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.222372]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1C1134|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.222571]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1C248K|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.222662]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1C248K|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.223020]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1C248K|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.225042]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1C248K|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.225254]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1E78AL|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.225346]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1E78AL|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.225780]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1E78AL|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.227547]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1E78AL|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.227715]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1E99BR|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.227816]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1E99BR|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.228166]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1E99BR|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.229915]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1E99BR|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.230056]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1F444H|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.230143]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1F444H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.230444]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1F444H|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.232153]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1F444H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.232296]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1F55D7|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.232385]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1F55D7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.232696]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1F55D7|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.234611]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1F55D7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.234800]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:1I99EM|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.234899]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:1I99EM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.235227]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:1I99EM|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.237208]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:1I99EM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.237359]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:225DHN|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.237455]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:225DHN|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.237928]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:225DHN|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.239748]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:225DHN|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.239897]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:258DD6|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.239985]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:258DD6|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.240362]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:258DD6|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.242280]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:258DD6|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.242423]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:25A8AD|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.242510]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:25A8AD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.242812]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:25A8AD|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.244548]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:25A8AD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.244695]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:26B72T|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.244796]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:26B72T|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.245094]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:26B72T|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.246812]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:26B72T|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.246981]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:26BA97|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.247071]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:26BA97|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.247367]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:26BA97|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.249259]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:26BA97|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.249457]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:27CA3F|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.249549]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:27CA3F|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.249937]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:27CA3F|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.251607]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:27CA3F|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.251749]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:29EB75|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.251842]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:29EB75|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.252144]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:29EB75|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.253909]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:29EB75|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.254056]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2BB75N|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.254166]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2BB75N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.254765]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2BB75N|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.256561]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2BB75N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.256708]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2BB9F4|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.256806]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2BB9F4|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.257158]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2BB9F4|SNRFOR|USD|XR14 loaded and using 7 quotes.
+NOTICE   [2026-Apr-15 17:24:53.258094]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2BB9F4|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.258279]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2C033N|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.258377]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2C033N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.258818]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2C033N|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.260599]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2C033N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.260751]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2E6448|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.260843]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2E6448|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.261197]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2E6448|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.262949]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2E6448|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.263090]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2F664B|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.263180]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2F664B|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.263484]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2F664B|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.265218]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2F664B|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.265361]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2F68AQ|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.265451]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2F68AQ|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.265757]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2F68AQ|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.267579]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2F68AQ|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.267775]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2G85AI|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.267875]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2G85AI|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.268212]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2G85AI|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.270029]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2G85AI|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.270191]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2H68GV|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.270322]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2H68GV|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.270749]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2H68GV|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.272717]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2H68GV|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.272898]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I6597|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.272989]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I6597|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.273336]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I6597|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.275329]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I6597|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.275478]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_10Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.275565]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_10Y
+NOTICE   [2026-Apr-15 17:24:53.275871]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_10Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.276201]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_10Y
+NOTICE   [2026-Apr-15 17:24:53.276324]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_1Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.276418]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_1Y
+NOTICE   [2026-Apr-15 17:24:53.276729]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_1Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.276899]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_1Y
+NOTICE   [2026-Apr-15 17:24:53.277006]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_2Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.277093]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_2Y
+NOTICE   [2026-Apr-15 17:24:53.277406]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_2Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.277609]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_2Y
+NOTICE   [2026-Apr-15 17:24:53.277724]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_3Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.277884]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_3Y
+NOTICE   [2026-Apr-15 17:24:53.278336]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_3Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.278564]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_3Y
+NOTICE   [2026-Apr-15 17:24:53.278683]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_5Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.278779]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_5Y
+NOTICE   [2026-Apr-15 17:24:53.279079]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_5Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.279339]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_5Y
+NOTICE   [2026-Apr-15 17:24:53.279460]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:2I65BYEG6_7Yand  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.279553]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:2I65BYEG6_7Y
+NOTICE   [2026-Apr-15 17:24:53.279844]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:2I65BYEG6_7Y loaded and using 6 quotes.
+NOTICE   [2026-Apr-15 17:24:53.280097]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:2I65BYEG6_7Y
+NOTICE   [2026-Apr-15 17:24:53.280216]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:36AGC5|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.280305]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:36AGC5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.280601]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:36AGC5|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.282347]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:36AGC5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.282525]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:38BD8L|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.282648]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:38BD8L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.282994]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:38BD8L|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.284795]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:38BD8L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.284946]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:39FF64|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.285048]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:39FF64|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.285374]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:39FF64|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.287142]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:39FF64|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.287291]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3A7367|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.287380]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3A7367|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.287724]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3A7367|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.289674]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3A7367|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.289821]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3A749R|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.289909]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3A749R|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.290230]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3A749R|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.292012]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3A749R|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.292165]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3D177O|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.292254]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3D177O|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.292555]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3D177O|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.294324]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3D177O|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.294470]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3D233N|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.294557]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3D233N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.294871]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3D233N|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.296638]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3D233N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.296782]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3E56A5|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.296872]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3E56A5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.297175]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3E56A5|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.298980]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3E56A5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.299191]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:3H98A7|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.299283]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:3H98A7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.299705]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:3H98A7|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.301628]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:3H98A7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.301847]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:46A844|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.301948]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:46A844|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.302292]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:46A844|SNRFOR|USD|XR14 loaded and using 9 quotes.
+NOTICE   [2026-Apr-15 17:24:53.303190]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:46A844|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.303375]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:46A89Q|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.303473]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:46A89Q|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.303810]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:46A89Q|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.305764]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:46A89Q|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.305955]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:47A77D|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.306044]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:47A77D|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.306399]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:47A77D|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.308376]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:47A77D|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.308607]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:47BD67|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.308722]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:47BD67|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.309145]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:47BD67|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.310887]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:47BD67|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.311056]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:49D954|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.311161]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:49D954|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.311495]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:49D954|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.313267]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:49D954|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.313412]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:49EB20|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.313501]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:49EB20|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.313812]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:49EB20|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.315525]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:49EB20|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.315669]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4A615A|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.315758]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4A615A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.316063]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4A615A|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.317732]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4A615A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.317880]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4BF976|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.317970]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4BF976|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.318277]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4BF976|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.320103]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4BF976|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.320283]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4DD9BH|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.320376]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4DD9BH|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.320709]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4DD9BH|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.322652]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4DD9BH|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.322905]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4E452A|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.323012]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4E452A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.323366]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4E452A|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.325452]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4E452A|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.325613]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4E477P|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.325711]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4E477P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.326044]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4E477P|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.327901]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4E477P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.328065]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4E6837|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.328171]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4E6837|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.328481]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4E6837|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.330248]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4E6837|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.330395]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:4I517N|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.330486]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:4I517N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.330792]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:4I517N|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.332601]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:4I517N|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.332751]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:58CHB3|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.332841]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:58CHB3|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.333150]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:58CHB3|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.334986]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:58CHB3|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.335178]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:59CEC7|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.335285]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:59CEC7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.335615]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:59CEC7|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.337562]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:59CEC7|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.337746]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5A78DD|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.337956]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5A78DD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.338328]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5A78DD|SNRFOR|USD|XR14 loaded and using 12 quotes.
+NOTICE   [2026-Apr-15 17:24:53.339997]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5A78DD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.340140]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5BBDDF|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.340228]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5BBDDF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.340538]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5BBDDF|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.342511]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5BBDDF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.342656]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5D8148|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.342742]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5D8148|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.343055]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5D8148|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.344786]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5D8148|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.345035]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5EA6BX|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.345139]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5EA6BX|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.345551]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5EA6BX|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.347311]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5EA6BX|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.347462]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5F07CP|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.347551]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5F07CP|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.347858]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5F07CP|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.349586]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5F07CP|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.349758]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5F1148|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.349850]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5F1148|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.350187]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5F1148|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.351993]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5F1148|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.352165]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5H865C|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.352262]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5H865C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.352591]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5H865C|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.354676]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5H865C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.354896]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5I759F|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.354986]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5I759F|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.355336]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5I759F|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.357081]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5I759F|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.357228]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:5J4466|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.357316]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:5J4466|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.357618]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:5J4466|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.359359]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:5J4466|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.359499]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:65339K|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.359587]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:65339K|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.359892]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:65339K|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.361637]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:65339K|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.361795]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:669B27|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.361889]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:669B27|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.362203]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:669B27|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.363920]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:669B27|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.364064]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:69AB75|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.364151]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:69AB75|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.364561]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:69AB75|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.366394]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:69AB75|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.366549]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6A521L|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.366639]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6A521L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.366979]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6A521L|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.368763]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6A521L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.368912]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6B679I|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.369001]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6B679I|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.369331]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6B679I|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.371395]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6B679I|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.371602]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6BADC8|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.371692]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6BADC8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.372040]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6BADC8|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.373825]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6BADC8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.374011]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6CCE9H|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.374132]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6CCE9H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.374574]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6CCE9H|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.376523]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6CCE9H|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.376699]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6DB9EI|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.376789]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6DB9EI|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.377125]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6DB9EI|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.378960]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6DB9EI|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.379104]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6E9AAA|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.379196]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6E9AAA|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.379506]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6E9AAA|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.381306]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6E9AAA|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.381450]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6EC42L|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.381540]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6EC42L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.381845]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6EC42L|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.383548]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6EC42L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.383696]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6F94BX|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.383789]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6F94BX|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.384102]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6F94BX|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.385890]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6F94BX|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.386045]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6FE66B|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.386137]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6FE66B|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.386461]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6FE66B|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.388314]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6FE66B|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.388520]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6FIB6J|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.388610]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6FIB6J|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.388948]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6FIB6J|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.390635]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6FIB6J|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.390779]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:6I209O|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.390868]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:6I209O|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.391166]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:6I209O|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.392854]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:6I209O|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.393003]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7B6989|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.393091]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7B6989|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.393405]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7B6989|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.395152]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7B6989|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.395368]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7B8752|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.395460]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7B8752|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.395846]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7B8752|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.397544]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7B8752|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.397692]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7B9DFM|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.397780]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7B9DFM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.398084]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7B9DFM|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.399744]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7B9DFM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.399919]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7BCB7P|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.400022]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7BCB7P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.400355]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7BCB7P|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.402198]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7BCB7P|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.402374]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7BDHBK|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.403677]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7BDHBK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.404059]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7BDHBK|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.405865]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7BDHBK|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.406066]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7C5259|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.406165]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7C5259|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.406911]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7C5259|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.408669]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7C5259|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.408837]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7FB89D|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.408932]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7FB89D|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.409243]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7FB89D|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.410978]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7FB89D|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.411127]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:7I8789|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.411221]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:7I8789|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.411528]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:7I8789|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.413212]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:7I8789|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.413361]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:897ECJ|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.413458]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:897ECJ|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.413767]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:897ECJ|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.415543]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:897ECJ|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.415699]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8A677C|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.415795]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8A677C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.416147]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8A677C|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.417910]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8A677C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.418091]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8AAG87|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.418189]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8AAG87|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.418499]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8AAG87|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.420166]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8AAG87|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.420314]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8C67DF|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.420405]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8C67DF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.420710]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8C67DF|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.422588]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8C67DF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.422775]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8C8BB5|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.422865]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8C8BB5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.423217]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8C8BB5|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.424884]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8C8BB5|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.425030]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8F97DO|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.425119]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8F97DO|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.425415]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8F97DO|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.427174]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8F97DO|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.427398]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8FD73G|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.427492]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8FD73G|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.427904]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8FD73G|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.429607]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8FD73G|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.429754]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8FFFB8|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.429844]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8FFFB8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.430149]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8FFFB8|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.431856]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8FFFB8|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.432010]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8GHDBF|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.432103]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8GHDBF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.432425]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8GHDBF|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.434325]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8GHDBF|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.434513]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:8HC878|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.434622]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:8HC878|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.434979]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:8HC878|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.436725]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:8HC878|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.436884]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:997F99|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.436979]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:997F99|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.437293]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:997F99|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.439144]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:997F99|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.439334]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9A2443|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.439423]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9A2443|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.439776]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9A2443|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.441472]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9A2443|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.441618]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9A456T|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.441706]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9A456T|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.442015]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9A456T|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.443686]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9A456T|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.443833]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9AAA4I|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.443920]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9AAA4I|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.444215]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9AAA4I|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.445917]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9AAA4I|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.446061]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9B579L|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.446149]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9B579L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.446442]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9B579L|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.448287]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9B579L|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.448589]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9C58DM|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.448708]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9C58DM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.449167]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9C58DM|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.450852]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9C58DM|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.451014]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9C645J|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.451107]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9C645J|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.451422]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9C645J|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.453235]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9C645J|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.453437]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9F837C|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.453525]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9F837C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.453881]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9F837C|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.455714]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9F837C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.455855]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9F9652|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.455951]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9F9652|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.456251]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9F9652|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.458100]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9F9652|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.458379]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9FFD9C|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.458488]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9FFD9C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.458914]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9FFD9C|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.460733]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9FFD9C|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.460894]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:9J26DD|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.460985]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:9J26DD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.461309]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:9J26DD|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.463083]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:9J26DD|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.463237]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:GL6652|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.463328]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:GL6652|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.463641]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:GL6652|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.465362]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:GL6652|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.465508]  (...ta/ored/marketdata/defaultcurve.cpp:335) : Start building default curve of type SpreadCDS for curve RED:UZDD52|SNRFOR|USD|XR14and  implyDefaultFromMarket = false
+NOTICE   [2026-Apr-15 17:24:53.465599]  (...ata/ored/marketdata/defaultcurve.cpp:87) : Loading regex quotes for default curve RED:UZDD52|SNRFOR|USD|XR14
+NOTICE   [2026-Apr-15 17:24:53.465905]  (...ta/ored/marketdata/defaultcurve.cpp:165) : DefaultCurve RED:UZDD52|SNRFOR|USD|XR14 loaded and using 13 quotes.
+NOTICE   [2026-Apr-15 17:24:53.467676]  (...ta/ored/marketdata/defaultcurve.cpp:668) : Finished building default curve of type SpreadCDS for curve RED:UZDD52|SNRFOR|USD|XR14
+WARNING  [2026-Apr-15 17:24:53.472988]      (OREAnalytics/orea/app/analytic.cpp:102) : Finishing PRICING Analytic::runAnalytic(): 120438784|120438784 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Apr-15 17:24:53.473108]  (...ytics/orea/app/analyticsmanager.cpp:158) : run analytic with label 'PRICING' finished.
+NOTICE   [2026-Apr-15 17:24:53.478183]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve CZK-IN-EUR for label  as it has already been added
+NOTICE   [2026-Apr-15 17:24:53.488783]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve USD-IN-EUR for label  as it has already been added
+NOTICE   [2026-Apr-15 17:24:53.491067]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR-EONIA for label  as it has already been added
+NOTICE   [2026-Apr-15 17:24:53.491202]  (...rea/app/marketcalibrationreport.cpp:351) : Skipping curve EUR-ESTER for label  as it has already been added
+NOTICE   [2026-Apr-15 17:24:53.497275]  (...nalytics/orea/app/reportwriter.cpp:1251) : Writing Pricing stats report
+NOTICE   [2026-Apr-15 17:24:53.497409]  (...nalytics/orea/app/reportwriter.cpp:1267) : Pricing stats report written
+NOTICE   [2026-Apr-15 17:24:53.497505]  (...nalytics/orea/app/reportwriter.cpp:1272) : Writing runtimes report
+NOTICE   [2026-Apr-15 17:24:53.497607]  (...nalytics/orea/app/reportwriter.cpp:1296) : Finished writing runtimes report
+NOTICE   [2026-Apr-15 17:24:53.497709]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name cashflow occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.497800]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name curves occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.497889]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name dividends occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.497978]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name fixings occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498067]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name marketdata occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498165]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name npv occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498254]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name pricingstats occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498341]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name runtimes occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498428]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498516]  (...ytics/orea/app/analyticsmanager.cpp:246) : report name todaysmarketcalibration_cashflows occurs 1 times
+NOTICE   [2026-Apr-15 17:24:53.498609]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/flows.csv'
+NOTICE   [2026-Apr-15 17:24:53.498915]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/flows.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.499009]  (...ytics/orea/app/analyticsmanager.cpp:299) : report cashflow written to Output/flows.csv
+NOTICE   [2026-Apr-15 17:24:53.499097]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/dividends.csv'
+NOTICE   [2026-Apr-15 17:24:53.499268]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/dividends.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.499359]  (...ytics/orea/app/analyticsmanager.cpp:299) : report dividends written to Output/dividends.csv
+NOTICE   [2026-Apr-15 17:24:53.499447]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/fixings.csv'
+NOTICE   [2026-Apr-15 17:24:53.501317]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/fixings.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.501518]  (...ytics/orea/app/analyticsmanager.cpp:299) : report fixings written to Output/fixings.csv
+NOTICE   [2026-Apr-15 17:24:53.501646]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/todaysmarketcalibration.csv'
+NOTICE   [2026-Apr-15 17:24:53.505873]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/todaysmarketcalibration.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.505987]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration written to Output/todaysmarketcalibration.csv
+NOTICE   [2026-Apr-15 17:24:53.506077]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/todaysmarketcalibration_cashflows.csv'
+NOTICE   [2026-Apr-15 17:24:53.752509]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/todaysmarketcalibration_cashflows.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.752764]  (...ytics/orea/app/analyticsmanager.cpp:299) : report todaysmarketcalibration_cashflows written to Output/todaysmarketcalibration_cashflows.csv
+NOTICE   [2026-Apr-15 17:24:53.752896]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/marketdata.csv'
+NOTICE   [2026-Apr-15 17:24:53.788434]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/marketdata.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.788693]  (...ytics/orea/app/analyticsmanager.cpp:299) : report marketdata written to Output/marketdata.csv
+NOTICE   [2026-Apr-15 17:24:53.788833]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/curves.csv'
+NOTICE   [2026-Apr-15 17:24:53.805768]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/curves.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.805936]  (...ytics/orea/app/analyticsmanager.cpp:299) : report curves written to Output/curves.csv
+NOTICE   [2026-Apr-15 17:24:53.806048]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/npv.csv'
+NOTICE   [2026-Apr-15 17:24:53.806294]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/npv.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.806404]  (...ytics/orea/app/analyticsmanager.cpp:299) : report npv written to Output/npv.csv
+NOTICE   [2026-Apr-15 17:24:53.806521]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/pricingstats.csv'
+NOTICE   [2026-Apr-15 17:24:53.806701]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/pricingstats.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.806796]  (...ytics/orea/app/analyticsmanager.cpp:299) : report pricingstats written to Output/pricingstats.csv
+NOTICE   [2026-Apr-15 17:24:53.806894]       (OREData/ored/report/csvreport.cpp:133) : Opening CSV file report 'Output/runtimes.csv'
+NOTICE   [2026-Apr-15 17:24:53.807083]       (OREData/ored/report/csvreport.cpp:222) : CSV file report 'Output/runtimes.csv' closed.
+NOTICE   [2026-Apr-15 17:24:53.807184]  (...ytics/orea/app/analyticsmanager.cpp:299) : report runtimes written to Output/runtimes.csv
+WARNING  [2026-Apr-15 17:24:53.807307]        (OREAnalytics/orea/app/oreapp.cpp:344) : Finishing OREApp::analytics(): 200491008|200491008 (peakMemoryUsage (bytes) | memoryUsage (bytes))
+NOTICE   [2026-Apr-15 17:24:53.807412]        (OREAnalytics/orea/app/oreapp.cpp:345) : ORE analytics done
+NOTICE   [2026-Apr-15 17:24:53.807522]        (OREAnalytics/orea/app/oreapp.cpp:489) : ORE done.

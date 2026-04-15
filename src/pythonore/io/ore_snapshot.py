@@ -205,6 +205,7 @@ class OreSnapshot:
     curve_dfs_lend: Optional[np.ndarray] = None
     p0_borrow: Optional[object] = dataclasses.field(default=None, repr=False)
     p0_lend: Optional[object] = dataclasses.field(default=None, repr=False)
+    trade_float_index2: str = ""
 
     # --- Own (bank) credit for DVA — from market when dvaName is in ore.xml ---
     own_hazard_times: Optional[np.ndarray] = None
@@ -3282,6 +3283,15 @@ def load_from_ore_xml(
         )
         legs["node_tenors"] = node_tenors
         legs = calibrate_float_spreads_from_coupon(legs, p0_fwd, t0=0.0)
+    float_index_by_leg = np.asarray(legs.get("float_index_by_leg", []), dtype=object)
+    float_index_names = tuple(
+        dict.fromkeys(
+            str(name).strip().upper()
+            for name in float_index_by_leg
+            if str(name).strip()
+        )
+    )
+    trade_float_index2 = float_index_names[1] if len(float_index_names) > 1 else ""
 
     # Optional: anchor Python t=0 NPV to ORE's reported NPV.
     # This applies a parallel float-spread shift that absorbs residual
@@ -3333,6 +3343,7 @@ def load_from_ore_xml(
         legs=legs,
         discount_column=discount_column,
         forward_column=forward_column,
+        trade_float_index2=trade_float_index2,
         xva_discount_column=xva_discount_column,
         curve_times_disc=curve_times_disc,
         curve_dfs_disc=curve_dfs_disc,
