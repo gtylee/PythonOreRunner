@@ -149,6 +149,7 @@ def _swap_npv_from_ore_legs_dual_curve_reference(
         tau = legs["float_accrual"][live]
         n = legs["float_notional"][live]
         sign = legs["float_sign"][live]
+        gearing = np.asarray(legs.get("float_gearing", np.ones_like(legs["float_accrual"])), dtype=float)[live]
         spread = legs["float_spread"][live]
         fixed = fix_t[live] <= t + 1.0e-12
 
@@ -168,12 +169,13 @@ def _swap_npv_from_ore_legs_dual_curve_reference(
             tau2 = tau[~fixed]
             n2 = n[~fixed]
             sign2 = sign[~fixed]
+            gearing2 = gearing[~fixed]
             spread2 = spread[~fixed]
             p_t_f = p0_fwd(t)
             p_ts_f2 = np.array([model.discount_bond(t, T, x_t, p_t_f, p0_fwd(T)) for T in s2])
             p_te_f2 = np.array([model.discount_bond(t, T, x_t, p_t_f, p0_fwd(T)) for T in e2])
             fwd2 = (p_ts_f2 / p_te_f2 - 1.0) / tau2[:, None]
-            amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
+            amount[~fixed, :] = sign2[:, None] * n2[:, None] * (gearing2[:, None] * fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv += np.sum(amount * p_tp_d, axis=0)
 
@@ -736,6 +738,7 @@ class TestIrsXvaUtils(unittest.TestCase):
         self.assertEqual(list(np.asarray(legs["float_index_by_leg"], dtype=object)), ["USD-LIBOR-3M", "USD-SOFR-3M"])
         self.assertTrue(np.all(np.asarray(legs["float_start_time"], dtype=float) >= 0.0))
         self.assertEqual(list(np.asarray(legs["float_leg_index"], dtype=int)), [0, 1])
+        self.assertEqual(int(np.asarray(legs["float_leg0_count"], dtype=int)[0]), 1)
         self.assertEqual(np.asarray(legs["float_pay_time"], dtype=float).size, 2)
 
     def test_build_schedule_backward_with_first_date_advances_past_stub(self):
@@ -776,6 +779,99 @@ class TestIrsXvaUtils(unittest.TestCase):
         self.assertEqual(starts[0], date(2024, 1, 2))
         self.assertEqual(ends[-1], date(2024, 7, 2))
         self.assertIn(date(2024, 5, 15), list(ends))
+        self.assertEqual(len(starts), len(ends))
+        self.assertEqual(len(ends), len(pays))
+
+    def test_day_counter_a365_alias_matches_a365f(self):
+        from pythonore.compute.irs_xva_utils import _time_from_dates, _year_fraction
+
+        start = date(2024, 1, 1)
+        end = date(2025, 1, 1)
+        self.assertAlmostEqual(_year_fraction(start, end, "A365"), _year_fraction(start, end, "A365F"))
+        self.assertAlmostEqual(_time_from_dates(start, end, "A365"), _time_from_dates(start, end, "A365F"))
+
+    def test_build_schedule_respects_term_convention_and_end_of_month(self):
+        import QuantLib as ql
+        from pythonore.compute.irs_xva_utils import _build_schedule
+
+        starts, ends, pays = _build_schedule(
+            date(2024, 1, 31),
+            date(2024, 5, 31),
+            "1M",
+            "TARGET",
+            "MF",
+            term_convention="P",
+            end_of_month=True,
+            rule="Forward",
+        )
+        expected = ql.Schedule(
+            ql.Date(31, 1, 2024),
+            ql.Date(31, 5, 2024),
+            ql.Period(1, ql.Months),
+            ql.TARGET(),
+            ql.ModifiedFollowing,
+            ql.Preceding,
+            ql.DateGeneration.Forward,
+            True,
+            ql.Date(),
+            ql.Date(),
+        )
+        expected_dates = [date(d.year(), int(d.month()), d.dayOfMonth()) for d in expected]
+        actual_dates = list(starts) + [ends[-1]]
+        self.assertEqual(actual_dates, expected_dates)
+        self.assertEqual(len(starts), len(ends))
+        self.assertEqual(len(ends), len(pays))
+
+    def test_schedule_from_leg_uses_joint_calendar_and_term_convention(self):
+        import QuantLib as ql
+        from pythonore.compute.irs_xva_utils import _schedule_from_leg
+
+        xml = """\
+<LegData>
+  <LegType>Floating</LegType>
+  <Payer>false</Payer>
+  <Currency>USD</Currency>
+  <Notionals><Notional>1000000</Notional></Notionals>
+  <DayCounter>A360</DayCounter>
+  <PaymentConvention>MF</PaymentConvention>
+  <FloatingLegData>
+    <Index>USD-SOFR</Index>
+    <FixingDays>0</FixingDays>
+    <Spreads><Spread>0.0</Spread></Spreads>
+    <Gearings><Gearing>1.0</Gearing></Gearings>
+  </FloatingLegData>
+  <ScheduleData>
+    <Rules>
+      <StartDate>2024-01-31</StartDate>
+      <EndDate>2024-05-31</EndDate>
+      <Tenor>1M</Tenor>
+      <Calendar>US,TARGET</Calendar>
+      <Convention>MF</Convention>
+      <TermConvention>P</TermConvention>
+      <EndOfMonth>true</EndOfMonth>
+      <Rule>Forward</Rule>
+    </Rules>
+  </ScheduleData>
+</LegData>
+"""
+        leg = ET.fromstring(xml)
+        starts, ends, pays = _schedule_from_leg(leg, pay_convention="MF")
+        joint_calendar = ql.JointCalendar(ql.UnitedStates(ql.UnitedStates.GovernmentBond), ql.TARGET(), ql.JoinHolidays)
+        expected = ql.Schedule(
+            ql.Date(31, 1, 2024),
+            ql.Date(31, 5, 2024),
+            ql.Period(1, ql.Months),
+            joint_calendar,
+            ql.ModifiedFollowing,
+            ql.Preceding,
+            ql.DateGeneration.Forward,
+            True,
+            ql.Date(),
+            ql.Date(),
+        )
+        expected_dates = [date(d.year(), int(d.month()), d.dayOfMonth()) for d in expected]
+        actual_dates = list(starts) + [ends[-1]]
+        self.assertEqual(actual_dates, expected_dates)
         self.assertEqual(len(starts), len(ends))
         self.assertEqual(len(ends), len(pays))
 
@@ -1111,6 +1207,7 @@ T1,Swap,1,1,2016-09-01,Interest,100.0,TRY,0.10,0.5,2016-03-01,2016-09-01,0.0,#N/
             "float_end_time": np.array([1.0, 2.0], dtype=float),
             "float_accrual": np.array([1.0, 1.0], dtype=float),
             "float_index_accrual": np.array([1.0, 1.0], dtype=float),
+            "float_gearing": np.array([2.0, 1.0], dtype=float),
             "float_spread": np.array([0.001, np.nan], dtype=float),
             "float_coupon": np.array([0.0, np.nan], dtype=float),
         }
@@ -1119,9 +1216,200 @@ T1,Swap,1,1,2016-09-01,Interest,100.0,TRY,0.10,0.5,2016-03-01,2016-09-01,0.0,#N/
         out = calibrate_float_spreads_from_coupon(legs, p0, t0=0.0)
 
         self.assertTrue(np.isfinite(out["float_spread"][0]))
-        self.assertEqual(float(out["float_spread"][0]), 0.001)
+        self.assertAlmostEqual(float(out["float_spread"][0]), 0.001, places=12)
         self.assertEqual(float(out["float_spread"][1]), 0.0)
         self.assertTrue(np.all(np.isfinite(out["float_coupon"])))
+
+    def test_load_swap_legs_from_portfolio_root_carries_float_gearing(self):
+        xml = """\
+<Portfolio>
+  <Trade id="GEAR_SWAP">
+    <TradeType>Swap</TradeType>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>1000000</Notional></Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.02</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-04-02</EndDate><Tenor>1M</Tenor><Calendar>TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>1000000</Notional></Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SOFR</Index>
+          <Gearings><Gearing>1.75</Gearing></Gearings>
+          <Spreads><Spread>0.0015</Spread></Spreads>
+          <FixingDays>0</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-04-02</EndDate><Tenor>1M</Tenor><Calendar>TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+"""
+        root = ET.fromstring(xml)
+        legs = load_swap_legs_from_portfolio_root(root, "GEAR_SWAP", "2024-01-02")
+        self.assertIn("float_gearing", legs)
+        self.assertTrue(np.allclose(legs["float_gearing"], np.full_like(legs["float_gearing"], 1.75)))
+
+    def test_load_swap_legs_from_portfolio_root_carries_fx_reset_by_leg(self):
+        xml = """\
+<Portfolio>
+  <Trade id="XCCY_RESET">
+    <TradeType>Swap</TradeType>
+    <SwapData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>102120250</Notional>
+          <FXReset>
+            <ForeignCurrency>EUR</ForeignCurrency>
+            <ForeignAmount>95000000</ForeignAmount>
+            <FXIndex>FX-ECB-EUR-USD</FXIndex>
+            <FixingDays>2</FixingDays>
+          </FXReset>
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SOFR</Index>
+          <FixingDays>2</FixingDays>
+          <Spreads><Spread>0.0</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-07-02</EndDate><Tenor>3M</Tenor><Calendar>US,TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>EUR</Currency>
+        <Notionals><Notional>95000000</Notional></Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>EUR-EURIBOR-6M</Index>
+          <FixingDays>2</FixingDays>
+          <Spreads><Spread>0.0</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-07-02</EndDate><Tenor>3M</Tenor><Calendar>US,TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+"""
+        root = ET.fromstring(xml)
+        legs = load_swap_legs_from_portfolio_root(root, "XCCY_RESET", "2024-01-02")
+        self.assertIn("float_fx_reset_by_leg", legs)
+        self.assertEqual(len(legs["float_fx_reset_by_leg"]), 2)
+        self.assertIsNotNone(legs["float_fx_reset_by_leg"][0])
+        self.assertIsNone(legs["float_fx_reset_by_leg"][1])
+        self.assertEqual(legs["float_fx_reset_by_leg"][0]["foreign_currency"], "EUR")
+        self.assertEqual(legs["float_fx_reset_by_leg"][0]["foreign_amount"], 95000000.0)
+
+    def test_load_swap_legs_from_portfolio_root_expands_piecewise_spread_gearing_and_notional(self):
+        xml = """\
+<Portfolio>
+  <Trade id="PIECEWISE_SWAP">
+    <TradeType>Swap</TradeType>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>1000000</Notional>
+          <Notional>900000</Notional>
+          <Notional>800000</Notional>
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.02</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-04-02</EndDate><Tenor>1M</Tenor><Calendar>TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>1000000</Notional>
+          <Notional>900000</Notional>
+          <Notional>800000</Notional>
+        </Notionals>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SOFR</Index>
+          <Gearings>
+            <Gearing>1.0</Gearing>
+            <Gearing>1.5</Gearing>
+            <Gearing>2.0</Gearing>
+          </Gearings>
+          <Spreads>
+            <Spread>0.0010</Spread>
+            <Spread>0.0020</Spread>
+            <Spread>0.0030</Spread>
+          </Spreads>
+          <FixingDays>0</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2024-01-02</StartDate><EndDate>2024-04-02</EndDate><Tenor>1M</Tenor><Calendar>TARGET</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+"""
+        root = ET.fromstring(xml)
+        legs = load_swap_legs_from_portfolio_root(root, "PIECEWISE_SWAP", "2024-01-02")
+        np.testing.assert_allclose(legs["fixed_notional"], np.array([1_000_000.0, 900_000.0, 800_000.0]))
+        np.testing.assert_allclose(legs["float_notional"], np.array([1_000_000.0, 900_000.0, 800_000.0]))
+        np.testing.assert_allclose(legs["float_gearing"], np.array([1.0, 1.5, 2.0]))
+        np.testing.assert_allclose(legs["float_spread"], np.array([0.0010, 0.0020, 0.0030]))
+
+    def test_swap_npv_from_ore_legs_dual_curve_applies_gearing_to_forward_only(self):
+        legs = {
+            "fixed_pay_time": np.array([], dtype=float),
+            "fixed_start_time": np.array([], dtype=float),
+            "fixed_end_time": np.array([], dtype=float),
+            "fixed_amount": np.array([], dtype=float),
+            "float_pay_time": np.array([1.0], dtype=float),
+            "float_start_time": np.array([0.0], dtype=float),
+            "float_end_time": np.array([1.0], dtype=float),
+            "float_accrual": np.array([1.0], dtype=float),
+            "float_index_accrual": np.array([1.0], dtype=float),
+            "float_notional": np.array([100.0], dtype=float),
+            "float_sign": np.array([1.0], dtype=float),
+            "float_gearing": np.array([1.5], dtype=float),
+            "float_spread": np.array([0.01], dtype=float),
+            "float_coupon": np.array([0.0], dtype=float),
+            "float_fixing_time": np.array([2.0], dtype=float),
+            "float_is_averaged": np.array([False], dtype=bool),
+        }
+
+        class _Model:
+            def discount_bond(self, t, maturity, x, p_t, p0_maturity):
+                return np.full_like(np.asarray(x, dtype=float), float(p0_maturity), dtype=float)
+
+            def discount_bond_paths(self, t, maturities, x_t, p_t, p0_maturities):
+                p0_maturities = np.asarray(p0_maturities, dtype=float)
+                x_t = np.asarray(x_t, dtype=float)
+                return np.tile((p0_maturities / float(p_t))[:, None], (1, x_t.size))
+
+        p0_disc = lambda t: float(np.exp(-0.02 * t))
+        p0_fwd = lambda t: float(np.exp(-0.01 * t))
+        pv = swap_npv_from_ore_legs_dual_curve(_Model(), p0_disc, p0_fwd, legs, 0.0, np.zeros(4, dtype=float))
+        expected_coupon = 1.5 * ((p0_fwd(0.0) / p0_fwd(1.0) - 1.0) / 1.0) + 0.01
+        expected = 100.0 * expected_coupon * p0_disc(1.0)
+        self.assertTrue(np.allclose(pv, np.full_like(pv, expected), atol=1.0e-12))
 
 
 if __name__ == "__main__":

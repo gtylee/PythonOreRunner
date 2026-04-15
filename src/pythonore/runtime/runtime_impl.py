@@ -3162,11 +3162,9 @@ class PythonLgmAdapter:
         legs["float_fixing_days"] = int((fld.findtext("./FixingDays") or "2").strip() or 2)
         spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
         gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
-        if "float_spread" in legs:
-            legs["float_spread"] = np.full_like(np.asarray(legs["float_spread"], dtype=float), spread)
-        if "float_gearing" in legs:
-            legs["float_gearing"] = np.full_like(np.asarray(legs["float_gearing"], dtype=float), gearing)
-        else:
+        if "float_spread" not in legs:
+            legs["float_spread"] = np.full_like(np.asarray(legs.get("float_accrual", []), dtype=float), spread)
+        if "float_gearing" not in legs:
             legs["float_gearing"] = np.full_like(np.asarray(legs.get("float_accrual", []), dtype=float), gearing)
 
     def _parse_generic_cashflow_schedule(
@@ -3356,8 +3354,10 @@ class PythonLgmAdapter:
                     return None
                 index_name = (fld.findtext("./Index") or "").strip().upper()
                 schedule_rule = (rules.findtext("./Rule") or "Forward").strip().upper() if rules is not None else "FORWARD"
-                spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
-                gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+                spread_nodes = [node for node in fld.findall("./Spreads/Spread") if (node.text or "").strip()]
+                gearing_nodes = [node for node in fld.findall("./Gearings/Gearing") if (node.text or "").strip()]
+                spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+                gearing, _ = self._irs_utils._expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
                 cap_txt = (fld.findtext("./Caps/Cap") or "").strip()
                 floor_txt = (fld.findtext("./Floors/Floor") or "").strip()
                 fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
@@ -3369,8 +3369,6 @@ class PythonLgmAdapter:
                 is_averaged = (fld.findtext("./IsAveraged") or "false").strip().lower() == "true"
                 has_sub_periods = (fld.findtext("./HasSubPeriods") or "false").strip().lower() == "true"
                 index_dc = infer_index_day_counter(index_name, fallback=dc)
-                fix_base_dates = e_dates if in_arrears else s_dates
-                fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 overnight_indexed = _forward_index_family(index_name) == "1D"
                 lookback_days = 0
                 if lookback_txt not in {"", "0D", "0d"}:
@@ -3386,8 +3384,8 @@ class PythonLgmAdapter:
                     return None
                 leg_info["index_name"] = index_name
                 leg_info["schedule_rule"] = schedule_rule
-                leg_info["spread"] = np.full_like(accr, spread)
-                leg_info["gearing"] = np.full_like(accr, gearing)
+                leg_info["spread"] = np.asarray(spread, dtype=float)
+                leg_info["gearing"] = np.asarray(gearing, dtype=float)
                 leg_info["cap"] = float(cap_txt) if cap_txt else None
                 leg_info["floor"] = float(floor_txt) if floor_txt else None
                 leg_info["overnight_indexed"] = overnight_indexed
@@ -3400,6 +3398,20 @@ class PythonLgmAdapter:
                 leg_info["naked_option"] = naked_option
                 leg_info["is_in_arrears"] = in_arrears
                 leg_info["fixing_days"] = fixing_days
+                if is_averaged:
+                    fix_dates = [
+                        self._irs_utils._average_overnight_coupon_fixing_date(
+                            sd,
+                            ed,
+                            calendar=cal,
+                            fixing_days=fixing_days,
+                            rate_cutoff=rate_cutoff,
+                        )
+                        for sd, ed in zip(s_dates, e_dates)
+                    ]
+                else:
+                    fix_base_dates = e_dates if in_arrears else s_dates
+                    fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 leg_info["fixing_time"] = np.asarray([time_from_dates(asof, fd, "A365F") for fd in fix_dates], dtype=float)
                 leg_info["start_date"] = np.asarray([d.isoformat() for d in s_dates], dtype=object)
                 leg_info["end_date"] = np.asarray([d.isoformat() for d in e_dates], dtype=object)
@@ -3412,13 +3424,14 @@ class PythonLgmAdapter:
                 if fld is None:
                     return None
                 index_name = (fld.findtext("./Index") or "").strip().upper()
-                spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
+                spread_nodes = [node for node in fld.findall("./Spreads/Spread") if (node.text or "").strip()]
+                spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
                 fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
                 in_arrears = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
                 fix_base_dates = e_dates if in_arrears else s_dates
                 fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 leg_info["index_name"] = index_name
-                leg_info["spread"] = np.full_like(accr, spread)
+                leg_info["spread"] = np.asarray(spread, dtype=float)
                 leg_info["gearing"] = np.ones_like(accr)
                 leg_info["is_in_arrears"] = in_arrears
                 leg_info["fixing_days"] = fixing_days
@@ -3430,8 +3443,10 @@ class PythonLgmAdapter:
                     return None
                 index1 = (fld.findtext("./Index1") or "").strip().upper()
                 index2 = (fld.findtext("./Index2") or "").strip().upper()
-                spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
-                gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+                spread_nodes = [node for node in fld.findall("./Spreads/Spread") if (node.text or "").strip()]
+                gearing_nodes = [node for node in fld.findall("./Gearings/Gearing") if (node.text or "").strip()]
+                spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+                gearing, _ = self._irs_utils._expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
                 cap_txt = (fld.findtext("./Caps/Cap") or "").strip()
                 floor_txt = (fld.findtext("./Floors/Floor") or "").strip()
                 fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
@@ -3440,8 +3455,8 @@ class PythonLgmAdapter:
                 fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 leg_info["index_name_1"] = index1
                 leg_info["index_name_2"] = index2
-                leg_info["spread"] = np.full_like(accr, spread)
-                leg_info["gearing"] = np.full_like(accr, gearing)
+                leg_info["spread"] = np.asarray(spread, dtype=float)
+                leg_info["gearing"] = np.asarray(gearing, dtype=float)
                 leg_info["cap"] = float(cap_txt) if cap_txt else None
                 leg_info["floor"] = float(floor_txt) if floor_txt else None
                 leg_info["naked_option"] = (fld.findtext("./NakedOption") or "false").strip().lower() == "true"
@@ -3458,16 +3473,18 @@ class PythonLgmAdapter:
                     return None
                 index1 = (cms.findtext("./Index1") or "").strip().upper()
                 index2 = (cms.findtext("./Index2") or "").strip().upper()
-                spread = float((cms.findtext("./Spreads/Spread") or "0").strip() or 0.0)
-                gearing = float((cms.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+                spread_nodes = [node for node in cms.findall("./Spreads/Spread") if (node.text or "").strip()]
+                gearing_nodes = [node for node in cms.findall("./Gearings/Gearing") if (node.text or "").strip()]
+                spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+                gearing, _ = self._irs_utils._expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
                 fixing_days = int((cms.findtext("./FixingDays") or "2").strip() or 2)
                 in_arrears = (cms.findtext("./IsInArrears") or "false").strip().lower() == "true"
                 fix_base_dates = e_dates if in_arrears else s_dates
                 fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 leg_info["index_name_1"] = index1
                 leg_info["index_name_2"] = index2
-                leg_info["spread"] = np.full_like(accr, spread)
-                leg_info["gearing"] = np.full_like(accr, gearing)
+                leg_info["spread"] = np.asarray(spread, dtype=float)
+                leg_info["gearing"] = np.asarray(gearing, dtype=float)
                 call_strike_txt = (fld.findtext("./CallStrikes/Strike") or "").strip()
                 call_payoff_txt = (fld.findtext("./CallPayoffs/Payoff") or "").strip()
                 put_strike_txt = (fld.findtext("./PutStrikes/Strike") or "").strip()
@@ -3633,8 +3650,16 @@ class PythonLgmAdapter:
                 notionals = notionals[live][: start_t.size]
             else:
                 notionals = np.resize(notionals, start_t.size)
-        spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
-        gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
+        spread_nodes = [node for node in fld.findall("./Spreads/Spread") if (node.text or "").strip()]
+        gearing_nodes = [node for node in fld.findall("./Gearings/Gearing") if (node.text or "").strip()]
+        spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+        gearing, _ = self._irs_utils._expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
+        spread = np.asarray(spread, dtype=float)
+        gearing = np.asarray(gearing, dtype=float)
+        if spread.size == live.size:
+            spread = spread[live]
+        if gearing.size == live.size:
+            gearing = gearing[live]
         cap_text = (data.findtext("./Caps/Cap") or "").strip()
         floor_text = (data.findtext("./Floors/Floor") or "").strip()
         if cap_text:
@@ -3659,8 +3684,8 @@ class PythonLgmAdapter:
             accrual=accr,
             notional=notionals,
             strike=np.full_like(accr, strike),
-            gearing=np.full_like(accr, gearing),
-            spread=np.full_like(accr, spread),
+            gearing=np.asarray(gearing, dtype=float),
+            spread=np.asarray(spread, dtype=float),
             fixing_time=fixing_t,
             fixing_date=np.asarray([d.isoformat() for d in fixing_dates], dtype=object)[live],
             position=position,
@@ -5584,6 +5609,9 @@ class PythonLgmAdapter:
                     fx_index = str(fx_reset.get("fx_index", "")).strip().upper()
                     foreign_ccy = str(fx_reset.get("foreign_currency", "")).strip().upper()
                     fx_pair = _fx_pair_from_index(fx_index, foreign_ccy, leg_ccy)
+                    spot0 = _spot_from_quotes(foreign_ccy + leg_ccy, inputs, default=1.0)
+                    p_dom_fx = inputs.discount_curves.get(leg_ccy)
+                    p_for_fx = inputs.discount_curves.get(foreign_ccy)
                     fx_paths = None
                     inverted = False
                     if shared_fx_sim is not None and fx_pair is not None:
@@ -5621,13 +5649,18 @@ class PythonLgmAdapter:
                                     fx_value = _spot_at_time(fx_paths, fix_t)
                                     fx_value = np.asarray(fx_value, dtype=float)
                                     if not np.all(np.isfinite(fx_value)):
-                                        fx_value = np.full_like(fx_value, _spot_from_quotes(foreign_ccy + leg_ccy, inputs, default=1.0))
+                                        fx_value = np.full_like(fx_value, spot0)
                                     if inverted:
                                         fx_value = 1.0 / np.maximum(fx_value, 1.0e-12)
                                     coupon_notionals[j, :] = foreign_amount * fx_value
                                 else:
-                                    pair6 = f"{foreign_ccy}{leg_ccy}"
-                                    fx_value = _spot_from_quotes(pair6, inputs, default=1.0)
+                                    if p_dom_fx is not None and p_for_fx is not None:
+                                        fix_t = float(self._irs_utils._time_from_dates(asof_dt, fix_date, "A365F"))
+                                        df_dom = max(float(p_dom_fx(fix_t)), 1.0e-12)
+                                        df_for = max(float(p_for_fx(fix_t)), 1.0e-12)
+                                        fx_value = spot0 * df_for / df_dom
+                                    else:
+                                        fx_value = spot0
                                     if inverted:
                                         fx_value = 1.0 / max(float(fx_value), 1.0e-12)
                                     coupon_notionals[j, :] = foreign_amount * float(fx_value)
@@ -5722,7 +5755,14 @@ class PythonLgmAdapter:
         values = np.asarray(amount, dtype=float)
         if local == report:
             return values
-        spot_path = None
+        t = float(inputs.times[time_index]) if 0 <= int(time_index) < int(inputs.times.size) else 0.0
+        local_curve = inputs.discount_curves.get(local)
+        report_curve = inputs.discount_curves.get(report)
+        forward_factor = None
+        if local_curve is not None and report_curve is not None:
+            spot = _spot_from_quotes(local + report, inputs, default=0.0)
+            if spot > 0.0:
+                forward_factor = spot * max(float(local_curve(t)), 1.0e-18) / max(float(report_curve(t)), 1.0e-18)
         if shared_fx_sim is not None:
             direct = f"{local}/{report}"
             inverse = f"{report}/{local}"
@@ -5730,14 +5770,20 @@ class PythonLgmAdapter:
                 spot_path = np.asarray(shared_fx_sim.sim["s"][direct][time_index, :], dtype=float)
                 if np.all(np.isfinite(spot_path)):
                     return values * spot_path
+                if forward_factor is not None:
+                    return values * float(forward_factor)
                 spot = _spot_from_quotes(local + report, inputs, default=1.0)
                 return values * float(spot)
             if inverse in shared_fx_sim.sim.get("s", {}):
                 spot_path = np.asarray(shared_fx_sim.sim["s"][inverse][time_index, :], dtype=float)
                 if np.all(np.isfinite(spot_path)):
                     return values / np.maximum(spot_path, 1.0e-12)
+                if forward_factor is not None:
+                    return values * float(forward_factor)
                 spot = _spot_from_quotes(report + local, inputs, default=1.0)
                 return values / max(float(spot), 1.0e-12)
+        if forward_factor is not None:
+            return values * float(forward_factor)
         spot = _spot_from_quotes(local + report, inputs, default=0.0)
         if spot > 0.0:
             return values * spot

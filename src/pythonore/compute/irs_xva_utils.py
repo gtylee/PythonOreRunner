@@ -24,6 +24,11 @@ import re
 import xml.etree.ElementTree as ET
 import numpy as np
 
+try:  # QuantLib is available in the main runtime and test environment.
+    import QuantLib as ql
+except Exception:  # pragma: no cover - keep a fallback for lightweight tooling.
+    ql = None
+
 
 _TIME_YEAR_BASIS = 365.25
 _ARRAY_CACHE_MAX_ITEMS = 256
@@ -141,6 +146,7 @@ def expand_leg_notionals(
     - one `<Notional>` per coupon period
     - a single initial `<Notional>` plus `<Amortizations>`
     - dated `<Notional>` nodes where later notionals carry `StartDate` / `startDate`
+    - piecewise per-period notionals on the same boundary pattern as spreads / gearings
     """
     n_periods = len(start_dates)
     if n_periods == 0:
@@ -153,7 +159,7 @@ def expand_leg_notionals(
     if not notional_nodes:
         return np.zeros(n_periods, dtype=float)
 
-    base_notionals, reset_mask = _expand_notional_nodes(notional_nodes, start_dates)
+    base_notionals, reset_mask = _expand_notional_nodes(notional_nodes, start_dates, default_value=0.0)
     amort_nodes = list(leg.findall("./Amortizations/AmortizationData"))
     if not amort_nodes:
         return base_notionals
@@ -188,6 +194,7 @@ def expand_leg_notionals(
 def _expand_notional_nodes(
     nodes: Sequence[ET.Element],
     period_starts: Sequence[date],
+    default_value: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     parsed: list[tuple[int, date | None, float]] = []
     for order, node in enumerate(nodes):
@@ -197,7 +204,7 @@ def _expand_notional_nodes(
         parsed.append((order, _optional_start_date(node), float(text)))
     if not parsed:
         n = len(period_starts)
-        return np.zeros(n, dtype=float), np.zeros(n, dtype=bool)
+        return np.full(n, float(default_value), dtype=float), np.zeros(n, dtype=bool)
     if len(parsed) == len(period_starts) and all(start is None for _, start, _ in parsed):
         return (
             np.asarray([value for _, _, value in parsed], dtype=float),
@@ -211,7 +218,7 @@ def _expand_notional_nodes(
     out = np.empty(len(period_starts), dtype=float)
     reset = np.zeros(len(period_starts), dtype=bool)
     undated = [value for _, start, value in parsed if start is None]
-    current = float(undated[0]) if undated else 0.0
+    current = float(undated[0]) if undated else float(default_value)
     reset_values: dict[int, float] = {}
     dated = sorted(
         ((start, order, value) for order, start, value in parsed if start is not None),
@@ -646,6 +653,36 @@ def _advance_business_days(d: date, n: int, calendar: str) -> date:
     return x
 
 
+def _average_overnight_coupon_fixing_date(
+    start_date: date,
+    end_date: date,
+    *,
+    calendar: str,
+    fixing_days: int,
+    rate_cutoff: int = 0,
+) -> date:
+    """Return a coupon-level fixing date for an averaged overnight period.
+
+    The averaged overnight coupon becomes known only after the last relevant
+    daily fixing in the period. We approximate that by walking the business-day
+    schedule inside the coupon window and selecting the last included fixing,
+    then applying the coupon fixing lag.
+    """
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+    business_dates: list[date] = []
+    cur = start_date
+    while cur <= end_date:
+        if _is_business_day(cur, calendar):
+            business_dates.append(cur)
+        cur += timedelta(days=1)
+    if not business_dates:
+        return _advance_business_days(end_date, -fixing_days, calendar)
+    last_idx = max(0, len(business_dates) - 2 - max(int(rate_cutoff), 0))
+    fixing_anchor = business_dates[last_idx]
+    return _advance_business_days(fixing_anchor, -fixing_days, calendar)
+
+
 def _year_fraction(start: date, end: date, day_counter: str) -> float:
     dc = day_counter.upper().replace(" ", "")
     if dc in ("A360", "ACT/360", "ACTUAL/360", "ACTUAL360"):
@@ -669,6 +706,81 @@ def _parse_tenor_to_months(tenor: str) -> int:
         raise ValueError(f"unsupported tenor '{tenor}'")
     n = int(m.group(1))
     return n * 12 if m.group(2) == "Y" else n
+
+
+def _ql_date_from_py(d: date):
+    if ql is None:
+        raise RuntimeError("QuantLib is required for ORE-style schedule generation")
+    return ql.Date(int(d.day), int(d.month), int(d.year))
+
+
+def _ql_calendar_from_name(name: str):
+    if ql is None:
+        raise RuntimeError("QuantLib is required for ORE-style schedule generation")
+
+    norm = str(name or "").strip()
+    if not norm:
+        return ql.TARGET()
+    if norm.startswith("JoinHolidays(") or norm.startswith("JoinBusinessDays("):
+        rule = ql.JoinHolidays if norm.startswith("JoinHolidays(") else ql.JoinBusinessDays
+        inner = norm[norm.find("(") + 1 : norm.rfind(")")]
+        toks = [tok.strip() for tok in inner.split(",") if tok.strip()]
+        if not toks:
+            return ql.TARGET()
+        calendars = [_ql_calendar_from_name(tok) for tok in toks]
+        cal = calendars[0]
+        for other in calendars[1:]:
+            cal = ql.JointCalendar(cal, other, rule)
+        return cal
+
+    key = norm.upper()
+    if key in {"TARGET", "EUR"}:
+        return ql.TARGET()
+    if key in {"GBP", "GB", "UK", "UNITEDKINGDOM", "LONDON"}:
+        return ql.UnitedKingdom(ql.UnitedKingdom.Exchange)
+    if key in {"USD", "US", "UNITEDSTATES"}:
+        return ql.UnitedStates(ql.UnitedStates.GovernmentBond)
+    if key in {"US-NYSE", "XNYS"}:
+        return ql.UnitedStates(ql.UnitedStates.NYSE)
+    if key in {"JPY", "JP", "JAPAN"}:
+        return ql.Japan()
+    if key in {"CHF", "SWITZERLAND"}:
+        return ql.Switzerland()
+    if key in {"CAD", "CANADA"}:
+        return ql.Canada()
+    if key in {"SEK", "SWEDEN"}:
+        return ql.Sweden()
+    if key in {"AUD", "AUSTRALIA"}:
+        return ql.Australia()
+    if key in {"NZD", "NEWZEALAND"}:
+        return ql.NewZealand()
+    return ql.TARGET()
+
+
+def _ql_business_convention(name: str):
+    if ql is None:
+        raise RuntimeError("QuantLib is required for ORE-style schedule generation")
+    key = str(name or "").strip().upper()
+    return {
+        "F": ql.Following,
+        "FOLLOWING": ql.Following,
+        "MF": ql.ModifiedFollowing,
+        "MODIFIEDFOLLOWING": ql.ModifiedFollowing,
+        "P": ql.Preceding,
+        "PRECEDING": ql.Preceding,
+        "U": ql.Unadjusted,
+        "UNADJUSTED": ql.Unadjusted,
+    }.get(key, ql.Following)
+
+
+def _ql_date_generation_rule(name: str):
+    if ql is None:
+        raise RuntimeError("QuantLib is required for ORE-style schedule generation")
+    key = str(name or "").strip().upper()
+    return {
+        "FORWARD": ql.DateGeneration.Forward,
+        "BACKWARD": ql.DateGeneration.Backward,
+    }.get(key, ql.DateGeneration.Forward)
 
 
 def parse_tenor_to_years(tenor: str) -> float:
@@ -710,14 +822,44 @@ def _build_schedule(
     calendar: str,
     convention: str,
     pay_convention: Optional[str] = None,
+    term_convention: Optional[str] = None,
+    end_of_month: bool = False,
     payment_lag: int = 0,
     rule: str = "Forward",
     first_date: date | None = None,
     last_date: date | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # Build coupon period boundaries from the same rule ingredients ORE stores in
-    # ``ScheduleData/Rules``. ORE advances the unadjusted anchor dates and only then
-    # applies business-day adjustment to each boundary independently.
+    # Build coupon period boundaries from the same ingredients ORE stores in
+    # ``ScheduleData/Rules``. When QuantLib is available we defer to its schedule
+    # construction so termination convention, first/last stubs, and end-of-month
+    # behavior all match the native implementation.
+    if ql is not None:
+        sched = ql.Schedule(
+            _ql_date_from_py(start),
+            _ql_date_from_py(end),
+            ql.Period(_parse_tenor_to_months(tenor), ql.Months),
+            _ql_calendar_from_name(calendar),
+            _ql_business_convention(convention),
+            _ql_business_convention(term_convention or convention),
+            _ql_date_generation_rule(rule),
+            bool(end_of_month),
+            _ql_date_from_py(first_date) if first_date is not None else ql.Date(),
+            _ql_date_from_py(last_date) if last_date is not None else ql.Date(),
+        )
+        boundaries = [date(int(d.year()), int(d.month()), int(d.dayOfMonth())) for d in sched]
+        if len(boundaries) < 2:
+            raise ValueError("degenerate schedule")
+        adjusted = boundaries
+        starts = adjusted[:-1]
+        ends = adjusted[1:]
+        pay = []
+        for d in boundaries[1:]:
+            pay_date = d
+            if payment_lag:
+                pay_date = _advance_business_days(pay_date, payment_lag, calendar)
+            pay.append(_adjust_date(pay_date, pay_convention or convention, calendar))
+        return np.asarray(starts, dtype=object), np.asarray(ends, dtype=object), np.asarray(pay, dtype=object)
+
     months = _parse_tenor_to_months(tenor)
     rule_name = (rule or "Forward").strip().upper()
     boundaries: list[date]
@@ -761,6 +903,8 @@ def _build_schedule(
     if boundaries[-1] != end:
         boundaries.append(end)
     adjusted = [_adjust_date(d, convention, calendar) for d in boundaries]
+    if adjusted:
+        adjusted[-1] = _adjust_date(adjusted[-1], term_convention or convention, calendar)
     starts = adjusted[:-1]
     ends = adjusted[1:]
     pay = []
@@ -809,6 +953,9 @@ def _schedule_from_leg(
     tenor = (rules.findtext("./Tenor") or "").strip()
     cal = (rules.findtext("./Calendar") or "TARGET").strip()
     convention = (rules.findtext("./Convention") or pay_convention or "F").strip()
+    term_convention = (rules.findtext("./TermConvention") or convention).strip()
+    end_of_month_txt = (rules.findtext("./EndOfMonth") or "").strip().lower()
+    end_of_month = end_of_month_txt in {"y", "yes", "true", "1"}
     first_date = _optional_date_text(rules.find("./FirstDate")) if rules.find("./FirstDate") is not None else None
     last_date = _optional_date_text(rules.find("./LastDate")) if rules.find("./LastDate") is not None else None
     rule = (rules.findtext("./Rule") or "Forward").strip()
@@ -819,6 +966,8 @@ def _schedule_from_leg(
         cal,
         convention,
         pay_convention=pay_convention,
+        term_convention=term_convention,
+        end_of_month=end_of_month,
         payment_lag=payment_lag,
         rule=rule,
         first_date=first_date,
@@ -1231,6 +1380,7 @@ def load_swap_legs_from_portfolio_root(
         "float_accrual": [],
         "float_notional": [],
         "float_sign": [],
+        "float_gearing": [],
         "float_spread": [],
         "float_coupon": [],
         "float_amount": [],
@@ -1242,8 +1392,11 @@ def load_swap_legs_from_portfolio_root(
     float_index_day_counter_values: list[str] = []
     float_fixing_source_values: list[str] = []
     float_index_accrual_parts: list[np.ndarray] = []
+    float_fixing_date_values: list[np.ndarray] = []
     float_index_names_by_leg: list[str] = []
     float_leg_index_parts: list[np.ndarray] = []
+    fixed_fx_reset_by_leg: list[dict[str, object] | None] = []
+    float_fx_reset_by_leg: list[dict[str, object] | None] = []
     float_leg_count = 0
     fixed_leg_count = 0
     for lx in legs_xml:
@@ -1259,6 +1412,16 @@ def load_swap_legs_from_portfolio_root(
             or (lx.findtext("./Currency") or "")
             or "TARGET"
         ).strip()
+        fx_reset_node = lx.find("./Notionals/FXReset")
+        fx_reset: dict[str, object] | None = None
+        if fx_reset_node is not None:
+            fx_reset = {
+                "foreign_currency": (fx_reset_node.findtext("./ForeignCurrency") or "").strip().upper(),
+                "foreign_amount": float((fx_reset_node.findtext("./ForeignAmount") or "0").strip() or 0.0),
+                "fx_index": (fx_reset_node.findtext("./FXIndex") or "").strip().upper(),
+                "fixing_days": int((fx_reset_node.findtext("./FixingDays") or "2").strip() or 2),
+                "reset_start_date": (fx_reset_node.findtext("./StartDate") or "").strip(),
+            }
         s_dates, e_dates, p_dates = _schedule_from_leg(lx, pay_convention=pay_conv)
         s_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in s_dates], dtype=float)
         e_t = np.asarray([_time_from_dates(asof, d, time_day_counter) for d in e_dates], dtype=float)
@@ -1276,9 +1439,9 @@ def load_swap_legs_from_portfolio_root(
             fixed_parts["fixed_notional"].append(np.asarray(notionals, dtype=float))
             fixed_parts["fixed_sign"].append(np.full_like(accr, sign))
             fixed_parts["fixed_amount"].append(sign * np.asarray(notionals, dtype=float) * rate * accr)
+            fixed_fx_reset_by_leg.append(fx_reset)
             fixed_leg_count += 1
         elif ltype == "Floating":
-            spread = float((lx.findtext("./FloatingLegData/Spreads/Spread") or "0").strip())
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
             float_index = (lx.findtext("./FloatingLegData/Index") or "").strip().upper()
             float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
@@ -1295,15 +1458,34 @@ def load_swap_legs_from_portfolio_root(
             float_index_accrual_parts.append(float_index_accrual)
             float_parts["float_notional"].append(np.asarray(notionals, dtype=float))
             float_parts["float_sign"].append(np.full_like(accr, sign))
-            float_parts["float_spread"].append(np.full_like(accr, spread))
+            spread_nodes = [node for node in lx.findall("./FloatingLegData/Spreads/Spread") if (node.text or "").strip()]
+            gearing_nodes = [node for node in lx.findall("./FloatingLegData/Gearings/Gearing") if (node.text or "").strip()]
+            spreads, _ = _expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+            gearings, _ = _expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
+            float_parts["float_gearing"].append(np.asarray(gearings, dtype=float))
+            float_parts["float_spread"].append(np.asarray(spreads, dtype=float))
             float_parts["float_coupon"].append(np.zeros_like(accr))
             float_parts["float_amount"].append(np.zeros_like(accr))
             float_leg_index_parts.append(np.full(accr.shape, float_leg_count, dtype=int))
-            # Averaged OIS coupons fix against the end-of-period lag, not the accrual start.
+            float_fx_reset_by_leg.append(fx_reset)
             if is_averaged:
-                fix_dates = [_advance_business_days(ed, -fixing_days, cal) for ed in e_dates]
+                fix_dates = np.asarray(
+                    [
+                        _average_overnight_coupon_fixing_date(
+                            sd,
+                            ed,
+                            calendar=cal,
+                            fixing_days=fixing_days,
+                        )
+                        for sd, ed in zip(s_dates, e_dates)
+                    ],
+                    dtype=object,
+                )
+                float_fixing_date_values.append(fix_dates.copy())
+                float_fixing_source_values.append("average_coupon_fixing_date")
             else:
-                fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
+                fix_dates = np.asarray([_advance_business_days(sd, -fixing_days, cal) for sd in s_dates], dtype=object)
+                float_fixing_date_values.append(fix_dates.copy())
             float_parts["float_fixing_time"].append(
                 np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
             )
@@ -1311,7 +1493,8 @@ def load_swap_legs_from_portfolio_root(
             float_index_values.append(float_index)
             float_index_tenor_values.append(float_index_tenor)
             float_index_day_counter_values.append(index_dc)
-            float_fixing_source_values.append("portfolio_fixing_days")
+            if not is_averaged:
+                float_fixing_source_values.append("portfolio_fixing_days")
             float_index_names_by_leg.append(float_index)
             float_leg_count += 1
         else:
@@ -1334,26 +1517,21 @@ def load_swap_legs_from_portfolio_root(
     for key, parts in float_parts.items():
         out[key] = _stack(parts, dtype=float if key != "float_is_averaged" else bool)
     out["float_leg_index"] = _stack(float_leg_index_parts, dtype=int)
+    out["fixed_fx_reset_by_leg"] = np.asarray(fixed_fx_reset_by_leg, dtype=object)
+    out["float_fx_reset_by_leg"] = np.asarray(float_fx_reset_by_leg, dtype=object)
 
     if out["fixed_pay_time"].size > 1:
         fixed_order = np.argsort(out["fixed_pay_time"], kind="mergesort")
         for key in fixed_parts:
             out[key] = out[key][fixed_order]
 
-    if out["float_pay_time"].size > 1:
-        float_order = np.argsort(out["float_pay_time"], kind="mergesort")
-        for key in float_parts:
-            out[key] = out[key][float_order]
-        if out["float_leg_index"].size > 1:
-            out["float_leg_index"] = out["float_leg_index"][float_order]
-
     out["float_index_accrual"] = _stack(float_index_accrual_parts, dtype=float)
-    if out["float_index_accrual"].size > 1 and out["float_pay_time"].size > 1:
-        out["float_index_accrual"] = out["float_index_accrual"][float_order]
     out["float_index"] = float_index_values[0] if float_index_values else ""
     out["float_index_tenor"] = float_index_tenor_values[0] if float_index_tenor_values else ""
     out["float_index_day_counter"] = float_index_day_counter_values[0] if float_index_day_counter_values else "A365"
     out["float_fixing_source"] = float_fixing_source_values[0] if len(set(float_fixing_source_values)) <= 1 else "mixed"
+    if float_fixing_date_values:
+        out["float_fixing_date"] = _stack(float_fixing_date_values, dtype=object)
     out["float_index_by_leg"] = np.asarray(float_index_names_by_leg, dtype=object)
 
     if out["float_start_time"].size:
@@ -1366,6 +1544,10 @@ def load_swap_legs_from_portfolio_root(
             for key in ("float_index", "float_index_tenor", "float_index_day_counter", "float_fixing_source"):
                 if key in out:
                     out[key] = out[key]
+    out["float_leg0_count"] = np.asarray(
+        [int(np.count_nonzero(np.asarray(out["float_leg_index"], dtype=int) == 0))],
+        dtype=int,
+    )
     out["fixed_leg_count"] = np.asarray([fixed_leg_count], dtype=int)
     out["float_leg_count"] = np.asarray([float_leg_count], dtype=int)
     return out
@@ -1539,7 +1721,8 @@ def swap_npv_from_ore_legs_dual_curve(
 
     This is closer to ORE's ``LgmVectorised::fixing()`` than the older deterministic
     basis-ratio transport approximation, where the forwarding curve was reconstructed
-    from the discounting state.
+    from the discounting state.  For floating coupons the gearing multiplies the
+    forward component only; the spread remains additive.
 
     ``use_node_interpolation`` keeps the older "simulate node tenors, then interpolate
     discount factors" workflow available for diagnostics.  Exact discount-bond
@@ -1650,6 +1833,7 @@ def swap_npv_from_ore_legs_dual_curve(
         index_tau = np.asarray(legs.get("float_index_accrual", legs["float_accrual"])[live], dtype=float)
         n = legs["float_notional"][live]
         sign = legs["float_sign"][live]
+        gearing = np.asarray(legs.get("float_gearing", np.ones_like(legs["float_accrual"])), dtype=float)[live]
         spread = np.nan_to_num(legs["float_spread"][live], nan=0.0, posinf=0.0, neginf=0.0)
         if deterministic_fixings_cutoff is None:
             fixed = fix_t[live] <= t + 1.0e-12
@@ -1708,7 +1892,7 @@ def swap_npv_from_ore_legs_dual_curve(
                     )
                 else:
                     fwd2 = np.nan_to_num((p_ts_f2 / p_te_f2 - 1.0) / index_tau2[:, None], nan=0.0, posinf=0.0, neginf=0.0)
-                amount[~fixed, :] = sign2[:, None] * n2[:, None] * (fwd2 + spread2[:, None]) * tau2[:, None]
+                amount[~fixed, :] = sign2[:, None] * n2[:, None] * (gearing[~fixed][:, None] * fwd2 + spread2[:, None]) * tau2[:, None]
 
         pv += np.sum(amount * p_tp_d, axis=0)
 
@@ -1750,6 +1934,7 @@ def compute_realized_float_coupons(
             out[i, :] = quoted_coupon[i]
             continue
         ft = float(fix_t[i])
+        g = float(np.asarray(legs.get("float_gearing", np.ones_like(s)), dtype=float)[i])
         if ft <= 1.0e-12:
             ps = float(p0_fwd(max(0.0, float(s[i]))))
             pe = float(p0_fwd(float(e[i])))
@@ -1757,7 +1942,7 @@ def compute_realized_float_coupons(
                 fwd = math.log(max(ps / pe, 1.0e-18)) / float(index_tau[i])
             else:
                 fwd = (ps / pe - 1.0) / float(index_tau[i])
-            out[i, :] = fwd + float(spr[i])
+            out[i, :] = g * fwd + float(spr[i])
             continue
         x_fix = interpolate_path_grid(sim_times, x_paths_on_sim_grid, ft)[0, :]
         p_ft_f = float(p0_fwd(ft))
@@ -1768,7 +1953,7 @@ def compute_realized_float_coupons(
             fwd_path = np.log(np.clip(p_t_s_f / p_t_e_f, 1.0e-18, None)) / float(index_tau[i])
         else:
             fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])
-        out[i, :] = fwd_path + float(spr[i])
+        out[i, :] = g * fwd_path + float(spr[i])
     return out
 
 
@@ -1780,7 +1965,7 @@ def calibrate_float_spreads_from_coupon(
     """Return a copy of legs with float_spread inferred from flow coupons at t0.
 
     For each future coupon i:
-      spread_i = coupon_i - (P_f(t0,s_i)/P_f(t0,e_i)-1)/tau_i
+      spread_i = coupon_i - gearing_i * (P_f(t0,s_i)/P_f(t0,e_i)-1)/tau_i
 
     This is useful when ORE has exported an all-in coupon but the Python pricer wants
     a clean explicit spread component for dual-curve revaluation.
@@ -1788,6 +1973,7 @@ def calibrate_float_spreads_from_coupon(
     out = {k: np.array(v, copy=True) for k, v in legs.items()}
     spread = np.array(out.get("float_spread", np.zeros_like(out["float_accrual"])), copy=True, dtype=float)
     coupons = np.asarray(out.get("float_coupon", np.zeros_like(out["float_accrual"])), dtype=float)
+    gearing = np.asarray(out.get("float_gearing", np.ones_like(out["float_accrual"])), dtype=float)
     out["float_coupon"] = coupons.copy()
 
     for i in range(spread.size):
@@ -1806,10 +1992,10 @@ def calibrate_float_spreads_from_coupon(
             continue
         coupon_i = float(coupons[i])
         if np.isfinite(coupon_i) and abs(coupon_i) > 0.0:
-            spread[i] = coupon_i - fwd0
+            spread[i] = coupon_i - float(gearing[i]) * fwd0
         if not np.isfinite(spread[i]):
             spread[i] = 0.0
-        out["float_coupon"][i] = fwd0 + spread[i]
+        out["float_coupon"][i] = float(gearing[i]) * fwd0 + spread[i]
 
     out["float_spread"] = spread
     return out

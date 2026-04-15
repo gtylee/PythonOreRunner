@@ -1558,6 +1558,7 @@ def _price_irs_t0_from_curves(
     index_tau = float_index_accrual[live]
     n = np.asarray(legs.get("float_notional", []), dtype=float)[live]
     sign = np.asarray(legs.get("float_sign", []), dtype=float)[live]
+    gearing = np.asarray(legs.get("float_gearing", np.ones_like(float_accrual)), dtype=float)[live]
     spread = np.asarray(legs.get("float_spread", np.zeros_like(pay_all)), dtype=float)[live]
     fixed = np.asarray(pre["fixed"], dtype=bool)
     disc_pay = np.asarray(pre["disc_pay"], dtype=float)
@@ -1578,12 +1579,13 @@ def _price_irs_t0_from_curves(
         index_tau2 = index_tau[~fixed]
         n2 = n[~fixed]
         sign2 = sign[~fixed]
+        gearing2 = gearing[~fixed]
         spread2 = spread[~fixed]
         disc_pay2 = disc_pay[~fixed]
         ps = np.asarray(pre["ps"], dtype=float)
         pe = np.asarray(pre["pe"], dtype=float)
         fwd = (ps / pe - 1.0) / index_tau2
-        amounts = sign2 * n2 * (fwd + spread2) * tau2
+        amounts = sign2 * n2 * (gearing2 * fwd + spread2) * tau2
         pv += float(np.sum(amounts * disc_pay2))
     return pv
 

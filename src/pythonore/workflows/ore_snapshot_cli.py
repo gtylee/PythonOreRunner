@@ -5607,6 +5607,7 @@ def _compute_snapshot_case(
             "float_accrual",
             "float_notional",
             "float_sign",
+            "float_gearing",
             "float_spread",
             "float_coupon",
             "float_amount",
@@ -5616,13 +5617,22 @@ def _compute_snapshot_case(
             if key in out:
                 arr = np.asarray(out[key], dtype=float if key != "float_sign" else float)
                 out[key] = arr[:0].copy()
+        if "float_fx_reset_by_leg" in out:
+            out["float_fx_reset_by_leg"] = np.asarray(out["float_fx_reset_by_leg"], dtype=object)[:0].copy()
         if "float_is_averaged" in out:
             out["float_is_averaged"] = np.asarray(out["float_is_averaged"], dtype=bool)[:0].copy()
         if "float_leg_index" in out:
             out["float_leg_index"] = np.asarray(out["float_leg_index"], dtype=int)[:0].copy()
+        if "float_leg0_count" in out:
+            out["float_leg0_count"] = np.asarray([0], dtype=int)
         return out
 
-    def _float_leg_subset(legs: dict[str, np.ndarray], mask: np.ndarray, index_name: str) -> dict[str, np.ndarray]:
+    def _float_leg_subset(
+        legs: dict[str, np.ndarray],
+        mask: np.ndarray,
+        index_name: str,
+        leg_idx: int,
+    ) -> dict[str, np.ndarray]:
         out = {k: np.array(v, copy=True) for k, v in legs.items()}
         mask = np.asarray(mask, dtype=bool)
         for key in (
@@ -5632,6 +5642,7 @@ def _compute_snapshot_case(
             "float_accrual",
             "float_notional",
             "float_sign",
+            "float_gearing",
             "float_spread",
             "float_coupon",
             "float_amount",
@@ -5640,10 +5651,14 @@ def _compute_snapshot_case(
         ):
             if key in out:
                 out[key] = np.asarray(out[key], dtype=float)[mask].copy()
+        if "float_fx_reset_by_leg" in out:
+            out["float_fx_reset_by_leg"] = np.asarray(out["float_fx_reset_by_leg"], dtype=object)[[leg_idx]].copy()
         if "float_is_averaged" in out:
             out["float_is_averaged"] = np.asarray(out["float_is_averaged"], dtype=bool)[mask].copy()
         if "float_leg_index" in out:
             out["float_leg_index"] = np.zeros(int(mask.sum()), dtype=int)
+        if "float_leg0_count" in out:
+            out["float_leg0_count"] = np.asarray([int(mask.sum())], dtype=int)
         out["float_index"] = str(index_name).upper()
         out["float_index_tenor"] = str(index_name).split("-")[-1].upper() if "-" in str(index_name) else ""
         out["float_index_by_leg"] = np.asarray([str(index_name).upper()], dtype=object)
@@ -5699,6 +5714,7 @@ def _compute_snapshot_case(
 
     float_leg_index = np.asarray(snap.legs.get("float_leg_index", []), dtype=int)
     float_index_by_leg = np.asarray(snap.legs.get("float_index_by_leg", []), dtype=object)
+    float_leg0_count = int(np.asarray(snap.legs.get("float_leg0_count", [0]), dtype=int).reshape(-1)[0]) if "float_leg0_count" in snap.legs else 0
     trade_float_index_names = tuple(
         dict.fromkeys(
             str(name).strip().upper()
@@ -5716,17 +5732,47 @@ def _compute_snapshot_case(
     if use_split_float_legs:
         fixed_only_legs = _empty_float_leg_block(snap.legs)
         float_leg_payloads: list[tuple[int, str, dict[str, np.ndarray], Any, np.ndarray]] = []
-        for leg_id in np.unique(float_leg_index):
-            leg_idx = int(leg_id)
+        can_slice_by_boundary = (
+            float_index_by_leg.size == 2
+            and float_leg0_count > 0
+            and float_leg0_count < float_leg_index.size
+            and np.all(float_leg_index[:float_leg0_count] == 0)
+            and np.all(float_leg_index[float_leg0_count:] == 1)
+        )
+        if can_slice_by_boundary:
+            n = float_leg_index.size
+            leg_masks = [
+                (
+                    0,
+                    np.concatenate(
+                        (
+                            np.ones(float_leg0_count, dtype=bool),
+                            np.zeros(n - float_leg0_count, dtype=bool),
+                        )
+                    ),
+                ),
+                (
+                    1,
+                    np.concatenate(
+                        (
+                            np.zeros(float_leg0_count, dtype=bool),
+                            np.ones(n - float_leg0_count, dtype=bool),
+                        )
+                    ),
+                ),
+            ]
+        else:
+            leg_masks = [(int(leg_id), float_leg_index == int(leg_id)) for leg_id in np.unique(float_leg_index)]
+        for leg_idx, mask in leg_masks:
             if leg_idx < 0 or leg_idx >= float_index_by_leg.size:
                 continue
             index_name = str(float_index_by_leg[leg_idx]).strip().upper()
             if not index_name:
                 continue
-            mask = float_leg_index == leg_idx
+            mask = np.asarray(mask, dtype=bool)
             if not np.any(mask):
                 continue
-            subset_legs = _float_leg_subset(snap.legs, mask, index_name)
+            subset_legs = _float_leg_subset(snap.legs, mask, index_name, int(leg_idx))
             curve = _forward_curve_for_index(index_name)
             realized_coupon = compute_realized_float_coupons(
                 model=model,

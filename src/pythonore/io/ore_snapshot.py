@@ -49,6 +49,7 @@ XML chain resolved automatically
 
   <outputPath>/
     calibration.xml   (if present) → calibrated LGMParams (preferred over simulation.xml)
+    todaysmarketcalibration.csv    → supplemental market calibration rows
     curves.csv        → snap.p0_disc, snap.p0_fwd
     exposure_trade_<id>.csv        → snap.exposure_times, ore_epe, ore_ene
     xva.csv                        → snap.ore_cva
@@ -807,6 +808,65 @@ def resolve_calibration_xml_path(
                 if calibration_xml.exists():
                     return calibration_xml.resolve()
     return None
+
+
+@dataclasses.dataclass(frozen=True)
+class TodaysMarketCalibrationRow:
+    market_object_type: str
+    market_object_id: str
+    result_id: str
+    result_key1: str
+    result_key2: str
+    result_key3: str
+    result_type: str
+    result_value: str
+
+    def as_float(self) -> float:
+        if str(self.result_type).strip().lower() != "double":
+            raise ValueError(
+                f"calibration row {self.market_object_type}/{self.market_object_id}/{self.result_id} is not numeric"
+            )
+        return float(self.result_value)
+
+
+def load_todaysmarket_calibration_csv(calibration_csv: str | Path) -> list[TodaysMarketCalibrationRow]:
+    path = Path(calibration_csv).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"todaysmarketcalibration.csv not found: {path}")
+    rows: list[TodaysMarketCalibrationRow] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        if header is None:
+            return rows
+        columns = [str(col).lstrip("#").strip() for col in header]
+        for raw in reader:
+            if not raw or not any(str(cell).strip() for cell in raw):
+                continue
+            values = list(raw) + [""] * max(len(columns) - len(raw), 0)
+            data = {columns[i]: (values[i] if i < len(values) else "") for i in range(len(columns))}
+            rows.append(
+                TodaysMarketCalibrationRow(
+                    market_object_type=str(data.get("MarketObjectType", "")).strip(),
+                    market_object_id=str(data.get("MarketObjectId", "")).strip(),
+                    result_id=str(data.get("ResultId", "")).strip(),
+                    result_key1=str(data.get("ResultKey1", "")).strip(),
+                    result_key2=str(data.get("ResultKey2", "")).strip(),
+                    result_key3=str(data.get("ResultKey3", "")).strip(),
+                    result_type=str(data.get("ResultType", "")).strip(),
+                    result_value=str(data.get("ResultValue", "")).strip(),
+                )
+            )
+    return rows
+
+
+def group_todaysmarket_calibration_rows(
+    rows: list[TodaysMarketCalibrationRow] | tuple[TodaysMarketCalibrationRow, ...],
+) -> dict[tuple[str, str], list[TodaysMarketCalibrationRow]]:
+    grouped: dict[tuple[str, str], list[TodaysMarketCalibrationRow]] = defaultdict(list)
+    for row in rows:
+        grouped[(row.market_object_type, row.market_object_id)].append(row)
+    return dict(grouped)
 
 
 def _runtime_calibration_failure_marker(output_path: str | Path) -> Path:

@@ -56,7 +56,18 @@ def _build_ql_overnight_index(overnight_index: str, overnight_handle: Any) -> An
         return ql.Estr(overnight_handle)
     if overnight_index == "SARON":
         return ql.Saron(overnight_handle)
-    return ql.Tonar(overnight_handle)
+    if overnight_index == "TONAR":
+        if hasattr(ql, "Tonar"):
+            return ql.Tonar(overnight_handle)
+        return ql.OvernightIndex(
+            "TONAR",
+            0,
+            ql.JPYCurrency(),
+            ql.Japan(),
+            ql.Actual365Fixed(),
+            overnight_handle,
+        )
+    raise AttributeError(f"unsupported overnight index '{overnight_index}'")
 
 
 def _curve_handle_from_curve(

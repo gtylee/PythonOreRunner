@@ -14,6 +14,8 @@ _EXPORTS = {
     "fit_discount_curves_from_programmatic_quotes": ("pythonore.io.ore_snapshot", "fit_discount_curves_from_programmatic_quotes"),
     "fitted_curves_to_dataframe": ("pythonore.io.ore_snapshot", "fitted_curves_to_dataframe"),
     "load_from_ore_xml": ("pythonore.io.ore_snapshot", "load_from_ore_xml"),
+    "group_todaysmarket_calibration_rows": ("pythonore.io.ore_snapshot", "group_todaysmarket_calibration_rows"),
+    "load_todaysmarket_calibration_csv": ("pythonore.io.ore_snapshot", "load_todaysmarket_calibration_csv"),
     "ore_input_validation_dataframe": ("pythonore.io.ore_snapshot", "ore_input_validation_dataframe"),
     "quote_dicts_from_pairs": ("pythonore.io.ore_snapshot", "quote_dicts_from_pairs"),
     "validate_ore_input_snapshot": ("pythonore.io.ore_snapshot", "validate_ore_input_snapshot"),

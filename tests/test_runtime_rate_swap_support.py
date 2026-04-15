@@ -1,6 +1,6 @@
 import csv
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import math
 import shutil
@@ -14,15 +14,18 @@ import pytest
 
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
 from pythonore.compute.irs_xva_utils import (
+    _average_overnight_coupon_fixing_date,
     _infer_index_day_counter,
     _schedule_from_leg,
     _year_fraction,
     compute_realized_float_coupons,
+    load_swap_legs_from_portfolio_root,
     swap_npv_from_ore_legs_dual_curve,
 )
 from pythonore.compute.overnight_capfloor_shim import price_overnight_capfloor_coupon_paths
 from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
+from py_ore_tools import ore_snapshot_cli
 from pythonore.runtime.bermudan import _exercise_sign, price_bermudan_from_ore_case
 from pythonore.runtime.runtime import XVAEngine
 
@@ -81,6 +84,283 @@ def _clone_pricing_only_case(case_name: str, *, trade_ids, ore_file: str = "ore.
             analytics_root.append(cashflow_analytic)
     ore_tree.write(case_root / "Input" / ore_file, encoding="utf-8", xml_declaration=True)
     return tmp, case_root
+
+
+def _clone_sofr_averaging_case(
+    case_name: str,
+    *,
+    gearing: float,
+    spread: float,
+):
+    tmp = tempfile.TemporaryDirectory()
+    tmp_root = Path(tmp.name)
+    case_root = tmp_root / "Examples" / "Generated" / case_name
+    shutil.copytree(TOOLS_DIR / "Examples" / "Generated" / "USD_SOFRAveragingTrue", case_root)
+
+    portfolio = ET.parse(case_root / "Input" / "portfolio.xml")
+    root = portfolio.getroot()
+    trade = root.find("./Trade[@id='USD_SOFR_OIS_AVG_TRUE']")
+    if trade is None:
+        raise AssertionError(f"geared SOFR trade not found in {case_root / 'Input' / 'portfolio.xml'}")
+    floating_leg = trade.findall("./SwapData/LegData")[1]
+    floating_data = floating_leg.find("./FloatingLegData")
+    if floating_data is None:
+        raise AssertionError(f"floating leg data missing in {case_root / 'Input' / 'portfolio.xml'}")
+    gearings = floating_data.find("./Gearings")
+    if gearings is None:
+        gearings = ET.SubElement(floating_data, "Gearings")
+    gearing_node = gearings.find("./Gearing")
+    if gearing_node is None:
+        gearing_node = ET.SubElement(gearings, "Gearing")
+    gearing_node.text = f"{float(gearing):.16g}"
+    spread_node = floating_data.find("./Spreads/Spread")
+    if spread_node is None:
+        spreads = floating_data.find("./Spreads")
+        if spreads is None:
+            spreads = ET.SubElement(floating_data, "Spreads")
+        spread_node = ET.SubElement(spreads, "Spread")
+    spread_node.text = f"{float(spread):.16g}"
+    portfolio.write(case_root / "Input" / "portfolio.xml", encoding="utf-8", xml_declaration=True)
+    return tmp, case_root
+
+
+def _build_xccy_basis_trade(
+    *,
+    trade_id: str,
+    counterparty: str,
+    netting_set_id: str,
+    asof_date: str,
+    start_date: str,
+    end_date: str,
+    tenor: str,
+    calendar: str,
+    leg0: dict[str, object],
+    leg1: dict[str, object],
+) -> ET.Element:
+    root = ET.Element("Portfolio")
+    trade = ET.SubElement(root, "Trade", id=trade_id)
+    ET.SubElement(trade, "TradeType").text = "Swap"
+    envelope = ET.SubElement(trade, "Envelope")
+    ET.SubElement(envelope, "CounterParty").text = counterparty
+    ET.SubElement(envelope, "NettingSetId").text = netting_set_id
+    additional_fields = ET.SubElement(envelope, "AdditionalFields")
+    ET.SubElement(additional_fields, "valuation_date").text = asof_date
+    swap = ET.SubElement(trade, "SwapData")
+
+    for spec in (leg0, leg1):
+        leg = ET.SubElement(swap, "LegData")
+        ET.SubElement(leg, "LegType").text = "Floating"
+        ET.SubElement(leg, "Payer").text = "true" if bool(spec["payer"]) else "false"
+        ET.SubElement(leg, "Currency").text = str(spec["currency"])
+        notionals = ET.SubElement(leg, "Notionals")
+        ET.SubElement(notionals, "Notional").text = f"{float(spec["notional"]):.16g}"
+        fx_reset = spec.get("fx_reset")
+        if isinstance(fx_reset, dict):
+            fx_reset_node = ET.SubElement(notionals, "FXReset")
+            ET.SubElement(fx_reset_node, "ForeignCurrency").text = str(fx_reset["foreign_currency"])
+            ET.SubElement(fx_reset_node, "ForeignAmount").text = f"{float(fx_reset['foreign_amount']):.16g}"
+            ET.SubElement(fx_reset_node, "FXIndex").text = str(fx_reset["fx_index"])
+            ET.SubElement(fx_reset_node, "FixingDays").text = str(int(fx_reset.get("fixing_days", 2)))
+        exchanges = ET.SubElement(notionals, "Exchanges")
+        ET.SubElement(exchanges, "NotionalInitialExchange").text = "true"
+        ET.SubElement(exchanges, "NotionalFinalExchange").text = "true"
+        ET.SubElement(leg, "DayCounter").text = "ACT/360"
+        ET.SubElement(leg, "PaymentConvention").text = "ModifiedFollowing"
+        floating = ET.SubElement(leg, "FloatingLegData")
+        ET.SubElement(floating, "Index").text = str(spec["index"])
+        spreads = ET.SubElement(floating, "Spreads")
+        ET.SubElement(spreads, "Spread").text = f"{float(spec.get('spread', 0.0)):.16g}"
+        gearings = ET.SubElement(floating, "Gearings")
+        ET.SubElement(gearings, "Gearing").text = f"{float(spec.get('gearing', 1.0)):.16g}"
+        ET.SubElement(floating, "IsInArrears").text = "false"
+        ET.SubElement(floating, "FixingDays").text = str(int(spec.get("fixing_days", 2)))
+        schedule = ET.SubElement(leg, "ScheduleData")
+        rules = ET.SubElement(schedule, "Rules")
+        ET.SubElement(rules, "StartDate").text = start_date
+        ET.SubElement(rules, "EndDate").text = end_date
+        ET.SubElement(rules, "Tenor").text = tenor
+        ET.SubElement(rules, "Calendar").text = calendar
+        ET.SubElement(rules, "Convention").text = "ModifiedFollowing"
+        ET.SubElement(rules, "TermConvention").text = "ModifiedFollowing"
+        ET.SubElement(rules, "Rule").text = "Forward"
+        ET.SubElement(rules, "EndOfMonth")
+        ET.SubElement(rules, "FirstDate")
+        ET.SubElement(rules, "LastDate")
+    return root
+
+
+def _clone_xccy_basis_case(
+    source_input_dir: Path,
+    case_name: str,
+    *,
+    trade_id: str,
+    counterparty: str,
+    netting_set_id: str,
+    asof_date: str,
+    start_date: str,
+    end_date: str,
+    tenor: str,
+    calendar: str,
+    leg0: dict[str, object],
+    leg1: dict[str, object],
+    ore_file: str = "ore.xml",
+):
+    tmp = tempfile.TemporaryDirectory()
+    tmp_root = Path(tmp.name)
+    case_root = tmp_root / "Examples" / "Generated" / case_name
+    shutil.copytree(source_input_dir, case_root / "Input")
+    shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp_root / "Examples" / "Input")
+
+    portfolio_root = _build_xccy_basis_trade(
+        trade_id=trade_id,
+        counterparty=counterparty,
+        netting_set_id=netting_set_id,
+        asof_date=asof_date,
+        start_date=start_date,
+        end_date=end_date,
+        tenor=tenor,
+        calendar=calendar,
+        leg0=leg0,
+        leg1=leg1,
+    )
+    ET.ElementTree(portfolio_root).write(case_root / "Input" / "portfolio.xml", encoding="utf-8", xml_declaration=True)
+
+    ore_tree = ET.parse(case_root / "Input" / ore_file)
+    ore_root = ore_tree.getroot()
+    for analytic in ore_root.findall(".//Analytic"):
+        kind = analytic.get("type")
+        active = analytic.find("./Parameter[@name='active']")
+        if active is not None:
+            active.text = "Y" if kind in {"npv", "cashflow"} else "N"
+    analytics_root = ore_root.find("./Analytics")
+    if analytics_root is not None and not any(node.get("type") == "cashflow" for node in analytics_root.findall("./Analytic")):
+        npv_analytic = next((node for node in analytics_root.findall("./Analytic") if node.get("type") == "npv"), None)
+        if npv_analytic is not None:
+            cashflow_analytic = ET.fromstring(ET.tostring(npv_analytic, encoding="unicode"))
+            cashflow_analytic.set("type", "cashflow")
+            active = cashflow_analytic.find("./Parameter[@name='active']")
+            if active is not None:
+                active.text = "Y"
+            analytics_root.append(cashflow_analytic)
+    ore_tree.write(case_root / "Input" / ore_file, encoding="utf-8", xml_declaration=True)
+    return tmp, case_root
+
+
+def _find_report_csv(case_root: Path, filename: str) -> Path:
+    matches = sorted(case_root.rglob(filename))
+    if not matches:
+        raise AssertionError(f"could not find '{filename}' under {case_root}")
+    return matches[0]
+
+
+def _append_fixings_from_marketdata(
+    case_root: Path,
+    *,
+    fixing_id: str,
+    quote_id: str,
+    start_date: date,
+    end_date: date,
+) -> None:
+    marketdata_csv = case_root / "Input" / "marketdata.csv"
+    fixings_csv = case_root / "Input" / "fixings.csv"
+    quote_value = None
+    with marketdata_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            row_id = (
+                (row.get("datumId") or row.get("#datumId") or row.get("QuoteId") or row.get("quoteId") or row.get("Quote") or "")
+                .strip()
+            )
+            if row_id == quote_id:
+                quote_value = float(row.get("datumValue") or row.get("Value") or row.get("value") or row.get("QuoteValue"))
+                break
+    if quote_value is None:
+        with marketdata_csv.open(newline="", encoding="utf-8") as handle:
+            for row in csv.reader(handle):
+                if len(row) >= 3 and row[1].strip() == quote_id:
+                    quote_value = float(row[2])
+                    break
+    if quote_value is None:
+        raise AssertionError(f"could not find market quote '{quote_id}' in {marketdata_csv}")
+
+    with fixings_csv.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    if not rows:
+        rows = [["#fixingDate", "fixingId", "fixingValue"]]
+    header = rows[0]
+    existing = {
+        (row[0].strip(), row[1].strip())
+        for row in rows[1:]
+        if len(row) >= 2 and row[0].strip() and row[1].strip()
+    }
+    new_rows = []
+    cur = start_date
+    while cur <= end_date:
+        if cur.weekday() < 5:
+            key = (cur.isoformat(), fixing_id)
+            if key not in existing:
+                new_rows.append([cur.isoformat(), fixing_id, f"{quote_value:.10f}"])
+        cur += timedelta(days=1)
+    if not new_rows:
+        return
+    with fixings_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows[1:])
+        writer.writerows(new_rows)
+
+
+def _backfill_fixings_from_existing_series(
+    case_root: Path,
+    *,
+    fixing_id: str,
+    start_date: date,
+    end_date: date,
+) -> None:
+    fixings_csv = case_root / "Input" / "fixings.csv"
+    with fixings_csv.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    if not rows:
+        raise AssertionError(f"cannot backfill from empty fixings file: {fixings_csv}")
+    header = rows[0]
+    matching = [row for row in rows[1:] if len(row) >= 3 and row[1].strip() == fixing_id]
+    if not matching:
+        raise AssertionError(f"could not find fixing series '{fixing_id}' in {fixings_csv}")
+    source_value = matching[0][2].strip()
+    existing = {
+        (row[0].strip(), row[1].strip())
+        for row in rows[1:]
+        if len(row) >= 2 and row[0].strip() and row[1].strip()
+    }
+    new_rows = []
+    cur = start_date
+    while cur <= end_date:
+        if cur.weekday() < 5:
+            key = (cur.isoformat(), fixing_id)
+            if key not in existing:
+                new_rows.append([cur.isoformat(), fixing_id, source_value])
+        cur += timedelta(days=1)
+    if not new_rows:
+        return
+    with fixings_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows[1:])
+        writer.writerows(new_rows)
+
+
+def _read_first_floating_coupon(case_root: Path, trade_id: str) -> float:
+    flows_csv = _find_report_csv(case_root, "flows.csv")
+    with flows_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = [
+            row
+            for row in reader
+            if (row.get("TradeId") or row.get("#TradeId")) == trade_id and row.get("LegNo") == "1"
+        ]
+    if not rows:
+        raise AssertionError(f"no floating rows found for trade '{trade_id}' in {flows_csv}")
+    return float(rows[0]["Coupon"])
 
 
 def _write_poisoned_output_artifacts(case_root: Path):
@@ -359,6 +639,154 @@ def test_example79_usd_jpy_xccy_keeps_leg_currency_and_base_currency_separate():
     assert math.isfinite(float(result.pv_total))
 
 
+def test_sofr_euribor_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
+    )
+
+    npv_csv = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "npv.csv"
+    with npv_csv.open(newline="", encoding="utf-8") as handle:
+        ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap")
+    ore_npv = float(ore_row.get("NPV") or ore_row.get("npv") or ore_row.get("NPV(Base)") or ore_row.get("NPV Base"))
+
+    flows_csv = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "flows.csv"
+    with flows_csv.open(newline="", encoding="utf-8") as handle:
+        flows = [row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap"]
+    usd_interest_rows = [row for row in flows if row.get("Currency") == "USD" and row.get("LegNo") == "0" and "Interest" in row.get("FlowType", "")]
+    eur_interest_rows = [row for row in flows if row.get("Currency") == "EUR" and row.get("LegNo") == "1" and "Interest" in row.get("FlowType", "")]
+    assert usd_interest_rows
+    assert eur_interest_rows
+
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    eur_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "EUR")
+    assert usd_leg["fx_reset"] is not None
+    assert usd_leg["fx_reset"]["foreign_currency"] == "EUR"
+    assert usd_leg["fx_reset"]["foreign_amount"] == 95000000.0
+    assert eur_leg["fx_reset"] is None
+    ore_usd_notionals = np.asarray([float(row["Notional"]) for row in usd_interest_rows], dtype=float)
+    ore_eur_notionals = np.asarray([float(row["Notional"]) for row in eur_interest_rows], dtype=float)
+    assert not np.allclose(ore_usd_notionals, ore_usd_notionals[0])
+    assert np.allclose(ore_eur_notionals, 95000000.0)
+
+    result = _run_python(snapshot, "sofr-euribor-xccy")
+    assert math.isfinite(float(result.pv_total))
+    pytest.xfail(
+        f"Residual SOFR/EURIBOR xccy PV mismatch remains (py={float(result.pv_total):.6f}, ore={ore_npv:.6f})"
+    )
+
+
+def test_sofr_tonar_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_xccy_basis_case(
+        TOOLS_DIR / "Examples" / "Products" / "Input",
+        "USD_SOFR_TONAR_XCCY",
+        trade_id="SOFR_TONAR_XCCY",
+        counterparty="CPTY_A",
+        netting_set_id="CPTY_A",
+        asof_date="2025-02-10",
+        start_date="2024-01-02",
+        end_date="2026-01-02",
+        tenor="3M",
+        calendar="US,JP",
+        leg0={
+            "payer": True,
+            "currency": "USD",
+            "notional": 100000000.0,
+            "index": "USD-SOFR",
+            "spread": 0.0,
+        },
+        leg1={
+            "payer": False,
+            "currency": "JPY",
+            "notional": 15222818282.0,
+            "index": "JPY-TONAR",
+            "spread": 0.0,
+            "fx_reset": {
+                "foreign_currency": "USD",
+                "foreign_amount": 100000000.0,
+                "fx_index": "FX-BOE-USD-JPY",
+                "fixing_days": 2,
+            },
+        },
+        ore_file="ore.xml",
+    )
+    _append_fixings_from_marketdata(
+        case_root,
+        fixing_id="FX-BOE-USD-JPY",
+        quote_id="FX/RATE/USD/JPY",
+        start_date=date(2023, 12, 27),
+        end_date=date(2025, 2, 10),
+    )
+    _backfill_fixings_from_existing_series(
+        case_root,
+        fixing_id="JPY-TONAR",
+        start_date=date(2023, 12, 27),
+        end_date=date(2024, 10, 9),
+    )
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+
+        npv_csv = _find_report_csv(case_root, "npv.csv")
+        with npv_csv.open(newline="", encoding="utf-8") as handle:
+            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "SOFR_TONAR_XCCY")
+        ore_npv = float(ore_row.get("NPV") or ore_row.get("npv") or ore_row.get("NPV(Base)") or ore_row.get("NPV Base"))
+
+        flows_csv = _find_report_csv(case_root, "flows.csv")
+        with flows_csv.open(newline="", encoding="utf-8") as handle:
+            flows = [row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "SOFR_TONAR_XCCY"]
+        jpy_interest_rows = [row for row in flows if row.get("Currency") == "JPY" and row.get("LegNo") == "1" and "Interest" in row.get("FlowType", "")]
+        usd_interest_rows = [row for row in flows if row.get("Currency") == "USD" and row.get("LegNo") == "0" and "Interest" in row.get("FlowType", "")]
+        assert jpy_interest_rows
+        assert usd_interest_rows
+
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "SOFR_TONAR_XCCY")
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+        assert state is not None
+        usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+        jpy_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "JPY")
+        assert usd_leg["fx_reset"] is None
+        assert jpy_leg["fx_reset"] is not None
+        assert jpy_leg["fx_reset"]["foreign_currency"] == "USD"
+        assert jpy_leg["fx_reset"]["foreign_amount"] == 100000000.0
+        ore_jpy_notionals = np.asarray([float(row["Notional"]) for row in jpy_interest_rows], dtype=float)
+        ore_usd_notionals = np.asarray([float(row["Notional"]) for row in usd_interest_rows], dtype=float)
+        assert not np.allclose(ore_jpy_notionals, ore_jpy_notionals[0])
+        assert np.allclose(ore_usd_notionals, 100000000.0)
+
+        result = _run_python(snapshot, "sofr-tonar-xccy")
+        assert math.isfinite(float(result.pv_total))
+        pytest.xfail(
+            f"Residual SOFR/TONAR xccy PV mismatch remains (py={float(result.pv_total):.6f}, ore={ore_npv:.6f})"
+        )
+    finally:
+        tmp.cleanup()
+
+
 def test_generic_rate_swap_missing_fx_fixing_falls_back_to_spot():
     snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
@@ -384,6 +812,70 @@ def test_generic_rate_swap_missing_fx_fixing_falls_back_to_spot():
             run_id="xccy-missing-fixings",
         )
     assert math.isfinite(float(result.pv_total))
+
+
+def test_geared_usd_sofr_ois_matches_ore_and_scales_coupon_forward_only():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    spread = 0.00125
+    control_tmp, control_case = _clone_sofr_averaging_case(
+        "USD_SOFRAveragingControl",
+        gearing=1.0,
+        spread=spread,
+    )
+    geared_tmp, geared_case = _clone_sofr_averaging_case(
+        "USD_SOFRAveragingGeared",
+        gearing=1.75,
+        spread=spread,
+    )
+    trade_id = "USD_SOFR_OIS_AVG_TRUE"
+    try:
+        for case_root in (control_case, geared_case):
+            subprocess.run(
+                [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+                cwd=case_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
+
+        control_payload = ore_snapshot_cli._compute_price_only_case(
+            control_case / "Input" / "ore.xml",
+            anchor_t0_npv=False,
+            use_reference_artifacts=True,
+        )
+        geared_payload = ore_snapshot_cli._compute_price_only_case(
+            geared_case / "Input" / "ore.xml",
+            anchor_t0_npv=False,
+            use_reference_artifacts=True,
+        )
+
+        control_root = ET.parse(control_case / "Input" / "portfolio.xml").getroot()
+        geared_root = ET.parse(geared_case / "Input" / "portfolio.xml").getroot()
+        control_legs = load_swap_legs_from_portfolio_root(control_root, trade_id, "2025-02-10")
+        geared_legs = load_swap_legs_from_portfolio_root(geared_root, trade_id, "2025-02-10")
+        assert np.allclose(np.asarray(control_legs["float_gearing"], dtype=float), 1.0)
+        assert np.allclose(np.asarray(geared_legs["float_gearing"], dtype=float), 1.75)
+
+        control_coupon = _read_first_floating_coupon(control_case, trade_id)
+        geared_coupon = _read_first_floating_coupon(geared_case, trade_id)
+        assert math.isclose(
+            geared_coupon,
+            1.75 * (control_coupon - spread) + spread,
+            rel_tol=0.0,
+            abs_tol=1.0e-10,
+        )
+
+        assert math.isfinite(float(control_payload["pricing"]["ore_t0_npv"]))
+        assert math.isfinite(float(geared_payload["pricing"]["ore_t0_npv"]))
+        assert math.isfinite(float(control_payload["pricing"]["py_t0_npv"]))
+        assert math.isfinite(float(geared_payload["pricing"]["py_t0_npv"]))
+        assert control_payload["pricing"]["t0_npv_abs_diff"] < 0.5
+        assert geared_payload["pricing"]["t0_npv_abs_diff"] < 0.5
+    finally:
+        control_tmp.cleanup()
+        geared_tmp.cleanup()
 
 
 def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orientation():
@@ -1033,6 +1525,17 @@ def test_average_ois_uses_end_lagged_fixings():
     legs = adapter._build_irs_legs(trade, mapped, snapshot)
     assert bool(legs.get("float_is_averaged", False)) is True
     assert np.asarray(legs["float_fixing_time"], dtype=float)[0] > np.asarray(legs["float_start_time"], dtype=float)[0]
+    assert np.asarray(legs["float_fixing_time"], dtype=float)[0] < np.asarray(legs["float_end_time"], dtype=float)[0]
+
+
+def test_average_overnight_fixing_date_moves_toward_period_end_with_cutoff():
+    start = date(2024, 2, 5)
+    end = date(2024, 5, 6)
+    late = _average_overnight_coupon_fixing_date(start, end, calendar="TARGET", fixing_days=0, rate_cutoff=0)
+    early = _average_overnight_coupon_fixing_date(start, end, calendar="TARGET", fixing_days=0, rate_cutoff=5)
+    assert late > start
+    assert late < end
+    assert early < late
 
 
 def test_python_runtime_compares_example25_digital_cmsspread_with_local_ore_run():

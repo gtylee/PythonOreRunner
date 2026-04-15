@@ -50,6 +50,7 @@ INFLATION_CAPFLOOR_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" /
 TA001_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Academy" / "TA001_Equity_Option" / "Input" / "ore.xml"
 EXAMPLE22_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "Legacy" / "Example_22" / "Input" / "ore_atmOnly.xml"
 SCRIPTED_EQUITY_CASE_XML = TOOLS_DIR / "Examples" / "ScriptedTrade" / "Input" / "ore.xml"
+SOFR_BASIS_SIMULATION_XML = TOOLS_DIR / "Examples" / "Generated" / "USD_SOFRBasisSnapshot" / "Input" / "simulation.xml"
 
 
 def _clone_example28_eur_base_case(tmp_root: Path) -> Path:
@@ -69,6 +70,21 @@ def _clone_example3_case(tmp_root: Path) -> Path:
     shutil.copytree(TOOLS_DIR / "Examples" / "Legacy" / "Example_3", case_root)
     shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp_root / "Examples" / "Input")
     return case_root / "Input" / "ore.xml"
+
+
+def _clone_basis_case_with_simulation(tmp_root: Path, case_name: str) -> Path:
+    case_root = tmp_root / "Examples" / "Generated" / case_name
+    shutil.copytree(TOOLS_DIR / "Examples" / "Generated" / case_name, case_root)
+    shutil.copy2(SOFR_BASIS_SIMULATION_XML, case_root / "Input" / "simulation.xml")
+
+    ore_xml = case_root / "Input" / "ore.xml"
+    root = ET.parse(ore_xml).getroot()
+    analytics = root.find("./Analytics")
+    if analytics is not None:
+        for analytic in list(analytics.findall("./Analytic[@type='xva']")):
+            analytics.remove(analytic)
+    ET.ElementTree(root).write(ore_xml, encoding="utf-8", xml_declaration=True)
+    return ore_xml
 
 
 def _promote_trade_to_first(portfolio_xml: Path, trade_id: str, *, long_short: str | None = None) -> None:
@@ -280,6 +296,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                 "float_accrual": np.array([0.4, 0.4, 0.4, 0.4], dtype=float),
                 "float_notional": np.array([1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0], dtype=float),
                 "float_sign": np.array([-1.0, -1.0, 1.0, 1.0], dtype=float),
+                "float_gearing": np.array([1.25, 1.25, 1.75, 1.75], dtype=float),
                 "float_spread": np.array([0.001, 0.001, -0.0005, -0.0005], dtype=float),
                 "float_coupon": np.zeros(4, dtype=float),
                 "float_amount": np.zeros(4, dtype=float),
@@ -287,6 +304,7 @@ class TestOreSnapshotCli(unittest.TestCase):
                 "float_index_accrual": np.array([0.4, 0.4, 0.4, 0.4], dtype=float),
                 "float_is_averaged": np.array([False, False, False, False], dtype=bool),
                 "float_leg_index": np.array([0, 0, 1, 1], dtype=int),
+                "float_leg0_count": np.array([2], dtype=int),
                 "float_index": "USD-LIBOR-3M",
                 "float_index_tenor": "3M",
                 "float_index_day_counter": "A365F",
@@ -321,6 +339,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             curve_load_calls: list[str] = []
             realized_calls: list[tuple[str, float]] = []
             price_calls: list[tuple[str, float]] = []
+            gearing_calls: list[np.ndarray] = []
 
             def _fake_curve_pairs(path, columns, **kwargs):
                 column = str(columns[0])
@@ -339,6 +358,7 @@ class TestOreSnapshotCli(unittest.TestCase):
             def _fake_swap_npv(model, p0_disc, p0_fwd, legs, t, x_t, realized_float_coupon=None, **kwargs):
                 size = int(np.asarray(legs.get("float_pay_time", []), dtype=float).size)
                 price_calls.append((size, str(legs.get("float_index", "")), float(p0_fwd(1.0))))
+                gearing_calls.append(np.asarray(legs.get("float_gearing", []), dtype=float).copy())
                 if size == 0:
                     return np.zeros_like(np.asarray(x_t, dtype=float), dtype=float)
                 return np.full_like(np.asarray(x_t, dtype=float), float(p0_fwd(1.0)), dtype=float)
@@ -394,7 +414,43 @@ class TestOreSnapshotCli(unittest.TestCase):
             (2, "USD-SOFR-3M", 0.97),
         ]
         self.assertEqual(price_calls, expected_price_calls * 2)
+        self.assertTrue(np.allclose(gearing_calls[0], np.array([], dtype=float)))
+        self.assertTrue(np.allclose(gearing_calls[1], np.array([1.25, 1.25], dtype=float)))
+        self.assertTrue(np.allclose(gearing_calls[2], np.array([1.75, 1.75], dtype=float)))
+        self.assertTrue(np.allclose(gearing_calls[3], np.array([], dtype=float)))
+        self.assertTrue(np.allclose(gearing_calls[4], np.array([1.25, 1.25], dtype=float)))
+        self.assertTrue(np.allclose(gearing_calls[5], np.array([1.75, 1.75], dtype=float)))
         self.assertAlmostEqual(float(result.pricing["py_t0_npv"]), 1.95, places=12)
+
+    def test_multi_curve_basis_examples_keep_analytics_and_simulation_markets_separate(self):
+        for case_name, expected_ore_npv in (
+            ("USD_SIFMA_SOFRBasisLong", -120463.206785),
+            ("USD_SIFMA_SOFRBasisShort", 120463.206785),
+        ):
+            with self.subTest(case=case_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ore_xml = _clone_basis_case_with_simulation(Path(tmp), case_name)
+                    snap = ore_snapshot_io.load_from_ore_xml(ore_xml)
+
+                self.assertEqual(snap.domestic_ccy, "USD")
+                self.assertEqual(snap.discount_column, "USD-IN-EUR")
+                self.assertEqual(snap.forward_column, "USD-SOFR-3M")
+                self.assertEqual(snap.trade_float_index2, "USD-SIFMA")
+                self.assertEqual(
+                    Path(snap.simulation_xml_path).resolve(),
+                    SOFR_BASIS_SIMULATION_XML.resolve(),
+                )
+                self.assertAlmostEqual(float(snap.ore_t0_npv), expected_ore_npv, places=6)
+
+                sim_root = ET.parse(snap.simulation_xml_path).getroot()
+                sim_indices = {
+                    (node.text or "").strip()
+                    for node in sim_root.findall("./Market/Indices/Index")
+                    if (node.text or "").strip()
+                }
+                self.assertTrue(
+                    {"USD-SOFR", "USD-SOFR-3M", "USD-SIFMA", "USD-LIBOR-3M"}.issubset(sim_indices)
+                )
 
     @staticmethod
     def _real_case_buffers() -> tuple[dict[str, str], dict[str, str]]:
@@ -2575,6 +2631,44 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertTrue(str(snap.flows_csv_path).endswith("flows_eur_base.csv"))
             self.assertIsNone(snap.xva_csv_path)
             self.assertIsNone(snap.exposure_csv_path)
+
+    def test_load_todaysmarket_calibration_csv_parses_multi_curve_rows(self):
+        calibration_csv = (
+            TOOLS_DIR
+            / "Examples"
+            / "Legacy"
+            / "Example_63"
+            / "Output"
+            / "valid_xccy"
+            / "todaysmarketcalibration.csv"
+        )
+        simulation_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Input" / "simulation.xml"
+
+        rows = ore_snapshot_io.load_todaysmarket_calibration_csv(calibration_csv)
+        grouped = ore_snapshot_io.group_todaysmarket_calibration_rows(rows)
+        yield_curve_ids = {
+            market_object_id
+            for (market_object_type, market_object_id) in grouped
+            if market_object_type == "yieldCurve"
+        }
+        sim_root = ET.parse(simulation_xml).getroot()
+        sim_indices = {
+            (node.text or "").strip()
+            for node in sim_root.findall("./Market/Indices/Index")
+            if (node.text or "").strip()
+        }
+
+        self.assertGreater(len(rows), 0)
+        self.assertTrue(sim_indices.issubset(yield_curve_ids))
+        self.assertIn("USD-IN-EUR", yield_curve_ids)
+        self.assertNotIn("USD-IN-EUR", sim_indices)
+        usd_sofr_rows = grouped[("yieldCurve", "USD-SOFR")]
+        self.assertIn("zeroRate", {row.result_id for row in usd_sofr_rows})
+        self.assertIn("discountFactor", {row.result_id for row in usd_sofr_rows})
+        self.assertGreater(
+            sum(1 for row in usd_sofr_rows if row.result_id == "discountFactor" and row.as_float() > 0.0),
+            0,
+        )
 
     def test_has_active_simulation_analytic_accepts_inactive_analytic_with_existing_simulation_file(self):
         with tempfile.TemporaryDirectory() as tmp:
