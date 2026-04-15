@@ -64,7 +64,97 @@ def _clone_example28_eur_base_case(tmp_root: Path) -> Path:
     return case_root / "Input" / "ore_eur_base.xml"
 
 
+def _clone_example3_case(tmp_root: Path) -> Path:
+    case_root = tmp_root / "Examples" / "Legacy" / "Example_3"
+    shutil.copytree(TOOLS_DIR / "Examples" / "Legacy" / "Example_3", case_root)
+    shutil.copytree(TOOLS_DIR / "Examples" / "Input", tmp_root / "Examples" / "Input")
+    return case_root / "Input" / "ore.xml"
+
+
+def _promote_trade_to_first(portfolio_xml: Path, trade_id: str, *, long_short: str | None = None) -> None:
+    tree = ET.parse(portfolio_xml)
+    root = tree.getroot()
+    trade = next((node for node in root.findall("./Trade") if (node.attrib.get("id", "") or "").strip() == trade_id), None)
+    if trade is None:
+        raise AssertionError(f"trade '{trade_id}' not found in {portfolio_xml}")
+    root.remove(trade)
+    root.insert(0, trade)
+    if long_short is not None:
+        option_data = trade.find("./SwaptionData/OptionData")
+        if option_data is None:
+            raise AssertionError(f"trade '{trade_id}' has no SwaptionData/OptionData in {portfolio_xml}")
+        long_short_node = option_data.find("./LongShort")
+        if long_short_node is None:
+            long_short_node = ET.SubElement(option_data, "LongShort")
+        long_short_node.text = long_short
+    tree.write(portfolio_xml, encoding="utf-8", xml_declaration=True)
+
+
 class TestOreSnapshotCli(unittest.TestCase):
+    def test_resolve_case_portfolio_path_uses_setup_portfolio_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir(parents=True)
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<ORE>
+  <Setup>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="portfolioFile">portfolio_a.xml</Parameter>
+  </Setup>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "portfolio_a.xml").write_text("<Portfolio />", encoding="utf-8")
+
+            resolved = ore_snapshot_cli._resolve_case_portfolio_path(ore_xml)
+
+            self.assertEqual(resolved, (input_dir / "portfolio_a.xml").resolve())
+
+    def test_resolve_case_portfolio_path_rejects_blank_portfolio_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "Input"
+            input_dir.mkdir(parents=True)
+            ore_xml = input_dir / "ore.xml"
+            ore_xml.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<ORE>
+  <Setup>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="portfolioFile"></Parameter>
+  </Setup>
+</ORE>
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Setup/portfolioFile is empty"):
+                ore_snapshot_cli._resolve_case_portfolio_path(ore_xml)
+
+    def test_terminal_preflight_summary_includes_resolved_portfolio_xml(self):
+        summary = {
+            "ore_xml": "/tmp/case/Input/ore.xml",
+            "portfolio_xml": "/tmp/case/Input/portfolio.xml",
+            "requested_modes": ["price", "xva"],
+            "validation": {"input_links_valid": True},
+            "native_ready": True,
+            "hybrid_ready": True,
+            "support": {
+                "native_trade_count": 1,
+                "requires_swig_trade_count": 0,
+                "requires_swig_trade_types": [],
+            },
+            "next_step": "run native",
+        }
+
+        text = ore_snapshot_cli._render_terminal_preflight_summary(summary)
+
+        self.assertIn("portfolio_xml=/tmp/case/Input/portfolio.xml", text)
+
     def test_simulate_with_fixing_grid_uses_exposure_grid_then_bridges_fixings_for_ore_path_major(self):
         class _DummyModel:
             _measure = "LGM"
@@ -601,6 +691,83 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertTrue(payload["pass_all"])
             self.assertLess(float(payload["pricing"]["t0_npv_abs_diff"]), 500.0)
 
+    def test_price_only_swaption_premium_trades_match_ore_expected_output(self):
+        for base_trade_id, premium_trade_id in (("SwaptionCash", "SwaptionCashPremium"), ("SwaptionPhysical", "SwaptionPhysicalPremium")):
+            with self.subTest(base_trade_id=base_trade_id, premium_trade_id=premium_trade_id):
+                with tempfile.TemporaryDirectory() as tmp_base, tempfile.TemporaryDirectory() as tmp_premium:
+                    root_base = Path(tmp_base)
+                    root_premium = Path(tmp_premium)
+                    ore_xml_base = _clone_example3_case(root_base)
+                    ore_xml_premium = _clone_example3_case(root_premium)
+                    _promote_trade_to_first(ore_xml_base.parent / "portfolio.xml", base_trade_id)
+                    _promote_trade_to_first(ore_xml_premium.parent / "portfolio.xml", premium_trade_id)
+                    rc_base = ore_snapshot_cli.main(
+                        [
+                            str(ore_xml_base),
+                            "--price",
+                            "--output-root",
+                            str(root_base / "artifacts"),
+                        ]
+                    )
+                    rc_premium = ore_snapshot_cli.main(
+                        [
+                            str(ore_xml_premium),
+                            "--price",
+                            "--output-root",
+                            str(root_premium / "artifacts"),
+                        ]
+                    )
+                    self.assertIn(rc_base, (0, 1))
+                    self.assertIn(rc_premium, (0, 1))
+                    payload_base = json.loads((root_base / "artifacts" / "Example_3" / "summary.json").read_text(encoding="utf-8"))
+                    payload_premium = json.loads((root_premium / "artifacts" / "Example_3" / "summary.json").read_text(encoding="utf-8"))
+                    self.assertEqual(payload_base["trade_id"], base_trade_id)
+                    self.assertEqual(payload_premium["trade_id"], premium_trade_id)
+                    self.assertEqual(payload_premium["diagnostics"]["engine"], "python_price_only")
+                    self.assertEqual(payload_premium["diagnostics"]["pricing_mode"], "python_swaption_static")
+                    self.assertEqual(payload_premium["pricing"]["trade_type"], "Swaption")
+                    self.assertEqual(payload_premium["pricing"]["long_short"], "Long")
+                    self.assertGreater(float(payload_premium["pricing"]["premium_pv"]), 0.0)
+                    delta_py = float(payload_base["pricing"]["py_t0_npv"]) - float(payload_premium["pricing"]["py_t0_npv"])
+                    delta_ore = float(payload_base["pricing"]["ore_t0_npv"]) - float(payload_premium["pricing"]["ore_t0_npv"])
+                    self.assertLess(abs(delta_py - delta_ore), 1.0)
+
+    def test_price_only_swaption_short_sign_flips_against_long_case(self):
+        for trade_id in ("SwaptionCashPremium", "SwaptionPhysicalPremium"):
+            with self.subTest(trade_id=trade_id), tempfile.TemporaryDirectory() as tmp_long, tempfile.TemporaryDirectory() as tmp_short:
+                root_long = Path(tmp_long)
+                root_short = Path(tmp_short)
+                ore_xml_long = _clone_example3_case(root_long)
+                ore_xml_short = _clone_example3_case(root_short)
+                _promote_trade_to_first(ore_xml_long.parent / "portfolio.xml", trade_id)
+                _promote_trade_to_first(ore_xml_short.parent / "portfolio.xml", trade_id, long_short="Short")
+                rc_long = ore_snapshot_cli.main(
+                    [
+                        str(ore_xml_long),
+                        "--price",
+                        "--output-root",
+                        str(root_long / "artifacts"),
+                    ]
+                )
+                rc_short = ore_snapshot_cli.main(
+                    [
+                        str(ore_xml_short),
+                        "--price",
+                        "--output-root",
+                        str(root_short / "artifacts"),
+                    ]
+                )
+                self.assertIn(rc_long, (0, 1))
+                self.assertIn(rc_short, (0, 1))
+                payload_long = json.loads((root_long / "artifacts" / "Example_3" / "summary.json").read_text(encoding="utf-8"))
+                payload_short = json.loads((root_short / "artifacts" / "Example_3" / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(payload_short["pricing"]["long_short"], "Short")
+                self.assertAlmostEqual(
+                    float(payload_short["pricing"]["py_t0_npv"]) + float(payload_long["pricing"]["py_t0_npv"]),
+                    0.0,
+                    delta=1.0e-3,
+                )
+
     def test_price_only_mixed_swaption_case_accepts_compact_exercise_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -998,7 +1165,6 @@ class TestOreSnapshotCli(unittest.TestCase):
     <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
     <Parameter name="conventionsFile">conventions.xml</Parameter>
     <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
-    <Parameter name="portfolioFile"></Parameter>
   </Setup>
   <Markets />
   <Analytics>
@@ -2260,7 +2426,6 @@ class TestOreSnapshotCli(unittest.TestCase):
     <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
     <Parameter name="conventionsFile">conventions.xml</Parameter>
     <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
-    <Parameter name="portfolioFile"></Parameter>
   </Setup>
   <Markets />
   <Analytics>
@@ -2390,6 +2555,149 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertTrue(result["pass_flags"]["xva_fba"])
         self.assertTrue(result["pass_flags"]["xva_fca"])
         self.assertTrue(result["pass_all"])
+
+    def test_run_case_uses_portfolio_xva_branch_for_multi_trade_portfolios(self):
+        args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--xva"])
+        fake_summary = ore_snapshot_cli.SnapshotComputation(
+            ore_xml=str(REAL_CASE_XML),
+            trade_id="PORTFOLIO",
+            counterparty="CPTY_A",
+            netting_set_id="NS_A",
+            paths=500,
+            seed=42,
+            rng_mode="ore_parity",
+            pricing={
+                "trade_type": "Portfolio",
+                "py_t0_npv": 12.0,
+                "ore_t0_npv": 12.0,
+                "t0_npv_abs_diff": 0.0,
+                "report_ccy": "EUR",
+                "currency": "EUR",
+                "leg_source": "portfolio",
+            },
+            xva={
+                "ore_cva": 4.0,
+                "py_cva": 4.0,
+                "cva_rel_diff": 0.0,
+                "ore_dva": 1.0,
+                "py_dva": 1.0,
+                "dva_rel_diff": 0.0,
+                "ore_fba": 0.0,
+                "py_fba": 0.0,
+                "fba_rel_diff": 0.0,
+                "ore_fca": 0.0,
+                "py_fca": 0.0,
+                "fca_rel_diff": 0.0,
+                "py_fva": 0.0,
+                "own_credit_source": "portfolio_runtime",
+                "ore_basel_epe": 0.0,
+                "ore_basel_eepe": 0.0,
+                "py_basel_epe": 0.0,
+                "py_basel_eepe": 0.0,
+            },
+            parity={"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"], "portfolio_mode": True}},
+            diagnostics={"engine": "python-lgm-portfolio"},
+            maturity_date="",
+            maturity_time=0.0,
+            exposure_dates=["2025-01-01"],
+            exposure_times=[0.0],
+            py_epe=[0.0],
+            py_ene=[0.0],
+            py_pfe=[0.0],
+            exposure_profile_by_trade={"dates": ["2025-01-01"], "times": [0.0], "closeout_epe": [0.0], "closeout_ene": [0.0], "pfe": [0.0]},
+            exposure_profile_by_netting_set={"dates": ["2025-01-01"], "times": [0.0], "closeout_epe": [0.0], "closeout_ene": [0.0], "pfe": [0.0]},
+            ore_basel_epe=0.0,
+            ore_basel_eepe=0.0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value={}):
+                with patch("py_ore_tools.ore_snapshot_cli._portfolio_contains_swap_like_trade", return_value=True):
+                    with patch("py_ore_tools.ore_snapshot_cli._portfolio_trade_context", return_value=(ET.Element("Portfolio"), ["T1", "T2"], "CPTY_A", "NS_A")):
+                        with patch("py_ore_tools.ore_snapshot_cli._compute_portfolio_xva_case", return_value=fake_summary) as portfolio_case:
+                            with patch("py_ore_tools.ore_snapshot_cli._compute_snapshot_case", side_effect=AssertionError("single-trade path should not be used")):
+                                with patch("py_ore_tools.ore_snapshot_cli._write_ore_compatible_reports"):
+                                    with patch("py_ore_tools.ore_snapshot_cli._copy_native_ore_reports"):
+                                        result = ore_snapshot_cli._run_case(REAL_CASE_XML, args, artifact_root=Path(tmp))
+        portfolio_case.assert_called_once()
+        self.assertEqual(result["trade_id"], "PORTFOLIO")
+        self.assertIsNone(result.get("pricing"))
+        self.assertEqual(result["xva"]["ore_cva"], 4.0)
+
+    def test_run_case_uses_portfolio_xva_branch_when_swap_is_not_anchor_trade(self):
+        args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--xva"])
+        fake_summary = ore_snapshot_cli.SnapshotComputation(
+            ore_xml=str(REAL_CASE_XML),
+            trade_id="PORTFOLIO",
+            counterparty="CPTY_A",
+            netting_set_id="NS_A",
+            paths=500,
+            seed=42,
+            rng_mode="ore_parity",
+            pricing={
+                "trade_type": "Portfolio",
+                "py_t0_npv": 12.0,
+                "ore_t0_npv": 12.0,
+                "t0_npv_abs_diff": 0.0,
+                "report_ccy": "EUR",
+                "currency": "EUR",
+                "leg_source": "portfolio",
+            },
+            xva={
+                "ore_cva": 4.0,
+                "py_cva": 4.0,
+                "cva_rel_diff": 0.0,
+                "ore_dva": 1.0,
+                "py_dva": 1.0,
+                "dva_rel_diff": 0.0,
+                "ore_fba": 0.0,
+                "py_fba": 0.0,
+                "fba_rel_diff": 0.0,
+                "ore_fca": 0.0,
+                "py_fca": 0.0,
+                "fca_rel_diff": 0.0,
+                "py_fva": 0.0,
+                "own_credit_source": "portfolio_runtime",
+                "ore_basel_epe": 0.0,
+                "ore_basel_eepe": 0.0,
+                "py_basel_epe": 0.0,
+                "py_basel_eepe": 0.0,
+            },
+            parity={"parity_ready": True, "summary": {"requested_xva_metrics": ["CVA", "DVA"], "portfolio_mode": True}},
+            diagnostics={"engine": "python-lgm-portfolio"},
+            maturity_date="",
+            maturity_time=0.0,
+            exposure_dates=["2025-01-01"],
+            exposure_times=[0.0],
+            py_epe=[0.0],
+            py_ene=[0.0],
+            py_pfe=[0.0],
+            exposure_profile_by_trade={"dates": ["2025-01-01"], "times": [0.0], "closeout_epe": [0.0], "closeout_ene": [0.0], "pfe": [0.0]},
+            exposure_profile_by_netting_set={"dates": ["2025-01-01"], "times": [0.0], "closeout_epe": [0.0], "closeout_ene": [0.0], "pfe": [0.0]},
+            ore_basel_epe=0.0,
+            ore_basel_eepe=0.0,
+        )
+        portfolio_root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="AnchorBond"><TradeType>Bond</TradeType></Trade>
+              <Trade id="SoFrOisSwap"><TradeType>Swap</TradeType></Trade>
+            </Portfolio>
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value={}):
+                with patch(
+                    "py_ore_tools.ore_snapshot_cli._portfolio_trade_context",
+                    return_value=(portfolio_root, ["AnchorBond", "SoFrOisSwap"], "CPTY_A", "NS_A"),
+                ):
+                    with patch("py_ore_tools.ore_snapshot_cli._compute_portfolio_xva_case", return_value=fake_summary) as portfolio_case:
+                        with patch("py_ore_tools.ore_snapshot_cli._compute_snapshot_case", side_effect=AssertionError("single-trade path should not be used")):
+                            with patch("py_ore_tools.ore_snapshot_cli._write_ore_compatible_reports"):
+                                with patch("py_ore_tools.ore_snapshot_cli._copy_native_ore_reports"):
+                                    result = ore_snapshot_cli._run_case(REAL_CASE_XML, args, artifact_root=Path(tmp))
+        portfolio_case.assert_called_once()
+        self.assertEqual(result["trade_id"], "PORTFOLIO")
+        self.assertEqual(result["xva"]["ore_cva"], 4.0)
 
     def test_bond_price_only_case_uses_python_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:

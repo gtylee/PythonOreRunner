@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - optional at import time
     ql = None
 
 import pythonore.io.ore_snapshot as ore_snapshot_mod
+from pythonore.io import XVALoader
 from pythonore.payoff_ir import build_equity_ore_black_scholes_model, lower_ore_script
 from pythonore.payoff_ir.exec_numpy import execute_numpy
 from pythonore.compute.irs_xva_utils import (
@@ -57,11 +58,13 @@ from pythonore.io.ore_snapshot import (
 )
 from pythonore.repo_paths import default_ore_bin, find_engine_repo_root, local_parity_artifacts_root
 from pythonore.runtime import classify_portfolio_support
+from pythonore.runtime.core import XVAEngine
 from pythonore.runtime.exposure_profiles import (
     build_ore_exposure_profile_from_paths,
     build_ore_exposure_profile_from_series,
     one_year_profile_value as _shared_one_year_profile_value,
 )
+from pythonore.runtime.lgm.inputs import _parse_swaption_premium_records
 
 
 DEFAULT_ARTIFACT_ROOT = local_parity_artifacts_root() / "ore_snapshot_cli"
@@ -2302,6 +2305,37 @@ def _load_xva_reference_row(xva_csv: Path, *, trade_id: str, netting_set_id: str
     return ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(netting_set_id)), False
 
 
+def _load_portfolio_npv_summary(npv_csv: Path, netting_set_id: str) -> dict[str, float]:
+    with open(npv_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        total = 0.0
+        maturity_time = 0.0
+        maturity_date = ""
+        matched = False
+        for row in reader:
+            if (row.get("NettingSet", "") or "").strip() != str(netting_set_id):
+                continue
+            if (row.get(tid_key, "") or "").strip() == "":
+                continue
+            matched = True
+            total += float(row.get("NPV(Base)") or row.get("NPV") or 0.0)
+            try:
+                row_maturity_time = float(row.get("MaturityTime") or 0.0)
+            except ValueError:
+                row_maturity_time = 0.0
+            if row_maturity_time >= maturity_time:
+                maturity_time = row_maturity_time
+                maturity_date = str(row.get("Maturity") or "").strip()
+        if not matched:
+            raise ValueError(f"portfolio NPV row not found for netting set '{netting_set_id}' in {npv_csv}")
+        return {
+            "npv": float(total),
+            "maturity_date": maturity_date,
+            "maturity_time": float(maturity_time),
+        }
+
+
 def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: str) -> tuple[float, float]:
     root = ET.parse(simulation_xml).getroot()
     corr_nodes = root.findall("./CrossAssetModel/InstantaneousCorrelations/Correlation")
@@ -2740,6 +2774,9 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
     if fixed_leg is None or float_leg is None:
         raise ValueError(f"failed to identify fixed/floating legs in {portfolio_xml}")
     ccy = (fixed_leg.findtext("./Currency") or float_leg.findtext("./Currency") or "EUR").strip().upper()
+    option_data = swd.find("./OptionData")
+    long_short = (option_data.findtext("./LongShort") if option_data is not None else "Long") or "Long"
+    long_short_sign = 1.0 if str(long_short).strip().lower() != "short" else -1.0
     float_index = (float_leg.findtext("./FloatingLegData/Index") or "").strip()
     reference_curves = _build_reference_discount_and_forward_curves(
         ore_xml,
@@ -2767,9 +2804,11 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
         raise ValueError(f"missing swaption schedule rules in {portfolio_xml}")
     bond_pricing_mod = _bond_pricing_mod()
     cal = bond_pricing_mod._ql_calendar((fixed_rules.findtext("./Calendar") or float_rules.findtext("./Calendar") or "TARGET").strip())
+    fixed_start = _ql_parse_ore_date((fixed_rules.findtext("./StartDate") or "").strip())
+    fixed_end = _ql_parse_ore_date((fixed_rules.findtext("./EndDate") or "").strip())
     fixed_schedule = ql.Schedule(
-        ql.DateParser.parseFormatted((fixed_rules.findtext("./StartDate") or "").strip(), "%Y%m%d"),
-        ql.DateParser.parseFormatted((fixed_rules.findtext("./EndDate") or "").strip(), "%Y%m%d"),
+        fixed_start,
+        fixed_end,
         ql.Period((fixed_rules.findtext("./Tenor") or "1Y").strip()),
         cal,
         bond_pricing_mod._ql_bdc((fixed_rules.findtext("./Convention") or fixed_leg.findtext("./PaymentConvention") or "F").strip()),
@@ -2777,9 +2816,11 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
         ql.DateGeneration.Forward,
         False,
     )
+    float_start = _ql_parse_ore_date((float_rules.findtext("./StartDate") or "").strip())
+    float_end = _ql_parse_ore_date((float_rules.findtext("./EndDate") or "").strip())
     float_schedule = ql.Schedule(
-        ql.DateParser.parseFormatted((float_rules.findtext("./StartDate") or "").strip(), "%Y%m%d"),
-        ql.DateParser.parseFormatted((float_rules.findtext("./EndDate") or "").strip(), "%Y%m%d"),
+        float_start,
+        float_end,
         ql.Period((float_rules.findtext("./Tenor") or "6M").strip()),
         cal,
         bond_pricing_mod._ql_bdc((float_rules.findtext("./Convention") or float_leg.findtext("./PaymentConvention") or "MF").strip()),
@@ -2801,8 +2842,8 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
         bond_pricing_mod._ql_day_counter((float_leg.findtext("./DayCounter") or "A360").strip()),
     )
     underlying.setPricingEngine(ql.DiscountingSwapEngine(disc_curve))
-    exercise = ql.EuropeanExercise(ql.DateParser.parseFormatted((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip(), "%Y%m%d"))
-    exercise_date = ql.DateParser.parseFormatted((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip(), "%Y%m%d")
+    exercise_date = _ql_parse_ore_date((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip())
+    exercise = ql.EuropeanExercise(exercise_date)
     settlement = (swd.findtext("./OptionData/Settlement") or "Physical").strip().lower()
     if settlement == "cash":
         instrument = ql.Swaption(underlying, exercise, ql.Settlement.Cash, ql.Settlement.ParYieldCurve)
@@ -2826,6 +2867,18 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
         instrument.setPricingEngine(ql.BachelierSwaptionEngine(disc_curve, vol_quote))
     else:
         instrument.setPricingEngine(ql.BlackSwaptionEngine(disc_curve, vol_quote))
+    premium_records = _parse_swaption_premium_records(trade)
+    premium_pv = 0.0
+    for premium in premium_records:
+        premium_ccy = str(premium.get("currency") or ccy).strip().upper() or ccy
+        pay_date = ql.DateParser.parseISO(str(premium.get("pay_date") or ""))
+        if pay_date <= ql.Settings.instance().evaluationDate:
+            continue
+        premium_df = float(disc_curve.discount(pay_date))
+        premium_amount = float(premium.get("amount", 0.0)) * premium_df
+        if premium_ccy != ccy:
+            premium_amount *= float(_load_fx_conversion_to_report(tm_root, market_data_path, asof_date, pricing_config_id, premium_ccy, ccy))
+        premium_pv += premium_amount
     npv_csv = _find_reference_npv_file(ore_xml, trade_id=trade_id)
     npv_details = ore_snapshot_mod._load_ore_npv_details(npv_csv, trade_id=trade_id) if npv_csv is not None else None
     return {
@@ -2836,9 +2889,12 @@ def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: b
         "maturity_date": str(npv_details["maturity_date"]) if npv_details is not None else (swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip(),
         "maturity_time": float(npv_details["maturity_time"]) if npv_details is not None else ore_snapshot_mod._year_fraction_from_day_counter(asof, _parse_ore_date((swd.findtext("./OptionData/ExerciseDates/ExerciseDate") or "").strip()), "A365F"),
         "ore_t0_npv": float(npv_details["npv"]) if npv_details is not None else None,
-        "py_t0_npv": float(instrument.NPV()),
+        "py_t0_npv": float(long_short_sign * float(instrument.NPV()) - long_short_sign * premium_pv),
         "discount_column": ccy,
         "forward_column": float_index,
+        "long_short": str(long_short).strip(),
+        "premium_records": premium_records,
+        "premium_pv": float(premium_pv),
         "reference_output_dirs": sorted({str(p.parent) for p in [npv_csv] if p is not None}),
         "using_expected_output": bool(npv_csv is not None and _classify_reference_dir(ore_xml, npv_csv.parent) == "expected_output"),
     }
@@ -3930,10 +3986,66 @@ def _resolve_case_portfolio_path(ore_xml: Path) -> Path | None:
     base = ore_xml.resolve().parent
     run_dir = base.parent
     input_dir = (run_dir / setup_params.get("inputPath", base.name or "Input")).resolve()
-    portfolio_file = (setup_params.get("portfolioFile", "portfolio.xml") or "").strip()
-    if not portfolio_file:
-        return None
+    portfolio_file = setup_params.get("portfolioFile")
+    if portfolio_file is None:
+        portfolio_file = "portfolio.xml"
+    else:
+        portfolio_file = portfolio_file.strip()
+        if not portfolio_file:
+            raise ValueError(
+                f"Setup/portfolioFile is empty in {ore_xml}; it must point to the portfolio.xml file that contains the trades."
+            )
     return (input_dir / portfolio_file).resolve()
+
+
+def _portfolio_trade_context(ore_xml: Path) -> tuple[ET.Element, list[str], str, str]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        raise FileNotFoundError(f"portfolio xml not found: {portfolio_xml}")
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trades = list(portfolio_root.findall("./Trade"))
+    if not trades:
+        raise ValueError(f"no Trade nodes found in {portfolio_xml}")
+    trade_ids: list[str] = []
+    counterparties: set[str] = set()
+    netting_sets: set[str] = set()
+    for trade in trades:
+        trade_id = (trade.attrib.get("id", "") or "").strip()
+        if trade_id:
+            trade_ids.append(trade_id)
+        cpty = (trade.findtext("./Envelope/CounterParty") or "").strip()
+        if cpty:
+            counterparties.add(cpty)
+        ns = (trade.findtext("./Envelope/NettingSetId") or "").strip()
+        if ns:
+            netting_sets.add(ns)
+    if not trade_ids:
+        raise ValueError(f"portfolio {portfolio_xml} contains trades without ids")
+    if len(counterparties) > 1:
+        raise ValueError(
+            f"portfolio CVA currently expects a single counterparty; found {sorted(counterparties)} in {portfolio_xml}"
+        )
+    if len(netting_sets) > 1:
+        raise ValueError(
+            f"portfolio CVA currently expects a single netting set; found {sorted(netting_sets)} in {portfolio_xml}"
+        )
+    counterparty = next(iter(counterparties), "")
+    netting_set_id = next(iter(netting_sets), "")
+    return portfolio_root, trade_ids, counterparty, netting_set_id
+
+
+def _portfolio_contains_swap_like_trade(ore_xml: Path) -> bool:
+    try:
+        portfolio_root, trade_ids, _, _ = _portfolio_trade_context(ore_xml)
+    except Exception:
+        return False
+    if len(trade_ids) <= 1:
+        return False
+    for trade in portfolio_root.findall("./Trade"):
+        trade_type = (trade.findtext("./TradeType") or "").strip()
+        if trade_type in {"Swap", "RateSwap"}:
+            return True
+    return False
 
 
 def _compute_price_only_case(
@@ -4409,6 +4521,8 @@ def _compute_price_only_case(
             "trade_type": "Swaption",
             "discount_column": payload["discount_column"],
             "forward_column": payload["forward_column"],
+            "long_short": payload.get("long_short"),
+            "premium_pv": float(payload.get("premium_pv", 0.0)),
         }
         if payload.get("ore_t0_npv") is not None:
             pricing["ore_t0_npv"] = float(payload["ore_t0_npv"])
@@ -5656,6 +5770,125 @@ def _compute_snapshot_case(
     )
 
 
+def _compute_portfolio_xva_case(
+    ore_xml: Path,
+    *,
+    paths: int | None,
+    seed: int,
+    rng_mode: str,
+    xva_mode: str,
+) -> SnapshotComputation:
+    ore_xml_path = ore_xml.resolve()
+    portfolio_root, trade_ids, counterparty, netting_set_id = _portfolio_trade_context(ore_xml_path)
+    input_dir = _resolve_case_input_dir(ore_xml_path)
+    snapshot = XVALoader.from_files(str(input_dir), ore_file=ore_xml_path.name)
+    effective_paths = int(paths) if paths is not None else int(getattr(snapshot.config, "num_paths", 500) or 500)
+    config_params = dict(snapshot.config.params)
+    config_params["python.lgm_rng_mode"] = str(rng_mode)
+    config_params["python.use_ore_flow_amounts_t0"] = "Y" if str(xva_mode).strip().lower() == "ore" else "N"
+    runtime = snapshot.config.runtime
+    if runtime is not None:
+        simulation = runtime.simulation
+        runtime = replace(runtime, simulation=replace(simulation, seed=int(seed)))
+    snapshot = replace(
+        snapshot,
+        config=replace(
+            snapshot.config,
+            num_paths=effective_paths,
+            params=config_params,
+            runtime=runtime,
+        ),
+    )
+    engine = XVAEngine.python_lgm_default(fallback_to_swig=True)
+    result = engine.create_session(snapshot).run(return_cubes=True)
+    trade_profile = dict(result.exposure_profiles_by_netting_set.get(netting_set_id) or {})
+    if not trade_profile:
+        raise ValueError(f"portfolio netting set '{netting_set_id}' not found in runtime result")
+    trade_profile = dict(trade_profile)
+    trade_profile.setdefault("entity_id", "PORTFOLIO")
+    exposure_dates = [str(x) for x in trade_profile.get("dates", [])]
+    exposure_times = [float(x) for x in trade_profile.get("times", [])]
+    py_epe = [float(x) for x in trade_profile.get("closeout_epe", [])]
+    py_ene = [float(x) for x in trade_profile.get("closeout_ene", [])]
+    py_pfe = [float(x) for x in trade_profile.get("pfe", [])]
+    npv_csv = _find_reference_output_file(ore_xml, "npv.csv")
+    xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
+    ore_npv = _load_portfolio_npv_summary(npv_csv, netting_set_id) if npv_csv is not None else None
+    ore_xva = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id) if xva_csv is not None else None
+    pricing = {
+        "trade_type": "Portfolio",
+        "py_t0_npv": float(result.pv_total),
+        "ore_t0_npv": float((ore_npv or {}).get("npv", result.pv_total)),
+        "t0_npv_abs_diff": abs(float(result.pv_total) - float((ore_npv or {}).get("npv", result.pv_total))),
+        "report_ccy": str(snapshot.config.base_currency).upper(),
+        "currency": str(snapshot.config.base_currency).upper(),
+        "leg_source": "portfolio",
+        "portfolio_trade_count": len(trade_ids),
+    }
+    xva_summary = {
+        "ore_cva": float((ore_xva or {}).get("cva", result.xva_by_metric.get("CVA", 0.0))),
+        "py_cva": float(result.xva_by_metric.get("CVA", 0.0)),
+        "cva_rel_diff": _safe_rel_diff(float(result.xva_by_metric.get("CVA", 0.0)), float((ore_xva or {}).get("cva", result.xva_by_metric.get("CVA", 0.0)))),
+        "ore_dva": float((ore_xva or {}).get("dva", result.xva_by_metric.get("DVA", 0.0))),
+        "py_dva": float(result.xva_by_metric.get("DVA", 0.0)),
+        "dva_rel_diff": _safe_rel_diff(float(result.xva_by_metric.get("DVA", 0.0)), float((ore_xva or {}).get("dva", result.xva_by_metric.get("DVA", 0.0)))),
+        "ore_fba": float((ore_xva or {}).get("fba", result.xva_by_metric.get("FBA", 0.0))),
+        "py_fba": float(result.xva_by_metric.get("FBA", 0.0)),
+        "fba_rel_diff": _safe_rel_diff(float(result.xva_by_metric.get("FBA", 0.0)), float((ore_xva or {}).get("fba", result.xva_by_metric.get("FBA", 0.0)))),
+        "ore_fca": float((ore_xva or {}).get("fca", result.xva_by_metric.get("FCA", 0.0))),
+        "py_fca": float(result.xva_by_metric.get("FCA", 0.0)),
+        "fca_rel_diff": _safe_rel_diff(float(result.xva_by_metric.get("FCA", 0.0)), float((ore_xva or {}).get("fca", result.xva_by_metric.get("FCA", 0.0)))),
+        "py_fva": float(result.xva_by_metric.get("FVA", 0.0)),
+        "own_credit_source": "portfolio_runtime",
+        "ore_basel_epe": float(trade_profile.get("basel_epe", 0.0) or 0.0),
+        "ore_basel_eepe": float(trade_profile.get("basel_eepe", 0.0) or 0.0),
+        "py_basel_epe": float(trade_profile.get("basel_epe", 0.0) or 0.0),
+        "py_basel_eepe": float(trade_profile.get("basel_eepe", 0.0) or 0.0),
+    }
+    parity = {
+        "parity_ready": True,
+        "summary": {
+            "requested_xva_metrics": list(result.xva_by_metric.keys()),
+            "portfolio_mode": True,
+            "portfolio_trade_count": len(trade_ids),
+            "portfolio_netting_set_count": 1,
+        },
+    }
+    diagnostics = {
+        "engine": "python-lgm-portfolio",
+        "portfolio_mode": True,
+        "portfolio_trade_count": len(trade_ids),
+        "portfolio_netting_set_id": netting_set_id,
+        "portfolio_counterparty": counterparty,
+        "portfolio_paths": effective_paths,
+        "xva_mode": str(xva_mode).strip().lower(),
+    }
+    return SnapshotComputation(
+        ore_xml=str(ore_xml),
+        trade_id="PORTFOLIO",
+        counterparty=counterparty,
+        netting_set_id=netting_set_id,
+        paths=effective_paths,
+        seed=seed,
+        rng_mode=rng_mode,
+        pricing=pricing,
+        xva=xva_summary,
+        parity=parity,
+        diagnostics=diagnostics,
+        maturity_date="",
+        maturity_time=0.0,
+        exposure_dates=exposure_dates,
+        exposure_times=exposure_times,
+        py_epe=py_epe,
+        py_ene=py_ene,
+        py_pfe=py_pfe,
+        exposure_profile_by_trade=trade_profile,
+        exposure_profile_by_netting_set=trade_profile,
+        ore_basel_epe=float(trade_profile.get("basel_epe", 0.0) or 0.0),
+        ore_basel_eepe=float(trade_profile.get("basel_eepe", 0.0) or 0.0),
+    )
+
+
 def _run_sensitivity_case(
     ore_xml: Path,
     *,
@@ -6469,6 +6702,7 @@ def _ore_reference_summary(
     *,
     allow_partial_reference: bool = False,
 ) -> dict[str, Any]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     validation = validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
     output_dir = _resolve_case_output_dir(ore_xml)
     trade_id, counterparty, netting_set_id = _default_case_identity(ore_xml)
@@ -6477,6 +6711,7 @@ def _ore_reference_summary(
     xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
+        "portfolio_xml": str(portfolio_xml) if portfolio_xml is not None else "",
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
         "trade_id": trade_id,
         "counterparty": counterparty,
@@ -6670,6 +6905,7 @@ def _namespace_from_run_options(options: PurePythonRunOptions, *, output_root: P
         max_dva_rel=float(options.max_dva_rel),
         max_fba_rel=float(options.max_fba_rel),
         max_fca_rel=float(options.max_fca_rel),
+        trade_id=None,
     )
 
 
@@ -7209,6 +7445,7 @@ def _render_case_markdown(case_summary: dict[str, Any]) -> str:
         "# ORE Snapshot CLI Report",
         "",
         f"- ore_xml: `{case_summary['ore_xml']}`",
+        f"- portfolio_xml: `{case_summary.get('portfolio_xml', '')}`",
         f"- trade_id: `{case_summary['trade_id']}`",
         f"- counterparty: `{case_summary['counterparty']}`",
         f"- netting_set_id: `{case_summary['netting_set_id']}`",
@@ -7626,8 +7863,10 @@ def _run_case(
     explicit_mode_request = bool(args.price or args.xva or args.sensi)
     modes = _infer_modes(args, ore_xml)
     first_trade_type = _first_trade_type(ore_xml)
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     case_summary: dict[str, Any] = {
         "ore_xml": str(ore_xml),
+        "portfolio_xml": str(portfolio_xml) if portfolio_xml is not None else "",
         "modes": [name for name, enabled in asdict(modes).items() if enabled],
     }
     validation = (
@@ -7641,7 +7880,18 @@ def _run_case(
         try:
             if engine == "ore":
                 raise FileNotFoundError("ORE reference engine explicitly requested")
-            if first_trade_type == "FxOption":
+            portfolio_mode = False
+            if getattr(args, "trade_id", None) is None:
+                portfolio_mode = _portfolio_contains_swap_like_trade(ore_xml)
+            if portfolio_mode:
+                base_summary = _compute_portfolio_xva_case(
+                    ore_xml,
+                    paths=args.paths,
+                    seed=args.seed,
+                    rng_mode=args.rng,
+                    xva_mode=args.xva_mode,
+                )
+            elif first_trade_type == "FxOption":
                 base_summary = _compute_fx_option_snapshot_case(
                     ore_xml,
                     paths=args.paths,
@@ -7924,6 +8174,7 @@ def _render_terminal_case_summary(case_summary: dict[str, Any]) -> str:
     lines = [
         "ORE done.",
         f"ore_xml={case_summary['ore_xml']}",
+        f"portfolio_xml={case_summary.get('portfolio_xml', '')}",
         f"trade_id={case_summary['trade_id']}",
         f"modes={','.join(case_summary['modes'])}",
         f"pass_all={case_summary['pass_all']}",
@@ -7966,6 +8217,7 @@ def _run_preflight_case(
     *,
     artifact_root: Path,
 ) -> dict[str, Any]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     snapshot = load_from_ore_xml(
         ore_xml,
         anchor_t0_npv=args.anchor_t0_npv,
@@ -7976,6 +8228,7 @@ def _run_preflight_case(
     support = _classify_preflight_support(snapshot, ore_xml, requested_modes=requested_modes)
     summary = {
         "ore_xml": str(ore_xml),
+        "portfolio_xml": str(portfolio_xml) if portfolio_xml is not None else "",
         "requested_modes": requested_modes,
         "validation": validation,
         "support": support,
@@ -8083,6 +8336,7 @@ def _render_terminal_preflight_summary(summary: dict[str, Any]) -> str:
     lines = [
         "PRECHECK done.",
         f"ore_xml={summary['ore_xml']}",
+        f"portfolio_xml={summary.get('portfolio_xml', '')}",
         f"requested_modes={','.join(summary['requested_modes'])}",
         f"validation_ok={bool(validation.get('input_links_valid', False))}",
         f"native_ready={summary['native_ready']}",
@@ -8273,6 +8527,7 @@ def _print_help(parser: argparse.ArgumentParser) -> None:
     print()
     print("Compatibility notes:")
     print("  - positional ore.xml matches ore.exe")
+    print("  - ore.xml is the entrypoint; Setup/portfolioFile points to the portfolio.xml with the trades")
     print("  - -v/--version matches ore.exe version flag")
     print("  - -h/--hash matches ore.exe hash flag")
     print("  - use --help for help output")

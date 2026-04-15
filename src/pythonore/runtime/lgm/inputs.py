@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import warnings
 from typing import Dict, List, Tuple
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -81,6 +82,70 @@ def _trade_notional(trade: Trade) -> float:
     return 0.0
 
 
+def _parse_swaption_premium_records(trade_root: ET.Element) -> Tuple[Dict[str, object], ...]:
+    def _parse_date_text(text: str) -> str | None:
+        value = str(text or "").strip()
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d", "%d/%m/%Y", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(value, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return value
+
+    def _append_record(
+        records: List[Dict[str, object]],
+        *,
+        amount_text: str | None,
+        currency_text: str | None,
+        pay_date_text: str | None,
+        source: str,
+    ) -> None:
+        amount_value = str(amount_text or "").strip()
+        pay_date_value = _parse_date_text(pay_date_text or "")
+        if not amount_value or not pay_date_value:
+            return
+        try:
+            amount = float(amount_value)
+        except ValueError:
+            return
+        currency_value = str(currency_text or "").strip().upper()
+        if not currency_value:
+            currency_value = str(
+                trade_root.findtext("./SwaptionData/LegData/Currency")
+                or trade_root.findtext("./SwaptionData/OptionData/PremiumCurrency")
+                or ""
+            ).strip().upper()
+        records.append(
+            {
+                "amount": float(amount),
+                "currency": currency_value,
+                "pay_date": pay_date_value,
+                "source": source,
+            }
+        )
+
+    records: List[Dict[str, object]] = []
+    for premium in trade_root.findall("./SwaptionData/OptionData/Premiums/Premium"):
+        _append_record(
+            records,
+            amount_text=premium.findtext("./Amount") or premium.findtext("./PremiumAmount"),
+            currency_text=premium.findtext("./Currency") or premium.findtext("./PremiumCurrency"),
+            pay_date_text=premium.findtext("./PayDate") or premium.findtext("./PremiumPayDate") or premium.findtext("./PremiumDate"),
+            source="nested",
+        )
+    _append_record(
+        records,
+        amount_text=trade_root.findtext("./SwaptionData/OptionData/PremiumAmount"),
+        currency_text=trade_root.findtext("./SwaptionData/OptionData/PremiumCurrency"),
+        pay_date_text=trade_root.findtext("./SwaptionData/OptionData/PremiumPayDate")
+        or trade_root.findtext("./SwaptionData/OptionData/PremiumDate"),
+        source="flat",
+    )
+    return tuple(records)
+
+
 def _build_irs_legs_from_trade(trade: Trade, asof: str | None = None) -> Dict[str, np.ndarray]:
     warnings.warn(
         f"Using fallback leg schedule for trade {trade.trade_id} "
@@ -140,6 +205,7 @@ __all__ = [
     "_fallback_exposure_grid",
     "_irs_schedule_bounds",
     "_schedule_periods",
+    "_parse_swaption_premium_records",
     "_tenor_to_years",
     "_trade_notional",
 ]

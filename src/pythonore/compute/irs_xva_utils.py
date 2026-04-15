@@ -731,8 +731,9 @@ def _build_schedule(
             if first_date is not None and prev < first_date:
                 if boundaries[-1] != first_date:
                     boundaries.append(first_date)
-                cur = first_date
-                continue
+                if boundaries[-1] != start:
+                    boundaries.append(start)
+                break
             if prev <= start:
                 if boundaries[-1] != start:
                     boundaries.append(start)
@@ -750,8 +751,7 @@ def _build_schedule(
             nxt = _add_months(cur, months)
             if last_date is not None and last_date > cur and nxt > last_date:
                 boundaries.append(last_date)
-                cur = last_date
-                continue
+                break
             if nxt >= end:
                 if boundaries[-1] != end:
                     boundaries.append(end)
@@ -1214,7 +1214,37 @@ def load_swap_legs_from_portfolio_root(
 
     asof = _parse_yyyymmdd(asof_date)
 
-    out: Dict[str, np.ndarray] = {}
+    fixed_parts: Dict[str, list[np.ndarray]] = {
+        "fixed_pay_time": [],
+        "fixed_start_time": [],
+        "fixed_end_time": [],
+        "fixed_accrual": [],
+        "fixed_rate": [],
+        "fixed_notional": [],
+        "fixed_sign": [],
+        "fixed_amount": [],
+    }
+    float_parts: Dict[str, list[np.ndarray]] = {
+        "float_pay_time": [],
+        "float_start_time": [],
+        "float_end_time": [],
+        "float_accrual": [],
+        "float_notional": [],
+        "float_sign": [],
+        "float_spread": [],
+        "float_coupon": [],
+        "float_amount": [],
+        "float_fixing_time": [],
+        "float_is_averaged": [],
+    }
+    float_index_values: list[str] = []
+    float_index_tenor_values: list[str] = []
+    float_index_day_counter_values: list[str] = []
+    float_fixing_source_values: list[str] = []
+    float_index_accrual_parts: list[np.ndarray] = []
+    float_index_names_by_leg: list[str] = []
+    float_leg_count = 0
+    fixed_leg_count = 0
     for lx in legs_xml:
         ltype = (lx.findtext("./LegType") or "").strip()
         payer = (lx.findtext("./Payer") or "").strip().lower() == "true"
@@ -1237,14 +1267,15 @@ def load_swap_legs_from_portfolio_root(
 
         if ltype == "Fixed":
             rate = float((lx.findtext("./FixedLegData/Rates/Rate") or "0").strip())
-            out["fixed_start_time"] = s_t
-            out["fixed_end_time"] = e_t
-            out["fixed_pay_time"] = p_t
-            out["fixed_accrual"] = accr
-            out["fixed_rate"] = np.full_like(accr, rate)
-            out["fixed_notional"] = np.asarray(notionals, dtype=float)
-            out["fixed_sign"] = np.full_like(accr, sign)
-            out["fixed_amount"] = sign * notionals * rate * accr
+            fixed_parts["fixed_start_time"].append(np.asarray(s_t, dtype=float))
+            fixed_parts["fixed_end_time"].append(np.asarray(e_t, dtype=float))
+            fixed_parts["fixed_pay_time"].append(np.asarray(p_t, dtype=float))
+            fixed_parts["fixed_accrual"].append(np.asarray(accr, dtype=float))
+            fixed_parts["fixed_rate"].append(np.full_like(accr, rate))
+            fixed_parts["fixed_notional"].append(np.asarray(notionals, dtype=float))
+            fixed_parts["fixed_sign"].append(np.full_like(accr, sign))
+            fixed_parts["fixed_amount"].append(sign * np.asarray(notionals, dtype=float) * rate * accr)
+            fixed_leg_count += 1
         elif ltype == "Floating":
             spread = float((lx.findtext("./FloatingLegData/Spreads/Spread") or "0").strip())
             fixing_days = int((lx.findtext("./FloatingLegData/FixingDays") or "2").strip())
@@ -1252,56 +1283,76 @@ def load_swap_legs_from_portfolio_root(
             float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
             is_averaged = (lx.findtext("./FloatingLegData/IsAveraged") or "false").strip().lower() == "true"
             index_dc = _infer_index_day_counter(float_index, fallback=dc)
-            out["float_pay_time"] = p_t
-            out["float_start_time"] = s_t
-            out["float_end_time"] = e_t
-            out["float_accrual"] = accr
-            out["float_index_accrual"] = np.asarray(
+            float_parts["float_pay_time"].append(np.asarray(p_t, dtype=float))
+            float_parts["float_start_time"].append(np.asarray(s_t, dtype=float))
+            float_parts["float_end_time"].append(np.asarray(e_t, dtype=float))
+            float_parts["float_accrual"].append(np.asarray(accr, dtype=float))
+            float_index_accrual = np.asarray(
                 [_year_fraction(sd, ed, index_dc) for sd, ed in zip(s_dates, e_dates)],
                 dtype=float,
             )
-            out["float_notional"] = np.asarray(notionals, dtype=float)
-            out["float_sign"] = np.full_like(accr, sign)
-            out["float_spread"] = np.full_like(accr, spread)
-            out["float_coupon"] = np.zeros_like(accr)
-            out["float_amount"] = np.zeros_like(accr)
+            float_index_accrual_parts.append(float_index_accrual)
+            float_parts["float_notional"].append(np.asarray(notionals, dtype=float))
+            float_parts["float_sign"].append(np.full_like(accr, sign))
+            float_parts["float_spread"].append(np.full_like(accr, spread))
+            float_parts["float_coupon"].append(np.zeros_like(accr))
+            float_parts["float_amount"].append(np.zeros_like(accr))
             # Averaged OIS coupons fix against the end-of-period lag, not the accrual start.
             if is_averaged:
                 fix_dates = [_advance_business_days(ed, -fixing_days, cal) for ed in e_dates]
             else:
                 fix_dates = [_advance_business_days(sd, -fixing_days, cal) for sd in s_dates]
-            out["float_fixing_time"] = np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
-            out["float_fixing_source"] = "portfolio_fixing_days"
-            out["float_index"] = float_index
-            out["float_index_tenor"] = float_index_tenor
-            out["float_index_day_counter"] = index_dc
-            out["float_is_averaged"] = np.full_like(accr, is_averaged, dtype=bool)
+            float_parts["float_fixing_time"].append(
+                np.asarray([_time_from_dates(asof, fd, time_day_counter) for fd in fix_dates], dtype=float)
+            )
+            float_parts["float_is_averaged"].append(np.full_like(accr, is_averaged, dtype=bool))
+            float_index_values.append(float_index)
+            float_index_tenor_values.append(float_index_tenor)
+            float_index_day_counter_values.append(index_dc)
+            float_fixing_source_values.append("portfolio_fixing_days")
+            float_index_names_by_leg.append(float_index)
+            float_leg_count += 1
         else:
             raise ValueError(f"unsupported leg type '{ltype}'")
 
-    required = [
-        "fixed_pay_time",
-        "fixed_start_time",
-        "fixed_end_time",
-        "fixed_accrual",
-        "fixed_rate",
-        "fixed_notional",
-        "fixed_sign",
-        "fixed_amount",
-        "float_pay_time",
-        "float_start_time",
-        "float_end_time",
-        "float_accrual",
-        "float_notional",
-        "float_sign",
-        "float_spread",
-        "float_coupon",
-        "float_amount",
-        "float_fixing_time",
-    ]
-    for k in required:
-        if k not in out:
-            raise ValueError(f"incomplete swap leg data, missing '{k}'")
+    if fixed_leg_count == 0 and float_leg_count == 0:
+        raise ValueError("swap trade contains no fixed or floating legs")
+
+    def _stack(parts: list[np.ndarray], *, dtype: Any = float) -> np.ndarray:
+        arrays = [np.asarray(part, dtype=dtype).reshape(-1) for part in parts if np.asarray(part).size > 0]
+        if not arrays:
+            return np.asarray([], dtype=dtype)
+        if len(arrays) == 1:
+            return arrays[0].copy()
+        return np.concatenate(arrays)
+
+    out: Dict[str, np.ndarray] = {}
+    for key, parts in fixed_parts.items():
+        out[key] = _stack(parts, dtype=float)
+    for key, parts in float_parts.items():
+        out[key] = _stack(parts, dtype=float if key != "float_is_averaged" else bool)
+
+    if out["fixed_pay_time"].size > 1:
+        fixed_order = np.argsort(out["fixed_pay_time"], kind="mergesort")
+        for key in fixed_parts:
+            out[key] = out[key][fixed_order]
+
+    if out["float_pay_time"].size > 1:
+        float_order = np.argsort(out["float_pay_time"], kind="mergesort")
+        for key in float_parts:
+            out[key] = out[key][float_order]
+
+    out["float_index_accrual"] = _stack(float_index_accrual_parts, dtype=float)
+    if out["float_index_accrual"].size > 1 and out["float_pay_time"].size > 1:
+        out["float_index_accrual"] = out["float_index_accrual"][float_order]
+    out["float_index"] = float_index_values[0] if float_index_values else ""
+    out["float_index_tenor"] = float_index_tenor_values[0] if float_index_tenor_values else ""
+    out["float_index_day_counter"] = float_index_day_counter_values[0] if float_index_day_counter_values else "A365"
+    out["float_fixing_source"] = float_fixing_source_values[0] if len(set(float_fixing_source_values)) <= 1 else "mixed"
+    if len(set(float_index_names_by_leg)) > 1:
+        out["float_index_by_leg"] = np.asarray(float_index_names_by_leg, dtype=object)
+    out["fixed_leg_count"] = np.asarray([fixed_leg_count], dtype=int)
+    out["float_leg_count"] = np.asarray([float_leg_count], dtype=int)
     return out
 
 
@@ -1673,6 +1724,7 @@ def compute_realized_float_coupons(
     notional = np.asarray(legs.get("float_notional", np.ones_like(s)), dtype=float)
     sign = np.asarray(legs.get("float_sign", np.ones_like(s)), dtype=float)
     quoted_coupon = np.asarray(legs.get("float_coupon", np.zeros_like(s)), dtype=float)
+    is_averaged = bool(np.asarray(legs.get("float_is_averaged", False), dtype=bool).any())
 
     n_cf = s.size
     n_paths = x_paths_on_sim_grid.shape[1]
@@ -1686,7 +1738,7 @@ def compute_realized_float_coupons(
         if ft <= 1.0e-12:
             ps = float(p0_fwd(max(0.0, float(s[i]))))
             pe = float(p0_fwd(float(e[i])))
-            if bool(legs.get("float_is_averaged", False)):
+            if is_averaged:
                 fwd = math.log(max(ps / pe, 1.0e-18)) / float(index_tau[i])
             else:
                 fwd = (ps / pe - 1.0) / float(index_tau[i])
@@ -1697,7 +1749,7 @@ def compute_realized_float_coupons(
         s_eff = max(float(s[i]), ft)
         p_t_s_f = model.discount_bond(ft, s_eff, x_fix, p_ft_f, float(p0_fwd(s_eff)))
         p_t_e_f = model.discount_bond(ft, float(e[i]), x_fix, p_ft_f, float(p0_fwd(float(e[i]))))
-        if bool(legs.get("float_is_averaged", False)):
+        if is_averaged:
             fwd_path = np.log(np.clip(p_t_s_f / p_t_e_f, 1.0e-18, None)) / float(index_tau[i])
         else:
             fwd_path = (p_t_s_f / p_t_e_f - 1.0) / float(index_tau[i])

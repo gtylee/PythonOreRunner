@@ -1,8 +1,10 @@
 """ore_snapshot.py — Single-entry-point loader for all ORE inputs needed by the Python LGM.
 
-Reads the ORE XML input chain starting from a single ore.xml file and resolves
-every path, curve-column name, LGM parameter set, swap leg, and ORE output
-automatically.  No manual flags required.
+Reads the ORE XML input chain starting from a single ore.xml file. The
+`Setup/portfolioFile` entry in ore.xml resolves the trade portfolio from
+portfolio.xml, and the loader then resolves every path, curve-column name,
+LGM parameter set, swap leg, and ORE output automatically.  No manual flags
+required.
 
 Usage
 -----
@@ -95,12 +97,10 @@ from pythonore.compute.irs_xva_utils import (
     build_discount_curve_from_discount_pairs,
     _normalize_curve_name,
     calibrate_float_spreads_from_coupon,
-    _infer_index_day_counter,
     load_ore_default_curve_inputs,
     load_ore_discount_pairs_by_columns,
     load_ore_discount_pairs_from_curves,
     load_ore_exposure_profile,
-    load_ore_legs_from_flows,
     load_simulation_yield_tenors,
     load_swap_legs_from_portfolio,
     parse_lgm_params_from_calibration_xml,
@@ -3271,31 +3271,15 @@ def load_from_ore_xml(
     ore_t0_npv = npv_row["npv"]
 
     # ------------------------------------------------------------------
-    # 7. Build swap legs: prefer flows.csv when present (ORE Amount signs = canonical
-    #    for parity; see SKILL.md "Use ORE cashflow signs as canonical truth").
+    # 7. Build swap legs directly from portfolio.xml.
     # ------------------------------------------------------------------
-    flows_csv = cashflow_csv
     legs = {"node_tenors": node_tenors}
     leg_source = "generic"
     if trade_type == "Swap":
-        legs = None
         leg_source = "portfolio"
-        if flows_csv.exists():
-            try:
-                legs = load_ore_legs_from_flows(
-                    str(flows_csv),
-                    trade_id=trade_id,
-                    asof_date=asof_date,
-                    time_day_counter=model_day_counter,
-                    index_day_counter=_infer_index_day_counter(forward_column, fallback=model_day_counter),
-                )
-                leg_source = "flows"
-            except (ValueError, FileNotFoundError):
-                pass
-        if legs is None:
-            legs = load_swap_legs_from_portfolio(
-                str(portfolio_xml), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
-            )
+        legs = load_swap_legs_from_portfolio(
+            str(portfolio_xml), trade_id=trade_id, asof_date=asof_date, time_day_counter=model_day_counter
+        )
         legs["node_tenors"] = node_tenors
         legs = calibrate_float_spreads_from_coupon(legs, p0_fwd, t0=0.0)
 
@@ -3399,7 +3383,7 @@ def load_from_ore_xml(
         exposure_csv_path=str(exposure_csv) if exposure_csv.exists() else None,
         xva_csv_path=str(xva_csv) if xva_csv.exists() else None,
         npv_csv_path=str(npv_csv),
-        flows_csv_path=str(flows_csv) if flows_csv.exists() else None,
+        flows_csv_path=str(cashflow_csv) if cashflow_csv.exists() else None,
     )
 
 

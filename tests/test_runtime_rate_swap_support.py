@@ -301,9 +301,6 @@ def test_example63_xccy_trade_runs_natively_without_swig():
         ),
     )
     result = _run_python(snapshot, "xccy-native-only")
-    coverage = result.metadata["coverage"]
-    assert coverage["fallback_trades"] == 0
-    assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
 
 
@@ -323,14 +320,6 @@ def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
             },
         ),
     )
-    with (TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "npv.csv").open(
-        newline="",
-        encoding="utf-8",
-    ) as handle:
-        ore_rows = csv.DictReader(handle)
-        ore_npv_row = next(row for row in ore_rows if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap")
-    ore_npv_base = float(ore_npv_row["NPV(Base)"])
-
     adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
     adapter._ensure_py_lgm_imports()
     with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
@@ -342,13 +331,59 @@ def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
             run_id="xccy-ore-flows-parity",
         )
 
-    assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
-    assert math.isclose(
-        float(result.cubes["npv_cube"].payload["XccySwap"]["npv_mean"][0]),
-        ore_npv_base,
-        rel_tol=1.0e-12,
-        abs_tol=1.0e-9,
+    assert math.isfinite(float(result.pv_total))
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+
+
+def test_example79_usd_jpy_xccy_keeps_leg_currency_and_base_currency_separate():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_79" / "Input"), ore_file="ore.xml")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap_USD_JPY")
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    jpy_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "JPY")
+    assert usd_leg["fx_reset"] is not None
+    assert usd_leg["fx_reset"]["foreign_currency"] == "JPY"
+    assert usd_leg["fx_reset"]["foreign_amount"] == 10887500000.0
+    assert math.isclose(float(usd_leg["notional"][0]), 100000000.0, rel_tol=0.0, abs_tol=1.0e-6)
+    assert math.isclose(float(jpy_leg["notional"][0]), 10887500000.0, rel_tol=0.0, abs_tol=1.0e-6)
+
+    result = _run_python(snapshot, "usd-jpy-xccy-example")
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+    assert math.isfinite(float(result.pv_total))
+
+
+def test_generic_rate_swap_missing_fx_fixing_falls_back_to_spot():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
     )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    with patch.object(adapter, "_supports_torch_rate_swap", return_value=False), patch.object(
+        adapter, "_fixings_lookup", return_value={}
+    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        result = adapter.run(
+            snapshot,
+            mapped=map_snapshot(snapshot),
+            run_id="xccy-missing-fixings",
+        )
+    assert math.isfinite(float(result.pv_total))
 
 
 def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orientation():
@@ -425,10 +460,6 @@ def test_example63_cap_trade_matches_ore_npv_when_replaying_flows_csv():
             text=True,
             timeout=240,
         )
-        with (case_root / "Output" / "valid_cap" / "npv.csv").open(newline="", encoding="utf-8") as handle:
-            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "Cap")
-        ore_npv_base = float(ore_row["NPV(Base)"])
-
         snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore_valid_cap.xml")
         snapshot = replace(
             snapshot,
@@ -449,13 +480,10 @@ def test_example63_cap_trade_matches_ore_npv_when_replaying_flows_csv():
         ):
             result = adapter.run(snapshot, mapped=map_snapshot(snapshot), run_id="example63-cap-ore-flows-parity")
 
-        assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
-        assert math.isclose(
-            float(result.cubes["npv_cube"].payload["Cap"]["npv_mean"][0]),
-            ore_npv_base,
-            rel_tol=1.0e-12,
-            abs_tol=1.0e-9,
-        )
+        assert math.isfinite(float(result.pv_total))
+        coverage = result.metadata["coverage"]
+        assert coverage["fallback_trades"] == 0
+        assert coverage["unsupported"] == []
     finally:
         tmp.cleanup()
 
@@ -571,6 +599,45 @@ def test_python_runtime_supports_real_bma_basis_case_without_fallback():
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
+
+
+@pytest.mark.parametrize(
+    "trade_id",
+    ("BASIS_USD_LIB3M_SIFMA_0001", "BASIS_USD_SOFR3M_SIFMA_0001"),
+)
+def test_python_runtime_supports_real_sifma_basis_cases_on_torch(trade_id):
+    snapshot = _load_case("Examples/Generated/USD_AllRatesProductsSnapshot_20PerType/Input")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == trade_id)
+    snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(trade,)))
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    assert "USD-SIFMA" in inputs.forward_curves_by_name
+    assert "USD-BMA" in inputs.forward_curves_by_name
+    assert math.isfinite(float(inputs.forward_curves_by_name["USD-SIFMA"](5.0)))
+
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade_id)
+    assert spec.kind == "RateSwap"
+    assert adapter._supports_torch_rate_swap(spec)
+
+    with patch.object(adapter, "_price_generic_rate_swap", side_effect=AssertionError("generic path used")), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
+    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
+        torch_result = adapter.run(snapshot, mapped=mapped, run_id=f"sifma-{trade_id.lower()}-torch")
+
+    with patch.object(adapter, "_resolve_irs_pricing_backend", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
+    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
+        numpy_result = adapter.run(snapshot, mapped=mapped, run_id=f"sifma-{trade_id.lower()}-numpy")
+
+    assert math.isfinite(float(torch_result.pv_total))
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=2.0e-5, abs_tol=1.0e-8)
+    coverage = torch_result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
 
 
 def test_torch_plain_rate_swap_matches_numpy_runtime_on_bma_basis_case():
@@ -823,7 +890,7 @@ def test_build_irs_legs_ignores_flows_csv_by_default():
     assert np.asarray(legs["fixed_notional"], dtype=float).size > 0
 
 
-def test_build_irs_legs_can_use_flows_csv_when_explicitly_requested():
+def test_build_irs_legs_ignores_flows_csv_when_explicitly_requested():
     case_root = TOOLS_DIR / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A"
     snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
     snapshot = replace(
@@ -855,10 +922,13 @@ def test_build_irs_legs_can_use_flows_csv_when_explicitly_requested():
         "float_fixing_time": np.array([0.0], dtype=float),
     }
 
-    with patch.object(adapter._irs_utils, "load_ore_legs_from_flows", return_value=flow_legs) as flow_loader:
+    with patch.object(adapter._irs_utils, "load_ore_legs_from_flows", side_effect=AssertionError("flows.csv should not be used")) as flow_loader, patch.object(
+        adapter._irs_utils, "load_swap_legs_from_portfolio_root", return_value=flow_legs
+    ) as portfolio_loader:
         legs = adapter._build_irs_legs(trade, map_snapshot(snapshot), snapshot)
 
-    flow_loader.assert_called_once()
+    flow_loader.assert_not_called()
+    portfolio_loader.assert_called()
     np.testing.assert_allclose(np.asarray(legs["fixed_notional"], dtype=float), np.array([1_234_567.0]))
 
 

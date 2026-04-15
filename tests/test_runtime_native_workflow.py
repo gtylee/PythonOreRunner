@@ -275,6 +275,90 @@ def _generic_swaption_trade_xml() -> str:
 """.strip()
 
 
+def _generic_swaption_trade_xml_with_premium(
+    *,
+    style: str = "European",
+    settlement: str = "Physical",
+    long_short: str = "Long",
+    premium_amount: float = 1090000.0,
+    premium_currency: str = "EUR",
+    premium_pay_date: str = "2026-03-01",
+    premium_nested: bool = False,
+    exercise_dates: tuple[str, ...] = ("2026-09-08",),
+) -> str:
+    exercise_xml = "\n      ".join(f"<ExerciseDate>{d}</ExerciseDate>" for d in exercise_dates)
+    premium_xml = (
+        f"""
+                <Premiums>
+                    <Premium>
+                        <Amount>{premium_amount}</Amount>
+                        <Currency>{premium_currency}</Currency>
+                        <PayDate>{premium_pay_date}</PayDate>
+                    </Premium>
+                </Premiums>
+"""
+        if premium_nested
+        else f"""
+                <PremiumAmount>{premium_amount}</PremiumAmount>
+                <PremiumCurrency>{premium_currency}</PremiumCurrency>
+                <PremiumPayDate>{premium_pay_date}</PremiumPayDate>
+"""
+    )
+    return f"""
+<SwaptionData>
+  <OptionData>
+    <Style>{style}</Style>
+    <Settlement>{settlement}</Settlement>
+    <LongShort>{long_short}</LongShort>
+    <ExerciseDates>
+      {exercise_xml}
+    </ExerciseDates>
+{premium_xml.rstrip()}
+  </OptionData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>EUR</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2028-09-08</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>EUR</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-09-08</StartDate>
+        <EndDate>2028-09-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>EUR-EURIBOR-6M</Index>
+      <FixingDays>2</FixingDays>
+      <Spreads><Spread>0.0</Spread></Spreads>
+    </FloatingLegData>
+  </LegData>
+</SwaptionData>
+""".strip()
+
+
 def _generic_digital_cmsspread_trade_xml() -> str:
     return """
 <SwapData>
@@ -402,6 +486,101 @@ def _simulation_xml_with_usd_grid(spec: str) -> str:
   </CrossAssetModel>
 </Simulation>
 """.strip()
+
+
+def _swaption_premium_runtime_case(
+    *,
+    long_short: str = "Long",
+    premium_nested: bool = False,
+) -> tuple[PythonLgmAdapter, _TradeSpec, _PricingContext, dict[str, object]]:
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id=f"SWO_PREM_{long_short.upper()}_{'N' if premium_nested else 'F'}",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swaption",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swaption",
+                "xml": _generic_swaption_trade_xml_with_premium(
+                    long_short=long_short,
+                    premium_nested=premium_nested,
+                    premium_amount=10.0,
+                    premium_currency="EUR",
+                    premium_pay_date="2026-09-08",
+                    exercise_dates=("2026-09-08",),
+                ),
+            }
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    state = adapter._build_generic_swaption_state(trade, snapshot)
+    assert state is not None
+    spec = _TradeSpec(
+        trade=trade,
+        kind="Swaption",
+        notional=1_000_000.0,
+        ccy="EUR",
+        sticky_state=state,
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0, 0.75], dtype=float),
+        valuation_times=np.array([0.0, 0.75], dtype=float),
+        observation_times=np.array([0.0, 0.75], dtype=float),
+        observation_closeout_times=np.array([0.0, 0.75], dtype=float),
+        discount_curves={"EUR": (lambda t: 1.0)},
+        forward_curves={"EUR": (lambda t: 1.0)},
+        forward_curves_by_tenor={"EUR": {"6M": (lambda t: 1.0)}},
+        forward_curves_by_name={"EUR-EURIBOR-6M": (lambda t: 1.0)},
+        swap_index_forward_tenors={"EUR-EURIBOR-6M": "6M"},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="EUR",
+        seed=42,
+        fx_spots={},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=(),
+        torch_device=None,
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    ctx = _PricingContext(
+        snapshot=snapshot,
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((inputs.times.size, 3), dtype=float),
+        irs_backend=None,
+        shared_fx_sim=None,
+        n_times=inputs.times.size,
+        n_paths=3,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+    return adapter, spec, ctx, state
 
 
 def _generic_bermudan_swaption_trade_xml() -> str:
@@ -1212,6 +1391,31 @@ def test_native_runtime_torch_bermudan_parity():
 
     assert abs(float(torch_result.pv_total) - float(numpy_result.pv_total)) < 1.0e-8
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
+
+
+def test_native_runtime_swaption_premium_records_and_signs_are_applied():
+    for long_short in ("Long", "Short"):
+        for premium_nested in (False, True):
+            adapter, spec, ctx, state = _swaption_premium_runtime_case(
+                long_short=long_short,
+                premium_nested=premium_nested,
+            )
+            assert state is not None
+            assert len(state["premium_records"]) == 1
+            assert state["premium_records"][0]["source"] == ("nested" if premium_nested else "flat")
+            assert float(state["premium_sign"]) == (1.0 if long_short != "Short" else -1.0)
+
+            def _fake_bermudan_npv_paths(*, model, p0_disc, p0_fwd, bermudan, times, x_paths, **kwargs):
+                return np.full((len(times), x_paths.shape[1]), 100.0 * float(bermudan.exercise_sign), dtype=float)
+
+            with patch.object(adapter._ir_options_mod, "bermudan_npv_paths", side_effect=_fake_bermudan_npv_paths):
+                vals, exact = adapter._price_trade_swaption_paths(spec, ctx)
+
+            assert exact is False
+            expected_first = 90.0 if long_short != "Short" else -90.0
+            expected_second = 100.0 if long_short != "Short" else -100.0
+            assert abs(float(vals[0, 0]) - expected_first) < 1.0e-12
+            assert abs(float(vals[1, 0]) - expected_second) < 1.0e-12
 
 
 def test_parse_market_overlay_accepts_named_dated_zero_quotes():

@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2019-12-27</Parameter>
+    <Parameter name="inputPath">.</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="logFile">log.txt</Parameter>
+    <Parameter name="logMask">31</Parameter>
+    <Parameter name="marketDataFile">../../MarketRisk/Input/Correlation/market.txt</Parameter>
+    <Parameter name="fixingDataFile">../../MarketRisk/Input/Correlation/fixings.txt</Parameter>
+    <Parameter name="curveConfigFile">../../MarketRisk/Input/Correlation/curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">../../MarketRisk/Input/Correlation/conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">../../MarketRisk/Input/Correlation/todaysmarket.xml</Parameter>
+    <Parameter name="pricingEnginesFile">../../MarketRisk/Input/Correlation/pricingengine.xml</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+    <Parameter name="nettingSetFile">../../MarketRisk/Input/netting.xml</Parameter>
+    <Parameter name="observationModel">None</Parameter>
+    <Parameter name="baseCurrency">USD</Parameter>
+  </Setup>
+  <Markets>
+    <Parameter name="lgmcalibration">default</Parameter>
+    <Parameter name="fxcalibration">default</Parameter>
+    <Parameter name="pricing">default</Parameter>
+    <Parameter name="simulation">default</Parameter>
+  </Markets>
+  <Analytics>
+    <Analytic type="npv">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+      <Parameter name="outputFileName">npv.csv</Parameter>
+    </Analytic>
+    <Analytic type="cashflow">
+      <Parameter name="active">Y</Parameter>
+      <Parameter name="outputFileName">flows.csv</Parameter>
+    </Analytic>
+    <Analytic type="simulation">
+      <Parameter name="active">N</Parameter>
+      <Parameter name="simulationConfigFile">simulation.xml</Parameter>
+      <Parameter name="baseCurrency">USD</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>

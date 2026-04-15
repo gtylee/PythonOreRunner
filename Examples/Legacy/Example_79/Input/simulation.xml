@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<Simulation>
+  <Market>
+    <BaseCurrency>USD</BaseCurrency>
+    <Currencies>
+      <Currency>USD</Currency>
+      <Currency>JPY</Currency>
+    </Currencies>
+    <YieldCurves>
+      <Configuration>
+        <Tenors>6M,1Y,2Y,3Y,5Y,7Y,10Y</Tenors>
+        <Interpolation>LogLinear</Interpolation>
+        <Extrapolation>FlatZero</Extrapolation>
+      </Configuration>
+    </YieldCurves>
+    <FxRates>
+      <CurrencyPairs>
+        <CurrencyPair>USDJPY</CurrencyPair>
+      </CurrencyPairs>
+    </FxRates>
+    <Indices>
+      <Index>USD-FedFunds</Index>
+      <Index>JPY-LIBOR-3M</Index>
+    </Indices>
+  </Market>
+</Simulation>

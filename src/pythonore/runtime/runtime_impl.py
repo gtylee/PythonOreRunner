@@ -362,16 +362,15 @@ class PythonLgmAdapter:
             return False
         if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1:
             return False
-        # The torch path only supports plain vanilla fixed/floating coupons.
-        # Overnight-indexed coupons, cap/floor features and naked-option legs
-        # need the generic coupon builder so we preserve the ORE conventions
-        # around stripping, lookback, and rate-cutoff handling.
+        # The torch path supports plain vanilla fixed/floating coupons, including
+        # basis swaps whose floating legs resolve to exact index curves. We still
+        # keep the generic builder for overnight-indexed coupons, cap/floor
+        # features, naked-option legs, and other conventions that need ORE's
+        # stripping, lookback, or rate-cutoff handling.
         for leg in rate_legs:
             if str(leg.get("kind", "")).upper() != "FLOATING":
                 continue
-            index_text = str(leg.get("index_name", "")).upper()
-            if any(tag in index_text for tag in ("BMA", "SIFMA", "BASIS")):
-                return False
+            schedule_rule = str(leg.get("schedule_rule", "FORWARD")).upper()
             if bool(leg.get("overnight_indexed", False)):
                 return False
             if any(
@@ -382,6 +381,8 @@ class PythonLgmAdapter:
             if int(leg.get("lookback_days", 0) or 0) != 0:
                 return False
             if int(leg.get("rate_cutoff", 0) or 0) != 0:
+                return False
+            if any(tag in str(leg.get("index_name", "")).upper() for tag in ("BMA", "SIFMA", "BASIS")) and schedule_rule != "FORWARD":
                 return False
         return all(
             str(leg.get("kind", "")).upper() in {"FIXED", "FLOATING"}
@@ -1412,7 +1413,6 @@ class PythonLgmAdapter:
             id(mapped.xml_buffers.get("portfolio.xml", "")),
             id(mapped.xml_buffers.get("simulation.xml", "")),
             snapshot.config.base_currency.upper(),
-            str(snapshot.config.params.get("python.use_flows_csv", "")).strip().lower(),
         )
         cached = self._portfolio_classification_cache.get(cache_key)
         if cached is not None:
@@ -1585,7 +1585,6 @@ class PythonLgmAdapter:
             id(snapshot.portfolio.trades),
             id(snapshot.fixings.points),
             id(portfolio_xml) if portfolio_xml else 0,
-            str(snapshot.config.params.get("python.use_flows_csv", "")).strip().lower(),
         )
 
     def _clone_cached_trade_state(
@@ -1614,7 +1613,6 @@ class PythonLgmAdapter:
             self._normalized_asof(snapshot),
             id(snapshot.fixings.points),
             snapshot.config.base_currency.upper(),
-            str(snapshot.config.params.get("python.use_flows_csv", "")).strip().lower(),
         )
 
     def _portfolio_root_from_xml(self, portfolio_xml: str) -> ET.Element:
@@ -3087,71 +3085,6 @@ class PythonLgmAdapter:
         cached_legs = self._irs_leg_cache.get(cache_key)
         if cached_legs is not None:
             return cached_legs
-        use_flows_csv = self._use_flows_csv_legs(snapshot)
-        if portfolio_xml and not use_flows_csv:
-            asof = self._normalized_asof(snapshot)
-            try:
-                legs = self._irs_utils.load_swap_legs_from_portfolio_root(
-                    self._portfolio_root_from_xml(portfolio_xml),
-                    trade.trade_id,
-                    asof,
-                )
-                sim_xml = mapped.xml_buffers.get("simulation.xml")
-                if sim_xml:
-                    try:
-                        legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
-                    except Exception:
-                        pass
-                self._augment_irs_overnight_metadata_from_portfolio_xml(legs, portfolio_xml, trade.trade_id)
-                result = self._apply_historical_fixings_to_legs(snapshot, trade, legs)
-                self._irs_leg_cache[cache_key] = result
-                return result
-            except Exception as exc:
-                import warnings as _warnings
-                _warnings.warn(
-                    f"Failed to load legs from portfolio.xml for trade {trade.trade_id}: {exc}",
-                    UserWarning,
-                    stacklevel=2,
-                )
-        ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
-        if use_flows_csv and ore_path_txt:
-            try:
-                ore_path = Path(ore_path_txt).resolve()
-                output_dir = (ore_path.parent.parent / snapshot.config.params.get("outputPath", "Output")).resolve()
-                flows_csv = output_dir / "flows.csv"
-                if flows_csv.exists():
-                    asof = self._normalized_asof(snapshot)
-                    model_day_counter = "A365F"
-                    sim_xml = mapped.xml_buffers.get("simulation.xml")
-                    if sim_xml:
-                        model_day_counter = self._day_counter_from_sim_xml(sim_xml)
-                    legs = self._irs_utils.load_ore_legs_from_flows(
-                        str(flows_csv),
-                        trade_id=trade.trade_id,
-                        asof_date=asof,
-                        time_day_counter=model_day_counter,
-                    )
-                    if sim_xml:
-                        try:
-                            legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
-                        except Exception:
-                            pass
-                    idx = str(trade.additional_fields.get("index", "")).upper()
-                    if idx:
-                        legs.setdefault("float_index", idx)
-                        if "float_index_tenor" not in legs or not str(legs.get("float_index_tenor", "")).strip():
-                            legs["float_index_tenor"] = idx.split("-")[-1].upper() if "-" in idx else ""
-                    self._augment_irs_overnight_metadata_from_portfolio_xml(legs, portfolio_xml, trade.trade_id)
-                    result = self._apply_historical_fixings_to_legs(snapshot, trade, legs)
-                    self._irs_leg_cache[cache_key] = result
-                    return result
-            except Exception as exc:
-                import warnings as _warnings
-                _warnings.warn(
-                    f"Failed to load legs from flows.csv for trade {trade.trade_id}: {exc}",
-                    UserWarning,
-                    stacklevel=2,
-                )
         if portfolio_xml:
             asof = self._normalized_asof(snapshot)
             try:
@@ -3236,14 +3169,6 @@ class PythonLgmAdapter:
         else:
             legs["float_gearing"] = np.full_like(np.asarray(legs.get("float_accrual", []), dtype=float), gearing)
 
-    def _use_flows_csv_legs(self, snapshot: XVASnapshot) -> bool:
-        params = dict(snapshot.config.params or {})
-        source = str(params.get("python.irs_leg_source", "")).strip().lower()
-        if source in {"flows", "flows_csv", "ore_flows"}:
-            return True
-        flag = str(params.get("python.use_flows_csv", "")).strip().lower()
-        return flag in {"y", "yes", "true", "1"}
-
     def _parse_generic_cashflow_schedule(
         self,
         cashflow_node: ET.Element,
@@ -3320,27 +3245,6 @@ class PythonLgmAdapter:
         leg_nodes = swap.findall("./LegData")
         if not leg_nodes:
             return None
-
-        if self._use_flows_csv_legs(snapshot):
-            ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
-            if ore_path_txt:
-                ore_path = Path(ore_path_txt).resolve()
-                output_dir = (ore_path.parent.parent / snapshot.config.params.get("outputPath", "Output")).resolve()
-                flows_csv = output_dir / "flows.csv"
-                if flows_csv.exists():
-                    try:
-                        sim_xml = snapshot.config.xml_buffers.get("simulation.xml", "")
-                        model_day_counter = self._day_counter_from_sim_xml(sim_xml) if sim_xml else "A365F"
-                        cashflow_state = self._irs_utils.load_trade_cashflows_from_flows(
-                            str(flows_csv),
-                            trade_id=trade.trade_id,
-                            asof_date=self._normalized_asof(snapshot),
-                            time_day_counter=model_day_counter,
-                        )
-                        if cashflow_state.get("rate_legs"):
-                            return cashflow_state
-                    except Exception:
-                        pass
 
         asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
         parse_date = self._irs_utils._parse_yyyymmdd
@@ -3451,6 +3355,7 @@ class PythonLgmAdapter:
                 if fld is None:
                     return None
                 index_name = (fld.findtext("./Index") or "").strip().upper()
+                schedule_rule = (rules.findtext("./Rule") or "Forward").strip().upper() if rules is not None else "FORWARD"
                 spread = float((fld.findtext("./Spreads/Spread") or "0").strip() or 0.0)
                 gearing = float((fld.findtext("./Gearings/Gearing") or "1").strip() or 1.0)
                 cap_txt = (fld.findtext("./Caps/Cap") or "").strip()
@@ -3480,6 +3385,7 @@ class PythonLgmAdapter:
                     # path does not implement them for ibor-style coupons.
                     return None
                 leg_info["index_name"] = index_name
+                leg_info["schedule_rule"] = schedule_rule
                 leg_info["spread"] = np.full_like(accr, spread)
                 leg_info["gearing"] = np.full_like(accr, gearing)
                 leg_info["cap"] = float(cap_txt) if cap_txt else None
@@ -3793,6 +3699,7 @@ class PythonLgmAdapter:
         style = (trade_root.findtext("./SwaptionData/OptionData/Style") or "").strip().lower()
         if style not in {"european", "bermudan"}:
             return None
+        premium_records = lgm_inputs._parse_swaption_premium_records(trade_root)
         asof = self._normalized_asof(snapshot)
         fake_root = ET.fromstring(f"<Portfolio>{ET.tostring(trade_root, encoding='unicode')}</Portfolio>")
         try:
@@ -3829,6 +3736,7 @@ class PythonLgmAdapter:
         long_short = (trade_root.findtext("./SwaptionData/OptionData/LongShort") or "Long").strip().lower()
         option_type = (trade_root.findtext("./SwaptionData/OptionData/OptionType") or "Call").strip().lower()
         exercise_sign = 1.0 if option_type == "call" else -1.0
+        premium_sign = 1.0 if long_short != "short" else -1.0
         if long_short == "short":
             exercise_sign *= -1.0
         bermudan = self._ir_options_mod.BermudanSwaptionDef(
@@ -3846,6 +3754,9 @@ class PythonLgmAdapter:
             "underlying_legs": underlying_legs,
             "index_name": float_index,
             "style": style,
+            "premium_records": premium_records,
+            "premium_sign": premium_sign,
+            "long_short": long_short,
         }
         self._generic_swaption_state_cache[cache_key] = result
         self._generic_swaption_state_xml_cache[xml_cache_key] = result
@@ -4496,12 +4407,66 @@ class PythonLgmAdapter:
         )
         return vals, False
 
+    def _price_swaption_premium_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> np.ndarray | None:
+        if spec.sticky_state is None:
+            return None
+        premium_records = tuple(spec.sticky_state.get("premium_records", ()))
+        if not premium_records:
+            return None
+        report_ccy = str(ctx.inputs.model_ccy or spec.ccy).upper()
+        asof_date = self._irs_utils._parse_yyyymmdd(ctx.inputs.asof)
+        premium_vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        for i, t in enumerate(ctx.inputs.times):
+            pv = np.zeros((ctx.n_paths,), dtype=float)
+            for record in premium_records:
+                pay_date_text = str(record.get("pay_date") or "").strip()
+                if not pay_date_text:
+                    continue
+                try:
+                    pay_date = self._irs_utils._parse_yyyymmdd(pay_date_text)
+                except Exception:
+                    continue
+                pay_time = float(self._irs_utils._time_from_dates(asof_date, pay_date, "A365F"))
+                if pay_time <= float(t) + 1.0e-12:
+                    continue
+                premium_ccy = str(record.get("currency") or spec.ccy).strip().upper() or spec.ccy
+                p_disc = ctx.inputs.discount_curves.get(premium_ccy) or ctx.inputs.discount_curves.get(spec.ccy)
+                if p_disc is None:
+                    return None
+                if ctx.shared_fx_sim is not None and premium_ccy in ctx.shared_fx_sim.sim.get("x", {}):
+                    local_x_t = np.asarray(ctx.shared_fx_sim.sim["x"][premium_ccy][i, :], dtype=float)
+                elif premium_ccy == report_ccy or premium_ccy == spec.ccy:
+                    local_x_t = ctx.x_paths[i, :]
+                else:
+                    local_x_t = ctx.x_paths[i, :]
+                p_t = float(p_disc(float(t)))
+                p_T = float(p_disc(pay_time))
+                disc = ctx.model.discount_bond_paths(
+                    float(t),
+                    np.asarray([pay_time], dtype=float),
+                    local_x_t,
+                    p_t,
+                    np.asarray([p_T], dtype=float),
+                )[0]
+                local_pv = float(record.get("amount", 0.0)) * np.asarray(disc, dtype=float)
+                pv += self._convert_amount_to_reporting_ccy(
+                    local_pv,
+                    local_ccy=premium_ccy,
+                    report_ccy=report_ccy,
+                    inputs=ctx.inputs,
+                    shared_fx_sim=ctx.shared_fx_sim,
+                    time_index=i,
+                )
+            premium_vals[i, :] = pv
+        return premium_vals
+
     def _price_trade_swaption_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
         if spec.sticky_state is None:
             return None, False
         definition = spec.sticky_state.get("definition")
         if definition is None:
             return None, False
+        premium_sign = float(spec.sticky_state.get("premium_sign", 1.0))
         p_disc = ctx.inputs.discount_curves[spec.ccy]
         float_index = str(spec.sticky_state.get("index_name", ""))
         p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, float_index)
@@ -4568,6 +4533,9 @@ class PythonLgmAdapter:
                 x_paths=ctx.x_paths,
                 signed_swap=float(definition.exercise_sign) * np.asarray(signed_swap, dtype=float),
             )
+            premium_vals = self._price_swaption_premium_paths(spec, ctx)
+            if premium_vals is not None:
+                vals = vals - premium_sign * premium_vals
             return vals, False
         vals = self._ir_options_mod.bermudan_npv_paths(
             model=ctx.model,
@@ -4577,6 +4545,9 @@ class PythonLgmAdapter:
             times=ctx.inputs.times,
             x_paths=ctx.x_paths,
         )
+        premium_vals = self._price_swaption_premium_paths(spec, ctx)
+        if premium_vals is not None:
+            vals = vals - premium_sign * premium_vals
         return vals, False
 
     def _price_trade_cashflow_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
@@ -5632,11 +5603,18 @@ class PythonLgmAdapter:
                             start_date = self._irs_utils._parse_yyyymmdd(self._date_from_time_cached(snapshot, float(start[j]))) if snapshot is not None else asof_dt
                             fix_date = self._irs_utils._advance_business_days(start_date, -fx_fixing_days, str(leg.get("calendar", leg_ccy)))
                             key = (fx_index, fix_date.isoformat())
-                            if fix_date <= asof_dt and key in fixings:
+                            if key in fixings:
                                 fx_value = float(fixings[key])
                                 if inverted:
                                     fx_value = 1.0 / max(fx_value, 1.0e-12)
                                 coupon_notionals[j, :] = foreign_amount * fx_value
+                                continue
+                            if fix_date <= asof_dt and fx_paths is None:
+                                pair6 = f"{foreign_ccy}{leg_ccy}"
+                                fx_value = _spot_from_quotes(pair6, inputs, default=1.0)
+                                if inverted:
+                                    fx_value = 1.0 / max(float(fx_value), 1.0e-12)
+                                coupon_notionals[j, :] = foreign_amount * float(fx_value)
                             else:
                                 if fx_paths is not None:
                                     fix_t = float(self._irs_utils._time_from_dates(asof_dt, fix_date, "A365F"))

@@ -602,6 +602,114 @@ class TestIrsXvaUtils(unittest.TestCase):
         np.testing.assert_allclose(legs["fixed_notional"], np.array([1_000_000.0, 900_000.0]))
         np.testing.assert_allclose(legs["float_notional"], np.array([1_000_000.0, 900_000.0]))
 
+    def test_load_swap_legs_from_portfolio_root_allows_float_float_swaps(self):
+        root = ET.fromstring(
+            """
+            <Portfolio>
+              <Trade id="FLOAT_FLOAT">
+                <TradeType>Swap</TradeType>
+                <SwapData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>true</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                    </Notionals>
+                    <DayCounter>ACT/360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FloatingLegData>
+                      <Index>USD-LIBOR-3M</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>0.001</Spread></Spreads>
+                    </FloatingLegData>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2024-01-02</Date>
+                          <Date>2024-04-02</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                  </LegData>
+                  <LegData>
+                    <LegType>Floating</LegType>
+                    <Payer>false</Payer>
+                    <Currency>USD</Currency>
+                    <Notionals>
+                      <Notional>1000000</Notional>
+                    </Notionals>
+                    <DayCounter>ACT/360</DayCounter>
+                    <PaymentConvention>MF</PaymentConvention>
+                    <FloatingLegData>
+                      <Index>USD-LIBOR-3M</Index>
+                      <FixingDays>2</FixingDays>
+                      <Spreads><Spread>-0.0005</Spread></Spreads>
+                    </FloatingLegData>
+                    <ScheduleData>
+                      <Dates>
+                        <Dates>
+                          <Date>2024-01-02</Date>
+                          <Date>2024-04-02</Date>
+                        </Dates>
+                      </Dates>
+                    </ScheduleData>
+                  </LegData>
+                </SwapData>
+              </Trade>
+            </Portfolio>
+            """
+        )
+
+        legs = load_swap_legs_from_portfolio_root(root, "FLOAT_FLOAT", "2023-12-29")
+
+        self.assertEqual(np.asarray(legs["fixed_pay_time"], dtype=float).size, 0)
+        self.assertEqual(np.asarray(legs["fixed_amount"], dtype=float).size, 0)
+        self.assertEqual(np.asarray(legs["float_pay_time"], dtype=float).size, 2)
+        np.testing.assert_allclose(np.asarray(legs["float_sign"], dtype=float), np.array([-1.0, 1.0]))
+        self.assertTrue(np.all(np.isfinite(np.asarray(legs["float_fixing_time"], dtype=float))))
+
+    def test_build_schedule_backward_with_first_date_advances_past_stub(self):
+        from pythonore.compute.irs_xva_utils import _build_schedule
+
+        starts, ends, pays = _build_schedule(
+            date(2024, 1, 2),
+            date(2024, 7, 2),
+            "3M",
+            "TARGET",
+            "F",
+            rule="Backward",
+            first_date=date(2024, 2, 15),
+        )
+
+        self.assertGreaterEqual(len(starts), 2)
+        self.assertEqual(starts[0], date(2024, 1, 2))
+        self.assertEqual(ends[-1], date(2024, 7, 2))
+        self.assertIn(date(2024, 2, 15), list(starts))
+        self.assertIn(date(2024, 2, 15), list(ends))
+        self.assertEqual(len(starts), len(ends))
+        self.assertEqual(len(ends), len(pays))
+
+    def test_build_schedule_forward_with_last_date_advances_past_stub(self):
+        from pythonore.compute.irs_xva_utils import _build_schedule
+
+        starts, ends, pays = _build_schedule(
+            date(2024, 1, 2),
+            date(2024, 7, 2),
+            "3M",
+            "TARGET",
+            "F",
+            rule="Forward",
+            last_date=date(2024, 5, 15),
+        )
+
+        self.assertGreaterEqual(len(starts), 2)
+        self.assertEqual(starts[0], date(2024, 1, 2))
+        self.assertEqual(ends[-1], date(2024, 7, 2))
+        self.assertIn(date(2024, 5, 15), list(ends))
+        self.assertEqual(len(starts), len(ends))
+        self.assertEqual(len(ends), len(pays))
+
     def test_load_ore_discount_pairs_by_columns_is_case_insensitive_and_supports_ester_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             curves_csv = f"{tmp}/curves.csv"
