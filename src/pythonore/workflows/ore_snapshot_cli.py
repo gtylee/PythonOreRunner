@@ -604,6 +604,15 @@ def _ore_ok(label: str) -> None:
     _ore_status(label, "OK")
 
 
+def _preview_list(values: Iterable[Any], *, limit: int = 6) -> str:
+    items = [str(value) for value in values if str(value)]
+    if not items:
+        return ""
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f", ... (+{len(items) - limit} more)"
+
+
 def _ore_requested_analytics(modes: ModeSelection) -> str:
     analytics: list[str] = []
     if modes.price:
@@ -623,7 +632,7 @@ def _build_minimal_pricing_payload(
     ore_xml: Path,
     *,
     anchor_t0_npv: bool,
-    use_reference_artifacts: bool = True,
+    use_reference_artifacts: bool = False,
 ) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
@@ -1022,8 +1031,7 @@ def _build_minimal_pricing_payload(
 
 
 def _load_market_quote_value(market_data_path: Path, asof_date: str, quote_id: str) -> float:
-    asof_compact = asof_date.replace("-", "")
-    asof_dash = asof_date
+    asof_tokens = _market_data_date_tokens(asof_date)
     with open(market_data_path, encoding="utf-8") as handle:
         for line in handle:
             txt = line.strip()
@@ -1032,11 +1040,22 @@ def _load_market_quote_value(market_data_path: Path, asof_date: str, quote_id: s
             parts = txt.split()
             if len(parts) < 3:
                 continue
-            if parts[0] not in {asof_compact, asof_dash}:
+            if parts[0] not in asof_tokens:
                 continue
             if parts[1] == quote_id:
                 return float(parts[2])
     raise ValueError(f"Quote '{quote_id}' not found for asof date {asof_date} in {market_data_path}")
+
+
+def _market_data_date_tokens(asof_date: str) -> set[str]:
+    raw = str(asof_date).strip()
+    if not raw:
+        return {raw}
+    if len(raw) == 8 and raw.isdigit():
+        return {raw, f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"}
+    if "-" in raw:
+        return {raw, raw.replace("-", "")}
+    return {raw}
 
 
 def _normal_cdf(x: float) -> float:
@@ -1068,8 +1087,7 @@ def _load_fx_atm_vol(
     quote_ccy: str,
     maturity_time: float,
 ) -> float:
-    asof_compact = asof_date.replace("-", "")
-    asof_dash = asof_date
+    asof_tokens = _market_data_date_tokens(asof_date)
     prefix = f"FX_OPTION/RATE_LNVOL/{base_ccy}/{quote_ccy}/"
     points: list[tuple[float, float]] = []
     with open(market_data_path, encoding="utf-8") as handle:
@@ -1078,7 +1096,7 @@ def _load_fx_atm_vol(
             if not txt or txt.startswith("#"):
                 continue
             parts = txt.split()
-            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+            if len(parts) < 3 or parts[0] not in asof_tokens:
                 continue
             quote_id = parts[1]
             if not quote_id.startswith(prefix) or not quote_id.endswith("/ATM"):
@@ -1186,8 +1204,7 @@ def _interp_total_variance(points: list[tuple[float, float]], target: float) -> 
 
 
 def _parse_market_quotes(market_data_path: Path, asof_date: str) -> dict[str, float]:
-    asof_compact = asof_date.replace("-", "")
-    asof_dash = asof_date
+    asof_tokens = _market_data_date_tokens(asof_date)
     quotes: dict[str, float] = {}
     with open(market_data_path, encoding="utf-8") as handle:
         for line in handle:
@@ -1199,7 +1216,7 @@ def _parse_market_quotes(market_data_path: Path, asof_date: str) -> dict[str, fl
                 rows.append([part.strip() for part in txt.split(",")])
             rows.append(txt.split())
             for parts in rows:
-                if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+                if len(parts) < 3 or parts[0] not in asof_tokens:
                     continue
                 try:
                     quotes[parts[1]] = float(parts[2])
@@ -1469,7 +1486,7 @@ def _black_forward_option_npv(*, forward: float, strike: float, maturity_time: f
     return float(discount) * (float(strike) * _normal_cdf(-d2) - float(forward) * _normal_cdf(-d1))
 
 
-def _build_equity_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
+def _build_equity_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -1854,14 +1871,13 @@ def _load_swaption_quotes(
     volatility_type: str,
 ) -> np.ndarray:
     quote_kind = "RATE_NVOL" if str(volatility_type).strip().lower() == "normal" else "RATE_LNVOL"
-    asof_compact = asof_date.replace("-", "")
-    asof_dash = asof_date
+    asof_tokens = _market_data_date_tokens(asof_date)
     prefix = f"SWAPTION/{quote_kind}/{currency}/"
     quotes: dict[tuple[str, str], float] = {}
     with open(market_data_path, encoding="utf-8") as handle:
         for line in handle:
             parts = line.strip().split()
-            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+            if len(parts) < 3 or parts[0] not in asof_tokens:
                 continue
             key = parts[1]
             if not key.startswith(prefix):
@@ -2075,7 +2091,7 @@ def _build_capfloor_defs_from_portfolio(
     return defs
 
 
-def _build_fx_forward_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
+def _build_fx_forward_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -2305,16 +2321,26 @@ def _load_xva_reference_row(xva_csv: Path, *, trade_id: str, netting_set_id: str
     return ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=str(netting_set_id)), False
 
 
-def _load_portfolio_npv_summary(npv_csv: Path, netting_set_id: str) -> dict[str, float]:
+def _load_portfolio_npv_summary(
+    npv_csv: Path,
+    netting_set_ids: Sequence[str] | str | None,
+) -> dict[str, float]:
     with open(npv_csv, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        ns_filter: set[str] | None
+        if netting_set_ids is None:
+            ns_filter = None
+        elif isinstance(netting_set_ids, str):
+            ns_filter = {netting_set_ids}
+        else:
+            ns_filter = {str(ns).strip() for ns in netting_set_ids if str(ns).strip()}
         total = 0.0
         maturity_time = 0.0
         maturity_date = ""
         matched = False
         for row in reader:
-            if (row.get("NettingSet", "") or "").strip() != str(netting_set_id):
+            if ns_filter is not None and (row.get("NettingSet", "") or "").strip() not in ns_filter:
                 continue
             if (row.get(tid_key, "") or "").strip() == "":
                 continue
@@ -2328,12 +2354,43 @@ def _load_portfolio_npv_summary(npv_csv: Path, netting_set_id: str) -> dict[str,
                 maturity_time = row_maturity_time
                 maturity_date = str(row.get("Maturity") or "").strip()
         if not matched:
-            raise ValueError(f"portfolio NPV row not found for netting set '{netting_set_id}' in {npv_csv}")
+            raise ValueError(f"portfolio NPV row not found for netting set(s) '{netting_set_ids}' in {npv_csv}")
         return {
             "npv": float(total),
             "maturity_date": maturity_date,
             "maturity_time": float(maturity_time),
         }
+
+
+def _load_portfolio_xva_summary(
+    xva_csv: Path,
+    netting_set_ids: Sequence[str] | str | None,
+) -> dict[str, float]:
+    with open(xva_csv, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        tid_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+        ns_filter: set[str] | None
+        if netting_set_ids is None:
+            ns_filter = None
+        elif isinstance(netting_set_ids, str):
+            ns_filter = {netting_set_ids}
+        else:
+            ns_filter = {str(ns).strip() for ns in netting_set_ids if str(ns).strip()}
+        totals = {"cva": 0.0, "dva": 0.0, "fba": 0.0, "fca": 0.0, "basel_epe": 0.0, "basel_eepe": 0.0}
+        matched = False
+        for row in reader:
+            if (row.get(tid_key, "") or "").strip() != "":
+                continue
+            ns = (row.get("NettingSetId", "") or "").strip()
+            if ns_filter is not None and ns not in ns_filter:
+                continue
+            metrics = ore_snapshot_mod._xva_row_to_metrics(row)
+            for key in totals:
+                totals[key] += float(metrics.get(key, 0.0))
+            matched = True
+        if not matched:
+            raise ValueError(f"portfolio XVA aggregate row not found for netting set(s) '{netting_set_ids}' in {xva_csv}")
+        return totals
 
 
 def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: str) -> tuple[float, float]:
@@ -2362,7 +2419,7 @@ def _load_hybrid_corr_from_simulation(simulation_xml: Path, base: str, quote: st
     return float(corr_dom_fx), float(corr_for_fx)
 
 
-def _build_fx_option_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
+def _build_fx_option_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -2732,7 +2789,7 @@ def _build_reference_discount_and_forward_curves(
     )
 
 
-def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
+def _build_swaption_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
     if ql is None:
         raise ImportError("QuantLib Python bindings are required for swaption price-only support")
     ore_xml_path = ore_xml.resolve()
@@ -3005,8 +3062,7 @@ def _lookup_swaption_market_vol(
     strike_spread: float = 0.0,
 ) -> float:
     quote_kind = "SWAPTION/RATE_NVOL" if str(volatility_type).lower() == "normal" else "SWAPTION/RATE_LNVOL"
-    asof_compact = str(asof_date).replace("-", "")
-    asof_dash = str(asof_date)
+    asof_tokens = _market_data_date_tokens(asof_date)
     target_e = float(ql.Actual365Fixed().yearFraction(ql.Settings.instance().evaluationDate, exercise_date))
     target_t = float(ql.Actual365Fixed().yearFraction(exercise_date, maturity_date))
     want_smile = str(dimension).strip().lower() == "smile"
@@ -3020,7 +3076,7 @@ def _lookup_swaption_market_vol(
             if not s or s.startswith("#"):
                 continue
             parts = s.split()
-            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+            if len(parts) < 3 or parts[0] not in asof_tokens:
                 continue
             key = parts[1].strip().upper()
             if not key.startswith(f"{quote_kind}/{currency.upper()}/"):
@@ -3240,7 +3296,7 @@ def _first_trade_id_from_portfolio(portfolio_xml: Path) -> str:
     return ore_snapshot_mod._get_first_trade_id(root)
 
 
-def _build_capfloor_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = True) -> dict[str, Any]:
+def _build_capfloor_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {n.attrib.get("name", ""): (n.text or "").strip() for n in ore_root.findall("./Setup/Parameter")}
@@ -4021,26 +4077,108 @@ def _portfolio_trade_context(ore_xml: Path) -> tuple[ET.Element, list[str], str,
             netting_sets.add(ns)
     if not trade_ids:
         raise ValueError(f"portfolio {portfolio_xml} contains trades without ids")
-    if len(counterparties) > 1:
-        raise ValueError(
-            f"portfolio CVA currently expects a single counterparty; found {sorted(counterparties)} in {portfolio_xml}"
-        )
-    if len(netting_sets) > 1:
-        raise ValueError(
-            f"portfolio CVA currently expects a single netting set; found {sorted(netting_sets)} in {portfolio_xml}"
-        )
     counterparty = next(iter(counterparties), "")
     netting_set_id = next(iter(netting_sets), "")
     return portfolio_root, trade_ids, counterparty, netting_set_id
 
 
+def _portfolio_trade_summary(ore_xml: Path) -> dict[str, Any]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        raise FileNotFoundError(f"portfolio xml not found: {portfolio_xml}")
+    portfolio_root = ET.parse(portfolio_xml).getroot()
+    trades = list(portfolio_root.findall("./Trade"))
+    if not trades:
+        raise ValueError(f"no Trade nodes found in {portfolio_xml}")
+    trade_rows: list[dict[str, str]] = []
+    trade_ids: list[str] = []
+    trade_types: list[str] = []
+    counterparties: list[str] = []
+    netting_sets: list[str] = []
+    trade_ids_by_netting_set: dict[str, list[str]] = {}
+    trade_ids_by_counterparty: dict[str, list[str]] = {}
+    for trade in trades:
+        trade_id = (trade.attrib.get("id", "") or "").strip()
+        trade_type = (trade.findtext("./TradeType") or "").strip()
+        counterparty = (trade.findtext("./Envelope/CounterParty") or "").strip()
+        netting_set_id = (trade.findtext("./Envelope/NettingSetId") or "").strip()
+        trade_rows.append(
+            {
+                "trade_id": trade_id,
+                "trade_type": trade_type,
+                "counterparty": counterparty,
+                "netting_set_id": netting_set_id,
+            }
+        )
+        if trade_id:
+            trade_ids.append(trade_id)
+        if trade_type:
+            trade_types.append(trade_type)
+        if counterparty:
+            counterparties.append(counterparty)
+            trade_ids_by_counterparty.setdefault(counterparty, []).append(trade_id)
+        if netting_set_id:
+            netting_sets.append(netting_set_id)
+            trade_ids_by_netting_set.setdefault(netting_set_id, []).append(trade_id)
+    return {
+        "portfolio_xml": str(portfolio_xml),
+        "trade_count": len(trade_rows),
+        "trade_ids": trade_ids,
+        "trade_types": trade_types,
+        "counterparties": sorted(set(counterparties)),
+        "netting_sets": sorted(set(netting_sets)),
+        "trade_rows": trade_rows,
+        "trade_ids_by_netting_set": {key: value for key, value in sorted(trade_ids_by_netting_set.items())},
+        "trade_ids_by_counterparty": {key: value for key, value in sorted(trade_ids_by_counterparty.items())},
+        "netting_set_count": len(set(netting_sets)),
+        "counterparty_count": len(set(counterparties)),
+    }
+
+
+def _combine_exposure_profiles_by_netting_set(profiles: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: list[dict[str, Any]] = []
+    for profile in profiles.values():
+        if isinstance(profile, dict) and profile:
+            normalized.append(dict(profile))
+    if not normalized:
+        return {}
+    first = normalized[0]
+    combined = dict(first)
+    combined["entity_id"] = "PORTFOLIO"
+    numeric_keys = (
+        "closeout_epe",
+        "closeout_ene",
+        "pfe",
+        "basel_ee",
+        "basel_eee",
+        "time_weighted_basel_epe",
+        "time_weighted_basel_eepe",
+        "expected_collateral",
+        "valuation_epe",
+        "valuation_ene",
+    )
+    for key in numeric_keys:
+        arrays = [np.asarray(profile.get(key, []), dtype=float) for profile in normalized if profile.get(key) is not None]
+        if not arrays:
+            continue
+        base_shape = arrays[0].shape
+        if any(arr.shape != base_shape for arr in arrays[1:]):
+            raise ValueError(f"portfolio exposure profile arrays for '{key}' do not align across netting sets")
+        combined[key] = np.sum(np.vstack(arrays), axis=0).tolist()
+    combined["basel_epe"] = float(sum(float(profile.get("basel_epe", 0.0) or 0.0) for profile in normalized))
+    combined["basel_eepe"] = float(sum(float(profile.get("basel_eepe", 0.0) or 0.0) for profile in normalized))
+    return combined
+
+
 def _portfolio_contains_swap_like_trade(ore_xml: Path) -> bool:
     try:
-        portfolio_root, trade_ids, _, _ = _portfolio_trade_context(ore_xml)
+        portfolio_summary = _portfolio_trade_summary(ore_xml)
     except Exception:
         return False
-    if len(trade_ids) <= 1:
+    if int(portfolio_summary.get("trade_count", 0)) <= 1:
         return False
+    portfolio_xml = Path(portfolio_summary["portfolio_xml"])
+    portfolio_root = ET.parse(portfolio_xml).getroot()
     for trade in portfolio_root.findall("./Trade"):
         trade_type = (trade.findtext("./TradeType") or "").strip()
         if trade_type in {"Swap", "RateSwap"}:
@@ -4053,7 +4191,7 @@ def _compute_price_only_case(
     *,
     anchor_t0_npv: bool,
     trade_id_override: str | None = None,
-    use_reference_artifacts: bool = True,
+    use_reference_artifacts: bool = False,
 ) -> dict[str, Any]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
@@ -4738,7 +4876,7 @@ def _compute_fx_option_snapshot_case(
 ) -> SnapshotComputation:
     _ = anchor_t0_npv
     _ = xva_mode
-    payload = _build_fx_option_pricing_payload(ore_xml)
+    payload = _build_fx_option_pricing_payload(ore_xml, use_reference_artifacts=True)
     ore_root = ET.parse(ore_xml).getroot()
     setup_params = {
         n.attrib.get("name", ""): (n.text or "").strip()
@@ -5037,7 +5175,7 @@ def _compute_capfloor_snapshot_case(
 ) -> SnapshotComputation:
     _ = anchor_t0_npv
     _ = xva_mode
-    payload = _build_capfloor_pricing_payload(ore_xml)
+    payload = _build_capfloor_pricing_payload(ore_xml, use_reference_artifacts=True)
     ore_root = ET.parse(ore_xml).getroot()
     xva_analytic = ore_root.find("./Analytics/Analytic[@type='xva']")
     xva_params = {
@@ -5992,6 +6130,9 @@ def _compute_portfolio_xva_case(
 ) -> SnapshotComputation:
     ore_xml_path = ore_xml.resolve()
     portfolio_root, trade_ids, counterparty, netting_set_id = _portfolio_trade_context(ore_xml_path)
+    portfolio_summary = _portfolio_trade_summary(ore_xml_path)
+    netting_set_ids = list(portfolio_summary.get("netting_sets", []))
+    counterparties = list(portfolio_summary.get("counterparties", []))
     input_dir = _resolve_case_input_dir(ore_xml_path)
     snapshot = XVALoader.from_files(str(input_dir), ore_file=ore_xml_path.name)
     effective_paths = int(paths) if paths is not None else int(getattr(snapshot.config, "num_paths", 500) or 500)
@@ -6013,20 +6154,24 @@ def _compute_portfolio_xva_case(
     )
     engine = XVAEngine.python_lgm_default(fallback_to_swig=True)
     result = engine.create_session(snapshot).run(return_cubes=True)
-    trade_profile = dict(result.exposure_profiles_by_netting_set.get(netting_set_id) or {})
-    if not trade_profile:
-        raise ValueError(f"portfolio netting set '{netting_set_id}' not found in runtime result")
-    trade_profile = dict(trade_profile)
-    trade_profile.setdefault("entity_id", "PORTFOLIO")
-    exposure_dates = [str(x) for x in trade_profile.get("dates", [])]
-    exposure_times = [float(x) for x in trade_profile.get("times", [])]
-    py_epe = [float(x) for x in trade_profile.get("closeout_epe", [])]
-    py_ene = [float(x) for x in trade_profile.get("closeout_ene", [])]
-    py_pfe = [float(x) for x in trade_profile.get("pfe", [])]
+    netting_profiles = {
+        ns: dict(result.exposure_profiles_by_netting_set.get(ns) or {})
+        for ns in netting_set_ids
+        if dict(result.exposure_profiles_by_netting_set.get(ns) or {})
+    }
+    if not netting_profiles:
+        raise ValueError(f"portfolio netting set(s) '{netting_set_ids}' not found in runtime result")
+    portfolio_profile = _combine_exposure_profiles_by_netting_set(netting_profiles)
+    portfolio_profile.setdefault("entity_id", "PORTFOLIO")
+    exposure_dates = [str(x) for x in portfolio_profile.get("dates", [])]
+    exposure_times = [float(x) for x in portfolio_profile.get("times", [])]
+    py_epe = [float(x) for x in portfolio_profile.get("closeout_epe", [])]
+    py_ene = [float(x) for x in portfolio_profile.get("closeout_ene", [])]
+    py_pfe = [float(x) for x in portfolio_profile.get("pfe", [])]
     npv_csv = _find_reference_output_file(ore_xml, "npv.csv")
     xva_csv = _find_reference_output_file(ore_xml, "xva.csv")
-    ore_npv = _load_portfolio_npv_summary(npv_csv, netting_set_id) if npv_csv is not None else None
-    ore_xva = ore_snapshot_mod._load_ore_xva_aggregate(xva_csv, cpty_or_netting=netting_set_id) if xva_csv is not None else None
+    ore_npv = _load_portfolio_npv_summary(npv_csv, None) if npv_csv is not None else None
+    ore_xva = _load_portfolio_xva_summary(xva_csv, None) if xva_csv is not None else None
     pricing = {
         "trade_type": "Portfolio",
         "py_t0_npv": float(result.pv_total),
@@ -6036,6 +6181,7 @@ def _compute_portfolio_xva_case(
         "currency": str(snapshot.config.base_currency).upper(),
         "leg_source": "portfolio",
         "portfolio_trade_count": len(trade_ids),
+        "portfolio_netting_set_count": len(netting_set_ids),
     }
     xva_summary = {
         "ore_cva": float((ore_xva or {}).get("cva", result.xva_by_metric.get("CVA", 0.0))),
@@ -6052,10 +6198,10 @@ def _compute_portfolio_xva_case(
         "fca_rel_diff": _safe_rel_diff(float(result.xva_by_metric.get("FCA", 0.0)), float((ore_xva or {}).get("fca", result.xva_by_metric.get("FCA", 0.0)))),
         "py_fva": float(result.xva_by_metric.get("FVA", 0.0)),
         "own_credit_source": "portfolio_runtime",
-        "ore_basel_epe": float(trade_profile.get("basel_epe", 0.0) or 0.0),
-        "ore_basel_eepe": float(trade_profile.get("basel_eepe", 0.0) or 0.0),
-        "py_basel_epe": float(trade_profile.get("basel_epe", 0.0) or 0.0),
-        "py_basel_eepe": float(trade_profile.get("basel_eepe", 0.0) or 0.0),
+        "ore_basel_epe": float(portfolio_profile.get("basel_epe", 0.0) or 0.0),
+        "ore_basel_eepe": float(portfolio_profile.get("basel_eepe", 0.0) or 0.0),
+        "py_basel_epe": float(portfolio_profile.get("basel_epe", 0.0) or 0.0),
+        "py_basel_eepe": float(portfolio_profile.get("basel_eepe", 0.0) or 0.0),
     }
     parity = {
         "parity_ready": True,
@@ -6063,23 +6209,26 @@ def _compute_portfolio_xva_case(
             "requested_xva_metrics": list(result.xva_by_metric.keys()),
             "portfolio_mode": True,
             "portfolio_trade_count": len(trade_ids),
-            "portfolio_netting_set_count": 1,
+            "portfolio_netting_set_count": len(netting_set_ids),
         },
     }
     diagnostics = {
         "engine": "python-lgm-portfolio",
         "portfolio_mode": True,
         "portfolio_trade_count": len(trade_ids),
-        "portfolio_netting_set_id": netting_set_id,
-        "portfolio_counterparty": counterparty,
+        "portfolio_netting_set_ids": netting_set_ids,
+        "portfolio_netting_set_count": len(netting_set_ids),
+        "portfolio_counterparties": counterparties,
+        "portfolio_counterparty_count": len(counterparties),
         "portfolio_paths": effective_paths,
         "xva_mode": str(xva_mode).strip().lower(),
+        "portfolio_trade_ids_by_netting_set": portfolio_summary.get("trade_ids_by_netting_set", {}),
     }
     return SnapshotComputation(
         ore_xml=str(ore_xml),
-        trade_id="PORTFOLIO",
-        counterparty=counterparty,
-        netting_set_id=netting_set_id,
+        trade_id=trade_ids[0] if trade_ids else "PORTFOLIO",
+        counterparty=counterparties[0] if counterparties else counterparty,
+        netting_set_id=netting_set_ids[0] if netting_set_ids else netting_set_id,
         paths=effective_paths,
         seed=seed,
         rng_mode=rng_mode,
@@ -6094,10 +6243,10 @@ def _compute_portfolio_xva_case(
         py_epe=py_epe,
         py_ene=py_ene,
         py_pfe=py_pfe,
-        exposure_profile_by_trade=trade_profile,
-        exposure_profile_by_netting_set=trade_profile,
-        ore_basel_epe=float(trade_profile.get("basel_epe", 0.0) or 0.0),
-        ore_basel_eepe=float(trade_profile.get("basel_eepe", 0.0) or 0.0),
+        exposure_profile_by_trade=portfolio_profile,
+        exposure_profile_by_netting_set=portfolio_profile,
+        ore_basel_epe=float(portfolio_profile.get("basel_epe", 0.0) or 0.0),
+        ore_basel_eepe=float(portfolio_profile.get("basel_eepe", 0.0) or 0.0),
     )
 
 
@@ -8430,6 +8579,7 @@ def _run_preflight_case(
     artifact_root: Path,
 ) -> dict[str, Any]:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    portfolio_summary = _portfolio_trade_summary(ore_xml)
     snapshot = load_from_ore_xml(
         ore_xml,
         anchor_t0_npv=args.anchor_t0_npv,
@@ -8441,12 +8591,22 @@ def _run_preflight_case(
     summary = {
         "ore_xml": str(ore_xml),
         "portfolio_xml": str(portfolio_xml) if portfolio_xml is not None else "",
+        "portfolio_trade_count": int(portfolio_summary.get("trade_count", 0)),
+        "portfolio_netting_set_count": int(portfolio_summary.get("netting_set_count", 0)),
+        "portfolio_counterparty_count": int(portfolio_summary.get("counterparty_count", 0)),
+        "portfolio_trade_ids": list(portfolio_summary.get("trade_ids", [])),
+        "portfolio_trade_types": list(portfolio_summary.get("trade_types", [])),
+        "portfolio_counterparties": list(portfolio_summary.get("counterparties", [])),
+        "portfolio_netting_sets": list(portfolio_summary.get("netting_sets", [])),
+        "portfolio_trade_rows": list(portfolio_summary.get("trade_rows", [])),
+        "portfolio_trade_ids_by_netting_set": dict(portfolio_summary.get("trade_ids_by_netting_set", {})),
+        "portfolio_trade_ids_by_counterparty": dict(portfolio_summary.get("trade_ids_by_counterparty", {})),
         "requested_modes": requested_modes,
         "validation": validation,
         "support": support,
         "native_ready": bool(validation.get("input_links_valid", False)) and support["requires_swig_trade_count"] == 0,
         "hybrid_ready": bool(validation.get("input_links_valid", False)),
-        "trade_count": int(support["native_trade_count"]) + int(support["requires_swig_trade_count"]),
+        "trade_count": int(portfolio_summary.get("trade_count", 0)),
         "next_step": (
             "run with PythonLgmAdapter(fallback_to_swig=False) or the Python CLI pricing/XVA modes"
             if support["requires_swig_trade_count"] == 0
@@ -8457,13 +8617,48 @@ def _run_preflight_case(
     case_out_dir.mkdir(parents=True, exist_ok=True)
     if not args.ore_output_only:
         _write_json(case_out_dir / "preflight.json", summary)
+        native_trade_ids = set(summary["support"]["native_trade_ids"])
+        swig_trade_ids = set(summary["support"]["requires_swig_trade_ids"])
         support_rows = [
-            {"bucket": "native_trade_ids", "value": trade_id}
-            for trade_id in summary["support"]["native_trade_ids"]
+            {
+                "bucket": "native_trade_ids",
+                "entity_type": "Trade",
+                "entity_id": trade_row.get("trade_id", ""),
+                "trade_type": trade_row.get("trade_type", ""),
+                "counterparty": trade_row.get("counterparty", ""),
+                "netting_set_id": trade_row.get("netting_set_id", ""),
+                "trade_count": "",
+                "trade_ids": "",
+            }
+            for trade_row in summary["portfolio_trade_rows"]
+            if trade_row.get("trade_id") in native_trade_ids
         ]
         support_rows.extend(
-            {"bucket": "requires_swig_trade_ids", "value": trade_id}
-            for trade_id in summary["support"]["requires_swig_trade_ids"]
+            {
+                "bucket": "requires_swig_trade_ids",
+                "entity_type": "Trade",
+                "entity_id": trade_row.get("trade_id", ""),
+                "trade_type": trade_row.get("trade_type", ""),
+                "counterparty": trade_row.get("counterparty", ""),
+                "netting_set_id": trade_row.get("netting_set_id", ""),
+                "trade_count": "",
+                "trade_ids": "",
+            }
+            for trade_row in summary["portfolio_trade_rows"]
+            if trade_row.get("trade_id") in swig_trade_ids
+        )
+        support_rows.extend(
+            {
+                "bucket": "portfolio_netting_set_ids",
+                "entity_type": "NettingSet",
+                "entity_id": netting_set_id,
+                "trade_type": "",
+                "counterparty": "",
+                "netting_set_id": netting_set_id,
+                "trade_count": len(trade_ids),
+                "trade_ids": ",".join(trade_ids),
+            }
+            for netting_set_id, trade_ids in summary["portfolio_trade_ids_by_netting_set"].items()
         )
         _write_csv(case_out_dir / "preflight_support.csv", support_rows)
         (case_out_dir / "preflight.md").write_text(_render_preflight_markdown(summary), encoding="utf-8")
@@ -8476,8 +8671,27 @@ def _classify_preflight_support(
     *,
     requested_modes: list[str],
 ) -> dict[str, Any]:
+    portfolio_summary: dict[str, Any] = {}
+    try:
+        portfolio_summary = _portfolio_trade_summary(ore_xml)
+    except Exception:
+        portfolio_summary = {}
     if hasattr(snapshot, "portfolio"):
-        return classify_portfolio_support(snapshot, fallback_to_swig=False)
+        support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+        support.update(
+            {
+                "portfolio_trade_ids": list(portfolio_summary.get("trade_ids", [])),
+                "portfolio_trade_types": list(portfolio_summary.get("trade_types", [])),
+                "portfolio_counterparties": list(portfolio_summary.get("counterparties", [])),
+                "portfolio_netting_sets": list(portfolio_summary.get("netting_sets", [])),
+                "portfolio_trade_count": int(portfolio_summary.get("trade_count", 0)),
+                "portfolio_netting_set_count": int(portfolio_summary.get("netting_set_count", 0)),
+                "portfolio_counterparty_count": int(portfolio_summary.get("counterparty_count", 0)),
+                "portfolio_trade_ids_by_netting_set": dict(portfolio_summary.get("trade_ids_by_netting_set", {})),
+                "portfolio_trade_ids_by_counterparty": dict(portfolio_summary.get("trade_ids_by_counterparty", {})),
+            }
+        )
+        return support
     trade_type = _first_trade_type(ore_xml)
     trade_id = ""
     try:
@@ -8509,20 +8723,36 @@ def _classify_preflight_support(
         "requires_swig_trade_types": requires_swig_trade_types,
         "native_trade_count": len(native_trade_ids),
         "requires_swig_trade_count": len(requires_swig_trade_ids),
+        "portfolio_trade_ids": list(portfolio_summary.get("trade_ids", [])),
+        "portfolio_trade_types": list(portfolio_summary.get("trade_types", [])),
+        "portfolio_counterparties": list(portfolio_summary.get("counterparties", [])),
+        "portfolio_netting_sets": list(portfolio_summary.get("netting_sets", [])),
+        "portfolio_trade_count": int(portfolio_summary.get("trade_count", 0)),
+        "portfolio_netting_set_count": int(portfolio_summary.get("netting_set_count", 0)),
+        "portfolio_counterparty_count": int(portfolio_summary.get("counterparty_count", 0)),
+        "portfolio_trade_ids_by_netting_set": dict(portfolio_summary.get("trade_ids_by_netting_set", {})),
+        "portfolio_trade_ids_by_counterparty": dict(portfolio_summary.get("trade_ids_by_counterparty", {})),
     }
 
 
 def _render_preflight_markdown(summary: dict[str, Any]) -> str:
     support = summary["support"]
     validation = summary["validation"]
+    portfolio_trade_rows = list(summary.get("portfolio_trade_rows") or [])
     lines = [
         "# ORE Snapshot CLI Preflight",
         "",
         f"- ore_xml: `{summary['ore_xml']}`",
+        f"- portfolio_xml: `{summary.get('portfolio_xml', '')}`",
         f"- requested_modes: `{','.join(summary['requested_modes'])}`",
         f"- validation_ok: `{bool(validation.get('input_links_valid', False))}`",
         f"- native_ready: `{summary['native_ready']}`",
         f"- hybrid_ready: `{summary['hybrid_ready']}`",
+        f"- portfolio_trade_count: `{summary.get('portfolio_trade_count', 0)}`",
+        f"- portfolio_netting_set_count: `{summary.get('portfolio_netting_set_count', 0)}`",
+        f"- portfolio_counterparty_count: `{summary.get('portfolio_counterparty_count', 0)}`",
+        f"- portfolio_trade_ids: `{_preview_list(summary.get('portfolio_trade_ids', []))}`",
+        f"- portfolio_netting_sets: `{_preview_list(summary.get('portfolio_netting_sets', []))}`",
         f"- native_trade_count: `{support['native_trade_count']}`",
         f"- requires_swig_trade_count: `{support['requires_swig_trade_count']}`",
         f"- support_mode: `{support['mode']}`",
@@ -8532,6 +8762,18 @@ def _render_preflight_markdown(summary: dict[str, Any]) -> str:
         lines.append(f"- native_trade_types: `{', '.join(support['native_trade_types'])}`")
     if support["requires_swig_trade_types"]:
         lines.append(f"- requires_swig_trade_types: `{', '.join(support['requires_swig_trade_types'])}`")
+    if portfolio_trade_rows:
+        lines.append("")
+        lines.append("## Portfolio Trades")
+        lines.append("")
+        for row in portfolio_trade_rows:
+            lines.append(
+                "- "
+                + f"{row.get('trade_id', '')} "
+                + f"({row.get('trade_type', '')}) "
+                + f"netting_set={row.get('netting_set_id', '')} "
+                + f"counterparty={row.get('counterparty', '')}"
+            )
     issues = validation.get("issues") or []
     if issues:
         lines.append("")
@@ -8553,9 +8795,15 @@ def _render_terminal_preflight_summary(summary: dict[str, Any]) -> str:
         f"validation_ok={bool(validation.get('input_links_valid', False))}",
         f"native_ready={summary['native_ready']}",
         f"hybrid_ready={summary['hybrid_ready']}",
+        f"portfolio_trade_count={summary.get('portfolio_trade_count', 0)}",
+        f"portfolio_netting_set_count={summary.get('portfolio_netting_set_count', 0)}",
         f"native_trade_count={support['native_trade_count']}",
         f"requires_swig_trade_count={support['requires_swig_trade_count']}",
     ]
+    if summary.get("portfolio_trade_ids"):
+        lines.append(f"portfolio_trade_ids={_preview_list(summary.get('portfolio_trade_ids', []))}")
+    if summary.get("portfolio_netting_sets"):
+        lines.append(f"portfolio_netting_sets={_preview_list(summary.get('portfolio_netting_sets', []))}")
     if support["requires_swig_trade_types"]:
         lines.append(f"requires_swig_trade_types={','.join(support['requires_swig_trade_types'])}")
     lines.append(f"next_step={summary['next_step']}")

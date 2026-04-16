@@ -1151,14 +1151,13 @@ def _load_lgm_swaption_quotes(
     volatility_type: str,
 ) -> np.ndarray:
     quote_kind = "RATE_NVOL" if str(volatility_type).strip().lower() == "normal" else "RATE_LNVOL"
-    asof_compact = str(asof_date).replace("-", "")
-    asof_dash = str(asof_date)
+    asof_tokens = _market_data_date_tokens(asof_date)
     prefix = f"SWAPTION/{quote_kind}/{currency}/"
     quotes: Dict[Tuple[str, str], float] = {}
     with open(market_data_path, encoding="utf-8") as handle:
         for line in handle:
             parts = line.strip().split()
-            if len(parts) < 3 or parts[0] not in {asof_compact, asof_dash}:
+            if len(parts) < 3 or parts[0] not in asof_tokens:
                 continue
             key = parts[1]
             if not key.startswith(prefix):
@@ -3678,7 +3677,15 @@ def _resolve_discount_columns_by_currency(
 def _normalize_date_input(d: str | date) -> date:
     if isinstance(d, date):
         return d
-    return datetime.strptime(str(d), "%Y-%m-%d").date()
+    txt = str(d).strip()
+    if len(txt) == 8 and txt.isdigit():
+        return datetime.strptime(txt, "%Y%m%d").date()
+    return datetime.strptime(txt, "%Y-%m-%d").date()
+
+
+def _market_data_date_tokens(asof_date: str | date) -> set[str]:
+    asof = _normalize_date_input(asof_date)
+    return {asof.isoformat(), asof.strftime("%Y%m%d")}
 
 
 def _days_in_year(year: int) -> int:

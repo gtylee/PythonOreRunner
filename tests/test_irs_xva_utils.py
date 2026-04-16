@@ -782,6 +782,46 @@ class TestIrsXvaUtils(unittest.TestCase):
         self.assertEqual(len(starts), len(ends))
         self.assertEqual(len(ends), len(pays))
 
+    def test_build_schedule_supports_day_based_tenor(self):
+        from pythonore.compute.irs_xva_utils import _build_schedule
+
+        starts, ends, pays = _build_schedule(
+            date(2023, 1, 1),
+            date(2024, 12, 31),
+            "365D",
+            "TARGET",
+            "U",
+            pay_convention="U",
+            term_convention="U",
+            rule="Forward",
+        )
+
+        expected = [
+            date(2023, 1, 1),
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+        ]
+        self.assertEqual(list(starts) + [ends[-1]], expected)
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(len(starts), len(ends))
+        self.assertEqual(len(ends), len(pays))
+
+    def test_amortization_event_dates_support_day_based_frequency(self):
+        from pythonore.compute.irs_xva_utils import _amortization_event_dates
+
+        node = ET.fromstring(
+            """
+            <AmortizationData>
+              <StartDate>2023-01-01</StartDate>
+              <EndDate>2024-12-31</EndDate>
+              <Frequency>365D</Frequency>
+            </AmortizationData>
+            """
+        )
+
+        dates = _amortization_event_dates(node, date(2023, 1, 1), date(2024, 12, 31))
+        self.assertEqual(dates, [date(2023, 1, 1), date(2024, 1, 1), date(2024, 12, 31)])
+
     def test_day_counter_a365_alias_matches_a365f(self):
         from pythonore.compute.irs_xva_utils import _time_from_dates, _year_fraction
 
@@ -1374,6 +1414,48 @@ T1,Swap,1,1,2016-09-01,Interest,100.0,TRY,0.10,0.5,2016-03-01,2016-09-01,0.0,#N/
         np.testing.assert_allclose(legs["float_notional"], np.array([1_000_000.0, 900_000.0, 800_000.0]))
         np.testing.assert_allclose(legs["float_gearing"], np.array([1.0, 1.5, 2.0]))
         np.testing.assert_allclose(legs["float_spread"], np.array([0.0010, 0.0020, 0.0030]))
+
+    def test_load_swap_legs_from_portfolio_root_supports_365d_float_reset_tenor(self):
+        xml = """\
+<Portfolio>
+  <Trade id="DAY_RESET_SWAP">
+    <TradeType>Swap</TradeType>
+    <SwapData>
+        <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>1000000</Notional></Notionals>
+        <DayCounter>A365</DayCounter>
+        <PaymentConvention>U</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.02</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>2023-01-01</StartDate><EndDate>2024-12-31</EndDate><Tenor>365D</Tenor><Calendar>TARGET</Calendar><Convention>U</Convention><TermConvention>U</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>1000000</Notional></Notionals>
+        <DayCounter>A365</DayCounter>
+        <PaymentConvention>U</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SOFR</Index>
+          <FixingDays>0</FixingDays>
+          <Spreads><Spread>0.0</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2023-01-01</StartDate><EndDate>2024-12-31</EndDate><Tenor>365D</Tenor><Calendar>TARGET</Calendar><Convention>U</Convention><TermConvention>U</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+"""
+        root = ET.fromstring(xml)
+        legs = load_swap_legs_from_portfolio_root(root, "DAY_RESET_SWAP", "2023-01-01")
+        self.assertEqual(np.asarray(legs["float_start_time"], dtype=float).size, 2)
+        self.assertEqual(np.asarray(legs["float_end_time"], dtype=float).size, 2)
+        self.assertEqual(np.asarray(legs["float_pay_time"], dtype=float).size, 2)
+        np.testing.assert_allclose(np.asarray(legs["float_accrual"], dtype=float), np.ones(2), atol=1e-12)
 
     def test_swap_npv_from_ore_legs_dual_curve_applies_gearing_to_forward_only(self):
         legs = {

@@ -223,7 +223,7 @@ def load_inflation_curve_from_market_data(
     *,
     curve_type: str = "ZC",
 ) -> InflationCurve:
-    asof_tokens = {str(asof_date).replace("-", ""), str(asof_date)}
+    asof_tokens = _market_data_date_tokens(asof_date)
     prefix = "ZC_INFLATIONSWAP/RATE" if str(curve_type).upper() == "ZC" else "YY_INFLATIONSWAP/RATE"
     times: list[float] = []
     rates: list[float] = []
@@ -258,7 +258,7 @@ def load_zero_inflation_surface_quote(
     strike: float,
     option_type: str,
 ) -> float | None:
-    asof_tokens = {str(asof_date).replace("-", ""), str(asof_date)}
+    asof_tokens = _market_data_date_tokens(asof_date)
     opt = "C" if str(option_type).strip().lower().startswith("c") else "F"
     strike_txt = f"{float(strike):.3f}".rstrip("0").rstrip(".")
     candidates = {
@@ -277,6 +277,17 @@ def load_zero_inflation_surface_quote(
             if parts[1] in candidates:
                 return float(parts[2])
     return None
+
+
+def _market_data_date_tokens(asof_date: str) -> set[str]:
+    raw = str(asof_date).strip()
+    if not raw:
+        return {raw}
+    if len(raw) == 8 and raw.isdigit():
+        return {raw, f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"}
+    if "-" in raw:
+        return {raw, raw.replace("-", "")}
+    return {raw}
 
 
 def project_index_level(base_cpi: float, curve: InflationCurve, maturity_years: float) -> float:

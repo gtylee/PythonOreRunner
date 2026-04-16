@@ -4233,8 +4233,10 @@ class PythonLgmAdapter:
             )
             ctx.torch_curve_cache[disc_key] = disc_curve
         p_disc = inputs.discount_curves[spec.ccy]
+        report_ccy = spec.ccy
         for leg in rate_legs:
             kind = str(leg.get("kind", "")).upper()
+            leg_ccy = str(leg.get("ccy", spec.ccy)).upper()
             if kind in {"FIXED", "FLOATING"}:
                 leg_cache_key = self._rate_leg_pricing_cache_key(spec.ccy, leg)
                 cached_vals = ctx.torch_rate_leg_value_cache.get(leg_cache_key)
@@ -4315,7 +4317,7 @@ class PythonLgmAdapter:
                             local_ccy=leg_ccy,
                             report_ccy=report_ccy,
                             inputs=inputs,
-                            shared_fx_sim=shared_fx_sim,
+                            shared_fx_sim=ctx.shared_fx_sim,
                             time_index=i,
                         )
                 ctx.torch_rate_leg_value_cache[leg_cache_key] = leg_vals

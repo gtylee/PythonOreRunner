@@ -162,27 +162,27 @@ def _build_xccy_basis_trade(
             ET.SubElement(fx_reset_node, "FXIndex").text = str(fx_reset["fx_index"])
             ET.SubElement(fx_reset_node, "FixingDays").text = str(int(fx_reset.get("fixing_days", 2)))
         exchanges = ET.SubElement(notionals, "Exchanges")
-        ET.SubElement(exchanges, "NotionalInitialExchange").text = "true"
-        ET.SubElement(exchanges, "NotionalFinalExchange").text = "true"
-        ET.SubElement(leg, "DayCounter").text = "ACT/360"
-        ET.SubElement(leg, "PaymentConvention").text = "ModifiedFollowing"
+        ET.SubElement(exchanges, "NotionalInitialExchange").text = "true" if bool(spec.get("notional_initial_exchange", True)) else "false"
+        ET.SubElement(exchanges, "NotionalFinalExchange").text = "true" if bool(spec.get("notional_final_exchange", True)) else "false"
+        ET.SubElement(leg, "DayCounter").text = str(spec.get("day_counter", "ACT/360"))
+        ET.SubElement(leg, "PaymentConvention").text = str(spec.get("payment_convention", "ModifiedFollowing"))
         floating = ET.SubElement(leg, "FloatingLegData")
         ET.SubElement(floating, "Index").text = str(spec["index"])
         spreads = ET.SubElement(floating, "Spreads")
         ET.SubElement(spreads, "Spread").text = f"{float(spec.get('spread', 0.0)):.16g}"
         gearings = ET.SubElement(floating, "Gearings")
         ET.SubElement(gearings, "Gearing").text = f"{float(spec.get('gearing', 1.0)):.16g}"
-        ET.SubElement(floating, "IsInArrears").text = "false"
+        ET.SubElement(floating, "IsInArrears").text = "true" if bool(spec.get("is_in_arrears", False)) else "false"
         ET.SubElement(floating, "FixingDays").text = str(int(spec.get("fixing_days", 2)))
         schedule = ET.SubElement(leg, "ScheduleData")
         rules = ET.SubElement(schedule, "Rules")
         ET.SubElement(rules, "StartDate").text = start_date
         ET.SubElement(rules, "EndDate").text = end_date
-        ET.SubElement(rules, "Tenor").text = tenor
-        ET.SubElement(rules, "Calendar").text = calendar
-        ET.SubElement(rules, "Convention").text = "ModifiedFollowing"
-        ET.SubElement(rules, "TermConvention").text = "ModifiedFollowing"
-        ET.SubElement(rules, "Rule").text = "Forward"
+        ET.SubElement(rules, "Tenor").text = str(spec.get("tenor", tenor))
+        ET.SubElement(rules, "Calendar").text = str(spec.get("calendar", calendar))
+        ET.SubElement(rules, "Convention").text = str(spec.get("schedule_convention", "ModifiedFollowing"))
+        ET.SubElement(rules, "TermConvention").text = str(spec.get("term_convention", "ModifiedFollowing"))
+        ET.SubElement(rules, "Rule").text = str(spec.get("rule", "Forward"))
         ET.SubElement(rules, "EndOfMonth")
         ET.SubElement(rules, "FirstDate")
         ET.SubElement(rules, "LastDate")
@@ -242,6 +242,53 @@ def _clone_xccy_basis_case(
             if active is not None:
                 active.text = "Y"
             analytics_root.append(cashflow_analytic)
+    ore_tree.write(case_root / "Input" / ore_file, encoding="utf-8", xml_declaration=True)
+    return tmp, case_root
+
+
+def _clone_basis_swap_case(
+    case_name: str,
+    *,
+    trade_id: str,
+    counterparty: str,
+    netting_set_id: str,
+    asof_date: str,
+    start_date: str,
+    end_date: str,
+    tenor: str,
+    calendar: str,
+    leg0: dict[str, object],
+    leg1: dict[str, object],
+    ore_file: str = "ore.xml",
+):
+    tmp = tempfile.TemporaryDirectory()
+    tmp_root = Path(tmp.name)
+    case_root = tmp_root / "Examples" / "Generated" / case_name
+    shutil.copytree(TOOLS_DIR / "Examples" / "Products" / "Input", case_root / "Input")
+
+    portfolio_root = _build_xccy_basis_trade(
+        trade_id=trade_id,
+        counterparty=counterparty,
+        netting_set_id=netting_set_id,
+        asof_date=asof_date,
+        start_date=start_date,
+        end_date=end_date,
+        tenor=tenor,
+        calendar=calendar,
+        leg0=leg0,
+        leg1=leg1,
+    )
+    ET.ElementTree(portfolio_root).write(case_root / "Input" / "portfolio.xml", encoding="utf-8", xml_declaration=True)
+
+    ore_tree = ET.parse(case_root / "Input" / ore_file)
+    ore_root = ore_tree.getroot()
+    setup = ore_root.find("./Setup")
+    if setup is not None:
+        for param in setup.findall("./Parameter"):
+            if param.attrib.get("name") == "portfolioFile":
+                param.text = "portfolio.xml"
+            elif param.attrib.get("name") == "asofDate":
+                param.text = asof_date
     ore_tree.write(case_root / "Input" / ore_file, encoding="utf-8", xml_declaration=True)
     return tmp, case_root
 
@@ -1130,6 +1177,148 @@ def test_python_runtime_supports_real_sifma_basis_cases_on_torch(trade_id):
     coverage = torch_result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
+
+
+@pytest.mark.parametrize(
+    "case_name,trade_id,leg0,leg1,expected_indices",
+    (
+        (
+            "USD_SOFR_LIBOR_Basis",
+            "USD_SOFR_LIBOR_BASIS",
+            {
+                "payer": True,
+                "currency": "USD",
+                "notional": 10_000_000.0,
+                "index": "USD-SOFR-3M",
+                "spread": 0.0005,
+                "gearing": 1.0,
+                "tenor": "3M",
+                "calendar": "TARGET",
+                "day_counter": "ACT",
+                    "payment_convention": "MF",
+                    "schedule_convention": "MF",
+                    "term_convention": "MF",
+                    "rule": "Forward",
+                    "notional_initial_exchange": False,
+                    "notional_final_exchange": False,
+                    "fixing_days": 0,
+                    "is_in_arrears": True,
+                },
+                {
+                "payer": False,
+                "currency": "USD",
+                "notional": 10_000_000.0,
+                "index": "USD-LIBOR-3M",
+                "spread": 0.0015,
+                "gearing": 1.0,
+                "tenor": "3M",
+                "calendar": "TARGET",
+                "day_counter": "A360",
+                    "payment_convention": "MF",
+                    "schedule_convention": "MF",
+                    "term_convention": "MF",
+                    "rule": "Forward",
+                    "notional_initial_exchange": False,
+                    "notional_final_exchange": False,
+                    "fixing_days": 2,
+                    "is_in_arrears": False,
+                },
+            {"USD-SOFR-3M", "USD-LIBOR-3M"},
+        ),
+        (
+            "USD_LIBOR1M_LIBOR3M_Basis",
+            "USD_LIBOR1M_LIBOR3M_BASIS",
+            {
+                "payer": True,
+                "currency": "USD",
+                "notional": 10_000_000.0,
+                "index": "USD-LIBOR-1M",
+                "spread": 0.0005,
+                "gearing": 1.0,
+                "tenor": "1M",
+                "calendar": "US",
+                "day_counter": "A360",
+                    "payment_convention": "MF",
+                    "schedule_convention": "MF",
+                    "term_convention": "MF",
+                    "rule": "Forward",
+                    "notional_initial_exchange": False,
+                    "notional_final_exchange": False,
+                    "fixing_days": 2,
+                    "is_in_arrears": False,
+                },
+            {
+                "payer": False,
+                "currency": "USD",
+                "notional": 10_000_000.0,
+                "index": "USD-LIBOR-3M",
+                "spread": 0.0015,
+                "gearing": 1.0,
+                "tenor": "3M",
+                "calendar": "US",
+                "day_counter": "A360",
+                    "payment_convention": "MF",
+                    "schedule_convention": "MF",
+                    "term_convention": "MF",
+                    "rule": "Forward",
+                    "notional_initial_exchange": False,
+                    "notional_final_exchange": False,
+                    "fixing_days": 2,
+                    "is_in_arrears": False,
+                },
+            {"USD-LIBOR-1M", "USD-LIBOR-3M"},
+        ),
+    ),
+)
+def test_python_runtime_supports_float_float_basis_swaps_via_generic_rate_swap(case_name, trade_id, leg0, leg1, expected_indices):
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_basis_swap_case(
+        case_name,
+        trade_id=trade_id,
+        counterparty="CPTY_A",
+        netting_set_id="CPTY_A",
+        asof_date="2025-02-10",
+        start_date="2019-12-04",
+        end_date="2045-04-05",
+        tenor=str(leg0["tenor"]),
+        calendar=str(leg0["calendar"]),
+        leg0=leg0,
+        leg1=leg1,
+    )
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(snapshot, config=replace(snapshot.config, num_paths=256))
+        trade = next(t for t in snapshot.portfolio.trades if t.trade_id == trade_id)
+        assert isinstance(trade.product, GenericProduct)
+        assert trade.product.payload.get("subtype") == "GenericRateSwap"
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+        assert state is not None
+        assert len(state["rate_legs"]) == 2
+        assert all(leg["kind"] == "FLOATING" for leg in state["rate_legs"])
+        assert {str(leg["index_name"]).upper() for leg in state["rate_legs"]} == {idx.upper() for idx in expected_indices}
+
+        result = _run_python(snapshot, case_name.lower())
+        assert math.isfinite(float(result.pv_total))
+
+        npv_csv = _find_report_csv(case_root, "npv.csv")
+        with npv_csv.open(newline="", encoding="utf-8") as handle:
+            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == trade_id)
+        ore_npv = float(ore_row.get("NPV") or ore_row.get("npv") or ore_row.get("NPV(Base)") or ore_row.get("NPV Base"))
+        assert math.copysign(1.0, float(result.pv_total)) == math.copysign(1.0, ore_npv)
+        assert abs(float(result.pv_total) - ore_npv) < 1.0e6
+    finally:
+        tmp.cleanup()
 
 
 def test_torch_plain_rate_swap_matches_numpy_runtime_on_bma_basis_case():

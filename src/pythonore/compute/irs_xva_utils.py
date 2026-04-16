@@ -557,17 +557,17 @@ def _amortization_event_dates(node: ET.Element, schedule_start: date, schedule_e
     if not frequency_txt:
         return [start]
     try:
-        months = _parse_tenor_to_months(frequency_txt)
+        amount, unit = _parse_tenor_value_unit(frequency_txt)
     except Exception:
         return [start]
-    if months <= 0:
+    if amount <= 0:
         return [start]
     out: list[date] = []
     current = start
     limit = min(end_limit, schedule_end)
     while current <= limit:
         out.append(current)
-        nxt = _add_months(current, months)
+        nxt = _shift_date_by_tenor(current, amount, unit)
         if nxt <= current:
             break
         current = nxt
@@ -708,6 +708,26 @@ def _parse_tenor_to_months(tenor: str) -> int:
     return n * 12 if m.group(2) == "Y" else n
 
 
+def _parse_tenor_value_unit(tenor: str) -> tuple[int, str]:
+    tenor = tenor.strip().upper()
+    m = re.match(r"^(\d+)([DWMY])$", tenor)
+    if m is None:
+        raise ValueError(f"unsupported tenor '{tenor}'")
+    return int(m.group(1)), m.group(2)
+
+
+def _shift_date_by_tenor(d: date, amount: int, unit: str) -> date:
+    if amount == 0:
+        return d
+    if unit == "D":
+        return d + timedelta(days=amount)
+    if unit == "W":
+        return d + timedelta(days=7 * amount)
+    if unit == "M":
+        return _add_months(d, amount)
+    return _add_months(d, 12 * amount)
+
+
 def _ql_date_from_py(d: date):
     if ql is None:
         raise RuntimeError("QuantLib is required for ORE-style schedule generation")
@@ -833,11 +853,20 @@ def _build_schedule(
     # ``ScheduleData/Rules``. When QuantLib is available we defer to its schedule
     # construction so termination convention, first/last stubs, and end-of-month
     # behavior all match the native implementation.
+    amount, unit = _parse_tenor_value_unit(tenor)
+    if amount <= 0:
+        raise ValueError(f"unsupported tenor '{tenor}'")
     if ql is not None:
+        ql_unit = {
+            "D": ql.Days,
+            "W": ql.Weeks,
+            "M": ql.Months,
+            "Y": ql.Years,
+        }[unit]
         sched = ql.Schedule(
             _ql_date_from_py(start),
             _ql_date_from_py(end),
-            ql.Period(_parse_tenor_to_months(tenor), ql.Months),
+            ql.Period(amount, ql_unit),
             _ql_calendar_from_name(calendar),
             _ql_business_convention(convention),
             _ql_business_convention(term_convention or convention),
@@ -860,7 +889,7 @@ def _build_schedule(
             pay.append(_adjust_date(pay_date, pay_convention or convention, calendar))
         return np.asarray(starts, dtype=object), np.asarray(ends, dtype=object), np.asarray(pay, dtype=object)
 
-    months = _parse_tenor_to_months(tenor)
+    amount, unit = _parse_tenor_value_unit(tenor)
     rule_name = (rule or "Forward").strip().upper()
     boundaries: list[date]
     if rule_name == "BACKWARD":
@@ -869,7 +898,7 @@ def _build_schedule(
         if cur != end:
             boundaries.append(cur)
         while cur > start:
-            prev = _add_months(cur, -months)
+            prev = _shift_date_by_tenor(cur, -amount, unit)
             if first_date is not None and prev < first_date:
                 if boundaries[-1] != first_date:
                     boundaries.append(first_date)
@@ -890,7 +919,7 @@ def _build_schedule(
             boundaries.append(first_date)
             cur = first_date
         while cur < end:
-            nxt = _add_months(cur, months)
+            nxt = _shift_date_by_tenor(cur, amount, unit)
             if last_date is not None and last_date > cur and nxt > last_date:
                 boundaries.append(last_date)
                 break
