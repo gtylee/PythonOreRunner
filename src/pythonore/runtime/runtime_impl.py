@@ -119,6 +119,8 @@ def _normalize_curve_lookup_key(name: str) -> str:
 
 def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[str, str] | None = None) -> str:
     key = str(index_name or "").strip().upper()
+    if key in {"USD-SIFMA", "USD-BMA", "USD-SIFMA-1W", "USD-SIFMA-7D", "USD-BMA-1W", "USD-BMA-7D"}:
+        return "1D"
     mapped = str((swap_index_forward_tenors or {}).get(key, "")).strip().upper()
     if mapped:
         return _normalize_forward_tenor_family(mapped)
@@ -229,6 +231,34 @@ def _rate_leg_currencies(legs_payload: Dict[str, object] | None, fallback_ccy: s
     if not values and fallback_ccy:
         values.append(str(fallback_ccy).upper())
     return tuple(values)
+
+
+def _build_bma_proxy_curve(
+    base_curve: Callable[[float], float],
+    ratio_times: np.ndarray,
+    ratio_vals: np.ndarray,
+) -> Callable[[float], float]:
+    times = np.asarray(ratio_times, dtype=float)
+    ratios = np.asarray(ratio_vals, dtype=float)
+    scalar_cache: Dict[float, float] = {}
+
+    def curve(t: float) -> float:
+        tt = float(t)
+        cached = scalar_cache.get(tt)
+        if cached is not None:
+            return cached
+        if times.size == 0:
+            rr = 1.0
+        elif times.size == 1:
+            rr = float(ratios[0])
+        else:
+            rr = float(np.interp(tt, times, ratios, left=float(ratios[0]), right=float(ratios[-1])))
+        rr = float(np.clip(rr, 0.01, 10.0))
+        out = float(max(float(base_curve(tt)) ** rr, 1.0e-12))
+        scalar_cache[tt] = out
+        return out
+
+    return curve
 
 
 def _resolve_fx_pair_name(ccy1: str, ccy2: str, available_pairs: Sequence[str]) -> str | None:
@@ -2149,29 +2179,9 @@ class PythonLgmAdapter:
                     if libor_curve is None:
                         continue
 
-                    def _make_bma_curve(
-                        base_curve: Callable[[float], float],
-                        times: np.ndarray,
-                        ratios: np.ndarray,
-                    ) -> Callable[[float], float]:
-                        scalar_cache: Dict[float, float] = {}
-
-                        def curve(t: float) -> float:
-                            tt = float(t)
-                            cached = scalar_cache.get(tt)
-                            if cached is not None:
-                                return cached
-                            rr = float(self._irs_utils.interpolate_linear_flat(tt, times, ratios))
-                            rr = float(np.clip(rr, 0.01, 10.0))
-                            out = float(max(float(base_curve(tt)) ** rr, 1.0e-12))
-                            scalar_cache[tt] = out
-                            return out
-
-                        return curve
-
-                    bma_curve = _make_bma_curve(libor_curve, ratio_times, ratio_vals)
-                    forward_curves_by_name.setdefault(f"{ccy.upper()}-SIFMA", bma_curve)
-                    forward_curves_by_name.setdefault(f"{ccy.upper()}-BMA", bma_curve)
+                    bma_curve = _build_bma_proxy_curve(libor_curve, ratio_times, ratio_vals)
+                    forward_curves_by_name[f"{ccy.upper()}-SIFMA"] = bma_curve
+                    forward_curves_by_name[f"{ccy.upper()}-BMA"] = bma_curve
                 curve_source = "market_overlay"
 
         runtime = snapshot.config.runtime
@@ -3503,14 +3513,16 @@ class PythonLgmAdapter:
                     return None
                 index_name = (fld.findtext("./Index") or "").strip().upper()
                 spread_nodes = [node for node in fld.findall("./Spreads/Spread") if (node.text or "").strip()]
+                gearing_nodes = [node for node in fld.findall("./Gearings/Gearing") if (node.text or "").strip()]
                 spread, _ = self._irs_utils._expand_notional_nodes(spread_nodes, s_dates, default_value=0.0)
+                gearing, _ = self._irs_utils._expand_notional_nodes(gearing_nodes, s_dates, default_value=1.0)
                 fixing_days = int((fld.findtext("./FixingDays") or "2").strip() or 2)
                 in_arrears = (fld.findtext("./IsInArrears") or "false").strip().lower() == "true"
                 fix_base_dates = e_dates if in_arrears else s_dates
                 fix_dates = [advance_business_days(d, -fixing_days, cal) for d in fix_base_dates]
                 leg_info["index_name"] = index_name
                 leg_info["spread"] = np.asarray(spread, dtype=float)
-                leg_info["gearing"] = np.ones_like(accr)
+                leg_info["gearing"] = np.asarray(gearing, dtype=float)
                 leg_info["is_in_arrears"] = in_arrears
                 leg_info["fixing_days"] = fixing_days
                 leg_info["fixing_time"] = np.asarray([time_from_dates(asof, fd, "A365F") for fd in fix_dates], dtype=float)
@@ -4810,6 +4822,10 @@ class PythonLgmAdapter:
         index_name: str,
     ) -> Callable[[float], float]:
         key = str(index_name).strip().upper()
+        if key in {"USD-SIFMA-1W", "USD-SIFMA-7D"}:
+            key = "USD-SIFMA"
+        elif key in {"USD-BMA-1W", "USD-BMA-7D"}:
+            key = "USD-BMA"
         family = _forward_index_family(key, inputs.swap_index_forward_tenors)
         if key and key in inputs.forward_curves_by_name:
             return inputs.forward_curves_by_name[key]

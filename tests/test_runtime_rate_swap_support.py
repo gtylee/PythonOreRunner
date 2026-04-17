@@ -1199,7 +1199,16 @@ def test_python_runtime_supports_real_sifma_basis_cases_on_torch(trade_id):
     inputs = adapter._extract_inputs(snapshot, mapped)
     assert "USD-SIFMA" in inputs.forward_curves_by_name
     assert "USD-BMA" in inputs.forward_curves_by_name
+    assert inputs.forward_curves_by_name["USD-SIFMA"] is inputs.forward_curves_by_name["USD-BMA"]
     assert math.isfinite(float(inputs.forward_curves_by_name["USD-SIFMA"](5.0)))
+    assert (
+        adapter._resolve_index_curve(inputs, "USD", "USD-SIFMA-1W")
+        is inputs.forward_curves_by_name["USD-SIFMA"]
+    )
+    assert (
+        adapter._resolve_index_curve(inputs, "USD", "USD-SIFMA-7D")
+        is inputs.forward_curves_by_name["USD-SIFMA"]
+    )
 
     specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
     assert unsupported == []

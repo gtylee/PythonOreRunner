@@ -89,6 +89,16 @@ def _clone_basis_case_with_simulation(tmp_root: Path, case_name: str) -> Path:
     return ore_xml
 
 
+def test_fingerprint_path_or_resource_changes_when_file_content_changes(tmp_path):
+    path = tmp_path / "market.xml"
+    path.write_text("<Market><Quote>1</Quote></Market>", encoding="utf-8")
+    first = ore_snapshot_io._fingerprint_path_or_resource(path)
+    path.write_text("<Market><Quote>2</Quote></Market>", encoding="utf-8")
+    second = ore_snapshot_io._fingerprint_path_or_resource(path)
+
+    assert first != second
+
+
 def _promote_trade_to_first(portfolio_xml: Path, trade_id: str, *, long_short: str | None = None) -> None:
     tree = ET.parse(portfolio_xml)
     root = tree.getroot()
@@ -3241,6 +3251,69 @@ class TestOreSnapshotCli(unittest.TestCase):
         self.assertIsNone(result.get("pricing"))
         self.assertEqual(result["xva"]["ore_cva"], 4.0)
 
+    def test_run_case_uses_portfolio_price_branch_for_multi_trade_portfolios(self):
+        args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--price"])
+        fake_summary = {
+            "trade_id": "PORTFOLIO",
+            "counterparty": "CPTY_A",
+            "netting_set_id": "NS_A",
+            "maturity_date": "2026-01-01",
+            "maturity_time": 1.0,
+            "pricing": {
+                "trade_type": "Portfolio",
+                "py_t0_npv": 12.0,
+                "ore_t0_npv": 12.0,
+                "t0_npv_abs_diff": 0.0,
+                "report_ccy": "EUR",
+                "currency": "EUR",
+                "leg_source": "portfolio",
+            },
+            "diagnostics": {"engine": "python_price_only", "pricing_mode": "python_portfolio_price_only"},
+            "portfolio_trade_rows": [
+                {
+                    "trade_id": "T1",
+                    "trade_type": "Swap",
+                    "counterparty": "CPTY_A",
+                    "netting_set_id": "NS_A",
+                    "maturity_date": "2025-01-01",
+                    "maturity_time": 0.5,
+                    "pricing": {"py_t0_npv": 5.0, "ore_t0_npv": 5.0, "report_ccy": "EUR"},
+                    "diagnostics": {"engine": "python_price_only"},
+                    "notional": 100.0,
+                    "notional_currency": "EUR",
+                },
+                {
+                    "trade_id": "T2",
+                    "trade_type": "Swap",
+                    "counterparty": "CPTY_A",
+                    "netting_set_id": "NS_A",
+                    "maturity_date": "2026-01-01",
+                    "maturity_time": 1.0,
+                    "pricing": {"py_t0_npv": 7.0, "ore_t0_npv": 7.0, "report_ccy": "EUR"},
+                    "diagnostics": {"engine": "python_price_only"},
+                    "notional": 120.0,
+                    "notional_currency": "EUR",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("py_ore_tools.ore_snapshot_cli.validate_ore_input_snapshot", return_value={}):
+                with patch(
+                    "py_ore_tools.ore_snapshot_cli._portfolio_trade_summary",
+                    return_value={"trade_count": 2, "trade_rows": [{"trade_id": "T1"}, {"trade_id": "T2"}], "trade_ids_by_netting_set": {"NS_A": ["T1", "T2"]}},
+                ):
+                    with patch("py_ore_tools.ore_snapshot_cli._compute_portfolio_price_case", return_value=fake_summary) as portfolio_case:
+                        with patch("py_ore_tools.ore_snapshot_cli._compute_price_only_case", side_effect=AssertionError("single-trade path should not be used")):
+                            with patch("py_ore_tools.ore_snapshot_cli._price_reference_summary", side_effect=AssertionError("reference fallback should not be used")):
+                                with patch("py_ore_tools.ore_snapshot_cli._write_ore_compatible_reports"):
+                                    with patch("py_ore_tools.ore_snapshot_cli._copy_native_ore_reports"):
+                                        result = ore_snapshot_cli._run_case(REAL_CASE_XML, args, artifact_root=Path(tmp))
+        portfolio_case.assert_called_once()
+        self.assertEqual(result["trade_id"], "PORTFOLIO")
+        self.assertEqual(result["pricing"]["py_t0_npv"], 12.0)
+        self.assertEqual(result["pricing"]["ore_t0_npv"], 12.0)
+        self.assertEqual(result["diagnostics"]["pricing_mode"], "python_portfolio_price_only")
+
     def test_run_case_uses_portfolio_xva_branch_when_swap_is_not_anchor_trade(self):
         args = ore_snapshot_cli.build_parser().parse_args([str(REAL_CASE_XML), "--xva"])
         fake_summary = ore_snapshot_cli.SnapshotComputation(
@@ -3317,6 +3390,56 @@ class TestOreSnapshotCli(unittest.TestCase):
         portfolio_case.assert_called_once()
         self.assertEqual(result["trade_id"], "PORTFOLIO")
         self.assertEqual(result["xva"]["ore_cva"], 4.0)
+
+    def test_write_reports_emits_per_trade_npv_rows_for_portfolio_price_only(self):
+        case_summary = {
+            "trade_id": "PORTFOLIO",
+            "counterparty": "CPTY_A",
+            "netting_set_id": "NS_A",
+            "maturity_date": "2026-01-01",
+            "maturity_time": 1.0,
+            "pricing": {
+                "trade_type": "Portfolio",
+                "py_t0_npv": 12.0,
+                "ore_t0_npv": 12.0,
+                "t0_npv_abs_diff": 0.0,
+                "report_ccy": "EUR",
+                "currency": "EUR",
+                "leg_source": "portfolio",
+            },
+            "portfolio_trade_rows": [
+                {
+                    "trade_id": "T1",
+                    "trade_type": "Swap",
+                    "counterparty": "CPTY_A",
+                    "netting_set_id": "NS_A",
+                    "maturity_date": "2025-01-01",
+                    "maturity_time": 0.5,
+                    "pricing": {"py_t0_npv": 5.0, "ore_t0_npv": 5.0, "report_ccy": "EUR"},
+                    "notional": 100.0,
+                    "notional_currency": "EUR",
+                },
+                {
+                    "trade_id": "T2",
+                    "trade_type": "Swap",
+                    "counterparty": "CPTY_A",
+                    "netting_set_id": "NS_A",
+                    "maturity_date": "2026-01-01",
+                    "maturity_time": 1.0,
+                    "pricing": {"py_t0_npv": 7.0, "ore_t0_npv": 7.0, "report_ccy": "EUR"},
+                    "notional": 120.0,
+                    "notional_currency": "EUR",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            ore_snapshot_cli._write_ore_compatible_reports(out_dir, case_summary)
+            with open(out_dir / "npv.csv", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual([row["#TradeId"] for row in rows], ["T1", "T2"])
+        self.assertEqual([float(row["NPV(Base)"]) for row in rows], [5.0, 7.0])
+        self.assertEqual([float(row["Notional"]) for row in rows], [100.0, 120.0])
 
     def test_bond_price_only_case_uses_python_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:

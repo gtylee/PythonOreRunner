@@ -564,6 +564,8 @@ def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[st
     key = _normalize_curve_lookup_key(index_name)
     if not key:
         return ""
+    if key in {"USD-SIFMA", "USD-BMA", "USD-SIFMA-1W", "USD-SIFMA-7D", "USD-BMA-1W", "USD-BMA-7D"}:
+        return "1D"
     if swap_index_forward_tenors:
         direct = swap_index_forward_tenors.get(key)
         if direct:

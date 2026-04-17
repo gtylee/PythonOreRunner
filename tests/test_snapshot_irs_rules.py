@@ -63,6 +63,69 @@ def _snapshot_with_trade(product: IRS) -> XVASnapshot:
     )
 
 
+def test_xva_snapshot_stable_key_is_content_based():
+    snapshot = XVASnapshot(
+        market=MarketData(
+            asof="2026-03-08",
+            raw_quotes=(
+                MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.1),
+                MarketQuote(date="2026-03-08", key="EUR-EURIBOR-6M", value=0.025),
+            ),
+        ),
+        fixings=FixingsData(),
+        portfolio=Portfolio(
+            trades=(
+                Trade(
+                    trade_id="T1",
+                    counterparty="CP_A",
+                    netting_set="NS1",
+                    trade_type="Swap",
+                    product=IRS(
+                        ccy="EUR",
+                        notional=1_000_000,
+                        fixed_rate=0.03,
+                        maturity_years=2.0,
+                    ),
+                ),
+            )
+        ),
+        config=XVAConfig(
+            asof="2026-03-08",
+            base_currency="EUR",
+            xml_buffers={"simulation.xml": "<Simulation><Samples>10</Samples></Simulation>"},
+        ),
+        netting=NettingConfig(),
+        collateral=CollateralConfig(),
+    )
+
+    cloned = XVASnapshot.from_dict(snapshot.to_dict())
+    quote_changed = XVASnapshot.from_dict(
+        {
+            **snapshot.to_dict(),
+            "market": {
+                **snapshot.to_dict()["market"],
+                "raw_quotes": [
+                    {"date": "2026-03-08", "key": "FX/EUR/USD", "value": 1.11},
+                    {"date": "2026-03-08", "key": "EUR-EURIBOR-6M", "value": 0.025},
+                ],
+            },
+        }
+    )
+    xml_changed = XVASnapshot.from_dict(
+        {
+            **snapshot.to_dict(),
+            "config": {
+                **snapshot.to_dict()["config"],
+                "xml_buffers": {"simulation.xml": "<Simulation><Samples>11</Samples></Simulation>"},
+            },
+        }
+    )
+
+    assert snapshot.stable_key() == cloned.stable_key()
+    assert snapshot.stable_key() != quote_changed.stable_key()
+    assert snapshot.stable_key() != xml_changed.stable_key()
+
+
 def test_extended_irs_fields_round_trip_through_snapshot_dict():
     product = IRS(
         ccy="EUR",

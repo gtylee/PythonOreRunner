@@ -4097,17 +4097,42 @@ def _portfolio_trade_summary(ore_xml: Path) -> dict[str, Any]:
     netting_sets: list[str] = []
     trade_ids_by_netting_set: dict[str, list[str]] = {}
     trade_ids_by_counterparty: dict[str, list[str]] = {}
+
+    def _trade_notional(trade: ET.Element) -> tuple[float, str]:
+        notionals: list[float] = []
+        currencies: list[str] = []
+        for leg in trade.findall(".//LegData"):
+            notional_text = (leg.findtext("./Notionals/Notional") or "").strip()
+            if notional_text:
+                try:
+                    notionals.append(abs(float(notional_text)))
+                except ValueError:
+                    pass
+            ccy_text = (
+                (leg.findtext("./Currency") or "")
+                or (leg.findtext("./Notionals/Currency") or "")
+                or (leg.findtext("./Notionals/NotionalCurrency") or "")
+            ).strip().upper()
+            if ccy_text:
+                currencies.append(ccy_text)
+        unique_ccys = sorted(set(currencies))
+        notional_ccy = unique_ccys[0] if len(unique_ccys) == 1 else ""
+        return float(sum(notionals)) if notionals else 0.0, notional_ccy
+
     for trade in trades:
         trade_id = (trade.attrib.get("id", "") or "").strip()
         trade_type = (trade.findtext("./TradeType") or "").strip()
         counterparty = (trade.findtext("./Envelope/CounterParty") or "").strip()
         netting_set_id = (trade.findtext("./Envelope/NettingSetId") or "").strip()
+        notional, notional_ccy = _trade_notional(trade)
         trade_rows.append(
             {
                 "trade_id": trade_id,
                 "trade_type": trade_type,
                 "counterparty": counterparty,
                 "netting_set_id": netting_set_id,
+                "notional": float(notional),
+                "notional_currency": notional_ccy,
             }
         )
         if trade_id:
@@ -4860,6 +4885,106 @@ def _compute_price_only_case(
             "reference_output_dirs": payload.get("reference_output_dirs", []),
             "using_expected_output": bool(payload.get("using_expected_output", False)),
         },
+    }
+
+
+def _compute_portfolio_price_case(
+    ore_xml: Path,
+    *,
+    anchor_t0_npv: bool,
+    use_reference_artifacts: bool = False,
+    portfolio_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    portfolio_summary = dict(portfolio_summary or _portfolio_trade_summary(ore_xml))
+    trade_rows = list(portfolio_summary.get("trade_rows") or [])
+    if len(trade_rows) <= 1:
+        trade_id = trade_rows[0].get("trade_id", "") if trade_rows else ""
+        return _compute_price_only_case(
+            ore_xml,
+            anchor_t0_npv=anchor_t0_npv,
+            trade_id_override=trade_id or None,
+            use_reference_artifacts=use_reference_artifacts,
+        )
+
+    trade_summaries: list[dict[str, Any]] = []
+    portfolio_trade_rows: list[dict[str, Any]] = []
+    total_py_npv = 0.0
+    total_ore_npv = 0.0
+    ore_npv_seen = False
+    maturity_time = 0.0
+    maturity_date = ""
+    counterparty = ""
+    netting_set_id = ""
+    for trade_row in trade_rows:
+        trade_id = str(trade_row.get("trade_id", "")).strip()
+        if not trade_id:
+            continue
+        trade_summary = _compute_price_only_case(
+            ore_xml,
+            anchor_t0_npv=anchor_t0_npv,
+            trade_id_override=trade_id,
+            use_reference_artifacts=use_reference_artifacts,
+        )
+        trade_summaries.append(trade_summary)
+        pricing = dict(trade_summary.get("pricing") or {})
+        py_npv = float(pricing.get("py_t0_npv", pricing.get("ore_t0_npv", 0.0)) or 0.0)
+        ore_npv = pricing.get("ore_t0_npv")
+        total_py_npv += py_npv
+        if ore_npv is not None:
+            total_ore_npv += float(ore_npv)
+            ore_npv_seen = True
+        maturity_time_candidate = float(trade_summary.get("maturity_time") or 0.0)
+        if maturity_time_candidate >= maturity_time:
+            maturity_time = maturity_time_candidate
+            maturity_date = str(trade_summary.get("maturity_date") or "")
+        if not counterparty:
+            counterparty = str(trade_summary.get("counterparty") or "")
+        if not netting_set_id:
+            netting_set_id = str(trade_summary.get("netting_set_id") or "")
+        portfolio_trade_rows.append(
+            {
+                "trade_id": trade_summary.get("trade_id", trade_id),
+                "trade_type": trade_summary.get("trade_type", trade_row.get("trade_type", "")),
+                "counterparty": trade_summary.get("counterparty", trade_row.get("counterparty", "")),
+                "netting_set_id": trade_summary.get("netting_set_id", trade_row.get("netting_set_id", "")),
+                "maturity_date": trade_summary.get("maturity_date", ""),
+                "maturity_time": float(trade_summary.get("maturity_time") or 0.0),
+                "pricing": pricing,
+                "diagnostics": dict(trade_summary.get("diagnostics") or {}),
+                "notional": float(trade_row.get("notional") or 0.0),
+                "notional_currency": str(trade_row.get("notional_currency") or ""),
+            }
+        )
+
+    aggregate_pricing = {
+        "trade_type": "Portfolio",
+        "py_t0_npv": float(total_py_npv),
+        "t0_npv_abs_diff": abs(float(total_py_npv) - float(total_ore_npv if ore_npv_seen else total_py_npv)),
+        "report_ccy": str(portfolio_trade_rows[0]["pricing"].get("report_ccy") if portfolio_trade_rows and portfolio_trade_rows[0].get("pricing") else "").upper(),
+        "currency": str(portfolio_trade_rows[0]["pricing"].get("report_ccy") if portfolio_trade_rows and portfolio_trade_rows[0].get("pricing") else "").upper(),
+        "leg_source": "portfolio",
+    }
+    if ore_npv_seen:
+        aggregate_pricing["ore_t0_npv"] = float(total_ore_npv)
+
+    return {
+        "trade_id": "PORTFOLIO",
+        "trade_type": "Portfolio",
+        "counterparty": counterparty,
+        "netting_set_id": netting_set_id,
+        "maturity_date": maturity_date,
+        "maturity_time": float(maturity_time),
+        "pricing": aggregate_pricing,
+        "diagnostics": {
+            "engine": "python_price_only",
+            "pricing_mode": "python_portfolio_price_only",
+            "portfolio_mode": True,
+            "portfolio_trade_count": len(portfolio_trade_rows),
+            "portfolio_trade_ids_by_netting_set": dict(portfolio_summary.get("trade_ids_by_netting_set", {})),
+            "reference_output_dirs": sorted({d for trade_summary in trade_summaries for d in trade_summary.get("diagnostics", {}).get("reference_output_dirs", [])}),
+            "using_expected_output": any(bool(trade_summary.get("diagnostics", {}).get("using_expected_output", False)) for trade_summary in trade_summaries),
+        },
+        "portfolio_trade_rows": portfolio_trade_rows,
     }
 
 
@@ -7428,6 +7553,7 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
     pricing = case_summary.get("pricing") or {}
     xva = case_summary.get("xva") or {}
     sensi = case_summary.get("sensitivity") or {}
+    portfolio_trade_rows = list(case_summary.get("portfolio_trade_rows") or [])
     trade_profile = dict(case_summary.get("exposure_profile_by_trade") or {})
     netting_profile = dict(case_summary.get("exposure_profile_by_netting_set") or {})
     exposure_dates = list(trade_profile.get("dates") or case_summary.get("exposure_dates") or [])
@@ -7442,31 +7568,58 @@ def _write_ore_compatible_reports(case_out_dir: Path, case_summary: dict[str, An
     if pricing:
         maturity_date = str(case_summary.get("maturity_date") or "")
         maturity_time = float(case_summary.get("maturity_time") or 0.0)
-        npv_value = float(pricing.get("py_t0_npv", pricing.get("ore_t0_npv", 0.0)))
         npv_headers = [
             "#TradeId", "TradeType", "Maturity", "MaturityTime", "NPV", "NpvCurrency",
             "NPV(Base)", "BaseCurrency", "Notional", "NotionalCurrency", "Notional(Base)",
             "NettingSet", "CounterParty",
         ]
-        npv_row = [
-            entity_id,
-            str(pricing.get("trade_type", report_ctx["entity_type"])),
-            maturity_date,
-            _fmt_float(maturity_time),
-            _fmt_float(npv_value),
-            str(report_ctx["report_ccy"]),
-            _fmt_float(npv_value),
-            str(report_ctx["base_currency"]),
-            _fmt_float(float(report_ctx["total_notional"]), digits=2),
-            str(report_ctx["notional_ccy"]),
-            _fmt_float(float(report_ctx["total_notional"]), digits=2),
-            netting_set_id,
-            counterparty,
-        ]
+        npv_rows: list[list[str]] = []
+        if portfolio_trade_rows:
+            for trade_row in portfolio_trade_rows:
+                trade_pricing = dict(trade_row.get("pricing") or {})
+                npv_value = float(trade_pricing.get("py_t0_npv", trade_pricing.get("ore_t0_npv", 0.0)))
+                notional = float(trade_row.get("notional") or 0.0)
+                notional_ccy = str(trade_row.get("notional_currency") or report_ctx["notional_ccy"] or report_ctx["report_ccy"])
+                npv_rows.append(
+                    [
+                        str(trade_row.get("trade_id", "")),
+                        str(trade_row.get("trade_type", report_ctx["entity_type"])),
+                        str(trade_row.get("maturity_date", "")),
+                        _fmt_float(float(trade_row.get("maturity_time") or 0.0)),
+                        _fmt_float(npv_value),
+                        str(trade_pricing.get("report_ccy") or report_ctx["report_ccy"]),
+                        _fmt_float(npv_value),
+                        str(trade_pricing.get("report_ccy") or report_ctx["base_currency"]),
+                        _fmt_float(notional, digits=2),
+                        notional_ccy,
+                        _fmt_float(notional, digits=2),
+                        str(trade_row.get("netting_set_id", netting_set_id)),
+                        str(trade_row.get("counterparty", counterparty)),
+                    ]
+                )
+        else:
+            npv_value = float(pricing.get("py_t0_npv", pricing.get("ore_t0_npv", 0.0)))
+            npv_rows.append(
+                [
+                    entity_id,
+                    str(pricing.get("trade_type", report_ctx["entity_type"])),
+                    maturity_date,
+                    _fmt_float(maturity_time),
+                    _fmt_float(npv_value),
+                    str(report_ctx["report_ccy"]),
+                    _fmt_float(npv_value),
+                    str(report_ctx["base_currency"]),
+                    _fmt_float(float(report_ctx["total_notional"]), digits=2),
+                    str(report_ctx["notional_ccy"]),
+                    _fmt_float(float(report_ctx["total_notional"]), digits=2),
+                    netting_set_id,
+                    counterparty,
+                ]
+            )
         with open(case_out_dir / "npv.csv", "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(npv_headers)
-            writer.writerow(npv_row)
+            writer.writerows(npv_rows)
     if sensi and str(sensi.get("metric", "")).strip().upper() in {"NPV", "PV"}:
         sensitivity_rows = list(sensi.get("python_rows") or [])
         scenario_rows = list(sensi.get("scenario_rows") or [])
@@ -8353,7 +8506,22 @@ def _run_case(
         try:
             if engine == "ore":
                 raise FileNotFoundError("ORE reference engine explicitly requested")
-            if _supports_native_price_only(first_trade_type, ore_xml) or (
+            portfolio_mode = False
+            portfolio_summary: dict[str, Any] = {}
+            if getattr(args, "trade_id", None) is None:
+                try:
+                    portfolio_summary = _portfolio_trade_summary(ore_xml)
+                    portfolio_mode = int(portfolio_summary.get("trade_count", 0)) > 1
+                except Exception:
+                    portfolio_mode = False
+            if portfolio_mode:
+                price_summary = _compute_portfolio_price_case(
+                    ore_xml,
+                    anchor_t0_npv=args.anchor_t0_npv,
+                    use_reference_artifacts=(engine == "compare"),
+                    portfolio_summary=portfolio_summary,
+                )
+            elif _supports_native_price_only(first_trade_type, ore_xml) or (
                 _has_active_simulation_analytic(ore_xml)
                 and first_trade_type == "Swap"
                 and _is_plain_vanilla_swap_trade(ore_xml)
@@ -8406,6 +8574,7 @@ def _run_case(
                 "xva": None,
                 "parity": None,
                 "diagnostics": price_summary.get("diagnostics", {"mode": "price_only"}),
+                "portfolio_trade_rows": list(price_summary.get("portfolio_trade_rows") or []),
             }
         )
     else:

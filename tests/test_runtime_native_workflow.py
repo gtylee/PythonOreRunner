@@ -37,12 +37,14 @@ from pythonore.runtime.runtime import (
     _PythonLgmInputs,
     _SharedFxSimulation,
     _TradeSpec,
+    _forward_index_family,
     _normalize_forward_tenor_family,
     _parse_market_overlay,
     _quote_matches_discount_curve,
     _quote_matches_forward_curve,
     classify_portfolio_support,
 )
+from pythonore.runtime.lgm.market import _forward_index_family as _lgm_forward_index_family
 from pythonore.mapping.mapper import map_snapshot
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -424,7 +426,14 @@ def _generic_digital_cmsspread_trade_xml() -> str:
 """.strip()
 
 
-def _generic_rate_swap_trade_xml(*, start_date: str = "2024-03-08", end_date: str = "2028-03-08") -> str:
+def _generic_rate_swap_trade_xml(
+    *,
+    start_date: str = "2024-03-08",
+    end_date: str = "2028-03-08",
+    float_gearing: float = 1.0,
+    float_is_in_arrears: bool = False,
+    float_spread: float = 0.0,
+) -> str:
     return f"""
 <SwapData>
   <LegData>
@@ -464,7 +473,72 @@ def _generic_rate_swap_trade_xml(*, start_date: str = "2024-03-08", end_date: st
     <FloatingLegData>
       <Index>EUR-EURIBOR-6M</Index>
       <FixingDays>2</FixingDays>
+      <IsInArrears>{"true" if float_is_in_arrears else "false"}</IsInArrears>
+      <Spreads><Spread>{float(float_spread):.16g}</Spread></Spreads>
+      <Gearings><Gearing>{float(float_gearing):.16g}</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _generic_cms_trade_xml(*, gearing: float = 1.0, spread: float = 0.0, index_name: str = "USD-CMS-10Y") -> str:
+    return f"""
+<SwapData>
+  <LegData>
+    <LegType>CMS</LegType>
+    <Currency>USD</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <CMSLegData>
+      <Index>{index_name}</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Gearings><Gearing>{float(gearing):.16g}</Gearing></Gearings>
+      <Spreads><Spread>{float(spread):.16g}</Spread></Spreads>
+    </CMSLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _generic_sifma_rate_swap_trade_xml(*, rate_cutoff: int = 1) -> str:
+    return f"""
+<SwapData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>USD</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SIFMA-1W</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <RateCutoff>{int(rate_cutoff)}</RateCutoff>
       <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
     </FloatingLegData>
   </LegData>
 </SwapData>
@@ -1321,6 +1395,115 @@ def test_torch_generic_capfloor_matches_numpy_runtime():
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
 
 
+def test_torch_generic_rate_swap_supports_in_arrears_non_unit_gearing():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="RATE_SWAP_IN_ARREARS_GEARED",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_rate_swap_trade_xml(
+                    float_gearing=1.75,
+                    float_is_in_arrears=True,
+                    float_spread=0.0005,
+                ),
+            }
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade.trade_id)
+    assert spec.kind == "RateSwap"
+    assert adapter._supports_torch_rate_swap(spec)
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
+    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="rate-swap-in-arrears-geared-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    from pythonore.compute.lgm_torch_xva import (
+        TorchDiscountCurve,
+        capfloor_npv_paths_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        par_swap_rate_paths_torch,
+        price_plain_rate_leg_paths_torch,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+    )
+
+    backend = (
+        TorchDiscountCurve,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        "cpu",
+        price_plain_rate_leg_paths_torch,
+        par_swap_rate_paths_torch,
+        capfloor_npv_paths_torch,
+    )
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
+    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="rate-swap-in-arrears-geared-torch")
+
+    assert np.isfinite(float(torch_result.pv_total))
+    assert np.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rtol=2.0e-5, atol=1.0e-8)
+    coverage = torch_result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+
+
+def test_preflight_does_not_block_torch_supported_in_arrears_geared_rate_swap():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="RATE_SWAP_IN_ARREARS_GEARED_PREFLIGHT",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_rate_swap_trade_xml(
+                    float_gearing=1.75,
+                    float_is_in_arrears=True,
+                    float_spread=0.0005,
+                ),
+            }
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    support = classify_portfolio_support(snapshot, fallback_to_swig=False)
+    assert support["python_supported"] is True
+    assert support["native_trade_count"] == 1
+    assert support["requires_swig_trade_count"] == 0
+    assert support["requires_swig_trade_ids"] == []
+    assert support["requires_swig_trade_types"] == []
+
+
 def test_native_runtime_supports_in_arrears_capfloors():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -1665,6 +1848,100 @@ def test_resolve_index_curve_uses_overnight_family_before_generic_forward_fallba
     curve = adapter._resolve_index_curve(inputs, "USD", "USD-FedFunds")
 
     assert curve(1.0) == 0.99
+
+
+def test_forward_index_family_treats_sifma_as_overnight():
+    assert _forward_index_family("USD-SIFMA") == "1D"
+    assert _forward_index_family("USD-BMA") == "1D"
+    assert _lgm_forward_index_family("USD-SIFMA") == "1D"
+    assert _lgm_forward_index_family("USD-SIFMA-1W") == "1D"
+
+
+def test_cms_coupon_path_respects_gearing():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0, 0.5], dtype=float),
+        valuation_times=np.array([0.0, 0.5], dtype=float),
+        observation_times=np.array([0.0, 0.5], dtype=float),
+        observation_closeout_times=np.array([0.0, 0.5], dtype=float),
+        discount_curves={"USD": (lambda t: float(np.exp(-0.01 * float(t))))},
+        forward_curves={"USD": (lambda t: float(np.exp(-0.01 * float(t))))},
+        forward_curves_by_tenor={"USD": {"10Y": (lambda t: float(np.exp(-0.01 * float(t))))}},
+        forward_curves_by_name={"USD-CMS-10Y": (lambda t: float(np.exp(-0.01 * float(t))))},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": np.array([0.0]), "alpha_values": np.array([0.01]), "kappa_times": np.array([0.0]), "kappa_values": np.array([0.01]), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=(),
+        torch_device=None,
+        trade_specs=(),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+
+    class _DummyModel:
+        pass
+
+    leg = {
+        "kind": "CMS",
+        "ccy": "USD",
+        "index_name": "USD-CMS-10Y",
+        "start_time": np.array([0.0], dtype=float),
+        "end_time": np.array([0.5], dtype=float),
+        "pay_time": np.array([0.5], dtype=float),
+        "accrual": np.array([0.5], dtype=float),
+        "spread": np.array([0.02], dtype=float),
+        "gearing": np.array([1.75], dtype=float),
+        "quoted_coupon": np.array([0.0], dtype=float),
+        "is_historically_fixed": np.array([False], dtype=bool),
+        "fixing_time": np.array([1.0], dtype=float),
+        "fixing_date": np.array(["2026-03-10"], dtype=object),
+        "day_counter": "A360",
+    }
+    with patch.object(adapter, "_par_swap_rate_paths", return_value=np.array([0.1], dtype=float)):
+        coupons = adapter._rate_leg_coupon_paths(_DummyModel(), leg, "USD", inputs, 0.25, np.array([0.0, 0.0], dtype=float))
+    assert coupons.shape == (1, 2)
+    np.testing.assert_allclose(coupons[0], np.full(2, 1.75 * 0.1 + 0.02))
+
+
+def test_sifma_rate_swap_with_rate_cutoff_is_treated_as_overnight():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="SIFMA_RATE_CUTOFF",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_sifma_rate_swap_trade_xml(rate_cutoff=1)}),
+    )
+    snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(trade,)))
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+
+    trade_specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in trade_specs if s.trade.trade_id == "SIFMA_RATE_CUTOFF")
+    assert spec.kind == "RateSwap"
+    assert spec.legs is not None
+    floating = next(leg for leg in spec.legs["rate_legs"] if str(leg.get("kind", "")).upper() == "FLOATING")
+    assert bool(floating.get("overnight_indexed", False))
+    assert int(floating.get("rate_cutoff", 0) or 0) == 1
+    assert adapter._supports_torch_rate_swap(spec) is False
 
 
 def test_classify_portfolio_trades_collects_all_generic_xccy_swap_currencies():

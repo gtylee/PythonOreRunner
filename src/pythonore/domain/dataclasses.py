@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import hashlib
 import json
+from dataclasses import fields, is_dataclass
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 
@@ -787,43 +789,18 @@ class XVASnapshot:
         return _snapshot_from_dict(data)
 
     def stable_key(self) -> str:
-        xml_buffers = tuple(
-            (key, id(value), len(value) if isinstance(value, str) else None)
-            for key, value in sorted(self.config.xml_buffers.items())
-        )
-        runtime = self.config.runtime
-        runtime_key = None
-        if runtime is not None:
-            simulation = runtime.simulation
-            xva = runtime.xva_analytic
-            runtime_key = (
-                int(simulation.samples),
-                int(simulation.seed),
-                tuple(str(x) for x in getattr(simulation, "grid", ())),
-                str(getattr(xva, "cpty", "") if xva is not None else ""),
-                str(getattr(xva, "own", "") if xva is not None else ""),
-                str(getattr(xva, "netting_set", "") if xva is not None else ""),
-            )
-        payload = (
-            self.market.asof,
-            id(self.market.raw_quotes),
-            len(self.market.raw_quotes),
-            id(self.fixings.points),
-            len(self.fixings.points),
-            id(self.portfolio.trades),
-            len(self.portfolio.trades),
-            tuple((t.trade_id, t.trade_type) for t in self.portfolio.trades),
-            self.config.asof,
-            self.config.base_currency,
-            tuple(self.config.analytics),
-            int(self.config.num_paths),
-            float(self.config.horizon_years),
-            tuple(sorted((str(k), repr(v)) for k, v in self.config.params.items() if k != "xml_buffers")),
-            xml_buffers,
-            runtime_key,
-            tuple(sorted((str(k), getattr(v, "path", None), getattr(v, "origin", None)) for k, v in self.source_meta.items())),
-        )
-        return str(abs(hash(payload)))
+        payload = {
+            "fingerprint_version": 2,
+            "market": self.market,
+            "fixings": self.fixings,
+            "portfolio": self.portfolio,
+            "config": self.config,
+            "netting": self.netting,
+            "collateral": self.collateral,
+            "source_meta": self.source_meta,
+        }
+        blob = json.dumps(_fingerprint_normalize(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _parse_product(data: Dict[str, Any]) -> ProductSpec:
@@ -1053,6 +1030,30 @@ def _snapshot_from_dict(data: Dict[str, Any]) -> XVASnapshot:
 
     source_meta = {k: SourceMeta(**v) for k, v in data.get("source_meta", {}).items()}
     return XVASnapshot(market=mk, fixings=fx, portfolio=pf, config=cfg, netting=ns, collateral=cc, source_meta=source_meta)
+
+
+def _fingerprint_normalize(value: Any) -> Any:
+    if is_dataclass(value):
+        return {
+            field.name: _fingerprint_normalize(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _fingerprint_normalize(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_normalize(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_fingerprint_normalize(item) for item in value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="surrogateescape")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
 
 
 def _validate_date_like(value: str, field_name: str) -> None:

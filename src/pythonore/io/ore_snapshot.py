@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import hashlib
 import json
 import shutil
 import subprocess
@@ -765,6 +766,22 @@ def _canonical_example_resource_id(path: str | Path) -> str:
     return str(resolved)
 
 
+def _fingerprint_path_or_resource(path: str | Path) -> str:
+    resolved = Path(path).resolve()
+    if resolved.exists() and resolved.is_file():
+        try:
+            digest = hashlib.sha256()
+            with resolved.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except Exception:
+            pass
+    return _canonical_example_resource_id(resolved)
+
+
 def resolve_calibration_xml_path(
     *,
     ore_xml_path: str,
@@ -780,10 +797,10 @@ def resolve_calibration_xml_path(
     if direct.exists():
         return direct
     current_key = (
-        _canonical_example_resource_id(market_data_path),
-        _canonical_example_resource_id(curve_config_path),
-        _canonical_example_resource_id(conventions_path),
-        _canonical_example_resource_id(todaysmarket_xml_path),
+        _fingerprint_path_or_resource(market_data_path),
+        _fingerprint_path_or_resource(curve_config_path),
+        _fingerprint_path_or_resource(conventions_path),
+        _fingerprint_path_or_resource(todaysmarket_xml_path),
         str(domestic_ccy).strip() or "EUR",
         _maybe_simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
     )
@@ -794,10 +811,10 @@ def resolve_calibration_xml_path(
             try:
                 ctx = _parse_ore_setup_context(candidate_ore_xml)
                 candidate_key = (
-                    _canonical_example_resource_id(ctx["market_data"]),
-                    _canonical_example_resource_id(ctx["curve_config"]),
-                    _canonical_example_resource_id(ctx["conventions"]),
-                    _canonical_example_resource_id(ctx["todaysmarket"]),
+                    _fingerprint_path_or_resource(ctx["market_data"]),
+                    _fingerprint_path_or_resource(ctx["curve_config"]),
+                    _fingerprint_path_or_resource(ctx["conventions"]),
+                    _fingerprint_path_or_resource(ctx["todaysmarket"]),
                     str(ctx["domestic_ccy"]),
                     _maybe_simulation_lgm_signature(str(Path(ctx["simulation_xml"]).resolve()), str(ctx["domestic_ccy"])),
                 )
@@ -1532,10 +1549,10 @@ def resolve_lgm_params(
     if lgm_param_source in {"auto", "python", "ore", "runtime_calibration"}:
         failure_marker = _runtime_calibration_failure_marker(output_path)
         runtime_cache_key = (
-            _canonical_example_resource_id(market_data_path),
-            _canonical_example_resource_id(curve_config_path),
-            _canonical_example_resource_id(conventions_path),
-            _canonical_example_resource_id(todaysmarket_xml_path),
+            _fingerprint_path_or_resource(market_data_path),
+            _fingerprint_path_or_resource(curve_config_path),
+            _fingerprint_path_or_resource(conventions_path),
+            _fingerprint_path_or_resource(todaysmarket_xml_path),
             str(domestic_ccy).strip() or "EUR",
             _maybe_simulation_lgm_signature(str(Path(simulation_xml_path).resolve()), str(domestic_ccy).strip() or "EUR"),
         )
