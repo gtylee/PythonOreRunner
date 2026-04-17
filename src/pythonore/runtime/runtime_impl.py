@@ -42,6 +42,7 @@ import contextlib
 import csv
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 import importlib
 import math
 import os
@@ -127,6 +128,70 @@ def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[st
     if any(tag in key for tag in ("EONIA", "ESTR", "ESTER", "FEDFUNDS", "SOFR", "SONIA", "SARON", "TOIS", "TONAR")):
         return "1D"
     return ""
+
+
+def _trade_curve_need_signature(
+    trade_specs: Sequence[Any],
+    swap_index_forward_tenors: Mapping[str, str],
+) -> tuple[tuple[object, ...], tuple[tuple[str, str], ...]]:
+    spec_sig: list[tuple[object, ...]] = []
+    for spec in trade_specs:
+        kind = str(getattr(spec, "kind", "")).upper()
+        ccy = str(getattr(spec, "ccy", "")).upper()
+        legs = getattr(spec, "legs", None)
+        if kind == "IRS" and isinstance(legs, dict):
+            spec_sig.append(
+                (
+                    kind,
+                    ccy,
+                    str(legs.get("float_index", "")).upper(),
+                    str(legs.get("float_index_tenor", "")).upper(),
+                )
+            )
+            continue
+        if kind == "RATESWAP" and isinstance(legs, dict):
+            leg_sigs: list[tuple[str, str, str]] = []
+            for leg in legs.get("rate_legs", []):
+                leg_sigs.append(
+                    (
+                        str(leg.get("index_name", "")).upper(),
+                        str(leg.get("index_name_1", "")).upper(),
+                        str(leg.get("index_name_2", "")).upper(),
+                    )
+                )
+            spec_sig.append((kind, ccy, tuple(sorted(leg_sigs))))
+    swap_sig = tuple(sorted((str(k).upper(), str(v).upper()) for k, v in swap_index_forward_tenors.items()))
+    return tuple(spec_sig), swap_sig
+
+
+@lru_cache(maxsize=256)
+def _derive_curve_needs_from_signature(
+    spec_sig: tuple[tuple[object, ...], ...],
+    swap_sig: tuple[tuple[str, str], ...],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[tuple[str, tuple[str, ...]], ...]]:
+    swap_index_forward_tenors = {k: v for k, v in swap_sig}
+    needed_tenors: Dict[str, set[str]] = {}
+    needed_forward_names: Dict[str, set[str]] = {}
+    for spec in spec_sig:
+        kind = str(spec[0]).upper()
+        ccy = str(spec[1]).upper()
+        if kind == "IRS":
+            index_name = str(spec[2]).upper()
+            tenor = str(spec[3]).upper()
+            if index_name:
+                needed_forward_names.setdefault(ccy, set()).add(index_name)
+            if tenor:
+                needed_tenors.setdefault(ccy, set()).add(tenor)
+        elif kind == "RATESWAP":
+            for index_name, _, _ in spec[2]:
+                if index_name:
+                    needed_forward_names.setdefault(ccy, set()).add(index_name)
+                    tenor = swap_index_forward_tenors.get(index_name, "")
+                    if tenor:
+                        needed_tenors.setdefault(ccy, set()).add(str(tenor).upper())
+    tenors_sig = tuple((ccy, tuple(sorted(tenors))) for ccy, tenors in sorted(needed_tenors.items()))
+    names_sig = tuple((ccy, tuple(sorted(names))) for ccy, names in sorted(needed_forward_names.items()))
+    return tenors_sig, names_sig
 
 
 def _index_name_matches_quote_token(token: str, index_name: str, ccy: str) -> bool:
@@ -249,6 +314,8 @@ class _PricingContext:
     torch_curve_cache: Dict[tuple[str, str], object]
     torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray]
     irs_curve_cache: Dict[tuple[str, str], Dict[str, object]]
+    last_trade_backend: str = ""
+    last_trade_backend_detail: str = ""
 
 
 class PythonLgmAdapter:
@@ -282,6 +349,7 @@ class PythonLgmAdapter:
         self._generic_cashflow_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
         self._market_overlay_cache: Dict[int, Dict[str, Any]] = {}
+        self._market_overlay_scan_cache: Dict[tuple[object, ...], Dict[str, Any]] = {}
         self._capfloor_vol_cache: Dict[tuple[int, str], Dict[str, Any]] = {}
         self._quote_dict_cache: Dict[int, Tuple[Dict[str, object], ...]] = {}
         self._extract_inputs_cache: Dict[str, _PythonLgmInputs] = {}
@@ -290,9 +358,10 @@ class PythonLgmAdapter:
             tuple[list["_TradeSpec"], list["Trade"], set[str]],
         ] = {}
         self._curve_fit_cache: Dict[tuple[object, ...], Optional[_CurveBundle]] = {}
-        self._swap_pricing_backend_cache = None
+        self._swap_pricing_backend_cache: Dict[tuple[str, bool], tuple[object, ...] | None] = {}
         self._par_swap_deterministic_cache: Dict[tuple[int, float, float, float, int], np.ndarray] = {}
         self._coupon_path_cache: Dict[tuple[object, ...], np.ndarray] = {}
+        self._lgm_path_cache: Dict[tuple[object, ...], tuple[np.ndarray, Any | None]] = {}
 
     def _progress_enabled(self, snapshot: XVASnapshot) -> bool:
         raw = str(snapshot.config.params.get("python.progress", "Y")).strip().upper()
@@ -317,8 +386,7 @@ class PythonLgmAdapter:
         rate_swap_count = sum(1 for spec in inputs.trade_specs if spec.kind == "RateSwap")
         if irs_count == 0 and rate_swap_count == 0:
             return None
-        if self._swap_pricing_backend_cache is not None:
-            return self._swap_pricing_backend_cache
+        requested_device = str(inputs.torch_device or "").strip().lower()
         try:
             import torch
             from pythonore.compute.lgm_torch_xva import (
@@ -330,18 +398,21 @@ class PythonLgmAdapter:
                 swap_npv_paths_from_ore_legs_dual_curve_torch,
             )
         except Exception:
-            self._swap_pricing_backend_cache = None
             return None
-        requested_device = str(inputs.torch_device or "").strip().lower()
-        if requested_device in {"cpu", "mps"}:
-            if requested_device == "mps" and not bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-                requested_device = "cpu"
-            device = requested_device
-        elif bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-            device = "mps"
-        else:
+        mps_available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+        device = requested_device
+        if device in {"", "auto"}:
+            device = "mps" if mps_available else "cpu"
+        elif device not in {"cpu", "mps"}:
+            device = "mps" if mps_available else "cpu"
+        elif device == "mps" and not mps_available:
             device = "cpu"
-        self._swap_pricing_backend_cache = (
+
+        cache_key = (device, mps_available)
+        cached = self._swap_pricing_backend_cache.get(cache_key)
+        if cached is not None or cache_key in self._swap_pricing_backend_cache:
+            return cached
+        backend = (
             TorchDiscountCurve,
             swap_npv_paths_from_ore_legs_dual_curve_torch,
             deflate_lgm_npv_paths_torch_batched,
@@ -350,7 +421,8 @@ class PythonLgmAdapter:
             par_swap_rate_paths_torch,
             capfloor_npv_paths_torch,
         )
-        return self._swap_pricing_backend_cache
+        self._swap_pricing_backend_cache[cache_key] = backend
+        return backend
 
     def _supports_torch_rate_swap(self, spec: _TradeSpec) -> bool:
         if spec.kind != "RateSwap" or not isinstance(spec.legs, dict):
@@ -901,13 +973,9 @@ class PythonLgmAdapter:
             )
         )
         rng_mode = self._python_lgm_rng_mode(snapshot)
-        rng, draw_order = self._build_lgm_rng(inputs.seed, rng_mode)
         reporter.log("simulating LGM state paths")
-        x_paths = self._lgm_mod.simulate_lgm_measure(
-            model, inputs.times, n_paths=n_paths, rng=rng, x0=0.0, draw_order=draw_order
-        )
+        x_paths, shared_fx_sim = self._simulate_lgm_paths_cached(snapshot, inputs, model, n_paths, rng_mode)
         reporter.log(f"simulation complete: x_paths_shape={tuple(x_paths.shape)}")
-        shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
         valuation_idx, obs_idx, obs_closeout_idx, obs_dates = self._validated_grid_indices(inputs)
         df_base = inputs.discount_curves[snapshot.config.base_currency.upper()]
         obs_df_vec = np.asarray([df_base(float(t)) for t in inputs.times], dtype=float)[obs_idx]
@@ -945,7 +1013,16 @@ class PythonLgmAdapter:
 
             self._fail_on_trade_nan(spec, vals)
             npv_by_trade[spec.trade.trade_id] = vals
+            if spec.kind == "RateSwap":
+                reporter.log(
+                    f"rateSwap trade {spec.trade.trade_id}: backend={pricing_ctx.last_trade_backend}"
+                    + (f" detail={pricing_ctx.last_trade_backend_detail}" if pricing_ctx.last_trade_backend_detail else "")
+                )
             if spec.kind == "CapFloor" and spec.sticky_state is not None:
+                reporter.log(
+                    f"capfloor trade {spec.trade.trade_id}: backend={pricing_ctx.last_trade_backend}"
+                    + (f" detail={pricing_ctx.last_trade_backend_detail}" if pricing_ctx.last_trade_backend_detail else "")
+                )
                 definition = spec.sticky_state.get("definition")
                 index_name = str(spec.sticky_state.get("index_name", ""))
                 if definition is not None:
@@ -1854,29 +1931,14 @@ class PythonLgmAdapter:
             model_ccy=model_ccy,
             trade_specs=trade_specs,
         )
-        needed_tenors: Dict[str, set[str]] = {}
-        needed_forward_names: Dict[str, set[str]] = {}
-        for spec in trade_specs:
-            if spec.kind == "IRS" and spec.legs is not None:
-                index_name = str(spec.legs.get("float_index", "")).upper()
-                if index_name:
-                    needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
-                tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-                if tenor:
-                    needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
-            elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
-                for leg in spec.legs.get("rate_legs", []):
-                    for field in ("index_name", "index_name_1", "index_name_2"):
-                        index_name = str(leg.get(field, "")).upper()
-                        if index_name:
-                            needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
-                        tenor = swap_index_forward_tenors.get(index_name, "")
-                        if tenor:
-                            needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+        need_sig = _trade_curve_need_signature(trade_specs, swap_index_forward_tenors)
+        needed_tenors_sig, needed_forward_names_sig = _derive_curve_needs_from_signature(*need_sig)
+        needed_tenors = {ccy: set(tenors) for ccy, tenors in needed_tenors_sig}
+        needed_forward_names = {ccy: set(names) for ccy, names in needed_forward_names_sig}
         market_cache_key = id(snapshot.market.raw_quotes)
         quote_dicts = self._quote_dict_cache.get(market_cache_key)
         if quote_dicts is None:
-            quote_dicts = tuple({"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes)
+            quote_dicts = _scan_market_quotes(snapshot.market.raw_quotes)
             self._quote_dict_cache[market_cache_key] = quote_dicts
         input_fallbacks: List[str] = []
         strict_ore_inputs = self._is_ore_case_snapshot(snapshot)
@@ -2489,7 +2551,7 @@ class PythonLgmAdapter:
             market_cache_key = id(snapshot.market.raw_quotes)
             quote_dicts = self._quote_dict_cache.get(market_cache_key)
             if quote_dicts is None:
-                quote_dicts = tuple({"key": str(q.key), "value": float(q.value)} for q in snapshot.market.raw_quotes)
+                quote_dicts = _scan_market_quotes(snapshot.market.raw_quotes)
                 self._quote_dict_cache[market_cache_key] = quote_dicts
             discount_meta = {
                 ccy: {
@@ -2506,25 +2568,10 @@ class PythonLgmAdapter:
             swap_index_forward_tenors = self._parse_swap_index_forward_tenors(
                 snapshot.config.xml_buffers.get("conventions.xml", "")
             )
-            needed_tenors: Dict[str, set[str]] = {}
-            needed_forward_names: Dict[str, set[str]] = {}
-            for spec in trade_specs:
-                if spec.kind == "IRS" and spec.legs is not None:
-                    index_name = str(spec.legs.get("float_index", "")).upper()
-                    if index_name:
-                        needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
-                    tenor = str(spec.legs.get("float_index_tenor", "")).upper()
-                    if tenor:
-                        needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
-                elif spec.kind == "RateSwap" and isinstance(spec.legs, dict):
-                    for leg in spec.legs.get("rate_legs", []):
-                        for field in ("index_name", "index_name_1", "index_name_2"):
-                            index_name = str(leg.get(field, "")).upper()
-                            if index_name:
-                                needed_forward_names.setdefault(spec.ccy.upper(), set()).add(index_name)
-                            tenor = swap_index_forward_tenors.get(index_name, "")
-                            if tenor:
-                                needed_tenors.setdefault(spec.ccy.upper(), set()).add(tenor)
+            need_sig = _trade_curve_need_signature(trade_specs, swap_index_forward_tenors)
+            needed_tenors_sig, needed_forward_names_sig = _derive_curve_needs_from_signature(*need_sig)
+            needed_tenors = {ccy: set(tenors) for ccy, tenors in needed_tenors_sig}
+            needed_forward_names = {ccy: set(names) for ccy, names in needed_forward_names_sig}
             cache_key = (
                 market_cache_key,
                 snapshot.config.asof,
@@ -2753,6 +2800,37 @@ class PythonLgmAdapter:
             f"'{rng_mode}'. Use 'numpy', 'ore_parity', 'ore_parity_antithetic', 'ore_sobol' or "
             "'ore_sobol_bridge'."
         )
+
+    def _simulate_lgm_paths_cached(
+        self,
+        snapshot: XVASnapshot,
+        inputs: _PythonLgmInputs,
+        model: Any,
+        n_paths: int,
+        rng_mode: str,
+    ) -> tuple[np.ndarray, Any | None]:
+        cache_key = (
+            snapshot.stable_key(),
+            int(n_paths),
+            str(rng_mode),
+        )
+        cached = self._lgm_path_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        rng, draw_order = self._build_lgm_rng(inputs.seed, rng_mode)
+        x_paths = self._lgm_mod.simulate_lgm_measure(
+            model,
+            inputs.times,
+            n_paths=n_paths,
+            rng=rng,
+            x0=0.0,
+            draw_order=draw_order,
+        )
+        shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
+        if len(self._lgm_path_cache) >= 8:
+            self._lgm_path_cache.pop(next(iter(self._lgm_path_cache)))
+        self._lgm_path_cache[cache_key] = (x_paths, shared_fx_sim)
+        return x_paths, shared_fx_sim
 
     def _day_counter_from_sim_xml(self, sim_xml: str) -> str:
         """Return the normalised day-counter string from simulation.xml text."""
@@ -4213,8 +4291,12 @@ class PythonLgmAdapter:
     def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
         inputs = ctx.inputs
         if ctx.irs_backend is None or not self._supports_torch_rate_swap(spec):
+            ctx.last_trade_backend = "rateSwap-generic"
+            ctx.last_trade_backend_detail = "price_generic_rate_swap"
             return self._price_generic_rate_swap(spec, inputs, ctx.model, ctx.x_paths, ctx.shared_fx_sim, ctx.snapshot), False
         torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _, _ = ctx.irs_backend
+        ctx.last_trade_backend = "rateSwap-torch"
+        ctx.last_trade_backend_detail = "torch_plain_leg_pricer"
         rate_legs = list((spec.legs or {}).get("rate_legs", []))
         vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
         disc_key = ("disc", spec.ccy)
@@ -4359,14 +4441,20 @@ class PythonLgmAdapter:
 
     def _price_trade_capfloor_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
         if spec.sticky_state is None:
+            ctx.last_trade_backend = "capfloor-missing-state"
+            ctx.last_trade_backend_detail = "no-sticky-state"
             return None, False
         definition = spec.sticky_state.get("definition")
         index_name = str(spec.sticky_state.get("index_name", ""))
         if definition is None:
+            ctx.last_trade_backend = "capfloor-missing-definition"
+            ctx.last_trade_backend_detail = "no-definition"
             return None, False
         p_disc = ctx.inputs.discount_curves[spec.ccy]
         p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, index_name)
         if ctx.irs_backend is None:
+            ctx.last_trade_backend = "capfloor-numpy"
+            ctx.last_trade_backend_detail = "capfloor_npv_paths"
             return self._ir_options_mod.capfloor_npv_paths(
                 model=ctx.model,
                 p0_disc=p_disc,
@@ -4379,6 +4467,8 @@ class PythonLgmAdapter:
                 fixing_index=index_name,
             ), False
         torch_curve_ctor, _, _, torch_device, _, _, torch_capfloor_pricer = ctx.irs_backend
+        ctx.last_trade_backend = "capfloor-torch"
+        ctx.last_trade_backend_detail = "torch_capfloor_pricer"
         disc_key = ("capfloor_disc", spec.ccy)
         disc_curve = ctx.torch_curve_cache.get(disc_key)
         if disc_curve is None:
@@ -6121,12 +6211,17 @@ def _tmp_xml_path(xml_text: str):
 
 
 def _parse_tenor_to_years(value: str) -> float:
-    txt = value.strip()
+    txt = str(value or "").strip().upper()
+    return _parse_tenor_to_years_cached(txt)
+
+
+@lru_cache(maxsize=16384)
+def _parse_tenor_to_years_cached(txt: str) -> float:
     m = _TENOR_RE.match(txt)
     if m is None:
         parts = _PERIOD_PART_RE.findall(txt)
         if not parts or "".join(a + b for a, b in parts).upper() != txt.upper():
-            raise ValueError(f"unsupported tenor '{value}'")
+            raise ValueError(f"unsupported tenor '{txt}'")
         total = 0.0
         for n_txt, u_txt in parts:
             n = float(n_txt)
@@ -6392,17 +6487,21 @@ def _build_sticky_closeout_times(times: np.ndarray, mpor_years: float) -> np.nda
 
 
 def _parse_zero_quote_time(token: str, asof_date: str | None, day_counter: str = "A365F") -> float | None:
+    return _parse_zero_quote_time_cached(str(token).strip(), _normalize_asof_date(asof_date or ""), day_counter)
+
+
+@lru_cache(maxsize=16384)
+def _parse_zero_quote_time_cached(token: str, asof_date: str, day_counter: str) -> float | None:
     if not asof_date:
         return None
     try:
         from pythonore.io import ore_snapshot as ore_snapshot_io
 
-        anchor = datetime.fromisoformat(_normalize_asof_date(asof_date)).date()
-        txt = str(token).strip()
-        if re.fullmatch(r"\d{8}", txt):
-            pillar = datetime.strptime(txt, "%Y%m%d").date()
+        anchor = datetime.fromisoformat(asof_date).date()
+        if re.fullmatch(r"\d{8}", token):
+            pillar = datetime.strptime(token, "%Y%m%d").date()
         else:
-            pillar = datetime.fromisoformat(txt).date()
+            pillar = datetime.fromisoformat(token).date()
     except Exception:
         return None
     yf = ore_snapshot_io._year_fraction_from_day_counter(anchor, pillar, day_counter)
@@ -6411,7 +6510,29 @@ def _parse_zero_quote_time(token: str, asof_date: str | None, day_counter: str =
     return float(yf)
 
 
+def _scan_market_quotes(raw_quotes: Sequence[Any]) -> Tuple[Dict[str, object], ...]:
+    key = tuple((str(q.key), float(q.value)) for q in raw_quotes)
+    cached = getattr(_scan_market_quotes, "_cache", None)
+    if cached is None:
+        cached = {}
+        setattr(_scan_market_quotes, "_cache", cached)
+    result = cached.get(key)
+    if result is not None:
+        return result
+    result = tuple({"key": str(q.key), "value": float(q.value)} for q in raw_quotes)
+    cached[key] = result
+    return result
+
+
 def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = None) -> Dict[str, Any]:
+    cache_key = (_normalize_asof_date(asof_date or ""), tuple((str(q.key).strip().upper(), float(q.value)) for q in raw_quotes))
+    cached = getattr(_parse_market_overlay, "_cache", None)
+    if cached is None:
+        cached = {}
+        setattr(_parse_market_overlay, "_cache", cached)
+    overlay = cached.get(cache_key)
+    if overlay is not None:
+        return overlay
     zero: Dict[str, List[Tuple[float, float]]] = {}
     named_zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
@@ -6424,18 +6545,22 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
     hazard: Dict[str, List[Tuple[float, float]]] = {}
     recovery: Dict[str, float] = {}
     cds_spreads: Dict[str, List[Tuple[float, float]]] = {}
+    parse_tenor = _parse_tenor_to_years
+    parse_zero_time = _parse_zero_quote_time
     for q in raw_quotes:
         key = str(q.key).strip()
         up = key.upper()
         val = float(q.value)
         parts = up.split("/")
-        if len(parts) >= 4 and parts[0] == "FX" and parts[1] == "RATE":
+        p0 = parts[0] if len(parts) > 0 else ""
+        p1 = parts[1] if len(parts) > 1 else ""
+        if len(parts) >= 4 and p0 == "FX" and p1 == "RATE":
             fx[parts[2] + parts[3]] = val
             continue
-        if len(parts) >= 3 and parts[0] == "FX":
+        if len(parts) >= 3 and p0 == "FX":
             fx[parts[1] + parts[2]] = val
             continue
-        if len(parts) >= 6 and parts[0] == "FX_OPTION" and parts[1] == "RATE_LNVOL":
+        if len(parts) >= 6 and p0 == "FX_OPTION" and p1 == "RATE_LNVOL":
             ccy1 = parts[2]
             ccy2 = parts[3]
             tenor = parts[4]
@@ -6443,12 +6568,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             fx_vol.setdefault(ccy1 + ccy2, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "SWAPTION" and parts[1] == "RATE_NVOL":
+        if len(parts) >= 6 and p0 == "SWAPTION" and p1 == "RATE_NVOL":
             ccy = parts[2]
             expiry = parts[3]
             swap_tenor = parts[4]
@@ -6456,12 +6581,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(expiry)
+                t = parse_tenor(expiry)
             except Exception:
                 continue
             swaption_normal_vols.setdefault((ccy, swap_tenor), []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "CORRELATION" and parts[1] == "RATE":
+        if len(parts) >= 6 and p0 == "CORRELATION" and p1 == "RATE":
             idx1 = parts[2]
             idx2 = parts[3]
             expiry = parts[4]
@@ -6469,12 +6594,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(expiry)
+                t = parse_tenor(expiry)
             except Exception:
                 continue
             cms_correlations.setdefault(tuple(sorted((idx1, idx2))), []).append((t, val))
             continue
-        if len(parts) >= 4 and parts[0] == "ZERO" and parts[1] == "RATE":
+        if len(parts) >= 4 and p0 == "ZERO" and p1 == "RATE":
             ccy = parts[2]
             tenor = parts[3]
             curve_name = None
@@ -6485,9 +6610,9 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     day_counter = parts[-2]
                 tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
-                t = _parse_zero_quote_time(tenor, asof_date, day_counter=day_counter)
+                t = parse_zero_time(tenor, asof_date, day_counter=day_counter)
                 if t is None:
                     continue
             if curve_name is not None:
@@ -6495,13 +6620,13 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             else:
                 zero.setdefault(ccy, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "IR_SWAP" and parts[1] == "RATE":
+        if len(parts) >= 6 and p0 == "IR_SWAP" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 80.0:
@@ -6511,23 +6636,23 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "BMA_SWAP" and parts[1] == "RATIO":
+        if len(parts) >= 5 and p0 == "BMA_SWAP" and p1 == "RATIO":
             ccy = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 80.0:
                 bma_ratio.setdefault(ccy, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "MM" and parts[1] == "RATE":
+        if len(parts) >= 5 and p0 == "MM" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 10.0:
@@ -6537,25 +6662,25 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "HAZARD_RATE":
+        if len(parts) >= 6 and p0 == "HAZARD_RATE":
             cpty = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             hazard.setdefault(cpty, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "CDS" and parts[1] == "CREDIT_SPREAD":
+        if len(parts) >= 6 and p0 == "CDS" and p1 == "CREDIT_SPREAD":
             cpty = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             cds_spreads.setdefault(cpty, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "RECOVERY_RATE":
+        if len(parts) >= 5 and p0 == "RECOVERY_RATE":
             cpty = parts[2]
             recovery[cpty] = val
             continue
@@ -6565,7 +6690,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         rec = float(recovery.get(cpty, 0.4))
         lgd = max(1.0 - rec, 1.0e-6)
         hazard[cpty] = [(t, max(float(spread) / lgd, 0.0)) for t, spread in spreads]
-    return {
+    overlay = {
         "zero": zero,
         "named_zero": named_zero,
         "fwd": fwd,
@@ -6579,6 +6704,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         "cds_spreads": cds_spreads,
         "recovery": recovery,
     }
+    cached[cache_key] = overlay
+    return overlay
 
 
 def _default_index_for_ccy(ccy: str) -> str:

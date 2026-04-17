@@ -567,6 +567,74 @@ class TestOreSnapshotCli(unittest.TestCase):
         parsed = ore_snapshot_cli._parse_ore_date("20170301")
         self.assertEqual(parsed.isoformat(), "2017-03-01")
 
+    def test_capfloor_validator_keeps_pay_date_on_valuation_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flows_csv = root / "flows.csv"
+            flows_csv.write_text(
+                "TradeId,Type,FlowType,PayDate,AccrualStartDate,AccrualEndDate,Accrual,Notional,Gearing,Spread,fixingDate,Currency,CapStrike,FloorStrike\n"
+                "CF1,CapFloor,interest,2026-09-08,2026-03-08,2026-09-08,0.500000,1000000,1.0,0.0,2026-03-06,EUR,0.03,\n",
+                encoding="utf-8",
+            )
+            defs_from_flows = ore_snapshot_cli._build_capfloor_defs_from_flows(
+                flows_csv,
+                trade_id="CF1",
+                asof_date="2026-09-08",
+                option_bias=1.0,
+            )
+            self.assertEqual(len(defs_from_flows), 1)
+            self.assertEqual(defs_from_flows[0].pay_time.size, 1)
+            self.assertAlmostEqual(float(defs_from_flows[0].pay_time[0]), 0.0, places=12)
+
+            portfolio_xml = root / "portfolio.xml"
+            portfolio_xml.write_text(
+                """
+<Portfolio>
+  <Trade id="CF1">
+    <TradeType>CapFloor</TradeType>
+    <CapFloorData>
+      <LongShort>Long</LongShort>
+      <Caps><Cap>0.03</Cap></Caps>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Currency>EUR</Currency>
+        <PaymentConvention>F</PaymentConvention>
+        <DayCounter>A360</DayCounter>
+        <Notionals><Notional>1000000</Notional></Notionals>
+        <ScheduleData>
+          <Dates>
+            <Date>2026-03-08</Date>
+            <Date>2026-09-08</Date>
+          </Dates>
+        </ScheduleData>
+        <FloatingLegData>
+          <Index>EUR-EURIBOR-6M</Index>
+          <FixingDays>2</FixingDays>
+          <IsInArrears>false</IsInArrears>
+          <Spreads><Spread>0.0</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+        </FloatingLegData>
+      </LegData>
+    </CapFloorData>
+  </Trade>
+</Portfolio>
+""".strip(),
+                encoding="utf-8",
+            )
+            tree = ET.parse(portfolio_xml)
+            trade = tree.getroot().find("./Trade")
+            self.assertIsNotNone(trade)
+            defs_from_portfolio = ore_snapshot_cli._build_capfloor_defs_from_portfolio(
+                trade.find("./CapFloorData"),  # type: ignore[union-attr]
+                trade.find("./CapFloorData/LegData"),  # type: ignore[union-attr]
+                trade_id="CF1",
+                asof_date="2026-09-08",
+                option_bias=1.0,
+            )
+            self.assertEqual(len(defs_from_portfolio), 1)
+            self.assertEqual(defs_from_portfolio[0].pay_time.size, 1)
+            self.assertAlmostEqual(float(defs_from_portfolio[0].pay_time[0]), 0.0, places=12)
+
     def test_market_data_read_accepts_compact_and_dashed_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

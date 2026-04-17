@@ -356,6 +356,66 @@ def capfloor_npv(
     return pv_fix + pv_unfixed
 
 
+def _capfloor_realized_forward_paths(
+    model: LGM1F,
+    p0_disc: Callable[[float], float],
+    p0_fwd: Callable[[float], float],
+    capfloor: CapFloorDef,
+    times: np.ndarray,
+    x_paths: np.ndarray,
+    lock_fixings: bool,
+    fixings: Mapping[tuple[str, str], float] | None = None,
+    fixing_index: str | None = None,
+) -> np.ndarray | None:
+    if not lock_fixings:
+        return None
+    fixing = _fixing_times(capfloor)
+    start = np.asarray(capfloor.start_time, dtype=float)
+    end = np.asarray(capfloor.end_time, dtype=float)
+    tau = np.asarray(capfloor.accrual, dtype=float)
+    n_coupons = fixing.size
+    if n_coupons == 0:
+        return np.zeros((0, x_paths.shape[1]), dtype=float)
+
+    realized = np.zeros((n_coupons, x_paths.shape[1]), dtype=float)
+    fixing_dates = None if capfloor.fixing_date is None else np.asarray(capfloor.fixing_date, dtype=object)
+
+    if fixings and fixing_index is not None and fixing_dates is not None:
+        for j, fixing_date in enumerate(fixing_dates):
+            fixing_key = (fixing_index.upper(), str(fixing_date))
+            if fixing_key in fixings:
+                realized[j, :] = float(fixings[fixing_key])
+
+    future_fixings = np.asarray(fixing > 1.0e-12, dtype=bool)
+    if np.any(future_fixings):
+        unique_fixings = np.unique(fixing[future_fixings])
+        for tf in unique_fixings:
+            idx = np.where(np.abs(fixing - tf) <= 1.0e-12)[0]
+            if idx.size == 0:
+                continue
+            x_fix = interpolate_path_grid(times, x_paths, float(tf))[0, :]
+            fwd = forward_rate_from_bonds(
+                model,
+                p0_disc,
+                p0_fwd,
+                float(tf),
+                x_fix,
+                start[idx],
+                end[idx],
+                tau[idx],
+                fixing_time=float(tf),
+            )
+            realized[idx, :] = fwd
+
+    nonpositive = np.where(fixing <= 1.0e-12)[0]
+    if nonpositive.size:
+        ps = np.array([float(p0_fwd(max(0.0, float(start[j])))) for j in nonpositive], dtype=float)
+        pe = np.array([float(p0_fwd(float(end[j]))) for j in nonpositive], dtype=float)
+        realized[nonpositive, :] = ((ps / pe - 1.0) / np.clip(tau[nonpositive], 1.0e-18, None))[:, None]
+
+    return realized
+
+
 def capfloor_npv_paths(
     model: LGM1F,
     p0_disc: Callable[[float], float],
@@ -379,18 +439,17 @@ def capfloor_npv_paths(
     if np.any(np.diff(t) <= 0.0):
         raise ValueError("times must be strictly increasing")
 
-    fixing = _fixing_times(capfloor)
-    start = np.asarray(capfloor.start_time, dtype=float)
-    end = np.asarray(capfloor.end_time, dtype=float)
-    tau = np.asarray(capfloor.accrual, dtype=float)
-
-    fix_to_idx: Dict[int, int] = {}
-    if lock_fixings:
-        for j, tf in enumerate(fixing):
-            if tf <= 1.0e-12:
-                continue
-            k = int(np.searchsorted(t, tf, side="right"))
-            fix_to_idx[j] = max(min(k, t.size - 1), 1)
+    realized_forward_full = _capfloor_realized_forward_paths(
+        model,
+        p0_disc,
+        p0_fwd,
+        capfloor,
+        t,
+        x_paths,
+        lock_fixings=lock_fixings,
+        fixings=fixings,
+        fixing_index=fixing_index,
+    )
 
     out = np.empty_like(x_paths)
     final_pay = float(np.max(np.asarray(capfloor.pay_time, dtype=float))) if capfloor.pay_time.size else 0.0
@@ -399,47 +458,7 @@ def capfloor_npv_paths(
             out[i, :] = 0.0
             continue
         live = np.asarray(capfloor.pay_time, dtype=float) >= ti - 1.0e-12
-        rf_live = None
-        if lock_fixings and np.any(live):
-            idx_live = np.where(live)[0]
-            rf_live = np.zeros((idx_live.size, x_paths.shape[1]), dtype=float)
-            for k_local, j in enumerate(idx_live):
-                tf = float(fixing[j])
-                if tf > ti + 1.0e-12:
-                    continue
-                if fixings is not None and fixing_index is not None and capfloor.fixing_date is not None:
-                    fixing_date = str(np.asarray(capfloor.fixing_date, dtype=object)[j])
-                    fixing_key = (fixing_index.upper(), fixing_date)
-                    if fixing_key in fixings:
-                        rf_live[k_local, :] = float(fixings[fixing_key])
-                        continue
-                if tf <= 1.0e-12:
-                    ps = float(p0_fwd(max(0.0, float(start[j]))))
-                    pe = float(p0_fwd(float(end[j])))
-                    rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
-                    continue
-                if tf >= float(end[j]) - 1.0e-12:
-                    ps = float(p0_fwd(max(0.0, float(start[j]))))
-                    pe = float(p0_fwd(float(end[j])))
-                    rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
-                    continue
-                if j in fix_to_idx:
-                    kf = fix_to_idx[j]
-                    x_fix = interpolate_path_grid(t, x_paths, tf)[0, :]
-                else:
-                    x_fix = interpolate_path_grid(t, x_paths, tf)[0, :]
-                fwd = forward_rate_from_bonds(
-                    model,
-                    p0_disc,
-                    p0_fwd,
-                    tf,
-                    x_fix,
-                    np.array([float(start[j])], dtype=float),
-                    np.array([float(end[j])], dtype=float),
-                    np.array([float(tau[j])], dtype=float),
-                    fixing_time=tf,
-                )[0, :]
-                rf_live[k_local, :] = fwd
+        rf_live = realized_forward_full[live, :] if realized_forward_full is not None else None
         out[i, :] = capfloor_npv(model, p0_disc, p0_fwd, capfloor, float(ti), x_paths[i, :], realized_forward=rf_live)
     return out
 

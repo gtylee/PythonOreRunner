@@ -12,7 +12,8 @@ except ImportError:  # pragma: no cover - torch-specific tests skip without torc
 
 if torch is not None:
     from py_ore_tools.lgm_torch import TorchLGM1F, simulate_lgm_measure_torch
-    from py_ore_tools.lgm_torch_xva import TorchDiscountCurve, swap_npv_from_ore_legs_dual_curve_torch
+    from py_ore_tools.lgm_torch_xva import TorchDiscountCurve, capfloor_npv_paths_torch, swap_npv_from_ore_legs_dual_curve_torch
+    from py_ore_tools.lgm_ir_options import CapFloorDef, capfloor_npv_paths
 
 
 @unittest.skipIf(torch is None, "torch is required for torch LGM tests")
@@ -126,6 +127,73 @@ class TestTorchLGM(unittest.TestCase):
         expected = 100.0 * 0.30 * 0.123 * float(disc_curve.discount(0.50))
         self.assertEqual(pv.shape, (1,))
         self.assertAlmostEqual(float(pv[0]), expected, places=12)
+
+    def test_capfloor_paths_precompute_unique_fixings_once(self):
+        disc_curve = TorchDiscountCurve(np.array([0.0, 0.5, 1.0], dtype=float), np.array([1.0, 0.99, 0.98], dtype=float))
+        fwd_curve = TorchDiscountCurve(np.array([0.0, 0.5, 1.0], dtype=float), np.array([1.0, 0.992, 0.985], dtype=float))
+        capfloor = CapFloorDef(
+            trade_id="CF1",
+            ccy="USD",
+            option_type="cap",
+            start_time=np.array([0.10, 0.10], dtype=float),
+            end_time=np.array([0.40, 0.50], dtype=float),
+            pay_time=np.array([0.55, 0.60], dtype=float),
+            accrual=np.array([0.30, 0.40], dtype=float),
+            notional=np.array([100.0, 100.0], dtype=float),
+            strike=np.array([0.02, 0.02], dtype=float),
+            gearing=np.array([1.0, 1.0], dtype=float),
+            spread=np.array([0.0, 0.0], dtype=float),
+            fixing_time=np.array([0.25, 0.25], dtype=float),
+            fixing_date=np.array(["2025-01-15", "2025-01-15"], dtype=object),
+        )
+        times = np.array([0.0, 0.5, 1.0], dtype=float)
+        x_paths = np.zeros((times.size, 2), dtype=float)
+        call_counter_np = {"count": 0}
+        call_counter_torch = {"count": 0}
+
+        from py_ore_tools import lgm_ir_options as lgm_ir_options_mod
+        from py_ore_tools import lgm_torch_xva as lgm_torch_xva_mod
+
+        original_np_interp = lgm_ir_options_mod.interpolate_path_grid
+        original_torch_interp = lgm_torch_xva_mod.interpolate_path_grid
+
+        def _counting_interp_np(*args, **kwargs):
+            call_counter_np["count"] += 1
+            return original_np_interp(*args, **kwargs)
+
+        def _counting_interp_torch(*args, **kwargs):
+            call_counter_torch["count"] += 1
+            return original_np_interp(*args, **kwargs)
+
+        try:
+            lgm_ir_options_mod.interpolate_path_grid = _counting_interp_np
+            pv_np = capfloor_npv_paths(
+                self.np_model,
+                disc_curve.discount,
+                fwd_curve.discount,
+                capfloor,
+                times,
+                x_paths,
+                lock_fixings=True,
+            )
+            lgm_torch_xva_mod.interpolate_path_grid = _counting_interp_torch
+            pv_torch = capfloor_npv_paths_torch(
+                self.torch_model,
+                disc_curve,
+                fwd_curve,
+                capfloor,
+                times,
+                x_paths,
+                lock_fixings=True,
+                return_numpy=True,
+            )
+        finally:
+            lgm_ir_options_mod.interpolate_path_grid = original_np_interp
+            lgm_torch_xva_mod.interpolate_path_grid = original_torch_interp
+
+        self.assertEqual(call_counter_np["count"], 1)
+        self.assertEqual(call_counter_torch["count"], 1)
+        self.assertTrue(np.allclose(pv_np, pv_torch))
 
 
 if __name__ == "__main__":

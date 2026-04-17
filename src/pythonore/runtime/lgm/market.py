@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -30,12 +31,17 @@ def _date_from_time(asof: str, t: float) -> str:
 
 
 def _parse_tenor_to_years(value: str) -> float:
-    txt = value.strip()
+    txt = str(value or "").strip().upper()
+    return _parse_tenor_to_years_cached(txt)
+
+
+@lru_cache(maxsize=16384)
+def _parse_tenor_to_years_cached(txt: str) -> float:
     m = _TENOR_RE.match(txt)
     if m is None:
         parts = _PERIOD_PART_RE.findall(txt)
         if not parts or "".join(a + b for a, b in parts).upper() != txt.upper():
-            raise ValueError(f"unsupported tenor '{value}'")
+            raise ValueError(f"unsupported tenor '{txt}'")
         total = 0.0
         for n_txt, u_txt in parts:
             n = float(n_txt)
@@ -149,17 +155,21 @@ def _parse_lgm_params_from_calibration_xml_text(xml_text: str, ccy_key: str = "E
 
 
 def _parse_zero_quote_time(token: str, asof_date: str | None, day_counter: str = "A365F") -> float | None:
+    return _parse_zero_quote_time_cached(str(token).strip(), _normalize_asof_date(asof_date or ""), day_counter)
+
+
+@lru_cache(maxsize=16384)
+def _parse_zero_quote_time_cached(token: str, asof_date: str, day_counter: str) -> float | None:
     if not asof_date:
         return None
     try:
         from pythonore.io import ore_snapshot as ore_snapshot_io
 
-        anchor = datetime.fromisoformat(_normalize_asof_date(asof_date)).date()
-        txt = str(token).strip()
-        if re.fullmatch(r"\d{8}", txt):
-            pillar = datetime.strptime(txt, "%Y%m%d").date()
+        anchor = datetime.fromisoformat(asof_date).date()
+        if re.fullmatch(r"\d{8}", token):
+            pillar = datetime.strptime(token, "%Y%m%d").date()
         else:
-            pillar = datetime.fromisoformat(txt).date()
+            pillar = datetime.fromisoformat(token).date()
     except Exception:
         return None
     yf = ore_snapshot_io._year_fraction_from_day_counter(anchor, pillar, day_counter)
@@ -168,7 +178,22 @@ def _parse_zero_quote_time(token: str, asof_date: str | None, day_counter: str =
     return float(yf)
 
 
+def _market_overlay_cache_key(raw_quotes: Sequence[Any], asof_date: str | None) -> tuple[object, ...]:
+    return (
+        _normalize_asof_date(asof_date or ""),
+        tuple((str(q.key).strip().upper(), float(q.value)) for q in raw_quotes),
+    )
+
+
 def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = None) -> Dict[str, Any]:
+    cache_key = _market_overlay_cache_key(raw_quotes, asof_date)
+    cached = getattr(_parse_market_overlay, "_cache", None)
+    if cached is None:
+        cached = {}
+        setattr(_parse_market_overlay, "_cache", cached)
+    overlay = cached.get(cache_key)
+    if overlay is not None:
+        return overlay
     zero: Dict[str, List[Tuple[float, float]]] = {}
     named_zero: Dict[str, List[Tuple[float, float]]] = {}
     fwd: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
@@ -181,18 +206,22 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
     hazard: Dict[str, List[Tuple[float, float]]] = {}
     recovery: Dict[str, float] = {}
     cds_spreads: Dict[str, List[Tuple[float, float]]] = {}
+    parse_tenor = _parse_tenor_to_years
+    parse_zero_time = _parse_zero_quote_time
     for q in raw_quotes:
         key = str(q.key).strip()
         up = key.upper()
         val = float(q.value)
         parts = up.split("/")
-        if len(parts) >= 4 and parts[0] == "FX" and parts[1] == "RATE":
+        p0 = parts[0] if len(parts) > 0 else ""
+        p1 = parts[1] if len(parts) > 1 else ""
+        if len(parts) >= 4 and p0 == "FX" and p1 == "RATE":
             fx[parts[2] + parts[3]] = val
             continue
-        if len(parts) >= 3 and parts[0] == "FX":
+        if len(parts) >= 3 and p0 == "FX":
             fx[parts[1] + parts[2]] = val
             continue
-        if len(parts) >= 6 and parts[0] == "FX_OPTION" and parts[1] == "RATE_LNVOL":
+        if len(parts) >= 6 and p0 == "FX_OPTION" and p1 == "RATE_LNVOL":
             ccy1 = parts[2]
             ccy2 = parts[3]
             tenor = parts[4]
@@ -200,12 +229,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             fx_vol.setdefault(ccy1 + ccy2, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "SWAPTION" and parts[1] == "RATE_NVOL":
+        if len(parts) >= 6 and p0 == "SWAPTION" and p1 == "RATE_NVOL":
             ccy = parts[2]
             expiry = parts[3]
             swap_tenor = parts[4]
@@ -213,12 +242,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(expiry)
+                t = parse_tenor(expiry)
             except Exception:
                 continue
             swaption_normal_vols.setdefault((ccy, swap_tenor), []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "CORRELATION" and parts[1] == "RATE":
+        if len(parts) >= 6 and p0 == "CORRELATION" and p1 == "RATE":
             idx1 = parts[2]
             idx2 = parts[3]
             expiry = parts[4]
@@ -226,12 +255,12 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             if strike != "ATM":
                 continue
             try:
-                t = _parse_tenor_to_years(expiry)
+                t = parse_tenor(expiry)
             except Exception:
                 continue
             cms_correlations.setdefault(tuple(sorted((idx1, idx2))), []).append((t, val))
             continue
-        if len(parts) >= 4 and parts[0] == "ZERO" and parts[1] == "RATE":
+        if len(parts) >= 4 and p0 == "ZERO" and p1 == "RATE":
             ccy = parts[2]
             tenor = parts[3]
             curve_name = None
@@ -242,9 +271,9 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     day_counter = parts[-2]
                 tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
-                t = _parse_zero_quote_time(tenor, asof_date, day_counter=day_counter)
+                t = parse_zero_time(tenor, asof_date, day_counter=day_counter)
                 if t is None:
                     continue
             if curve_name is not None:
@@ -252,13 +281,13 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
             else:
                 zero.setdefault(ccy, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "IR_SWAP" and parts[1] == "RATE":
+        if len(parts) >= 6 and p0 == "IR_SWAP" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 80.0:
@@ -268,23 +297,23 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "BMA_SWAP" and parts[1] == "RATIO":
+        if len(parts) >= 5 and p0 == "BMA_SWAP" and p1 == "RATIO":
             ccy = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 80.0:
                 bma_ratio.setdefault(ccy, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "MM" and parts[1] == "RATE":
+        if len(parts) >= 5 and p0 == "MM" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             if 0.0 < t <= 10.0:
@@ -294,25 +323,25 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
                     fwd_by_index.setdefault(ccy, {}).setdefault(idx_name, []).append((t, val))
                     fwd.setdefault(ccy, {}).setdefault(idx_tenor, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "HAZARD_RATE":
+        if len(parts) >= 6 and p0 == "HAZARD_RATE":
             cpty = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             hazard.setdefault(cpty, []).append((t, val))
             continue
-        if len(parts) >= 6 and parts[0] == "CDS" and parts[1] == "CREDIT_SPREAD":
+        if len(parts) >= 6 and p0 == "CDS" and p1 == "CREDIT_SPREAD":
             cpty = parts[2]
             tenor = parts[-1]
             try:
-                t = _parse_tenor_to_years(tenor)
+                t = parse_tenor(tenor)
             except Exception:
                 continue
             cds_spreads.setdefault(cpty, []).append((t, val))
             continue
-        if len(parts) >= 5 and parts[0] == "RECOVERY_RATE":
+        if len(parts) >= 5 and p0 == "RECOVERY_RATE":
             cpty = parts[2]
             recovery[cpty] = val
             continue
@@ -322,7 +351,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         rec = float(recovery.get(cpty, 0.4))
         lgd = max(1.0 - rec, 1.0e-6)
         hazard[cpty] = [(t, max(float(spread) / lgd, 0.0)) for t, spread in spreads]
-    return {
+    overlay = {
         "zero": zero,
         "named_zero": named_zero,
         "fwd": fwd,
@@ -336,6 +365,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         "cds_spreads": cds_spreads,
         "recovery": recovery,
     }
+    cached[cache_key] = overlay
+    return overlay
 
 
 def _default_index_for_ccy(ccy: str) -> str:

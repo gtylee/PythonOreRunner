@@ -33,6 +33,10 @@ except Exception:  # pragma: no cover - keep a fallback for lightweight tooling.
 _TIME_YEAR_BASIS = 365.25
 _ARRAY_CACHE_MAX_ITEMS = 256
 _SCHEDULE_ALIGNMENT_TOLERANCE_DAYS = 7
+_PORTFOLIO_TRADE_LOOKUP_CACHE: dict[int, tuple[ET.Element, dict[str, ET.Element]]] = {}
+_SWAP_LEG_CACHE: dict[int, tuple[ET.Element, dict[tuple[str, str, str], Dict[str, np.ndarray]]]] = {}
+_CURVE_VALUES_CACHE: dict[tuple[int, tuple[tuple[int, ...], bytes]], np.ndarray] = {}
+_PORTFOLIO_AGGREGATION_CACHE: dict[tuple[object, ...], Dict[str, Dict[str, np.ndarray] | np.ndarray]] = {}
 
 
 def _array_cache_key(arr: np.ndarray) -> tuple[tuple[int, ...], bytes]:
@@ -60,6 +64,7 @@ def _days_in_year(year: int) -> int:
     return 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
 
 
+@lru_cache(maxsize=65536)
 def _year_fraction_actual_actual(start: date, end: date) -> float:
     if end == start:
         return 0.0
@@ -79,7 +84,11 @@ def _year_fraction_actual_actual(start: date, end: date) -> float:
 
 
 def _time_from_dates(start: date, end: date, day_counter: str) -> float:
-    dc = (day_counter or "A365F").strip().upper()
+    return _time_from_dates_cached(start, end, (day_counter or "A365F").strip().upper())
+
+
+@lru_cache(maxsize=65536)
+def _time_from_dates_cached(start: date, end: date, dc: str) -> float:
     if dc in ("A360", "ACT/360", "ACTUAL/360", "ACTUAL360"):
         return (end - start).days / 360.0
     if dc in ("A365F", "A365", "ACT/365(FIXED)", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
@@ -255,6 +264,34 @@ def _align_event_date_to_period_index(
     return None
 
 
+def _portfolio_trade_lookup(portfolio_root: ET.Element) -> dict[str, ET.Element]:
+    key = id(portfolio_root)
+    cached = _PORTFOLIO_TRADE_LOOKUP_CACHE.get(key)
+    if cached is not None and cached[0] is portfolio_root:
+        return cached[1]
+    lookup: dict[str, ET.Element] = {}
+    for trade in portfolio_root.findall("./Trade"):
+        trade_id = (trade.attrib.get("id", "") or "").strip()
+        if trade_id:
+            lookup[trade_id] = trade
+    _PORTFOLIO_TRADE_LOOKUP_CACHE[key] = (portfolio_root, lookup)
+    return lookup
+
+
+def _portfolio_swap_leg_cache(
+    portfolio_root: ET.Element,
+) -> dict[tuple[str, str, str], Dict[str, np.ndarray]]:
+    key = id(portfolio_root)
+    cached = _SWAP_LEG_CACHE.get(key)
+    if cached is not None:
+        cached_root, lookup = cached
+        if cached_root is portfolio_root:
+            return lookup
+    lookup: dict[tuple[str, str, str], Dict[str, np.ndarray]] = {}
+    _SWAP_LEG_CACHE[key] = (portfolio_root, lookup)
+    return lookup
+
+
 def _optional_start_date(node: ET.Element) -> date | None:
     txt = (
         node.findtext("./StartDate")
@@ -336,9 +373,17 @@ def curve_values(
     t_arr = np.asarray(times, dtype=float)
     if t_arr.ndim == 0:
         return float(curve(float(t_arr)))
+    cache_key = (id(curve), _array_cache_key(t_arr))
+    cached = _CURVE_VALUES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     flat = t_arr.reshape(-1)
     out = np.fromiter((float(curve(float(t))) for t in flat), dtype=float, count=flat.size)
-    return out.reshape(t_arr.shape)
+    reshaped = out.reshape(t_arr.shape)
+    if len(_CURVE_VALUES_CACHE) >= _ARRAY_CACHE_MAX_ITEMS:
+        _CURVE_VALUES_CACHE.pop(next(iter(_CURVE_VALUES_CACHE)))
+    _CURVE_VALUES_CACHE[cache_key] = reshaped
+    return reshaped
 
 
 class _ZeroRateDiscountCurve:
@@ -684,7 +729,11 @@ def _average_overnight_coupon_fixing_date(
 
 
 def _year_fraction(start: date, end: date, day_counter: str) -> float:
-    dc = day_counter.upper().replace(" ", "")
+    return _year_fraction_cached(start, end, (day_counter or "").upper().replace(" ", ""))
+
+
+@lru_cache(maxsize=65536)
+def _year_fraction_cached(start: date, end: date, dc: str) -> float:
     if dc in ("A360", "ACT/360", "ACTUAL/360", "ACTUAL360"):
         return (end - start).days / 360.0
     if dc in ("A365", "A365F", "ACT/365", "ACT/365(FIXED)", "ACTUAL/365", "ACTUAL/365(FIXED)", "ACTUAL365FIXED"):
@@ -988,11 +1037,42 @@ def _schedule_from_leg(
     first_date = _optional_date_text(rules.find("./FirstDate")) if rules.find("./FirstDate") is not None else None
     last_date = _optional_date_text(rules.find("./LastDate")) if rules.find("./LastDate") is not None else None
     rule = (rules.findtext("./Rule") or "Forward").strip()
-    return _build_schedule(
+    return _schedule_from_leg_cached(
         start,
         end,
         tenor,
         cal,
+        convention,
+        pay_convention or convention,
+        term_convention,
+        end_of_month,
+        payment_lag,
+        rule,
+        first_date,
+        last_date,
+    )
+
+
+@lru_cache(maxsize=16384)
+def _schedule_from_leg_cached(
+    start: date,
+    end: date,
+    tenor: str,
+    calendar: str,
+    convention: str,
+    pay_convention: str,
+    term_convention: str,
+    end_of_month: bool,
+    payment_lag: int,
+    rule: str,
+    first_date: date | None,
+    last_date: date | None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return _build_schedule(
+        start,
+        end,
+        tenor,
+        calendar,
         convention,
         pay_convention=pay_convention,
         term_convention=term_convention,
@@ -1371,11 +1451,12 @@ def load_swap_legs_from_portfolio_root(
     useful when flow reports are unavailable or when a schedule needs to be rebuilt
     from the canonical ORE trade description.
     """
-    trade = None
-    for t in root.findall("./Trade"):
-        if t.attrib.get("id", "") == trade_id:
-            trade = t
-            break
+    cache = _portfolio_swap_leg_cache(root)
+    cache_key = (trade_id, asof_date, time_day_counter)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    trade = _portfolio_trade_lookup(root).get(trade_id)
     if trade is None:
         raise ValueError(f"trade '{trade_id}' not found in portfolio XML")
     trade_type = (trade.findtext("./TradeType") or "").strip()
@@ -1579,6 +1660,7 @@ def load_swap_legs_from_portfolio_root(
     )
     out["fixed_leg_count"] = np.asarray([fixed_leg_count], dtype=int)
     out["float_leg_count"] = np.asarray([float_leg_count], dtype=int)
+    cache[cache_key] = out
     return out
 
 
@@ -2694,6 +2776,19 @@ def aggregate_portfolio_npv_paths(
     if not npv_paths_by_trade:
         raise ValueError("npv_paths_by_trade must not be empty")
 
+    cache_key = (
+        tuple(
+            sorted(
+                (trade_id, id(mat), np.asarray(mat).shape)
+                for trade_id, mat in npv_paths_by_trade.items()
+            )
+        ),
+        tuple(sorted(trade_to_netting_set.items())) if trade_to_netting_set is not None else None,
+    )
+    cached = _PORTFOLIO_AGGREGATION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     ref_shape: Optional[Tuple[int, int]] = None
     by_ns: Dict[str, np.ndarray] = {}
     for trade_id, mat in npv_paths_by_trade.items():
@@ -2716,7 +2811,11 @@ def aggregate_portfolio_npv_paths(
     portfolio = np.zeros(ref_shape, dtype=float)  # type: ignore[arg-type]
     for arr in by_ns.values():
         portfolio += arr
-    return {"by_netting_set": by_ns, "portfolio": portfolio}
+    out = {"by_netting_set": by_ns, "portfolio": portfolio}
+    if len(_PORTFOLIO_AGGREGATION_CACHE) >= _ARRAY_CACHE_MAX_ITEMS:
+        _PORTFOLIO_AGGREGATION_CACHE.pop(next(iter(_PORTFOLIO_AGGREGATION_CACHE)))
+    _PORTFOLIO_AGGREGATION_CACHE[cache_key] = out
+    return out
 
 
 def compute_portfolio_xva_from_trade_paths(

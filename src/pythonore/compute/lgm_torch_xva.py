@@ -230,6 +230,57 @@ def _tensorize_legs(legs: Mapping[str, np.ndarray], *, device: str, dtype):
     return out
 
 
+def _capfloor_realized_forward_paths_torch(
+    model: LGM1F,
+    disc_curve: TorchDiscountCurve,
+    fwd_curve: TorchDiscountCurve,
+    capfloor: CapFloorDef,
+    times: np.ndarray,
+    x_paths,
+    lock_fixings: bool,
+) -> np.ndarray | None:
+    if not lock_fixings:
+        return None
+    torch = _require_torch()
+    fixing = _fixing_times(capfloor)
+    start = np.asarray(capfloor.start_time, dtype=float)
+    end = np.asarray(capfloor.end_time, dtype=float)
+    tau = np.asarray(capfloor.accrual, dtype=float)
+    n_coupons = fixing.size
+    if n_coupons == 0:
+        return np.zeros((0, np.asarray(x_paths).shape[1]), dtype=float)
+
+    x = np.asarray(x_paths, dtype=float)
+    realized = np.zeros((n_coupons, x.shape[1]), dtype=float)
+    future_fixings = np.asarray(fixing > 1.0e-12, dtype=bool)
+    if np.any(future_fixings):
+        unique_fixings = np.unique(fixing[future_fixings])
+        for tf in unique_fixings:
+            idx = np.where(np.abs(fixing - tf) <= 1.0e-12)[0]
+            if idx.size == 0:
+                continue
+            x_fix = interpolate_path_grid(times, x, float(tf))[0, :]
+            fwd = forward_rate_from_bonds_torch(
+                model,
+                disc_curve,
+                fwd_curve,
+                float(tf),
+                x_fix,
+                start[idx],
+                end[idx],
+                tau[idx],
+            ).detach().cpu().numpy()
+            realized[idx, :] = fwd
+
+    nonpositive = np.where(fixing <= 1.0e-12)[0]
+    if nonpositive.size:
+        ps = np.asarray(fwd_curve.discount(torch.as_tensor(np.maximum(start[nonpositive], 0.0), dtype=disc_curve.dtype, device=disc_curve.device_obj)), dtype=float)
+        pe = np.asarray(fwd_curve.discount(torch.as_tensor(end[nonpositive], dtype=disc_curve.dtype, device=disc_curve.device_obj)), dtype=float)
+        realized[nonpositive, :] = ((ps / pe - 1.0) / np.clip(tau[nonpositive], 1.0e-18, None))[:, None]
+
+    return realized
+
+
 def discount_bond_paths_torch(
     model: LGM1F,
     t: float,
@@ -946,51 +997,19 @@ def capfloor_npv_paths_torch(
     x = np.asarray(x_paths, dtype=float)
     if x.shape[0] != t.size:
         raise ValueError("x_paths first dimension must match times size")
-    fixing = _fixing_times(capfloor)
-    start = np.asarray(capfloor.start_time, dtype=float)
-    end = np.asarray(capfloor.end_time, dtype=float)
-    tau = np.asarray(capfloor.accrual, dtype=float)
+    realized_forward_full = _capfloor_realized_forward_paths_torch(
+        model,
+        disc_curve,
+        fwd_curve,
+        capfloor,
+        t,
+        x_paths,
+        lock_fixings=lock_fixings,
+    )
     out = np.empty_like(x)
-    torch = _require_torch()
-    start_t = torch.as_tensor(start, dtype=disc_curve.dtype, device=disc_curve.device_obj)
-    end_t = torch.as_tensor(end, dtype=disc_curve.dtype, device=disc_curve.device_obj)
-    tau_t = torch.as_tensor(tau, dtype=disc_curve.dtype, device=disc_curve.device_obj)
-    fwd_start_disc = fwd_curve.discount(start_t)
-    fwd_end_disc = fwd_curve.discount(end_t)
-    fix_to_idx: dict[int, int] = {}
-    if lock_fixings:
-        for j, tf in enumerate(fixing):
-            if tf <= 1.0e-12:
-                continue
-            k = int(np.searchsorted(t, tf, side="right"))
-            fix_to_idx[j] = max(min(k, t.size - 1), 1)
     for i, ti in enumerate(t):
         live = np.asarray(capfloor.pay_time, dtype=float) > ti + 1.0e-12
-        rf_live = None
-        if lock_fixings and np.any(live):
-            idx_live = np.where(live)[0]
-            rf_live = np.zeros((idx_live.size, x.shape[1]), dtype=float)
-            for k_local, j in enumerate(idx_live):
-                tf = float(fixing[j])
-                if tf > ti + 1.0e-12:
-                    continue
-                if tf <= 1.0e-12:
-                    ps = float(fwd_start_disc[j].item())
-                    pe = float(fwd_end_disc[j].item())
-                    rf_live[k_local, :] = (ps / pe - 1.0) / float(tau[j])
-                    continue
-                x_fix = interpolate_path_grid(t, x, tf)[0, :]
-                fwd = forward_rate_from_bonds_torch(
-                    model,
-                    disc_curve,
-                    fwd_curve,
-                    tf,
-                    x_fix,
-                    np.array([float(start[j])], dtype=float),
-                    np.array([float(end[j])], dtype=float),
-                    np.array([float(tau[j])], dtype=float),
-                )[0].detach().cpu().numpy()
-                rf_live[k_local, :] = fwd
+        rf_live = realized_forward_full[live, :] if realized_forward_full is not None else None
         out[i, :] = capfloor_npv_torch(
             model,
             disc_curve,

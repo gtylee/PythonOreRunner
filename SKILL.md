@@ -258,6 +258,27 @@ Important implications:
 - Native runtime calibration must not depend on `oreapp` outputs like `curves.csv`, `npv.csv`, or `flows.csv`.
 - Common ORE cases labeled with `VolatilityType=Hagan` should still go through the Python QuantLib/GSR calibration path; do not reject them just because the XML label says `Hagan`.
 
+### Bermudan swaption pricing and exposure use different benchmarks
+
+For Bermudan swaption work in this repo:
+
+- trade NPV parity should follow the grid/backward pricing path
+- XVA and exposure checks should follow the LSMC path
+- do not use the XVA path as a pricing benchmark for Bermudan trade NPVs
+
+Current Bermudan-specific calibration rules:
+
+- prefer trade-specific GSR calibration when `pricingengine.xml` has a `BermudanSwaption` engine block and matching swaption quotes are available
+- accept both `RATE_NVOL` and `RATE_LNVOL` quote families when building the calibration basket
+- `OptionType` determines the exercise direction; do not infer Bermudan sign from the fixed leg orientation
+- if a USD Bermudan trade references USD Libor tenors, the helper needs the matching USD Ibor index support before the calibration basket will populate correctly
+
+Practical debugging order for Bermudan parity:
+
+1. verify the trade-specific calibration basket is non-empty
+2. verify the grid path uses the intended engine settings from `pricingengine.xml`
+3. only then tune the grid resolution or model parameters
+
 ### Do not use `flows.csv` / `curves.csv` in plain price-only mode unless parity is explicitly requested
 
 This became an important fault line in the native price-only CLI path.

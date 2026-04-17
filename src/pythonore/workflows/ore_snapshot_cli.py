@@ -1922,7 +1922,7 @@ def _build_capfloor_defs_from_flows(
     def _time(text: str, dc: str = "A365F") -> float:
         return ore_snapshot_mod._year_fraction_from_day_counter(asof, _parse_ore_date(text), dc)
     pay_raw = np.asarray([_time(r["PayDate"]) for r in rows], dtype=float)
-    live_mask = pay_raw > 1.0e-12
+    live_mask = pay_raw >= -1.0e-12
     if not np.any(live_mask):
         raise ValueError(f"trade '{trade_id}' has no future-pay cap/floor coupons in {flows_csv}")
     rows = [row for row, keep in zip(rows, live_mask) if bool(keep)]
@@ -2034,7 +2034,7 @@ def _build_capfloor_defs_from_portfolio(
     fixing_base = end_dates if in_arrears else start_dates
     fixing_dates = [irs_utils._advance_business_days(d, -fixing_days, calendar) for d in fixing_base]
     fixing_t = np.asarray([irs_utils._time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
-    live = pay_t > 1.0e-12
+    live = pay_t >= -1.0e-12
     if not np.any(live):
         raise ValueError(f"trade '{trade_id}' has no future-pay cap/floor coupons in portfolio")
     start_t = start_t[live]

@@ -12,6 +12,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+import pythonore.compute.irs_xva_utils as irs_utils_mod
+import pythonore.compute.overnight_capfloor_shim as overnight_shim_mod
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
 from pythonore.compute.irs_xva_utils import (
     _average_overnight_coupon_fixing_date,
@@ -613,6 +615,49 @@ def test_overnight_static_state_uses_exact_helper(monkeypatch):
             x_t=np.zeros(1, dtype=float),
             snapshot=snapshot,
         )
+
+
+def test_overnight_global_coupon_rate_handles_missing_floor():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_59" / "Input"), ore_file="ore.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "Cap_USD_SOFR")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, num_paths=4),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    leg = next(leg for leg in state["rate_legs"] if leg.get("overnight_indexed", False))
+    surface_period = overnight_shim_mod.capfloor_surface_rate_computation_period(snapshot, ccy=str(leg["ccy"])) or ""
+    static_state = overnight_shim_mod._build_overnight_static_state(
+        adapter,
+        inputs,
+        snapshot,
+        ccy=str(leg["ccy"]),
+        index_name=str(leg["index_name"]),
+        surface_period=surface_period,
+        target_period=str(leg.get("schedule_tenor", "")).strip() or "3M",
+        leg=leg,
+    )
+    assert static_state is not None
+    pricer = static_state["pricer"]
+    raw_rate = np.full(1, 0.01, dtype=float)
+    out = pricer.global_coupon_rate(
+        raw_rate=raw_rate,
+        cap=0.02,
+        floor=None,
+        naked_option=bool(leg.get("naked_option", False)),
+        expiry_time=float(static_state["expiry_times"][0]),
+        fixing_date=static_state["fixing_dates"][0],
+        fixing_dates=list(static_state["fixing_dates"]),
+        asof_date=static_state["asof_date"],
+    )
+    assert out.shape == raw_rate.shape
+    assert np.all(np.isfinite(out))
 
 
 def test_example63_xccy_trade_runs_natively_without_swig():
@@ -1725,6 +1770,217 @@ def test_average_overnight_fixing_date_moves_toward_period_end_with_cutoff():
     assert late > start
     assert late < end
     assert early < late
+
+
+def test_capfloor_surface_rate_computation_period_caches_raw_quote_scan():
+    class RawQuotes:
+        def __init__(self, quotes):
+            self.quotes = tuple(quotes)
+            self.iter_count = 0
+
+        def __iter__(self):
+            self.iter_count += 1
+            return iter(self.quotes)
+
+    class Snapshot:
+        def __init__(self, raw_quotes):
+            self.market = type("Market", (), {"raw_quotes": raw_quotes})()
+
+    cache_before = dict(overnight_shim_mod._CAPFLOOR_SURFACE_PERIOD_CACHE)
+    try:
+        raw_quotes = RawQuotes(
+            [
+                type("Quote", (), {"key": "CAPFLOOR/RATE_NVOL/USD/1Y/3M/0.0200", "value": 0.01})(),
+                type("Quote", (), {"key": "OTHER/QUOTE", "value": 0.02})(),
+            ]
+        )
+        snapshot = Snapshot(raw_quotes)
+        period1 = overnight_shim_mod.capfloor_surface_rate_computation_period(snapshot, ccy="USD")
+        period2 = overnight_shim_mod.capfloor_surface_rate_computation_period(snapshot, ccy="USD")
+        assert period1 == "3M"
+        assert period2 == "3M"
+        assert raw_quotes.iter_count == 1
+    finally:
+        overnight_shim_mod._CAPFLOOR_SURFACE_PERIOD_CACHE.clear()
+        overnight_shim_mod._CAPFLOOR_SURFACE_PERIOD_CACHE.update(cache_before)
+
+
+def test_overnight_qlextras_cache_curve_handle_and_index_objects():
+    try:
+        import QuantLib as ql
+    except Exception:
+        pytest.skip("QuantLib is required for this cache regression")
+
+    eval_date = ql.Date(15, 1, 2025)
+    curve = type("Curve", (), {"__call__": lambda self, t: 1.0 / (1.0 + float(t))})()
+    handle1 = overnight_shim_mod._curve_handle_from_curve(eval_date, curve, extra_times=[0.0, 1.0, 2.0])
+    handle2 = overnight_shim_mod._curve_handle_from_curve(eval_date, curve, extra_times=[0.0, 1.0, 2.0])
+    index1 = overnight_shim_mod._build_ql_overnight_index("SOFR", handle1)
+    index2 = overnight_shim_mod._build_ql_overnight_index("SOFR", handle2)
+    assert handle1 is handle2
+    assert index1 is index2
+
+
+def test_load_swap_legs_from_portfolio_root_reuses_trade_lookup_cache():
+    portfolio_root = ET.fromstring(
+        """
+        <Portfolio>
+          <Trade id="T1">
+            <TradeType>Swap</TradeType>
+            <SwapData>
+              <LegData>
+                <LegType>Fixed</LegType>
+                <Currency>EUR</Currency>
+                <PaymentConvention>F</PaymentConvention>
+                <DayCounter>A360</DayCounter>
+                <Notionals><Notional>1000000</Notional></Notionals>
+                <ScheduleData>
+                  <Rules>
+                    <StartDate>2025-02-10</StartDate>
+                    <EndDate>2026-02-10</EndDate>
+                    <Tenor>6M</Tenor>
+                    <Calendar>TARGET</Calendar>
+                    <Convention>F</Convention>
+                  </Rules>
+                </ScheduleData>
+                <FixedLegData><Rates><Rate>0.02</Rate></Rates></FixedLegData>
+              </LegData>
+              <LegData>
+                <LegType>Floating</LegType>
+                <Currency>EUR</Currency>
+                <PaymentConvention>F</PaymentConvention>
+                <DayCounter>A360</DayCounter>
+                <Notionals><Notional>1000000</Notional></Notionals>
+                <ScheduleData>
+                  <Rules>
+                    <StartDate>2025-02-10</StartDate>
+                    <EndDate>2026-02-10</EndDate>
+                    <Tenor>6M</Tenor>
+                    <Calendar>TARGET</Calendar>
+                    <Convention>F</Convention>
+                  </Rules>
+                </ScheduleData>
+                <FloatingLegData>
+                  <Index>EUR-EURIBOR-6M</Index>
+                  <FixingDays>2</FixingDays>
+                  <IsInArrears>false</IsInArrears>
+                  <Spreads><Spread>0.0</Spread></Spreads>
+                  <Gearings><Gearing>1.0</Gearing></Gearings>
+                </FloatingLegData>
+              </LegData>
+            </SwapData>
+          </Trade>
+        </Portfolio>
+        """
+    )
+
+    cache_before = dict(irs_utils_mod._PORTFOLIO_TRADE_LOOKUP_CACHE)
+    try:
+        first = irs_utils_mod._portfolio_trade_lookup(portfolio_root)
+        second = irs_utils_mod._portfolio_trade_lookup(portfolio_root)
+        assert first is second
+        cache_key = ("T1", "2025-02-10", "ActualActual(ISDA)")
+        irs_utils_mod._SWAP_LEG_CACHE.pop(id(portfolio_root), None)
+        legs = load_swap_legs_from_portfolio_root(portfolio_root, "T1", "2025-02-10")
+        cached = load_swap_legs_from_portfolio_root(portfolio_root, "T1", "2025-02-10")
+        assert legs["fixed_pay_time"].size > 0
+        assert cached is legs
+        assert cache_key in irs_utils_mod._SWAP_LEG_CACHE[id(portfolio_root)][1]
+        assert len(irs_utils_mod._PORTFOLIO_TRADE_LOOKUP_CACHE) >= 1
+    finally:
+        irs_utils_mod._PORTFOLIO_TRADE_LOOKUP_CACHE.clear()
+        irs_utils_mod._SWAP_LEG_CACHE.clear()
+        irs_utils_mod._PORTFOLIO_TRADE_LOOKUP_CACHE.update(cache_before)
+
+
+def test_python_lgm_adapter_reuses_cached_lgm_paths_for_same_snapshot():
+    snapshot = _load_case("Examples/Legacy/Example_25/Input")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    inputs = adapter._extract_inputs(snapshot, map_snapshot(snapshot))
+    model = adapter._lgm_mod.LGM1F(
+        adapter._lgm_mod.LGMParams(
+            alpha_times=tuple(float(x) for x in inputs.lgm_params["alpha_times"]),
+            alpha_values=tuple(float(x) for x in inputs.lgm_params["alpha_values"]),
+            kappa_times=tuple(float(x) for x in inputs.lgm_params["kappa_times"]),
+            kappa_values=tuple(float(x) for x in inputs.lgm_params["kappa_values"]),
+            shift=float(inputs.lgm_params["shift"]),
+            scaling=float(inputs.lgm_params["scaling"]),
+        )
+    )
+    call_counter = {"count": 0}
+    original = adapter._lgm_mod.simulate_lgm_measure
+
+    def _counting_simulate(*args, **kwargs):
+        call_counter["count"] += 1
+        return original(*args, **kwargs)
+
+    try:
+        adapter._lgm_mod.simulate_lgm_measure = _counting_simulate
+        first_x, first_fx = adapter._simulate_lgm_paths_cached(snapshot, inputs, model, 4, "numpy")
+        second_x, second_fx = adapter._simulate_lgm_paths_cached(snapshot, inputs, model, 4, "numpy")
+    finally:
+        adapter._lgm_mod.simulate_lgm_measure = original
+
+    assert call_counter["count"] == 1
+    assert first_x is second_x
+    assert first_fx is second_fx
+
+
+def test_curve_values_caches_repeated_callable_vector_evaluation():
+    class CountingCurve:
+        def __init__(self):
+            self.count = 0
+
+        def __call__(self, t):
+            self.count += 1
+            return 1.0 / (1.0 + float(t))
+
+    curve = CountingCurve()
+    times = np.array([0.0, 1.0, 2.0, 5.0], dtype=float)
+    first = irs_utils_mod.curve_values(curve, times)
+    second = irs_utils_mod.curve_values(curve, times)
+    assert np.allclose(first, second)
+    assert curve.count == times.size
+
+
+def test_aggregate_portfolio_npv_paths_reuses_cached_aggregation():
+    trade_paths = {
+        "T1": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=float),
+        "T2": np.array([[10.0, 20.0], [30.0, 40.0]], dtype=float),
+    }
+    trade_to_ns = {"T1": "NS1", "T2": "NS1"}
+    first = irs_utils_mod.aggregate_portfolio_npv_paths(trade_paths, trade_to_netting_set=trade_to_ns)
+    second = irs_utils_mod.aggregate_portfolio_npv_paths(trade_paths, trade_to_netting_set=trade_to_ns)
+    assert first is second
+    assert np.allclose(first["portfolio"], np.array([[11.0, 22.0], [33.0, 44.0]], dtype=float))
+    assert np.allclose(first["by_netting_set"]["NS1"], first["portfolio"])
+
+
+def test_resolve_irs_pricing_backend_respects_requested_device_per_snapshot():
+    import torch
+
+    if not hasattr(torch.backends, "mps"):
+        pytest.skip("mps backend is not available in this torch build")
+
+    snapshot = _load_case("Examples/Legacy/Example_25/Input")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    inputs = adapter._extract_inputs(snapshot, map_snapshot(snapshot))
+    original_mps_available = torch.backends.mps.is_available
+    try:
+        torch.backends.mps.is_available = lambda: True  # type: ignore[assignment]
+        cpu_backend = adapter._resolve_irs_pricing_backend(replace(inputs, torch_device="cpu"))
+        mps_backend = adapter._resolve_irs_pricing_backend(replace(inputs, torch_device="mps"))
+    finally:
+        torch.backends.mps.is_available = original_mps_available  # type: ignore[assignment]
+
+    assert cpu_backend is not None
+    assert mps_backend is not None
+    assert cpu_backend[3] == "cpu"
+    assert mps_backend[3] == "mps"
+    assert cpu_backend is not mps_backend
+    assert len(adapter._swap_pricing_backend_cache) >= 2
 
 
 def test_python_runtime_compares_example25_digital_cmsspread_with_local_ore_run():

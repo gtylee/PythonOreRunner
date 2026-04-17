@@ -7,6 +7,7 @@ to QuantExt's proxy-volatility classes.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -21,6 +22,13 @@ def _coupon_include_spread(coupon: Any) -> bool:
         except Exception:
             return False
     return False
+
+
+_CAPFLOOR_SURFACE_PERIOD_CACHE: dict[tuple[int, str], str | None] = {}
+_QL_OVERNIGHT_INDEX_CACHE: dict[tuple[str, int], Any] = {}
+_QL_CURVE_HANDLE_CACHE: dict[tuple[object, ...], Any] = {}
+_QL_OVERNIGHT_RATE_CACHE: dict[tuple[object, ...], float] = {}
+_QL_AVERAGE_OVERNIGHT_RATE_CACHE: dict[tuple[object, ...], float] = {}
 
 
 def _past_fixing_or_none(ql_index: Any, fixing_date: Any) -> float | None:
@@ -46,28 +54,37 @@ def _past_fixing_or_none(ql_index: Any, fixing_date: Any) -> float | None:
 def _build_ql_overnight_index(overnight_index: str, overnight_handle: Any) -> Any:
     import QuantLib as ql
 
+    cache_key = (overnight_index, id(overnight_handle))
+    cached = _QL_OVERNIGHT_INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     if overnight_index == "SOFR":
-        return ql.Sofr(overnight_handle)
-    if overnight_index == "FEDFUNDS":
-        return ql.FedFunds(overnight_handle)
-    if overnight_index == "SONIA":
-        return ql.Sonia(overnight_handle)
-    if overnight_index == "ESTR":
-        return ql.Estr(overnight_handle)
-    if overnight_index == "SARON":
-        return ql.Saron(overnight_handle)
-    if overnight_index == "TONAR":
+        idx = ql.Sofr(overnight_handle)
+    elif overnight_index == "FEDFUNDS":
+        idx = ql.FedFunds(overnight_handle)
+    elif overnight_index == "SONIA":
+        idx = ql.Sonia(overnight_handle)
+    elif overnight_index == "ESTR":
+        idx = ql.Estr(overnight_handle)
+    elif overnight_index == "SARON":
+        idx = ql.Saron(overnight_handle)
+    elif overnight_index == "TONAR":
         if hasattr(ql, "Tonar"):
-            return ql.Tonar(overnight_handle)
-        return ql.OvernightIndex(
-            "TONAR",
-            0,
-            ql.JPYCurrency(),
-            ql.Japan(),
-            ql.Actual365Fixed(),
-            overnight_handle,
-        )
-    raise AttributeError(f"unsupported overnight index '{overnight_index}'")
+            idx = ql.Tonar(overnight_handle)
+        else:
+            idx = ql.OvernightIndex(
+                "TONAR",
+                0,
+                ql.JPYCurrency(),
+                ql.Japan(),
+                ql.Actual365Fixed(),
+                overnight_handle,
+            )
+    else:
+        raise AttributeError(f"unsupported overnight index '{overnight_index}'")
+    _QL_OVERNIGHT_INDEX_CACHE[cache_key] = idx
+    return idx
 
 
 def _curve_handle_from_curve(
@@ -79,6 +96,16 @@ def _curve_handle_from_curve(
     dfs: list[float] | tuple[float, ...] | None = None,
 ) -> Any:
     import QuantLib as ql
+    cache_key = (
+        int(eval_date.serialNumber()) if hasattr(eval_date, "serialNumber") else str(eval_date),
+        id(curve),
+        tuple(extra_times) if extra_times else None,
+        tuple(dates) if dates is not None else None,
+        tuple(dfs) if dfs is not None else None,
+    )
+    cached = _QL_CURVE_HANDLE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     if dates is not None and dfs is not None:
         ql_dates = []
@@ -99,7 +126,9 @@ def _curve_handle_from_curve(
             except Exception:
                 continue
         if ql_dates and ql_dfs:
-            return ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
+            handle = ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
+            _QL_CURVE_HANDLE_CACHE[cache_key] = handle
+            return handle
 
     grid = {0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0}
     if extra_times:
@@ -114,12 +143,23 @@ def _curve_handle_from_curve(
     for tt in grid[1:]:
         ql_dates.append(eval_date + int(round(365.25 * tt)))
         ql_dfs.append(max(float(curve(tt)), 1.0e-10))
-    return ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
+    handle = ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
+    _QL_CURVE_HANDLE_CACHE[cache_key] = handle
+    return handle
 
 
 def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) -> float:
     """Replicate QuantExt::OvernightIndexedCoupon::compute() as closely as possible."""
     import QuantLib as ql
+    cache_key = (
+        "overnight",
+        int(eval_date.serialNumber()) if hasattr(eval_date, "serialNumber") else str(eval_date),
+        id(coupon),
+        id(ql_index),
+    )
+    cached = _QL_OVERNIGHT_RATE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     fixing_dates = list(coupon.fixingDates())
     value_dates = list(coupon.valueDates())
@@ -185,7 +225,9 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
     swaplet_rate = coupon.gearing() * rate
     if not _coupon_include_spread(coupon):
         swaplet_rate += coupon.spread()
-    return float(swaplet_rate)
+    out = float(swaplet_rate)
+    _QL_OVERNIGHT_RATE_CACHE[cache_key] = out
+    return out
 
 
 def _average_overnight_coupon_rate_exact(
@@ -203,6 +245,17 @@ def _average_overnight_coupon_rate_exact(
     forward-rate approximation.
     """
     import QuantLib as ql
+    cache_key = (
+        "average",
+        int(float(t) * 1_000_000.0),
+        int(coupon_index),
+        id(ql_index),
+        id(runtime),
+        id(snapshot),
+    )
+    cached = _QL_AVERAGE_OVERNIGHT_RATE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     start_dates = np.asarray(leg.get("start_date", []), dtype=object)
     end_dates = np.asarray(leg.get("end_date", []), dtype=object)
@@ -303,7 +356,9 @@ def _average_overnight_coupon_rate_exact(
     tau = day_counter.yearFraction(value_dates[0], value_dates[-1])
     if tau <= 0.0:
         raise ValueError("invalid average overnight coupon accrual period")
-    return float(gearing * accumulated_rate / tau + spread)
+    out = float(gearing * accumulated_rate / tau + spread)
+    _QL_AVERAGE_OVERNIGHT_RATE_CACHE[cache_key] = out
+    return out
 
 
 def _parse_overnight_index_name(index_name: str) -> str | None:
@@ -428,6 +483,17 @@ class BlackOvernightIndexedCouponPricerReplica:
         fixing_dates: list[Any] | None = None,
         asof_date: datetime.date | None = None,
     ) -> np.ndarray:
+        def _optional_float(value: object) -> float | None:
+            if value is None:
+                return None
+            try:
+                out = float(value)
+            except Exception:
+                return None
+            return out if math.isfinite(out) else None
+
+        cap_value = _optional_float(cap)
+        floor_value = _optional_float(floor)
         coupon_rate = np.zeros_like(raw_rate, dtype=float) if naked_option else raw_rate.copy()
         if asof_date is None:
             asof_date = datetime.fromisoformat(self.runtime._normalized_asof(self.snapshot)).date()
@@ -456,12 +522,12 @@ class BlackOvernightIndexedCouponPricerReplica:
                 T += ((fixing_end_time - T) ** 3) / denom / 3.0
             return np.full_like(raw_rate, vol * math.sqrt(max(T, 0.0)), dtype=float)
 
-        if floor is not None:
-            stddev = _stddev(float(floor))
-            coupon_rate = coupon_rate + self.runtime._normal_option_rate(raw_rate, float(floor), stddev, is_call=False)
-        if cap is not None:
-            stddev = _stddev(float(cap))
-            coupon_rate = coupon_rate - self.runtime._normal_option_rate(raw_rate, float(cap), stddev, is_call=True)
+        if floor_value is not None:
+            stddev = _stddev(floor_value)
+            coupon_rate = coupon_rate + self.runtime._normal_option_rate(raw_rate, floor_value, stddev, is_call=False)
+        if cap_value is not None:
+            stddev = _stddev(cap_value)
+            coupon_rate = coupon_rate - self.runtime._normal_option_rate(raw_rate, cap_value, stddev, is_call=True)
         return coupon_rate
 
     def local_coupon_rate(
@@ -484,6 +550,10 @@ class BlackOvernightIndexedCouponPricerReplica:
 
 
 def capfloor_surface_rate_computation_period(snapshot: Any, *, ccy: str) -> str | None:
+    cache_key = (id(snapshot.market.raw_quotes), str(ccy).upper())
+    cached = _CAPFLOOR_SURFACE_PERIOD_CACHE.get(cache_key)
+    if cached is not None or cache_key in _CAPFLOOR_SURFACE_PERIOD_CACHE:
+        return cached
     for quote in snapshot.market.raw_quotes:
         raw_key = str(getattr(quote, "key", "")).strip().upper()
         if not raw_key.startswith(f"CAPFLOOR/RATE_NVOL/{ccy.upper()}/"):
@@ -492,7 +562,10 @@ def capfloor_surface_rate_computation_period(snapshot: Any, *, ccy: str) -> str 
         if len(parts) < 5:
             continue
         period = parts[4].strip()
-        return period or None
+        result = period or None
+        _CAPFLOOR_SURFACE_PERIOD_CACHE[cache_key] = result
+        return result
+    _CAPFLOOR_SURFACE_PERIOD_CACHE[cache_key] = None
     return None
 
 
@@ -767,19 +840,30 @@ def _apply_local_cap_floor(
     naked_option: bool,
     option_stddev: np.ndarray | None,
 ) -> np.ndarray:
+    def _optional_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        return out if math.isfinite(out) else None
+
+    cap_value = _optional_float(cap)
+    floor_value = _optional_float(floor)
     coupon_rate = raw_rate.copy() if not naked_option else np.zeros_like(raw_rate, dtype=float)
     stddev = option_stddev if option_stddev is not None else np.zeros_like(raw_rate, dtype=float)
-    if floor is not None:
-        coupon_rate = np.maximum(coupon_rate, float(floor)) if not naked_option else runtime._normal_option_rate(
+    if floor_value is not None:
+        coupon_rate = np.maximum(coupon_rate, floor_value) if not naked_option else runtime._normal_option_rate(
             raw_rate,
-            float(floor),
+            floor_value,
             stddev,
             is_call=False,
         )
-    if cap is not None:
-        coupon_rate = np.minimum(coupon_rate, float(cap)) if not naked_option else coupon_rate - runtime._normal_option_rate(
+    if cap_value is not None:
+        coupon_rate = np.minimum(coupon_rate, cap_value) if not naked_option else coupon_rate - runtime._normal_option_rate(
             raw_rate,
-            float(cap),
+            cap_value,
             stddev,
             is_call=True,
         )

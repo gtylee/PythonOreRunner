@@ -35,6 +35,12 @@ The maintained native path is strongest for:
 - inflation swaps and inflation cap/floor flows already supported by the runtime
 - XVA exposure, CVA, DVA, FVA, and related parity-style reporting for supported products
 
+Parity and workflow notes:
+
+- Bermudan swaptions use the grid/backward pricing path for trade NPV checks, while XVA/exposure uses the LSMC path.
+- The USD Bermudan case in the generated mixed book now picks up trade-specific GSR calibration from `pricingengine.xml` when swaption market quotes are available.
+- The runtime handles both normal and lognormal swaption vol surfaces, including the USD Libor index support needed by the Bermudan calibration helper.
+
 Not everything in ORE is natively priced here. Unsupported trades may still require ORE or SWIG-backed flows.
 
 ## Repository Layout
