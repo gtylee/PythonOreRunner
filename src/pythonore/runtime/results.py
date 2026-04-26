@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import numpy as np
+
+
+def xva_total_from_metrics(metrics: Mapping[str, float]) -> float:
+    """Return the signed aggregate XVA adjustment from reported components."""
+    by_name = {str(k).upper(): float(v) for k, v in metrics.items()}
+    funding = by_name["FVA"] if "FVA" in by_name else by_name.get("FBA", 0.0) + by_name.get("FCA", 0.0)
+    return float(
+        by_name.get("CVA", 0.0)
+        - by_name.get("DVA", 0.0)
+        + funding
+        + by_name.get("COLVA", 0.0)
+        + by_name.get("MVA", 0.0)
+        + by_name.get("KVA", 0.0)
+    )
 
 
 @dataclass(frozen=True)

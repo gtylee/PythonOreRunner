@@ -872,7 +872,7 @@ def _build_minimal_pricing_payload(
         )
         node_tenors = load_simulation_yield_tenors(str(simulation_xml))
     else:
-        if trade_type != "Swap" or not _is_plain_vanilla_swap_trade(ore_xml):
+        if trade_type != "Swap" or not _is_plain_vanilla_swap_trade(ore_xml, trade_id=trade_id):
             raise ValueError(f"Missing Analytics/Analytic[@type='simulation'] in {ore_xml_path}")
         domestic_ccy = (
             trade_ccy
@@ -971,6 +971,8 @@ def _build_minimal_pricing_payload(
                 if str(leg.get("ccy") or "").strip()
             }
             if cashflow_ccys and (len(cashflow_ccys) > 1 or (trade_ccy and cashflow_ccys != {trade_ccy.upper()})):
+                use_cashflow_replay = True
+            if simulation_xml is None:
                 use_cashflow_replay = True
         except Exception:
             trade_cashflows = None
@@ -6761,19 +6763,26 @@ def _first_trade_type(ore_xml: Path) -> str:
         return ""
 
 
-def _is_plain_vanilla_swap_trade(ore_xml: Path) -> bool:
+def _is_plain_vanilla_swap_trade(ore_xml: Path, trade_id: str | None = None) -> bool:
     portfolio_xml = _resolve_case_portfolio_path(ore_xml)
     if portfolio_xml is None or not portfolio_xml.exists():
         return False
     try:
         root = ET.parse(portfolio_xml).getroot()
-        trade_id = ore_snapshot_mod._get_first_trade_id(root)
-        if ore_snapshot_mod._get_trade_type(root, trade_id) != "Swap":
+        selected_trade_id = str(trade_id or ore_snapshot_mod._get_first_trade_id(root)).strip()
+        if ore_snapshot_mod._get_trade_type(root, selected_trade_id) != "Swap":
             return False
-        legs = root.findall("./Trade/SwapData/LegData")
-        if not legs:
-            trade = root.find("./Trade") or root.find(".//Trade")
-            legs = [] if trade is None else trade.findall("./SwapData/LegData")
+        trade = next(
+            (
+                node
+                for node in root.findall("./Trade")
+                if (node.attrib.get("id", "") or "").strip() == selected_trade_id
+            ),
+            None,
+        )
+        if trade is None:
+            trade = root.find("./Trade") if not selected_trade_id else None
+        legs = [] if trade is None else trade.findall("./SwapData/LegData")
         if len(legs) != 2:
             return False
         currencies = {(leg.findtext("./Currency") or "").strip() for leg in legs}

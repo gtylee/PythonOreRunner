@@ -200,6 +200,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
     fwd_by_index: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     bma_ratio: Dict[str, List[Tuple[float, float]]] = {}
     fx: Dict[str, float] = {}
+    fx_forward: Dict[str, List[Tuple[float, float]]] = {}
     fx_vol: Dict[str, List[Tuple[float, float]]] = {}
     swaption_normal_vols: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
     cms_correlations: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
@@ -217,6 +218,18 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         p1 = parts[1] if len(parts) > 1 else ""
         if len(parts) >= 4 and p0 == "FX" and p1 == "RATE":
             fx[parts[2] + parts[3]] = val
+            continue
+        if len(parts) >= 5 and p0 == "FXFWD" and p1 == "RATE":
+            pair = parts[2] + parts[3]
+            tenor = parts[4]
+            try:
+                if tenor in {"ON", "TN", "SN"}:
+                    t = {"ON": 1.0, "TN": 2.0, "SN": 2.0}[tenor] / 365.0
+                else:
+                    t = parse_tenor(tenor)
+            except Exception:
+                continue
+            fx_forward.setdefault(pair, []).append((t, val))
             continue
         if len(parts) >= 3 and p0 == "FX":
             fx[parts[1] + parts[2]] = val
@@ -358,6 +371,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         "fwd_by_index": fwd_by_index,
         "bma_ratio": bma_ratio,
         "fx": fx,
+        "fx_forward": fx_forward,
         "fx_vol": fx_vol,
         "swaption_normal_vols": swaption_normal_vols,
         "cms_correlations": cms_correlations,

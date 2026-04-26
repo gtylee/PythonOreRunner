@@ -6,7 +6,7 @@ import numpy as np
 
 from pythonore.domain.dataclasses import FXForward, IRS, Trade, XVASnapshot
 from pythonore.mapping.mapper import MappedInputs
-from pythonore.runtime.results import CubeAccessor, XVAResult
+from pythonore.runtime.results import CubeAccessor, XVAResult, xva_total_from_metrics
 
 
 def _toy_trade_numbers(trade: Trade):
@@ -46,13 +46,13 @@ class DeterministicToyAdapter:
             if m == "CVA":
                 metric_values[m] = 0.012 * total_epe
             elif m == "DVA":
-                metric_values[m] = -0.006 * total_epe
+                metric_values[m] = 0.006 * total_epe
             elif m == "FVA":
                 metric_values[m] = 0.002 * abs(pv_total)
             elif m == "MVA":
                 metric_values[m] = 0.0015 * total_epe
 
-        xva_total = sum(metric_values.values())
+        xva_total = xva_total_from_metrics(metric_values)
 
         reports = {
             "xva": [

@@ -648,6 +648,59 @@ def _is_target_holiday(d: date) -> bool:
     return False
 
 
+def _observed_fixed_holiday(d: date, month: int, day: int) -> bool:
+    actual = date(d.year, month, day)
+    observed = actual
+    if actual.weekday() == 5:
+        observed = actual - timedelta(days=1)
+    elif actual.weekday() == 6:
+        observed = actual + timedelta(days=1)
+    return d == observed
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    d = date(year, month, 1)
+    while d.weekday() != weekday:
+        d += timedelta(days=1)
+    return d + timedelta(days=7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        d = date(year, 12, 31)
+    else:
+        d = date(year, month + 1, 1) - timedelta(days=1)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
+def _is_us_holiday(d: date) -> bool:
+    if _observed_fixed_holiday(d, 1, 1):
+        return True
+    if d == _nth_weekday(d.year, 1, 0, 3):
+        return True
+    if d == _nth_weekday(d.year, 2, 0, 3):
+        return True
+    if d == _last_weekday(d.year, 5, 0):
+        return True
+    if _observed_fixed_holiday(d, 6, 19):
+        return True
+    if _observed_fixed_holiday(d, 7, 4):
+        return True
+    if d == _nth_weekday(d.year, 9, 0, 1):
+        return True
+    if d == _nth_weekday(d.year, 10, 0, 2):
+        return True
+    if _observed_fixed_holiday(d, 11, 11):
+        return True
+    if d == _nth_weekday(d.year, 11, 3, 4):
+        return True
+    if _observed_fixed_holiday(d, 12, 25):
+        return True
+    return False
+
+
 def _calendar_tokens(calendar: str) -> list[str]:
     toks = [x.strip().upper() for x in (calendar or "TARGET").split(",") if x.strip()]
     return toks if toks else ["TARGET"]
@@ -658,6 +711,8 @@ def _is_business_day(d: date, calendar: str) -> bool:
         return False
     for c in _calendar_tokens(calendar):
         if c == "TARGET" and _is_target_holiday(d):
+            return False
+        if c in {"US", "USD", "USNY", "NYSE", "US-GOVERNMENTBOND"} and _is_us_holiday(d):
             return False
     return True
 

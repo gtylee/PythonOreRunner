@@ -87,7 +87,7 @@ from pythonore.runtime.lgm import inputs as lgm_inputs
 from pythonore.runtime.lgm import market as lgm_market
 from pythonore.runtime.swig import ORESwigAdapter
 from pythonore.runtime.toy import DeterministicToyAdapter, _toy_trade_numbers
-from pythonore.runtime.results import CubeAccessor, XVAResult
+from pythonore.runtime.results import CubeAccessor, XVAResult, xva_total_from_metrics
 from pythonore.repo_paths import find_engine_repo_root
 
 
@@ -320,6 +320,8 @@ class _PythonLgmInputs:
     mpor: MporConfig
     input_provenance: Dict[str, str]  # Diagnostic dict recording which source was used for each input (model_params, market, grid, portfolio).
     input_fallbacks: Tuple[str, ...] = ()
+    fx_forwards: Dict[str, List[Tuple[float, float]]] = field(default_factory=dict)
+    fx_spots_today: Dict[str, float] = field(default_factory=dict)
     discount_curve_dates: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     discount_curve_dfs: Dict[str, Tuple[float, ...]] = field(default_factory=dict)
 
@@ -369,14 +371,17 @@ class PythonLgmAdapter:
         self._simulation_root_cache: Dict[int, ET.Element] = {}
         self._simulation_tenor_cache: Dict[int, np.ndarray] = {}
         self._swap_index_forward_tenor_cache: Dict[int, Dict[str, str]] = {}
+        self._fx_index_convention_cache: Dict[int, Dict[str, Dict[str, object]]] = {}
         self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._generic_capfloor_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._generic_swaption_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._generic_cashflow_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
+        self._generic_fra_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
         self._generic_rate_swap_legs_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_capfloor_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_swaption_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_cashflow_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
+        self._generic_fra_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
         self._market_overlay_cache: Dict[int, Dict[str, Any]] = {}
         self._market_overlay_scan_cache: Dict[tuple[object, ...], Dict[str, Any]] = {}
@@ -1620,24 +1625,37 @@ class PythonLgmAdapter:
                                 )
                             )
                         else:
-                            generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
-                            if generic_legs is not None:
-                                notionals = [
-                                    float(np.max(np.abs(np.asarray(leg.get("notional", np.asarray([0.0], dtype=float)), dtype=float))))
-                                    for leg in generic_legs.get("rate_legs", [])
-                                ]
-                                generic_ccys.update(_rate_leg_currencies(generic_legs, str(generic_legs.get("ccy", snapshot.config.base_currency))))
+                            generic_fra = self._build_generic_fra_state(t, snapshot)
+                            if generic_fra is not None:
+                                generic_ccys.add(str(generic_fra.get("ccy", snapshot.config.base_currency)).upper())
                                 trade_specs.append(
                                     _TradeSpec(
                                         trade=t,
-                                        kind="RateSwap",
-                                        notional=max(notionals) if notionals else 0.0,
-                                        ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
-                                        legs=generic_legs,
+                                        kind="FRA",
+                                        notional=float(generic_fra.get("notional", 0.0)),
+                                        ccy=str(generic_fra.get("ccy", snapshot.config.base_currency)).upper(),
+                                        sticky_state=generic_fra,
                                     )
                                 )
                             else:
-                                unsupported.append(t)
+                                generic_legs = self._build_generic_rate_swap_legs(t, snapshot)
+                                if generic_legs is not None:
+                                    notionals = [
+                                        float(np.max(np.abs(np.asarray(leg.get("notional", np.asarray([0.0], dtype=float)), dtype=float))))
+                                        for leg in generic_legs.get("rate_legs", [])
+                                    ]
+                                    generic_ccys.update(_rate_leg_currencies(generic_legs, str(generic_legs.get("ccy", snapshot.config.base_currency))))
+                                    trade_specs.append(
+                                        _TradeSpec(
+                                            trade=t,
+                                            kind="RateSwap",
+                                            notional=max(notionals) if notionals else 0.0,
+                                            ccy=str(generic_legs.get("ccy", snapshot.config.base_currency)).upper(),
+                                            legs=generic_legs,
+                                        )
+                                    )
+                                else:
+                                    unsupported.append(t)
             else:
                 unsupported.append(t)
         ccy_set: set[str] = {snapshot.config.base_currency.upper()}
@@ -1862,6 +1880,148 @@ class PythonLgmAdapter:
         self._swap_index_forward_tenor_cache[key] = mapping
         return mapping
 
+    def _parse_fx_index_conventions(self, conventions_xml: str) -> Dict[str, Dict[str, object]]:
+        key = id(conventions_xml)
+        cached = self._fx_index_convention_cache.get(key)
+        if cached is not None:
+            return cached
+        mapping: Dict[str, Dict[str, object]] = {}
+        if not conventions_xml.strip():
+            return mapping
+        try:
+            root = ET.fromstring(conventions_xml)
+        except Exception:
+            return mapping
+        for node in root.findall("./FX"):
+            conv_id = (node.findtext("./Id") or "").strip().upper()
+            source = (node.findtext("./SourceCurrency") or "").strip().upper()
+            target = (node.findtext("./TargetCurrency") or "").strip().upper()
+            if not source or not target:
+                continue
+            try:
+                spot_days = int((node.findtext("./SpotDays") or "2").strip() or 2)
+            except Exception:
+                spot_days = 2
+            advance_calendar = (node.findtext("./AdvanceCalendar") or f"{source},{target}").strip()
+            convention = {
+                "spot_days": spot_days,
+                "advance_calendar": advance_calendar,
+                "source_currency": source,
+                "target_currency": target,
+                "points_factor": float((node.findtext("./PointsFactor") or "10000").strip() or 10000.0),
+                "spot_relative": (node.findtext("./SpotRelative") or "true").strip().lower() == "true",
+            }
+            keys = {
+                conv_id,
+                f"{source}{target}",
+                f"{target}{source}",
+                f"{source}/{target}",
+                f"{target}/{source}",
+                f"FX-{source}-{target}",
+                f"FX-{target}-{source}",
+            }
+            for k in keys:
+                if k:
+                    mapping[k.upper()] = convention
+        self._fx_index_convention_cache[key] = mapping
+        return mapping
+
+    def _resolve_fx_index_convention(
+        self,
+        conventions_xml: str,
+        fx_index: str,
+        foreign_ccy: str,
+        domestic_ccy: str,
+    ) -> Dict[str, object]:
+        mapping = self._parse_fx_index_conventions(conventions_xml)
+        fx_index_u = str(fx_index or "").strip().upper()
+        foreign = str(foreign_ccy or "").strip().upper()
+        domestic = str(domestic_ccy or "").strip().upper()
+        candidates = [fx_index_u]
+        parts = fx_index_u.split("-")
+        if len(parts) >= 4 and parts[0] == "FX":
+            source = parts[-2]
+            target = parts[-1]
+            family = "-".join(parts[1:-2])
+            candidates.extend(
+                [
+                    f"FX-{family}-{source}-{target}",
+                    f"FX-{family}-{target}-{source}",
+                    f"{source}{target}",
+                    f"{target}{source}",
+                    f"{source}/{target}",
+                    f"{target}/{source}",
+                    f"FX-{source}-{target}",
+                    f"FX-{target}-{source}",
+                ]
+            )
+        if foreign and domestic:
+            candidates.extend(
+                [
+                    f"{foreign}{domestic}",
+                    f"{domestic}{foreign}",
+                    f"{foreign}/{domestic}",
+                    f"{domestic}/{foreign}",
+                    f"FX-{foreign}-{domestic}",
+                    f"FX-{domestic}-{foreign}",
+                ]
+            )
+        for candidate in candidates:
+            conv = mapping.get(str(candidate).upper())
+            if conv is not None:
+                return conv
+        return {
+            "spot_days": 2,
+            "advance_calendar": f"{foreign},{domestic}" if foreign and domestic else "USD",
+            "source_currency": foreign,
+            "target_currency": domestic,
+            "points_factor": 10000.0,
+            "spot_relative": True,
+        }
+
+    def _fx_today_spots_from_settlement_quotes(
+        self,
+        fx_spots: Mapping[str, float],
+        fx_forwards: Mapping[str, Sequence[Tuple[float, float]]],
+        conventions_xml: str,
+    ) -> Dict[str, float]:
+        out = {str(k).upper(): float(v) for k, v in fx_spots.items()}
+        for pair, raw_spot in list(out.items()):
+            if len(pair) != 6:
+                continue
+            base = pair[:3]
+            quote = pair[3:]
+            conv = self._resolve_fx_index_convention(conventions_xml, f"FX-{base}-{quote}", base, quote)
+            if not bool(conv.get("spot_relative", True)):
+                continue
+            spot_days = max(int(conv.get("spot_days", 0) or 0), 0)
+            if spot_days <= 0:
+                continue
+            points_factor = max(float(conv.get("points_factor", 10000.0) or 10000.0), 1.0e-12)
+            nodes = sorted(
+                (float(t), float(points))
+                for t, points in fx_forwards.get(pair, ())
+                if np.isfinite(float(t)) and np.isfinite(float(points))
+            )
+            if not nodes:
+                continue
+            short_points: list[float] = []
+            seen_times: set[float] = set()
+            for t, points in nodes:
+                # ON/TN/SN nodes are the first distinct maturities.  To turn an
+                # ORE spot-date quote into today's FX quote, roll the spot quote
+                # backwards over the settlement lag by subtracting those points.
+                key = round(float(t), 12)
+                if key in seen_times:
+                    continue
+                seen_times.add(key)
+                short_points.append(float(points))
+                if len(short_points) >= spot_days:
+                    break
+            if len(short_points) >= spot_days:
+                out[pair] = float(raw_spot) - sum(short_points[:spot_days]) / points_factor
+        return out
+
     def _load_inflation_curves(
         self,
         snapshot: XVASnapshot,
@@ -1942,6 +2102,12 @@ class PythonLgmAdapter:
             overlay = lgm_market._parse_market_overlay(snapshot.market.raw_quotes, snapshot.config.asof)
             self._market_overlay_cache[market_cache_key] = overlay
         fx_spots = overlay["fx"]
+        fx_forwards = overlay.get("fx_forward", {})
+        fx_spots_today = self._fx_today_spots_from_settlement_quotes(
+            fx_spots,
+            fx_forwards,
+            xml.get("conventions.xml", ""),
+        )
         fx_vols = overlay.get("fx_vol", {})
         swaption_normal_vols = overlay.get("swaption_normal_vols", {})
         cms_correlations = overlay.get("cms_correlations", {})
@@ -2317,6 +2483,8 @@ class PythonLgmAdapter:
             model_ccy=model_ccy,
             seed=int(snapshot.config.runtime.simulation.seed) if snapshot.config.runtime else 42,
             fx_spots=fx_spots,
+            fx_spots_today=fx_spots_today,
+            fx_forwards=fx_forwards,
             fx_vols=fx_vols,
             swaption_normal_vols=swaption_normal_vols,
             cms_correlations=cms_correlations,
@@ -2777,6 +2945,16 @@ class PythonLgmAdapter:
                 extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
             elif spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward):
                 extras.append(np.asarray([max(float(spec.trade.product.maturity_years), 0.0)], dtype=float))
+            elif spec.kind == "FRA" and isinstance(spec.sticky_state, dict):
+                extras.append(
+                    np.asarray(
+                        [
+                            max(float(spec.sticky_state.get("start_time", 0.0)), 0.0),
+                            max(float(spec.sticky_state.get("end_time", 0.0)), 0.0),
+                        ],
+                        dtype=float,
+                    )
+                )
         if extras:
             out = np.unique(np.concatenate([out, *extras]))
         if out.size == 0 or out[0] > 0.0:
@@ -3340,6 +3518,7 @@ class PythonLgmAdapter:
         year_fraction = self._irs_utils._year_fraction
         advance_business_days = self._irs_utils._advance_business_days
         infer_index_day_counter = self._irs_utils._infer_index_day_counter
+        conventions_xml = snapshot.config.xml_buffers.get("conventions.xml", "")
 
         rate_legs: List[Dict[str, object]] = []
         ccy = None
@@ -3380,11 +3559,22 @@ class PythonLgmAdapter:
             fx_reset_node = leg.find("./Notionals/FXReset")
             fx_reset: Dict[str, object] | None = None
             if fx_reset_node is not None:
+                fx_index = (fx_reset_node.findtext("./FXIndex") or "").strip().upper()
+                foreign_currency = (fx_reset_node.findtext("./ForeignCurrency") or "").strip().upper()
+                fx_convention = self._resolve_fx_index_convention(
+                    conventions_xml,
+                    fx_index,
+                    foreign_currency,
+                    leg_ccy,
+                )
                 fx_reset = {
-                    "foreign_currency": (fx_reset_node.findtext("./ForeignCurrency") or "").strip().upper(),
+                    "foreign_currency": foreign_currency,
                     "foreign_amount": float((fx_reset_node.findtext("./ForeignAmount") or "0").strip() or 0.0),
-                    "fx_index": (fx_reset_node.findtext("./FXIndex") or "").strip().upper(),
-                    "fixing_days": int((fx_reset_node.findtext("./FixingDays") or "2").strip() or 2),
+                    "fx_index": fx_index,
+                    "fixing_days": int(fx_convention.get("spot_days", 2) or 2),
+                    "fixing_calendar": str(fx_convention.get("advance_calendar", "") or f"{foreign_currency},{leg_ccy}"),
+                    "points_factor": float(fx_convention.get("points_factor", 10000.0) or 10000.0),
+                    "spot_relative": bool(fx_convention.get("spot_relative", True)),
                     "reset_start_date": (fx_reset_node.findtext("./StartDate") or "").strip(),
                 }
             rules = leg.find("./ScheduleData/Rules")
@@ -3400,6 +3590,15 @@ class PythonLgmAdapter:
                     s_dates, e_dates, p_dates = schedule_from_leg(leg, pay_convention=pay_conv)
                 except Exception:
                     return None
+                if notional_payment_lag:
+                    adjust_date = getattr(self._irs_utils, "_adjust_date", None)
+                    p_dates = np.asarray(
+                        [
+                            (adjust_date(advance_business_days(d, notional_payment_lag, leg_ccy), pay_conv, leg_ccy) if adjust_date is not None else advance_business_days(d, notional_payment_lag, leg_ccy))
+                            for d in e_dates
+                        ],
+                        dtype=object,
+                    )
             else:
                 if rules is None:
                     return None
@@ -3646,6 +3845,57 @@ class PythonLgmAdapter:
         }
         self._generic_cashflow_state_cache[cache_key] = result
         self._generic_cashflow_state_xml_cache[xml_cache_key] = result
+        return result
+
+    def _build_generic_fra_state(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+    ) -> Optional[Dict[str, object]]:
+        cache_key = self._portfolio_cache_key(trade, snapshot)
+        if cache_key in self._generic_fra_state_cache:
+            return self._generic_fra_state_cache[cache_key]
+        xml_cache_key = self._generic_xml_cache_key(trade, snapshot)
+        cached_xml_result = self._generic_fra_state_xml_cache.get(xml_cache_key)
+        if cached_xml_result is not None or xml_cache_key in self._generic_fra_state_xml_cache:
+            self._generic_fra_state_cache[cache_key] = cached_xml_result
+            return cached_xml_result
+        product = trade.product
+        if not isinstance(product, GenericProduct):
+            return None
+        if str(product.payload.get("trade_type", "")).strip() != "ForwardRateAgreement":
+            return None
+        xml = str(product.payload.get("xml", "")).strip()
+        if "<ForwardRateAgreementData" not in xml:
+            return None
+        try:
+            trade_root = ET.fromstring(f"<Trade>{xml}</Trade>")
+        except Exception:
+            return None
+        data = trade_root.find("./ForwardRateAgreementData")
+        if data is None:
+            return None
+        try:
+            asof = self._irs_utils._parse_yyyymmdd(self._normalized_asof(snapshot))
+            start_date = self._irs_utils._parse_yyyymmdd((data.findtext("./StartDate") or "").strip())
+            end_date = self._irs_utils._parse_yyyymmdd((data.findtext("./EndDate") or "").strip())
+            index_name = (data.findtext("./Index") or "").strip().upper()
+            day_counter = self._irs_utils._infer_index_day_counter(index_name, fallback="A360")
+            result = {
+                "ccy": (data.findtext("./Currency") or snapshot.config.base_currency).strip().upper(),
+                "index_name": index_name,
+                "notional": float((data.findtext("./Notional") or "0").strip() or 0.0),
+                "strike": float((data.findtext("./Strike") or "0").strip() or 0.0),
+                "position": -1.0 if (data.findtext("./LongShort") or "Long").strip().lower() == "short" else 1.0,
+                "start_time": float(self._irs_utils._time_from_dates(asof, start_date, "A365F")),
+                "end_time": float(self._irs_utils._time_from_dates(asof, end_date, "A365F")),
+                "accrual": float(self._irs_utils._year_fraction(start_date, end_date, day_counter)),
+                "day_counter": day_counter,
+            }
+        except Exception:
+            result = None
+        self._generic_fra_state_cache[cache_key] = result
+        self._generic_fra_state_xml_cache[xml_cache_key] = result
         return result
 
     def _build_generic_capfloor_state(
@@ -3951,6 +4201,10 @@ class PythonLgmAdapter:
             coupon = np.asarray(leg.get("quoted_coupon", np.zeros(fixing_time.shape)), dtype=float).copy()
             if leg.get("kind") in {"FLOATING", "CMS"}:
                 index_name = str(leg.get("index_name", "")).upper()
+                if bool(leg.get("overnight_indexed", False)):
+                    leg["quoted_coupon"] = coupon
+                    leg["is_historically_fixed"] = fixed_mask
+                    continue
                 for i, ft in enumerate(fixing_time):
                     fixing_date = self._date_from_time_cached(snapshot, float(ft))
                     key = (index_name, fixing_date)
@@ -4057,6 +4311,7 @@ class PythonLgmAdapter:
             "CapFloor": self._price_trade_capfloor_paths,
             "Swaption": self._price_trade_swaption_paths,
             "Cashflow": self._price_trade_cashflow_paths,
+            "FRA": self._price_trade_fra_paths,
             "InflationSwap": self._price_trade_inflation_swap_paths,
             "InflationCapFloor": self._price_trade_inflation_capfloor_paths,
         }
@@ -4723,6 +4978,40 @@ class PythonLgmAdapter:
             )
         return vals, False
 
+    def _price_trade_fra_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
+        state = spec.sticky_state or {}
+        try:
+            start_t = float(state["start_time"])
+            end_t = float(state["end_time"])
+            accrual = float(state["accrual"])
+            notional = float(state["notional"])
+            strike = float(state["strike"])
+            position = float(state.get("position", 1.0))
+            index_name = str(state.get("index_name", ""))
+        except Exception:
+            return None, False
+        if accrual <= 0.0 or end_t <= start_t:
+            return None, False
+        inputs = ctx.inputs
+        model = ctx.model
+        p_disc = inputs.discount_curves[spec.ccy]
+        p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
+        vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
+        for i, t_raw in enumerate(inputs.times):
+            t = float(t_raw)
+            if t >= start_t - 1.0e-12:
+                continue
+            x_t = ctx.x_paths[i, :]
+            p0_disc_t = float(p_disc(t))
+            p0_fwd_t = float(p_fwd(t))
+            p_t_start_disc = model.discount_bond(t, start_t, x_t, p0_disc_t, float(p_disc(start_t)))
+            p_t_start_fwd = model.discount_bond(t, start_t, x_t, p0_fwd_t, float(p_fwd(start_t)))
+            p_t_end_fwd = model.discount_bond(t, end_t, x_t, p0_fwd_t, float(p_fwd(end_t)))
+            forward = (p_t_start_fwd / np.maximum(p_t_end_fwd, 1.0e-12) - 1.0) / accrual
+            settlement = position * notional * accrual * (forward - strike) / np.maximum(1.0 + accrual * forward, 1.0e-12)
+            vals[i, :] = settlement * p_t_start_disc
+        return vals, True
+
     def _price_trade_inflation_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
         trade_product = spec.trade.product
         assert isinstance(trade_product, InflationSwap)
@@ -5343,6 +5632,9 @@ class PythonLgmAdapter:
                 coupons = price_overnight_capfloor_coupon_paths(
                     self, inputs=inputs, leg=leg, ccy=ccy, t=t, x_t=x_arr, snapshot=snapshot
                 )
+            fixed_rows = fixed_mask
+            if np.any(fixed_rows):
+                coupons[fixed_rows, :] = quoted[fixed_rows, None]
             self._coupon_path_cache[cache_key] = coupons
             return coupons
         for i in range(start.size):
@@ -5708,8 +6000,10 @@ class PythonLgmAdapter:
                     continue
                 notionals = np.asarray(leg.get("notional", np.zeros(pay.shape)), dtype=float)
                 fx_reset = leg.get("fx_reset")
+                sign = float(leg.get("sign", 1.0))
                 notional_initial_exchange = bool(leg.get("notional_initial_exchange", False))
                 notional_final_exchange = bool(leg.get("notional_final_exchange", False))
+                notional_amort_exchange = bool(leg.get("notional_amort_exchange", False))
                 principal_pay = np.asarray([], dtype=float)
                 principal_amount = np.asarray([], dtype=float)
                 if isinstance(fx_reset, dict):
@@ -5720,6 +6014,13 @@ class PythonLgmAdapter:
                     spot0 = _spot_from_quotes(foreign_ccy + leg_ccy, inputs, default=1.0)
                     p_dom_fx = inputs.discount_curves.get(leg_ccy)
                     p_for_fx = inputs.discount_curves.get(foreign_ccy)
+                    fx_forward_nodes = []
+                    if fx_pair is not None:
+                        direct_pair = fx_pair.replace("/", "").upper()
+                        inverse_pair = "".join(reversed([direct_pair[:3], direct_pair[3:]])) if len(direct_pair) == 6 else ""
+                        fx_forward_nodes = list(inputs.fx_forwards.get(direct_pair, []))
+                        if not fx_forward_nodes and inverse_pair:
+                            fx_forward_nodes = list(inputs.fx_forwards.get(inverse_pair, []))
                     fx_paths = None
                     inverted = False
                     if shared_fx_sim is not None and fx_pair is not None:
@@ -5735,9 +6036,14 @@ class PythonLgmAdapter:
                     if foreign_amount != 0.0:
                         coupon_notionals = np.empty((pay.size, n_paths), dtype=float)
                         fx_fixing_days = int(fx_reset.get("fixing_days", 2) or 2)
+                        fx_fixing_calendar = str(fx_reset.get("fixing_calendar", "") or leg.get("calendar", leg_ccy))
+                        fx_points_factor = float(fx_reset.get("points_factor", 10000.0) or 10000.0)
                         for j in range(pay.size):
+                            if j == 0 and notionals.ndim == 1 and notionals.size:
+                                coupon_notionals[j, :] = float(notionals[0])
+                                continue
                             start_date = self._irs_utils._parse_yyyymmdd(self._date_from_time_cached(snapshot, float(start[j]))) if snapshot is not None else asof_dt
-                            fix_date = self._irs_utils._advance_business_days(start_date, -fx_fixing_days, str(leg.get("calendar", leg_ccy)))
+                            fix_date = self._irs_utils._advance_business_days(start_date, -fx_fixing_days, fx_fixing_calendar)
                             key = (fx_index, fix_date.isoformat())
                             if key in fixings:
                                 fx_value = float(fixings[key])
@@ -5761,6 +6067,16 @@ class PythonLgmAdapter:
                                     if inverted:
                                         fx_value = 1.0 / np.maximum(fx_value, 1.0e-12)
                                     coupon_notionals[j, :] = foreign_amount * fx_value
+                                elif fx_forward_nodes:
+                                    fix_t = float(self._irs_utils._time_from_dates(asof_dt, fix_date, "A365F"))
+                                    nodes = sorted((float(tn), float(points)) for tn, points in fx_forward_nodes if np.isfinite(float(tn)) and np.isfinite(float(points)))
+                                    node_t = np.asarray([tn for tn, _ in nodes], dtype=float)
+                                    node_p = np.asarray([points for _, points in nodes], dtype=float)
+                                    points = float(np.interp(max(fix_t, 0.0), node_t, node_p))
+                                    fx_value = spot0 + points / max(fx_points_factor, 1.0e-12)
+                                    if inverted:
+                                        fx_value = 1.0 / max(float(fx_value), 1.0e-12)
+                                    coupon_notionals[j, :] = foreign_amount * float(fx_value)
                                 else:
                                     if p_dom_fx is not None and p_for_fx is not None:
                                         fix_t = float(self._irs_utils._time_from_dates(asof_dt, fix_date, "A365F"))
@@ -5772,8 +6088,6 @@ class PythonLgmAdapter:
                                     if inverted:
                                         fx_value = 1.0 / max(float(fx_value), 1.0e-12)
                                     coupon_notionals[j, :] = foreign_amount * float(fx_value)
-                        # Keep the FX-reset notional ladder explicit so we preserve the
-                        # same start/end boundary structure that ORE reports in flows.csv.
                         if pay.size:
                             principal_times: list[float] = []
                             principal_amounts: list[np.ndarray] = []
@@ -5787,20 +6101,53 @@ class PythonLgmAdapter:
                                 if j == 0:
                                     if include_initial_period and notional_initial_exchange:
                                         principal_times.append(float(start[0]))
-                                        principal_amounts.append(-amount_j)
-                                    if include_initial_period and (pay.size > 1 or notional_final_exchange):
+                                        principal_amounts.append(-sign * amount_j)
+                                    if pay.size > 1:
+                                        amount_next = np.asarray(coupon_notionals[j + 1], dtype=float)
                                         principal_times.append(float(end[0]))
-                                        principal_amounts.append(amount_j)
+                                        principal_amounts.append(sign * amount_j)
+                                        principal_times.append(float(end[0]))
+                                        principal_amounts.append(-sign * amount_next)
+                                    elif notional_final_exchange:
+                                        principal_times.append(float(end[0]))
+                                        principal_amounts.append(sign * amount_j)
                                 else:
-                                    principal_times.append(float(start[j]))
-                                    principal_amounts.append(-amount_j)
-                                    if j < pay.size - 1 or notional_final_exchange:
+                                    if j < pay.size - 1:
+                                        amount_next = np.asarray(coupon_notionals[j + 1], dtype=float)
                                         principal_times.append(float(end[j]))
-                                        principal_amounts.append(amount_j)
+                                        principal_amounts.append(sign * amount_j)
+                                        principal_times.append(float(end[j]))
+                                        principal_amounts.append(-sign * amount_next)
+                                    elif notional_final_exchange:
+                                        principal_times.append(float(end[j]))
+                                        principal_amounts.append(sign * amount_j)
                             if principal_times:
                                 principal_pay = np.asarray(principal_times, dtype=float)
                                 principal_amount = np.asarray(principal_amounts, dtype=float)
                         notionals = coupon_notionals
+                elif pay.size and notionals.size:
+                    principal_times = []
+                    principal_amounts = []
+                    include_initial_period = True
+                    if snapshot is not None and start.size:
+                        include_initial_period = self._irs_utils._parse_yyyymmdd(
+                            self._date_from_time_cached(snapshot, float(start[0]))
+                        ) >= asof_dt
+                    if include_initial_period and notional_initial_exchange:
+                        principal_times.append(float(start[0]))
+                        principal_amounts.append(-sign * float(notionals[0]))
+                    if notional_amort_exchange and notionals.size > 1:
+                        for j in range(notionals.size - 1):
+                            principal_times.append(float(end[j]))
+                            principal_amounts.append(sign * float(notionals[j]))
+                            principal_times.append(float(end[j]))
+                            principal_amounts.append(-sign * float(notionals[j + 1]))
+                    if notional_final_exchange:
+                        principal_times.append(float(end[min(end.size - 1, notionals.size - 1)]))
+                        principal_amounts.append(sign * float(notionals[-1]))
+                    if principal_times:
+                        principal_pay = np.asarray(principal_times, dtype=float)
+                        principal_amount = np.asarray(principal_amounts, dtype=float)
                 if float(t) > 1.0e-12 and leg_idx in frozen_coupon_paths:
                     coupons = frozen_coupon_paths[leg_idx][live, :]
                 else:
@@ -5808,7 +6155,6 @@ class PythonLgmAdapter:
                 if not np.all(np.isfinite(coupons)):
                     quoted = np.asarray(leg.get("quoted_coupon", np.zeros(pay.shape)), dtype=float)[live]
                     coupons = np.where(np.isfinite(coupons), coupons, quoted[:, None])
-                sign = float(leg.get("sign", 1.0))
                 if notionals.ndim == 1:
                     amount = sign * notionals[live, None] * accr[live, None] * coupons
                 else:
@@ -5863,14 +6209,7 @@ class PythonLgmAdapter:
         values = np.asarray(amount, dtype=float)
         if local == report:
             return values
-        t = float(inputs.times[time_index]) if 0 <= int(time_index) < int(inputs.times.size) else 0.0
-        local_curve = inputs.discount_curves.get(local)
-        report_curve = inputs.discount_curves.get(report)
-        forward_factor = None
-        if local_curve is not None and report_curve is not None:
-            spot = _spot_from_quotes(local + report, inputs, default=0.0)
-            if spot > 0.0:
-                forward_factor = spot * max(float(local_curve(t)), 1.0e-18) / max(float(report_curve(t)), 1.0e-18)
+        fallback_spot = _today_spot_from_quotes(local + report, inputs, default=0.0)
         if shared_fx_sim is not None:
             direct = f"{local}/{report}"
             inverse = f"{report}/{local}"
@@ -5878,24 +6217,19 @@ class PythonLgmAdapter:
                 spot_path = np.asarray(shared_fx_sim.sim["s"][direct][time_index, :], dtype=float)
                 if np.all(np.isfinite(spot_path)):
                     return values * spot_path
-                if forward_factor is not None:
-                    return values * float(forward_factor)
-                spot = _spot_from_quotes(local + report, inputs, default=1.0)
-                return values * float(spot)
+                if fallback_spot > 0.0:
+                    return values * float(fallback_spot)
+                return values
             if inverse in shared_fx_sim.sim.get("s", {}):
                 spot_path = np.asarray(shared_fx_sim.sim["s"][inverse][time_index, :], dtype=float)
                 if np.all(np.isfinite(spot_path)):
                     return values / np.maximum(spot_path, 1.0e-12)
-                if forward_factor is not None:
-                    return values * float(forward_factor)
-                spot = _spot_from_quotes(report + local, inputs, default=1.0)
-                return values / max(float(spot), 1.0e-12)
-        if forward_factor is not None:
-            return values * float(forward_factor)
-        spot = _spot_from_quotes(local + report, inputs, default=0.0)
-        if spot > 0.0:
-            return values * spot
-        inverse = _spot_from_quotes(report + local, inputs, default=0.0)
+                if fallback_spot > 0.0:
+                    return values * float(fallback_spot)
+                return values
+        if fallback_spot > 0.0:
+            return values * fallback_spot
+        inverse = _today_spot_from_quotes(report + local, inputs, default=0.0)
         if inverse > 0.0:
             return values / max(inverse, 1.0e-12)
         return values
@@ -6196,7 +6530,7 @@ class PythonLgmAdapter:
         return XVAResult(
             run_id=run_id,
             pv_total=pv_total,
-            xva_total=float(sum(xva_by_metric.values())),
+            xva_total=xva_total_from_metrics(xva_by_metric),
             xva_by_metric=xva_by_metric,
             exposure_by_netting_set=exposure_by_ns,
             exposure_profiles_by_netting_set=exposure_profiles_by_netting_set,
@@ -6555,6 +6889,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
     fwd_by_index: Dict[str, Dict[str, List[Tuple[float, float]]]] = {}
     bma_ratio: Dict[str, List[Tuple[float, float]]] = {}
     fx: Dict[str, float] = {}
+    fx_forward: Dict[str, List[Tuple[float, float]]] = {}
     fx_vol: Dict[str, List[Tuple[float, float]]] = {}
     swaption_normal_vols: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
     cms_correlations: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
@@ -6572,6 +6907,18 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         p1 = parts[1] if len(parts) > 1 else ""
         if len(parts) >= 4 and p0 == "FX" and p1 == "RATE":
             fx[parts[2] + parts[3]] = val
+            continue
+        if len(parts) >= 5 and p0 == "FXFWD" and p1 == "RATE":
+            pair = parts[2] + parts[3]
+            tenor = parts[4]
+            try:
+                if tenor in {"ON", "TN", "SN"}:
+                    t = {"ON": 1.0, "TN": 2.0, "SN": 2.0}[tenor] / 365.0
+                else:
+                    t = parse_tenor(tenor)
+            except Exception:
+                continue
+            fx_forward.setdefault(pair, []).append((t, val))
             continue
         if len(parts) >= 3 and p0 == "FX":
             fx[parts[1] + parts[2]] = val
@@ -6713,6 +7060,7 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         "fwd_by_index": fwd_by_index,
         "bma_ratio": bma_ratio,
         "fx": fx,
+        "fx_forward": fx_forward,
         "fx_vol": fx_vol,
         "swaption_normal_vols": swaption_normal_vols,
         "cms_correlations": cms_correlations,
@@ -7003,6 +7351,19 @@ def _spot_from_quotes(pair6: str, inputs: _PythonLgmInputs, default: float = 1.0
     if inv in inputs.fx_spots:
         return 1.0 / max(float(inputs.fx_spots[inv]), 1.0e-12)
     return float(default)
+
+
+def _today_spot_from_quotes(pair6: str, inputs: _PythonLgmInputs, default: float = 1.0) -> float:
+    base = pair6[:3].upper()
+    quote = pair6[3:].upper()
+    fwd = base + quote
+    inv = quote + base
+    spots = inputs.fx_spots_today or inputs.fx_spots
+    if fwd in spots:
+        return float(spots[fwd])
+    if inv in spots:
+        return 1.0 / max(float(spots[inv]), 1.0e-12)
+    return _spot_from_quotes(pair6, inputs, default=default)
 
 
 def _convert_fx_forward_npv_to_reporting_ccy(

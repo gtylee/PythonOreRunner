@@ -30,6 +30,7 @@ from pythonore.mapping.mapper import map_snapshot
 from py_ore_tools import ore_snapshot_cli
 from pythonore.runtime.bermudan import _exercise_sign, price_bermudan_from_ore_case
 from pythonore.runtime.runtime import XVAEngine
+from pythonore.runtime.runtime_impl import _today_spot_from_quotes
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -480,7 +481,7 @@ def test_schedule_reconstruction_applies_payment_lag_to_xccy_leg():
     assert starts[0].isoformat() == "2024-01-02"
     assert ends[0].isoformat() == "2024-04-02"
     assert pays[0].isoformat() == "2024-04-04"
-    assert pays[1].isoformat() == "2024-07-04"
+    assert pays[1].isoformat() == "2024-07-05"
 
 
 def test_generic_rate_swap_parses_xccy_fx_reset_metadata():
@@ -491,13 +492,24 @@ def test_generic_rate_swap_parses_xccy_fx_reset_metadata():
     state = adapter._build_generic_rate_swap_legs(trade, snapshot)
     assert state is not None
     usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    eur_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "EUR")
     fx_reset = usd_leg["fx_reset"]
     assert fx_reset is not None
     assert fx_reset["foreign_currency"] == "EUR"
     assert fx_reset["foreign_amount"] == 95000000.0
     assert fx_reset["fx_index"] == "FX-ECB-EUR-USD"
+    assert fx_reset["fixing_calendar"] == "TARGET,US"
     assert usd_leg["notional_initial_exchange"] is True
     assert usd_leg["notional_final_exchange"] is True
+    assert list(usd_leg["pay_date"][:2]) == ["2024-04-04", "2024-07-05"]
+    assert list(eur_leg["pay_date"][:2]) == ["2024-04-04", "2024-07-04"]
+    second_start = adapter._irs_utils._parse_yyyymmdd(str(usd_leg["start_date"][1]))
+    fx_fixing_date = adapter._irs_utils._advance_business_days(
+        second_start,
+        -int(fx_reset["fixing_days"]),
+        str(fx_reset["fixing_calendar"]),
+    )
+    assert fx_fixing_date.isoformat() == "2024-03-27"
 
 
 def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
@@ -604,7 +616,7 @@ def test_overnight_static_state_uses_exact_helper(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise RuntimeError("exact helper called")
 
-    monkeypatch.setattr("pythonore.compute.overnight_capfloor_shim._overnight_coupon_rate_exact", _boom)
+    monkeypatch.setattr("pythonore.compute.overnight_capfloor_shim._quant_ext_overnight_coupon_rate", _boom)
     with pytest.raises(RuntimeError, match="exact helper called"):
         price_overnight_capfloor_coupon_paths(
             adapter,
@@ -676,7 +688,7 @@ def test_example63_xccy_trade_runs_natively_without_swig():
     assert math.isfinite(float(result.pv_total))
 
 
-def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
+def test_example63_xccy_trade_ignores_flows_csv_for_native_runtime():
     snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
     snapshot = replace(
@@ -704,9 +716,63 @@ def test_example63_xccy_trade_matches_ore_npv_when_replaying_flows_csv():
         )
 
     assert math.isfinite(float(result.pv_total))
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, map_snapshot(snapshot))
+    assert unsupported == []
+    assert len(specs) == 1
+    assert specs[0].kind == "RateSwap"
+    assert specs[0].legs is not None
+    assert specs[0].legs.get("source") != "flows.csv"
     coverage = result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
+
+
+def test_example63_overnight_xccy_first_coupon_uses_daily_compounding():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_63"), ore_file="Input/ore_valid_xccy.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XccySwap")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    quoted_coupon = np.asarray(usd_leg["quoted_coupon"], dtype=float)
+    fixed_mask = np.asarray(usd_leg["is_historically_fixed"], dtype=bool)
+    assert quoted_coupon[0] == 0.0
+    assert not bool(fixed_mask[0])
+
+    p = inputs.lgm_params
+    model = adapter._lgm_mod.LGM1F(
+        adapter._lgm_mod.LGMParams(
+            alpha_times=tuple(p["alpha_times"]),
+            alpha_values=tuple(p["alpha_values"]),
+            kappa_times=tuple(p["kappa_times"]),
+            kappa_values=tuple(p["kappa_values"]),
+            shift=p["shift"],
+            scaling=p["scaling"],
+        )
+    )
+    coupons = adapter._rate_leg_coupon_paths(
+        model,
+        usd_leg,
+        "USD",
+        inputs,
+        0.0,
+        np.zeros(1, dtype=float),
+        snapshot=snapshot,
+    )
+    assert coupons.shape[0] == quoted_coupon.size
+    assert coupons[0, 0] > 0.01
 
 
 def test_example79_usd_jpy_xccy_keeps_leg_currency_and_base_currency_separate():
@@ -773,6 +839,12 @@ def test_sofr_euribor_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime
     ore_eur_notionals = np.asarray([float(row["Notional"]) for row in eur_interest_rows], dtype=float)
     assert not np.allclose(ore_usd_notionals, ore_usd_notionals[0])
     assert np.allclose(ore_eur_notionals, 95000000.0)
+    mapped = map_snapshot(snapshot)
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        inputs = adapter._extract_inputs(snapshot, mapped)
+    assert math.isclose(_today_spot_from_quotes("USDEUR", inputs), 0.9066219663, rel_tol=0.0, abs_tol=1.0e-10)
 
     result = _run_python(snapshot, "sofr-euribor-xccy")
     assert math.isfinite(float(result.pv_total))
@@ -1179,6 +1251,36 @@ def test_python_runtime_reprices_example25_cmsspread_from_input_market():
 def test_python_runtime_supports_real_bma_basis_case_without_fallback():
     snapshot = _load_case("Examples/Legacy/Example_27/Input")
     result = _run_python(snapshot, "bma-test")
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+    assert math.isfinite(float(result.pv_total))
+
+
+def test_python_runtime_supports_real_fra_without_fallback():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Exposure" / "Input"), ore_file="ore_fra.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "fra1")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=8,
+            params={**dict(snapshot.config.params), "python.progress": "N"},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    assert [(spec.trade.trade_id, spec.kind, spec.ccy) for spec in specs] == [("fra1", "FRA", "EUR")]
+
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        result = adapter.run(snapshot, mapped=mapped, run_id="fra-native")
     coverage = result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []

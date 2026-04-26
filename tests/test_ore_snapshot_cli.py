@@ -517,6 +517,26 @@ class TestOreSnapshotCli(unittest.TestCase):
             )
         )
 
+    def test_is_plain_vanilla_swap_trade_handles_multi_swap_portfolio_trade_override(self):
+        ore_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_51" / "Input" / "ore.xml"
+
+        self.assertTrue(ore_snapshot_cli._is_plain_vanilla_swap_trade(ore_xml, trade_id="Swap_Euribor"))
+        self.assertTrue(ore_snapshot_cli._is_plain_vanilla_swap_trade(ore_xml, trade_id="Swap_OIS"))
+
+    def test_example51_multi_swap_no_simulation_replays_reference_flows(self):
+        ore_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_51" / "Input" / "ore.xml"
+
+        summary = ore_snapshot_cli._compute_portfolio_price_case(
+            ore_xml,
+            anchor_t0_npv=False,
+            use_reference_artifacts=True,
+        )
+
+        self.assertEqual(summary["pricing"]["trade_type"], "Portfolio")
+        self.assertLess(summary["pricing"]["t0_npv_abs_diff"], 1.0e-6)
+        self.assertTrue(summary["diagnostics"]["using_expected_output"])
+        self.assertTrue(all(row["diagnostics"].get("cashflow_replay") for row in summary["portfolio_trade_rows"]))
+
     def test_supports_native_price_only_excludes_unsupported_non_swap_products(self):
         self.assertFalse(
             ore_snapshot_cli._supports_native_price_only(

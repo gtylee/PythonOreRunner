@@ -230,6 +230,149 @@ def _overnight_coupon_rate_exact(coupon: Any, *, ql_index: Any, eval_date: Any) 
     return out
 
 
+def _quant_ext_overnight_value_dates(
+    *,
+    ql_index: Any,
+    eval_date: Any,
+    start_date: Any,
+    end_date: Any,
+    lookback_days: int,
+    rate_cutoff: int,
+    telescopic_value_dates: bool = False,
+) -> list[Any]:
+    import QuantLib as ql
+
+    calendar = ql_index.fixingCalendar()
+    bdc = ql_index.businessDayConvention()
+    value_start = start_date
+    value_end = end_date
+    if lookback_days != 0:
+        lookback_bdc = ql.Preceding if lookback_days > 0 else ql.Following
+        value_start = calendar.advance(value_start, -lookback_days, ql.Days, lookback_bdc)
+        value_end = calendar.advance(value_end, -lookback_days, ql.Days, lookback_bdc)
+
+    tmp_end_date = value_end
+    if telescopic_value_dates:
+        tmp_end_date = calendar.advance(max(value_start, eval_date), 7, ql.Days, ql.Following)
+        tmp_end_date = min(tmp_end_date, value_end)
+    if not value_start < tmp_end_date:
+        raise ValueError("invalid overnight value-date period")
+
+    value_dates = [value_start]
+    next_date = calendar.advance(value_start, 1, ql.Days, ql.Following)
+    while next_date < tmp_end_date:
+        if next_date != value_dates[-1]:
+            value_dates.append(next_date)
+        next_date = calendar.advance(next_date, 1, ql.Days, ql.Following)
+    if value_dates[-1] != tmp_end_date:
+        value_dates.append(tmp_end_date)
+
+    if value_dates[0] != value_start:
+        value_dates.insert(0, value_start)
+
+    if telescopic_value_dates:
+        tmp2 = calendar.adjust(value_end, bdc)
+        tmp1 = calendar.advance(tmp2, -max(int(rate_cutoff), 1), ql.Days, ql.Preceding)
+        while tmp1 <= tmp2:
+            if tmp1 > value_dates[-1]:
+                value_dates.append(tmp1)
+            tmp1 = calendar.advance(tmp1, 1, ql.Days, ql.Following)
+
+    if len(value_dates) < 2 + int(rate_cutoff):
+        raise ValueError("degenerate overnight schedule")
+    value_dates[0] = value_start
+    value_dates[-1] = value_end
+    return value_dates
+
+
+def _quant_ext_overnight_coupon_rate(
+    *,
+    ql_index: Any,
+    eval_date: Any,
+    start_date: Any,
+    end_date: Any,
+    spread: float,
+    gearing: float,
+    payment_day_counter: Any,
+    lookback_days: int,
+    rate_cutoff: int,
+    fixing_days: int,
+    include_spread: bool = False,
+    telescopic_value_dates: bool = False,
+) -> tuple[float, list[Any]]:
+    import QuantLib as ql
+
+    value_dates = _quant_ext_overnight_value_dates(
+        ql_index=ql_index,
+        eval_date=eval_date,
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=lookback_days,
+        rate_cutoff=rate_cutoff,
+        telescopic_value_dates=telescopic_value_dates,
+    )
+    n = len(value_dates) - 1
+    if int(rate_cutoff) >= n:
+        raise ValueError("rate cutoff must be less than number of fixings in period")
+
+    calendar = ql_index.fixingCalendar()
+    fixing_dates = [
+        calendar.advance(value_dates[i], -int(fixing_days), ql.Days, ql.Preceding)
+        for i in range(n)
+    ]
+    dts = [ql_index.dayCounter().yearFraction(value_dates[i], value_dates[i + 1]) for i in range(n)]
+    n_cutoff = n - int(rate_cutoff)
+    compound_factor = 1.0
+    compound_factor_without_spread = 1.0
+    i = 0
+
+    while i < n and fixing_dates[min(i, n_cutoff)] < eval_date:
+        fixing_date = fixing_dates[min(i, n_cutoff)]
+        past_fixing = _past_fixing_or_none(ql_index, fixing_date)
+        if past_fixing is None:
+            raise ValueError(f"missing fixing for {fixing_date}")
+        if include_spread:
+            compound_factor_without_spread *= 1.0 + past_fixing * dts[i]
+            past_fixing += spread
+        compound_factor *= 1.0 + past_fixing * dts[i]
+        i += 1
+
+    if i < n and fixing_dates[min(i, n_cutoff)] == eval_date:
+        past_fixing = _past_fixing_or_none(ql_index, eval_date)
+        if past_fixing is not None:
+            if include_spread:
+                compound_factor_without_spread *= 1.0 + past_fixing * dts[i]
+                past_fixing += spread
+            compound_factor *= 1.0 + past_fixing * dts[i]
+            i += 1
+
+    if i < n:
+        curve = ql_index.forwardingTermStructure()
+        if curve is None:
+            raise ValueError(f"null term structure set to this instance of {ql_index.name()}")
+        start_discount = curve.discount(value_dates[i])
+        end_discount = curve.discount(value_dates[max(n_cutoff, i)])
+        if n_cutoff < n:
+            discount_cutoff_date = curve.discount(value_dates[n_cutoff] + 1) / curve.discount(value_dates[n_cutoff])
+            end_discount *= discount_cutoff_date ** int(value_dates[n] - value_dates[n_cutoff])
+        compound_factor *= start_discount / end_discount
+        if include_spread:
+            compound_factor_without_spread *= start_discount / end_discount
+            tau_daily = ql_index.dayCounter().yearFraction(value_dates[i], value_dates[-1]) / int(
+                value_dates[-1] - value_dates[i]
+            )
+            compound_factor *= (1.0 + tau_daily * spread) ** int(value_dates[-1] - value_dates[i])
+
+    tau = payment_day_counter.yearFraction(value_dates[0], value_dates[-1])
+    if tau <= 0.0:
+        raise ValueError("invalid overnight coupon accrual period")
+    rate = (compound_factor - 1.0) / tau
+    swaplet_rate = float(gearing) * rate
+    if not include_spread:
+        swaplet_rate += float(spread)
+    return float(swaplet_rate), fixing_dates
+
+
 def _average_overnight_coupon_rate_exact(
     *,
     ql_index: Any,
@@ -644,6 +787,7 @@ def _overnight_static_cache_key(
         str(target_period).strip(),
         int(leg.get("lookback_days", 0) or 0),
         int(leg.get("rate_cutoff", 0) or 0),
+        int(leg.get("fixing_days", 0) or 0),
         bool(leg.get("apply_observation_shift", False)),
         bool(leg.get("naked_option", False)),
         bool(leg.get("local_cap_floor", False)),
@@ -675,14 +819,10 @@ def _build_overnight_static_state(
     if overnight_index is None:
         return None
     index_curve = runtime._resolve_index_curve(inputs, ccy, index_name)
-    date_nodes = getattr(inputs, "discount_curve_dates", {}).get(ccy.upper())
-    df_nodes = getattr(inputs, "discount_curve_dfs", {}).get(ccy.upper())
     overnight_handle = _curve_handle_from_curve(
         eval_date,
         index_curve,
         extra_times=list(getattr(inputs, "times", [])),
-        dates=list(date_nodes) if date_nodes else None,
-        dfs=list(df_nodes) if df_nodes else None,
     )
     ql_index = _build_ql_overnight_index(overnight_index, overnight_handle)
     proxy = ProxyOptionletVolatilityReplica(
@@ -710,10 +850,44 @@ def _build_overnight_static_state(
     start = np.asarray(leg.get("start_time", []), dtype=float)
     end = np.asarray(leg.get("end_time", []), dtype=float)
     pay_times = np.asarray(leg.get("pay_time", end), dtype=float)
+    curve_times = set(float(t) for t in getattr(inputs, "times", []) if np.isfinite(float(t)))
+    for arr in (start, end, pay_times, np.asarray(leg.get("fixing_time", []), dtype=float)):
+        for t_value in arr:
+            if np.isfinite(float(t_value)):
+                curve_times.add(max(float(t_value), 0.0))
+    curve_times.add(0.0)
+    curve_nodes: dict[str, float] = {}
+    for t_value in sorted(curve_times):
+        try:
+            curve_nodes[runtime._date_from_time_cached(snapshot, float(t_value))] = float(index_curve(float(t_value)))
+        except Exception:
+            continue
+    curve_dates = sorted(curve_nodes)
+    curve_dfs = [curve_nodes[d] for d in curve_dates]
+    if curve_dates and curve_dfs:
+        overnight_handle = _curve_handle_from_curve(
+            eval_date,
+            index_curve,
+            dates=curve_dates,
+            dfs=curve_dfs,
+        )
+        ql_index = _build_ql_overnight_index(overnight_index, overnight_handle)
+    fixings = runtime._fixings_lookup(snapshot)
+    for (fixing_index, fixing_date), fixing_value in fixings.items():
+        if str(fixing_index).upper() != str(index_name).upper():
+            continue
+        try:
+            ql_fixing_date = ql.DateParser.parseISO(str(fixing_date))
+            if ql_fixing_date <= eval_date:
+                ql_index.addFixing(ql_fixing_date, float(fixing_value), True)
+        except Exception:
+            continue
     lookback_days = int(leg.get("lookback_days", 0) or 0)
     lockout_days = int(leg.get("rate_cutoff", 0) or 0)
-    apply_observation_shift = bool(leg.get("apply_observation_shift", False))
+    fixing_days = int(leg.get("fixing_days", 0) or 0)
     is_averaged = bool(leg.get("is_averaged", False))
+    spreads = np.asarray(leg.get("spread", np.zeros(start.shape)), dtype=float)
+    gearings = np.asarray(leg.get("gearing", np.ones(start.shape)), dtype=float)
     raw_rates = np.zeros(start.size, dtype=float)
     fixing_dates: list[Any] = []
     expiry_times = np.zeros(start.size, dtype=float)
@@ -730,31 +904,25 @@ def _build_overnight_static_state(
             continue
         start_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(start[i])))
         end_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(end[i])))
-        pay_date = ql.DateParser.parseISO(runtime._date_from_time_cached(snapshot, float(pay_times[i])))
-        coupon = ql.OvernightIndexedCoupon(
-            pay_date,
-            1.0,
-            start_date,
-            end_date,
-            ql_index,
-            1.0,
-            0.0,
-            start_date,
-            end_date,
-            ql.Actual360(),
-            False,
-            ql.RateAveraging.Compound,
-            lookback_days,
-            lockout_days,
-            apply_observation_shift,
+        raw_rate, coupon_fixings = _quant_ext_overnight_coupon_rate(
+            ql_index=ql_index,
+            eval_date=eval_date,
+            start_date=start_date,
+            end_date=end_date,
+            spread=float(spreads[i]) if i < spreads.size else 0.0,
+            gearing=float(gearings[i]) if i < gearings.size else 1.0,
+            payment_day_counter=ql.Actual360(),
+            lookback_days=lookback_days,
+            rate_cutoff=lockout_days,
+            fixing_days=fixing_days,
         )
-        coupon_fixings = list(coupon.fixingDates())
         if not coupon_fixings:
             continue
-        fixing_dates.append(coupon_fixings[-1])
-        fixing_py = datetime(coupon_fixings[-1].year(), coupon_fixings[-1].month(), coupon_fixings[-1].dayOfMonth()).date()
+        fixing_date = coupon_fixings[len(coupon_fixings) - 1 - lockout_days]
+        fixing_dates.append(fixing_date)
+        fixing_py = datetime(fixing_date.year(), fixing_date.month(), fixing_date.dayOfMonth()).date()
         expiry_times[i] = float(runtime._irs_utils._time_from_dates(asof_date, fixing_py, "A365F"))
-        raw_rates[i] = _overnight_coupon_rate_exact(coupon, ql_index=ql_index, eval_date=eval_date)
+        raw_rates[i] = raw_rate
     return {
         "ql_index": ql_index,
         "pricer": pricer,

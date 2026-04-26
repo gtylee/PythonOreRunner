@@ -15,7 +15,7 @@ from pythonore.mapping.mapper import MappedInputs, build_input_parameters
 from pythonore.repo_paths import find_engine_repo_root
 from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.lgm.market import _active_dim_mode, _configured_output_dir, _read_csv_report
-from pythonore.runtime.results import CubeAccessor, XVAResult
+from pythonore.runtime.results import CubeAccessor, XVAResult, xva_total_from_metrics
 from pythonore.domain.dataclasses import XVASnapshot
 
 
@@ -46,7 +46,7 @@ class ORESwigAdapter:
         reports.update(dim_reports)
         xva_by_metric = self._extract_xva_metrics(reports)
         exposure_by_netting_set = self._extract_exposures(reports)
-        xva_total = sum(xva_by_metric.values())
+        xva_total = xva_total_from_metrics(xva_by_metric)
         pv_total = self._extract_pv_total(reports)
 
         return XVAResult(

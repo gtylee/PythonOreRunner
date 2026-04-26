@@ -53,18 +53,25 @@ Representative cases:
 - `Examples/Legacy/Example_51/Input/ore.xml`
 
 What would need to be added to eliminate this bucket:
-1. For the one real vanilla swap holdout, add a local curve-build fallback for
-   price-only mode when `ExpectedOutput` has `npv.csv` and `flows.csv` but no
-   `curves.csv`:
+1. For the one real vanilla swap holdout, keep the no-simulation/reference-flow
+   price-only replay path covered by tests when `ExpectedOutput` has `npv.csv`
+   and `flows.csv` but no `curves.csv`:
    - `Examples/Legacy/Example_51/Input/ore.xml`
-2. Reclassify the rest out of this bucket, because they are not meaningful
-   vanilla swap price-only targets:
+2. For rates-first cleanup, keep cross-currency examples on the modeled native
+   path. ORE `flows.csv` can be used only as a validation/reference artifact, not
+   as a native runtime input. The native path now covers signed principal
+   exchanges, FX forward-point reset notionals, USD holiday/payment-lag dates, and
+   QuantExt-style overnight fixing-day value/fixing ladders. The remaining modeled
+   cross-currency PV gap is now much smaller after applying ORE-style today-spot
+   conversion from short FX forwards; the remaining difference is in coupon
+   projection / curve convention details, not cashflow replay.
+3. Reclassify the rest out of this bucket, because they are not meaningful
+   rates price-only targets:
    - equity options
-   - swaptions
    - FX forwards
    - credit/structured products
-   - non-vanilla swaps with exchanges or cross-currency structure
-3. If native Python pricing is actually desired for those families, that work
+   - non-rates products
+4. If native Python pricing is actually desired for those families, that work
    belongs in the unsupported-product backlog, not here.
 
 What not to do:
@@ -83,7 +90,6 @@ Meaning:
   needed to run it natively
 
 Representative families:
-- `Examples/Exposure/Input/ore_capfloor.xml`
 - `Examples/Exposure/Input/ore_fx.xml`
 - `Examples/Exposure/Input/ore_credit.xml`
 - `Examples/Exposure/Input/ore_commodity.xml`
@@ -93,12 +99,21 @@ Representative families:
 - `Examples/AmericanMonteCarlo/Input/ore_scriptedberm.xml`
 
 What would need to be added to eliminate this bucket:
-1. Native Python product support in the snapshot/pricer path for the remaining
-   unsupported trade families.
-2. Native model support where the example is not LGM-based, especially the HW2F
-   family.
-3. Product-aware exposure/pricing loaders where the current swap-centric leg
-   extraction expects `FloatingLegData/Index` and similar IRS-only structures.
+1. Rates first:
+   - native rate-future runtime product support
+   - HW2F snapshot/runtime model support
+   - residual cross-currency rate-swap parity work where native execution exists
+     but ORE PV parity is not yet proven
+   - scripted/AMC Bermudan-style rate products that do not fit the current
+     swaption loaders
+2. Then XVA on supported rates:
+   - profile-level EPE/ENE/PFE/CVA alignment against ORE cubes and exposure
+     reports
+3. Then non-rates product support:
+   - FX options / TARF / barriers
+   - commodity, equity, credit, and other structured products
+4. Product-aware exposure/pricing loaders where the current snapshot path still
+   assumes swap-like leg structures.
 
 Where the detailed product backlog now lives:
 - `docs/ore_snapshot_cli_unsupported_cases.md`
@@ -185,13 +200,16 @@ Important note:
 ## Practical Priority
 
 If continuing cleanup, the next honest order is:
-1. `price_only_reference_fallback`
-   - now mostly requires one plain-swap fallback improvement plus reclassification
-     of non-vanilla products
-2. `no_reference_artifacts_pass`
-   - requires generating or vendoring reference artifacts
-3. `expected_output_fallback_pass`
-   - only if native-output provenance matters; these already pass via explicit
-     fallback
-4. `unsupported_python_snapshot_fallback`
-   - product/model implementation work, not report cleanup
+1. Rates product parity
+   - clear rates items from `price_only_reference_fallback`
+   - add futures runtime support
+   - close known modeled cross-currency rate-swap PV residuals without `flows.csv`
+   - add HW2F runtime/model routing for rate examples
+2. Rates reference provenance
+   - generate or vendor native `Output/` for rates cases in
+     `no_reference_artifacts_pass` and `expected_output_fallback_pass`
+3. XVA parity on supported rates
+   - compare Python vs ORE cube/profile terms before treating CVA as solved
+4. Non-rates unsupported products
+   - FX options / TARF / barriers, then commodity/equity/credit/structured
+     products
