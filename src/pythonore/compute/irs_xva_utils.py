@@ -373,17 +373,9 @@ def curve_values(
     t_arr = np.asarray(times, dtype=float)
     if t_arr.ndim == 0:
         return float(curve(float(t_arr)))
-    cache_key = (id(curve), _array_cache_key(t_arr))
-    cached = _CURVE_VALUES_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
     flat = t_arr.reshape(-1)
     out = np.fromiter((float(curve(float(t))) for t in flat), dtype=float, count=flat.size)
-    reshaped = out.reshape(t_arr.shape)
-    if len(_CURVE_VALUES_CACHE) >= _ARRAY_CACHE_MAX_ITEMS:
-        _CURVE_VALUES_CACHE.pop(next(iter(_CURVE_VALUES_CACHE)))
-    _CURVE_VALUES_CACHE[cache_key] = reshaped
-    return reshaped
+    return out.reshape(t_arr.shape)
 
 
 class _ZeroRateDiscountCurve:

@@ -39,11 +39,14 @@ from pythonore.runtime.runtime import (
     _TradeSpec,
     _forward_index_family,
     _normalize_forward_tenor_family,
+    _parse_ore_exposure_date_grid_from_simulation_xml_text,
+    _parse_exposure_times_from_simulation_xml_text,
     _parse_market_overlay,
     _quote_matches_discount_curve,
     _quote_matches_forward_curve,
     classify_portfolio_support,
 )
+from pythonore.compute.irs_xva_utils import curve_values
 from pythonore.runtime.lgm.market import _forward_index_family as _lgm_forward_index_family
 from pythonore.mapping.mapper import map_snapshot
 
@@ -1630,6 +1633,64 @@ def test_loader_from_ore_xml_matches_from_files():
     assert "<ORE>" in from_dir.config.xml_buffers["ore.xml"]
     assert len(from_xml.portfolio.trades) == len(from_dir.portfolio.trades)
     assert tuple(t.trade_id for t in from_xml.portfolio.trades) == tuple(t.trade_id for t in from_dir.portfolio.trades)
+
+
+def test_loader_includes_symmetric_dva_when_ore_reports_it_with_cva():
+    ore_xml = TOOLS_DIR / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A" / "Input" / "ore.xml"
+    snapshot = XVALoader.from_files(str(ore_xml.parent), ore_file=ore_xml.name)
+
+    assert "CVA" in snapshot.config.analytics
+    assert "DVA" in snapshot.config.analytics
+
+
+def test_native_observation_grid_excludes_market_and_calibration_tenors():
+    simulation_xml = """
+<Simulation>
+  <Parameters><Grid>2,1Y</Grid></Parameters>
+  <Market>
+    <YieldCurves><Configuration><Tenors>1Y,5Y,10Y</Tenors></Configuration></YieldCurves>
+    <DefaultCurves><Tenors>3Y,7Y</Tenors></DefaultCurves>
+  </Market>
+  <CrossAssetModel>
+    <InterestRateModels>
+      <LGM><CalibrationSwaptions><Expiries>4Y,8Y</Expiries></CalibrationSwaptions></LGM>
+    </InterestRateModels>
+  </CrossAssetModel>
+</Simulation>
+"""
+    times = _parse_exposure_times_from_simulation_xml_text(simulation_xml)
+
+    assert times.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_native_observation_grid_uses_ore_calendar_dates():
+    from pythonore.compute import irs_xva_utils
+
+    simulation_xml = """
+<Simulation>
+  <Parameters>
+    <Grid>4,1M</Grid>
+    <Calendar>TARGET</Calendar>
+  </Parameters>
+</Simulation>
+"""
+    times, dates = _parse_ore_exposure_date_grid_from_simulation_xml_text(
+        simulation_xml,
+        "2016-02-05",
+        irs_xva_utils,
+    )
+
+    assert dates == ("2016-02-05", "2016-03-07", "2016-04-05", "2016-05-05", "2016-06-06")
+    np.testing.assert_allclose(times[:3], [0.0, 31.0 / 366.0, 60.0 / 366.0])
+
+
+def test_curve_values_does_not_reuse_stale_callable_id_cache():
+    times = np.array([0.5, 1.0], dtype=float)
+    first = curve_values(lambda t: 1.0 + t, times)
+    second = curve_values(lambda t: 2.0 + t, times)
+
+    np.testing.assert_allclose(first, [1.5, 2.0])
+    np.testing.assert_allclose(second, [2.5, 3.0])
 
 
 def test_live_capfloor_with_past_coupon_stays_native_and_filters_paid_cashflows():

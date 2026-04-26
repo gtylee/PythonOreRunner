@@ -3148,6 +3148,14 @@ def load_from_ore_xml(
         )
         if xva_params and str(enabled).strip().upper() == "Y"
     )
+    calc_type = str(xva_params.get("calculationType", "Symmetric")).strip().lower()
+    if (
+        "CVA" in requested_xva_metrics
+        and "DVA" not in requested_xva_metrics
+        and calc_type == "symmetric"
+        and (xva_params.get("dvaName") or "").strip()
+    ):
+        requested_xva_metrics = (*requested_xva_metrics, "DVA")
     borrowing_curve_column = (xva_params.get("fvaBorrowingCurve") or "").strip() or None
     lending_curve_column = (xva_params.get("fvaLendingCurve") or "").strip() or None
 

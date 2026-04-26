@@ -154,16 +154,22 @@ class XVALoader:
             or "EUR"
         )
 
-        metrics = tuple(
+        xva_params = analytics.get("xva", {})
+        metric_list = [
             m
             for m, flag in (
-                ("CVA", analytics.get("xva", {}).get("cva", "Y")),
-                ("DVA", analytics.get("xva", {}).get("dva", "N")),
-                ("FVA", analytics.get("xva", {}).get("fva", "N")),
-                ("MVA", analytics.get("xva", {}).get("mva", "N")),
+                ("CVA", xva_params.get("cva", "Y")),
+                ("DVA", xva_params.get("dva", "N")),
+                ("FVA", xva_params.get("fva", "N")),
+                ("MVA", xva_params.get("mva", "N")),
             )
             if str(flag).upper() == "Y"
-        ) or ("CVA",)
+        ]
+        calc_type = str(xva_params.get("calculationType", "Symmetric")).strip().lower()
+        dva_name = str(xva_params.get("dvaName", "")).strip()
+        if "CVA" in metric_list and "DVA" not in metric_list and calc_type == "symmetric" and dva_name:
+            metric_list.append("DVA")
+        metrics = tuple(metric_list) or ("CVA",)
 
         xml_buffers = _load_known_xml_buffers(ore_path, setup, analytics, input_path)
 

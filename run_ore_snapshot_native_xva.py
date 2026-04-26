@@ -110,6 +110,11 @@ def main() -> None:
     parser.add_argument("--paths", type=int, default=None, help="Override num_paths (default: from simulation.xml)")
     parser.add_argument("--seed", type=int, default=42, help="Seed (used for display; runtime uses simulation.xml)")
     parser.add_argument("--rng", choices=["numpy", "ore_parity"], default="ore_parity", help="Python LGM RNG mode")
+    parser.add_argument(
+        "--fit-market-quotes",
+        action="store_true",
+        help="Do not consume ORE Output/curves.csv; fit native curves from market quotes instead.",
+    )
     args = parser.parse_args()
 
     case_dir = args.case_dir or _default_case_dir()
@@ -131,10 +136,13 @@ def main() -> None:
         num_paths = _samples_from_simulation_xml(snapshot.config.xml_buffers["simulation.xml"])
     if num_paths is None or num_paths <= 0:
         num_paths = 2000
+    params = {**snapshot.config.params, "python.lgm_rng_mode": args.rng}
+    if not args.fit_market_quotes and (output_dir / "curves.csv").exists():
+        params["python.use_ore_output_curves"] = "Y"
     cfg = replace(
         snapshot.config,
         num_paths=num_paths,
-        params={**snapshot.config.params, "python.lgm_rng_mode": args.rng},
+        params=params,
     )
     snapshot = replace(snapshot, config=cfg)
 
@@ -178,7 +186,7 @@ def main() -> None:
     print(f"  Basel EEPE:  ORE={ore_basel_eepe:.2f}")
     print("\nPython result metadata:", result.metadata.get("engine"), result.metadata.get("path_count"), result.metadata.get("python_lgm_rng_mode"))
     if abs(py_pv - ore_pv) > 1000:
-        print("(Known: PV/EPE gap can be from leg sign, schedule, or curve mapping; DVA=0 if own-credit not configured.)")
+        print("(Known: PV/EPE gap can be from leg sign, schedule, curve mapping, or exposure dynamics.)")
 
 
 def _rel(py_val: float, ore_val: float) -> float:

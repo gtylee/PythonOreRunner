@@ -41,7 +41,7 @@ from __future__ import annotations
 import contextlib
 import csv
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 import importlib
 import math
@@ -323,6 +323,7 @@ class _PythonLgmInputs:
     fx_forwards: Dict[str, List[Tuple[float, float]]] = field(default_factory=dict)
     fx_spots_today: Dict[str, float] = field(default_factory=dict)
     discount_curve_dates: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    observation_dates: Tuple[str, ...] = ()  # ORE exposure report dates aligned with observation_times.
     discount_curve_dfs: Dict[str, Tuple[float, ...]] = field(default_factory=dict)
 
 
@@ -422,6 +423,8 @@ class PythonLgmAdapter:
         if irs_count == 0 and rate_swap_count == 0:
             return None
         requested_device = str(inputs.torch_device or "").strip().lower()
+        if requested_device in {"numpy", "none", "off", "disabled", "disable"}:
+            return None
         try:
             import torch
             from pythonore.compute.lgm_torch_xva import (
@@ -1016,6 +1019,7 @@ class PythonLgmAdapter:
         obs_df_vec = np.asarray([df_base(float(t)) for t in inputs.times], dtype=float)[obs_idx]
         pfe_quantile = _pfe_quantile(snapshot)
         use_flow_amounts_t0 = str(snapshot.config.params.get("python.use_ore_flow_amounts_t0", "N")).strip().upper() in {"Y", "YES", "TRUE", "1"}
+        store_npv_cube_paths = str(snapshot.config.params.get("python.store_npv_cube_paths", "N")).strip().upper() in {"Y", "YES", "TRUE", "1"}
         pv_total_native = 0.0
         ns_valuation_paths: Dict[str, np.ndarray] = {}
         ns_closeout_paths: Dict[str, np.ndarray] = {}
@@ -1160,7 +1164,7 @@ class PythonLgmAdapter:
                 asof_date=inputs.asof,
             )
             exposure_profiles_by_trade[spec.trade.trade_id] = profile
-            npv_cube_payload[spec.trade.trade_id] = {
+            cube_payload = {
                 "times": inputs.valuation_times.tolist(),
                 "npv_mean": np.mean(vals[valuation_idx, :], axis=1).tolist(),
                 "npv_xva_mean": np.mean(vals_xva[valuation_idx, :], axis=1).tolist(),
@@ -1176,6 +1180,11 @@ class PythonLgmAdapter:
                 "time_weighted_basel_epe": profile["time_weighted_basel_epe"],
                 "time_weighted_basel_eepe": profile["time_weighted_basel_eepe"],
             }
+            if store_npv_cube_paths:
+                cube_payload["npv_paths"] = vals[valuation_idx, :].tolist()
+                cube_payload["npv_xva_paths"] = vals_xva[valuation_idx, :].tolist()
+                cube_payload["dates"] = obs_dates
+            npv_cube_payload[spec.trade.trade_id] = cube_payload
             ns = spec.trade.netting_set
             ns_valuation_paths[ns] = ns_valuation_paths.get(ns, np.zeros_like(vals_xva_val)) + vals_xva_val
             ns_closeout_paths[ns] = ns_closeout_paths.get(ns, np.zeros_like(vals_xva_obs)) + vals_xva_obs
@@ -1236,6 +1245,7 @@ class PythonLgmAdapter:
             f"metrics={','.join(sorted(result.xva_by_metric)) if result.xva_by_metric else 'none'}"
         )
         result.metadata["python_lgm_rng_mode"] = rng_mode
+        result.metadata["irs_pricing_backend"] = f"torch:{irs_backend[3]}" if irs_backend is not None else "numpy"
         if dim_mode in supported_python_dim_models:
             dim_result = calculate_python_dim(snapshot.config.params, dim_model=dim_mode)
             result.reports.update(dim_result.reports)
@@ -1498,11 +1508,20 @@ class PythonLgmAdapter:
 
     def _build_exposure_grid(
         self, snapshot: "XVASnapshot", xml: Dict[str, str]
-    ) -> tuple[np.ndarray, np.ndarray, str]:
-        """Return (times, observation_times, grid_source)."""
+    ) -> tuple[np.ndarray, np.ndarray, Tuple[str, ...], str]:
+        """Return (times, observation_times, observation_dates, grid_source)."""
         grid_source = "fallback"
+        observation_dates: Tuple[str, ...] = ()
         if "simulation.xml" in xml:
-            times = _parse_exposure_times_from_simulation_xml_text(xml["simulation.xml"])
+            exact_grid = _parse_ore_exposure_date_grid_from_simulation_xml_text(
+                xml["simulation.xml"],
+                self._normalized_asof(snapshot),
+                self._irs_utils,
+            )
+            if exact_grid is not None and exact_grid[0].size > 1:
+                times, observation_dates = exact_grid
+            else:
+                times = _parse_exposure_times_from_simulation_xml_text(xml["simulation.xml"])
             if times.size > 1:
                 grid_source = "xml"
             else:
@@ -1512,7 +1531,9 @@ class PythonLgmAdapter:
         if times.size < 2:
             times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
         observation_times = np.asarray(times, dtype=float)
-        return times, observation_times, grid_source
+        if len(observation_dates) != observation_times.size:
+            observation_dates = tuple(self._date_from_time_cached(snapshot, float(t)) for t in observation_times)
+        return times, observation_times, observation_dates, grid_source
 
     def _classify_portfolio_trades(
         self, snapshot: "XVASnapshot", mapped: "MappedInputs"
@@ -2093,7 +2114,7 @@ class PythonLgmAdapter:
             )
 
         lgm_params, param_source = self._parse_model_params(xml, model_ccy, snapshot)
-        valuation_times, observation_times, grid_source = self._build_exposure_grid(snapshot, xml)
+        valuation_times, observation_times, observation_dates, grid_source = self._build_exposure_grid(snapshot, xml)
         mpor = _resolve_mpor_config(snapshot, xml)
 
         market_cache_key = id(snapshot.market.raw_quotes)
@@ -2463,6 +2484,7 @@ class PythonLgmAdapter:
             times=times,
             valuation_times=valuation_times,
             observation_times=observation_times,
+            observation_dates=observation_dates,
             observation_closeout_times=observation_closeout_times,
             discount_curves=discount_curves,
             discount_curve_dates=discount_curve_dates,
@@ -4283,10 +4305,13 @@ class PythonLgmAdapter:
         ):
             if idx.size != target.size or np.any(idx >= times.size) or np.any(np.abs(times[idx] - target) > 1.0e-10):
                 raise EngineRunError(f"{name} times are not aligned with the fixed pricing grid")
-        obs_dates = [
-            (datetime.fromisoformat(inputs.asof).date() + timedelta(days=int(round(float(t) * 365.0)))).isoformat()
-            for t in obs_times
-        ]
+        if len(inputs.observation_dates) == obs_times.size:
+            obs_dates = list(inputs.observation_dates)
+        else:
+            obs_dates = [
+                (datetime.fromisoformat(inputs.asof).date() + timedelta(days=int(round(float(t) * 365.0)))).isoformat()
+                for t in obs_times
+            ]
         return valuation_idx, obs_idx, obs_closeout_idx, obs_dates
 
     def _fail_on_trade_nan(self, spec: _TradeSpec, values: np.ndarray) -> None:
@@ -6714,24 +6739,48 @@ def _parse_exposure_times_from_simulation_xml_text(xml_text: str) -> np.ndarray:
                     vals.extend([i * step for i in range(1, n + 1)])
             except Exception:
                 pass
-    for path in (
-        "./Market/YieldCurves/Configuration/Tenors",
-        "./Market/DefaultCurves/Tenors",
-        "./CrossAssetModel/InterestRateModels/LGM/CalibrationSwaptions/Expiries",
-    ):
-        txt = root.findtext(path)
-        if not txt:
-            continue
-        for item in txt.split(","):
-            s = item.strip()
-            if not s:
-                continue
-            try:
-                vals.append(_parse_tenor_to_years(s))
-            except Exception:
-                continue
     arr = np.asarray(sorted(set(float(x) for x in vals if x >= 0.0)), dtype=float)
     return arr
+
+
+def _parse_ore_exposure_date_grid_from_simulation_xml_text(
+    xml_text: str,
+    asof: str,
+    irs_utils: Any,
+) -> tuple[np.ndarray, Tuple[str, ...]] | None:
+    root = ET.fromstring(xml_text)
+    grid_txt = root.findtext("./Parameters/Grid")
+    if not grid_txt:
+        return None
+    grid_parts = [x.strip() for x in grid_txt.split(",") if x.strip()]
+    if len(grid_parts) != 2:
+        return None
+    try:
+        n = int(float(grid_parts[0]))
+        amount, unit = irs_utils._parse_tenor_value_unit(grid_parts[1])
+    except Exception:
+        return None
+    if n <= 0 or amount <= 0:
+        return None
+
+    calendar = (root.findtext("./Parameters/Calendar") or "TARGET").strip() or "TARGET"
+    asof_dt = irs_utils._parse_yyyymmdd(_normalize_asof_date(asof))
+    dates: list[date] = [asof_dt]
+    for i in range(1, n + 1):
+        unadjusted = irs_utils._shift_date_by_tenor(asof_dt, amount * i, unit)
+        dates.append(irs_utils._adjust_date(unadjusted, "F", calendar))
+
+    unique_dates: list[date] = []
+    seen: set[date] = set()
+    for d in dates:
+        if d not in seen:
+            unique_dates.append(d)
+            seen.add(d)
+    times = np.asarray(
+        [float(irs_utils._time_from_dates(asof_dt, d, "ActualActual(ISDA)")) for d in unique_dates],
+        dtype=float,
+    )
+    return times, tuple(d.isoformat() for d in unique_dates)
 
 
 def _parse_stochastic_fx_pairs_from_simulation_xml_text(
