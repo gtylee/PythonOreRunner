@@ -25,6 +25,13 @@ def test_xva_exposure_diagnostic_splits_formula_from_exposure_shape():
     assert summary["backend_comparison"]["numpy_backend"] == "numpy"
     assert summary["backend_comparison"]["torch_backend"].startswith("torch:")
     assert summary["backend_comparison"]["raw_cube_max_abs_diff"] == 0.0
+    assert summary["t0_leg_split"]["native"]["fixed_pv"] > 0.0
+    assert summary["t0_leg_split"]["native"]["float_pv"] < 0.0
+    assert summary["t0_leg_split"]["ore_flow_report"]["net_pv"] > 0.0
+    assert summary["t0_leg_split"]["coupon_comparison"]["points"] == 10
+    assert summary["t0_leg_split"]["coupon_comparison"]["max_abs_pv_diff"] > 0.0
+    assert len(result["floating_coupon_comparison"]) == 10
+    assert result["floating_coupon_comparison"][0]["CouponNo"] == 1
     assert summary["first_material_epe_divergence"]["Date"] == "2016-03-07"
     assert summary["worst_epe_divergence"]["Date"] == "2016-10-05"
     assert abs(summary["python_formula_on_ore_epe_cva"] - summary["ore_report_cva"]) < 5.0

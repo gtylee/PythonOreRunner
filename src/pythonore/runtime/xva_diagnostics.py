@@ -11,10 +11,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from pythonore.compute.irs_xva_utils import (
+    curve_values,
     compute_xva_from_exposure_profile,
     load_ore_exposure_profile,
     survival_probability_from_hazard,
 )
+from pythonore.mapping.mapper import map_snapshot
 from pythonore.io.loader import XVALoader
 from pythonore.io.ore_snapshot import load_from_ore_xml
 from pythonore.runtime.runtime import PythonLgmAdapter, XVAEngine
@@ -131,6 +133,9 @@ def compare_native_exposure_to_ore(
         for i in range(int(ore_times.size))
     ]
 
+    t0_diagnostics = _t0_leg_split(snapshot, output_dir, trade_id)
+    floating_coupon_comparison = list(t0_diagnostics.pop("floating_coupon_comparison", []))
+
     summary = {
         "case_dir": str(case_root),
         "trade_id": trade_id,
@@ -156,10 +161,11 @@ def compare_native_exposure_to_ore(
         "max_ene_abs_diff": float(np.max(ene_abs)) if ene_abs.size else 0.0,
         **xva_split,
         **_native_cube_split(result, trade_id, ore_dates, ore_rawcube),
+        **t0_diagnostics,
     }
     if compare_backends:
         summary["backend_comparison"] = _compare_numpy_torch_backends(snapshot)
-    return {"summary": summary, "pointwise": pointwise}
+    return {"summary": summary, "pointwise": pointwise, "floating_coupon_comparison": floating_coupon_comparison}
 
 
 def write_exposure_diagnostic(result: Mapping[str, Any], output_dir: str | Path) -> None:
@@ -172,6 +178,12 @@ def write_exposure_diagnostic(result: Mapping[str, Any], output_dir: str | Path)
             writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
+    coupon_rows = list(result.get("floating_coupon_comparison", []))
+    if coupon_rows:
+        with open(out / "floating_coupons.csv", "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(coupon_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(coupon_rows)
 
 
 def _run_native(snapshot: Any) -> tuple[Any, float]:
@@ -393,6 +405,137 @@ def _native_cube_split(
         "native_raw_vs_ore_t0_mean": first_row(native_raw, "mean"),
         "native_xva_vs_ore_t0_mean": first_row(native_xva, "mean"),
     }
+
+
+def _t0_leg_split(snapshot: Any, output_dir: Path, trade_id: str) -> dict[str, Any]:
+    try:
+        adapter = PythonLgmAdapter(fallback_to_swig=False)
+        adapter._ensure_py_lgm_imports()
+        mapped = map_snapshot(snapshot)
+        inputs = adapter._extract_inputs(snapshot, mapped)
+        spec = next((s for s in inputs.trade_specs if s.trade.trade_id == trade_id), None)
+        if spec is None or spec.legs is None or spec.kind != "IRS":
+            return {}
+        legs = spec.legs
+        p_disc = inputs.discount_curves[spec.ccy]
+        index_name = str(legs.get("float_index", spec.trade.additional_fields.get("index", "")))
+        p_fwd = adapter._resolve_index_curve(inputs, spec.ccy, index_name)
+
+        fixed_pay = np.asarray(legs.get("fixed_pay_time", []), dtype=float)
+        fixed_amount = np.asarray(legs.get("fixed_amount", []), dtype=float)
+        fixed_pv = float(np.sum(fixed_amount * np.asarray(curve_values(p_disc, fixed_pay), dtype=float))) if fixed_pay.size else 0.0
+
+        start = np.asarray(legs.get("float_start_time", []), dtype=float)
+        end = np.asarray(legs.get("float_end_time", []), dtype=float)
+        pay = np.asarray(legs.get("float_pay_time", []), dtype=float)
+        tau = np.asarray(legs.get("float_accrual", []), dtype=float)
+        index_tau = np.asarray(legs.get("float_index_accrual", tau), dtype=float)
+        notional = np.asarray(legs.get("float_notional", []), dtype=float)
+        sign = np.asarray(legs.get("float_sign", []), dtype=float)
+        spread = np.nan_to_num(np.asarray(legs.get("float_spread", np.zeros_like(tau)), dtype=float), nan=0.0)
+        native_coupon = np.asarray([], dtype=float)
+        native_amount = np.asarray([], dtype=float)
+        native_pv = np.asarray([], dtype=float)
+        float_pv = 0.0
+        if pay.size:
+            gearing = np.asarray(legs.get("float_gearing", np.ones_like(tau)), dtype=float)
+            p_s = np.asarray(curve_values(p_fwd, start), dtype=float)
+            p_e = np.asarray(curve_values(p_fwd, end), dtype=float)
+            fwd = np.nan_to_num((p_s / p_e - 1.0) / np.maximum(index_tau, 1.0e-18), nan=0.0)
+            native_coupon = np.nan_to_num(gearing * fwd + spread, nan=0.0)
+            native_amount = sign * notional * native_coupon * tau
+            native_pv = native_amount * np.asarray(curve_values(p_disc, pay), dtype=float)
+            float_pv = float(np.sum(native_pv))
+        native = {
+            "fixed_pv": fixed_pv,
+            "float_pv": float_pv,
+            "net_pv": fixed_pv + float_pv,
+        }
+        ore, coupon, coupon_rows = _ore_flow_leg_split(
+            output_dir / "flows.csv",
+            trade_id,
+            native_coupon,
+            native_amount,
+            native_pv,
+        )
+        return {
+            "t0_leg_split": {"native": native, "ore_flow_report": ore, "coupon_comparison": coupon},
+            "floating_coupon_comparison": coupon_rows,
+        }
+    except Exception as exc:
+        return {"t0_leg_split_error": str(exc)}
+
+
+def _ore_flow_leg_split(
+    path: Path,
+    trade_id: str,
+    native_float_coupons: np.ndarray,
+    native_float_amounts: np.ndarray,
+    native_float_pvs: np.ndarray,
+) -> tuple[dict[str, float], dict[str, Any], list[dict[str, Any]]]:
+    if not path.exists():
+        return {}, {}, []
+    fixed_pv = 0.0
+    float_pv = 0.0
+    float_rows: list[dict[str, Any]] = []
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if row.get("#TradeId") != trade_id and row.get("TradeId") != trade_id:
+                continue
+            try:
+                pv = float(row.get("PresentValue(Base)", "0") or 0.0)
+            except ValueError:
+                pv = 0.0
+            if row.get("LegNo") == "0":
+                fixed_pv += pv
+            elif row.get("LegNo") == "1":
+                float_pv += pv
+                float_rows.append(dict(row))
+    coupon_cmp: dict[str, Any] = {}
+    coupon_rows: list[dict[str, Any]] = []
+    if float_rows and native_float_coupons.size:
+        n = min(len(float_rows), int(native_float_coupons.size))
+        ore_coupons = np.asarray([_float_or_nan(r.get("Coupon", "nan")) for r in float_rows[:n]], dtype=float)
+        ore_pvs = np.asarray([_float_or_nan(r.get("PresentValue(Base)", "nan")) for r in float_rows[:n]], dtype=float)
+        ore_amounts = np.asarray([_float_or_nan(r.get("Amount", "nan")) for r in float_rows[:n]], dtype=float)
+        diff = np.asarray(native_float_coupons[:n], dtype=float) - ore_coupons
+        pv_diff = np.asarray(native_float_pvs[:n], dtype=float) - ore_pvs
+        worst = int(np.argmax(np.abs(diff))) if diff.size else 0
+        coupon_cmp = {
+            "points": int(n),
+            "max_abs_coupon_diff": float(np.max(np.abs(diff))) if diff.size else 0.0,
+            "worst_coupon_index": int(worst + 1) if diff.size else 0,
+            "worst_coupon_diff": float(diff[worst]) if diff.size else 0.0,
+            "max_abs_pv_diff": float(np.nanmax(np.abs(pv_diff))) if pv_diff.size else 0.0,
+        }
+        for i, row in enumerate(float_rows[:n]):
+            coupon_rows.append(
+                {
+                    "CouponNo": int(i + 1),
+                    "AccrualStartDate": row.get("AccrualStartDate", ""),
+                    "AccrualEndDate": row.get("AccrualEndDate", ""),
+                    "PayDate": row.get("PayDate", ""),
+                    "FixingDate": row.get("FixingDate", ""),
+                    "OreCoupon": float(ore_coupons[i]),
+                    "NativeCoupon": float(native_float_coupons[i]),
+                    "CouponDiff": float(diff[i]),
+                    "OreAmount": float(ore_amounts[i]),
+                    "NativeAmount": float(native_float_amounts[i]),
+                    "AmountDiff": float(native_float_amounts[i] - ore_amounts[i]),
+                    "OrePV": float(ore_pvs[i]),
+                    "NativePV": float(native_float_pvs[i]),
+                    "PVDiff": float(pv_diff[i]),
+                }
+            )
+    return {"fixed_pv": fixed_pv, "float_pv": float_pv, "net_pv": fixed_pv + float_pv}, coupon_cmp, coupon_rows
+
+
+def _float_or_nan(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def _parse_args() -> argparse.Namespace:
