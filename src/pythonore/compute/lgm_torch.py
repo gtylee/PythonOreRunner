@@ -354,7 +354,7 @@ def simulate_lgm_measure_torch(
                 draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
             increments = step_scales_t[:, None] * draws_t
             x[1:] = float(x0) + torch_mod.cumsum(increments, dim=0)
-            return x.cpu().numpy() if return_numpy else x
+            return x.detach().cpu().numpy() if return_numpy else x
 
         if normal_draws is None:
             if not hasattr(rng, "next_sequence"):
@@ -367,7 +367,7 @@ def simulate_lgm_measure_torch(
         draws_t = torch_mod.as_tensor(draws, dtype=dtype, device=device_obj)
         increments = draws_t * step_scales_t[None, :]
         x[1:] = float(x0) + torch_mod.cumsum(increments, dim=1).transpose(0, 1)
-        return x.cpu().numpy() if return_numpy else x
+        return x.detach().cpu().numpy() if return_numpy else x
 
 
 __all__ = [

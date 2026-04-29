@@ -26,7 +26,7 @@ def _to_numpy_float_array(values) -> np.ndarray:
 
 
 def _clamp_nonnegative_times(times) -> np.ndarray:
-    arr = np.asarray(times, dtype=float)
+    arr = _to_numpy_float_array(times)
     if arr.ndim == 0:
         return np.asarray(max(float(arr), 0.0), dtype=float)
     out = arr.copy()
@@ -224,7 +224,7 @@ def _tensorize_legs(legs: Mapping[str, np.ndarray], *, device: str, dtype):
     torch = _require_torch()
     out = {}
     for k, v in legs.items():
-        arr = np.asarray(v)
+        arr = _to_numpy_float_array(v)
         if arr.dtype.kind in ("f", "i", "u"):
             out[k] = torch.as_tensor(arr, dtype=dtype, device=torch.device(device))
     return out
@@ -247,10 +247,10 @@ def _capfloor_realized_forward_paths_torch(
     end = np.asarray(capfloor.end_time, dtype=float)
     tau = np.asarray(capfloor.accrual, dtype=float)
     n_coupons = fixing.size
+    x = _to_numpy_float_array(x_paths)
     if n_coupons == 0:
-        return np.zeros((0, np.asarray(x_paths).shape[1]), dtype=float)
+        return np.zeros((0, x.shape[1]), dtype=float)
 
-    x = np.asarray(x_paths, dtype=float)
     realized = np.zeros((n_coupons, x.shape[1]), dtype=float)
     future_fixings = np.asarray(fixing > 1.0e-12, dtype=bool)
     if np.any(future_fixings):
@@ -274,8 +274,14 @@ def _capfloor_realized_forward_paths_torch(
 
     nonpositive = np.where(fixing <= 1.0e-12)[0]
     if nonpositive.size:
-        ps = np.asarray(fwd_curve.discount(torch.as_tensor(np.maximum(start[nonpositive], 0.0), dtype=disc_curve.dtype, device=disc_curve.device_obj)), dtype=float)
-        pe = np.asarray(fwd_curve.discount(torch.as_tensor(end[nonpositive], dtype=disc_curve.dtype, device=disc_curve.device_obj)), dtype=float)
+        ps = _to_numpy_float_array(
+            fwd_curve.discount(
+                torch.as_tensor(np.maximum(start[nonpositive], 0.0), dtype=disc_curve.dtype, device=disc_curve.device_obj)
+            )
+        )
+        pe = _to_numpy_float_array(
+            fwd_curve.discount(torch.as_tensor(end[nonpositive], dtype=disc_curve.dtype, device=disc_curve.device_obj))
+        )
         realized[nonpositive, :] = ((ps / pe - 1.0) / np.clip(tau[nonpositive], 1.0e-18, None))[:, None]
 
     return realized
@@ -994,7 +1000,7 @@ def capfloor_npv_paths_torch(
     return_numpy: bool = True,
 ):
     t = np.asarray(times, dtype=float)
-    x = np.asarray(x_paths, dtype=float)
+    x = _to_numpy_float_array(x_paths)
     if x.shape[0] != t.size:
         raise ValueError("x_paths first dimension must match times size")
     realized_forward_full = _capfloor_realized_forward_paths_torch(

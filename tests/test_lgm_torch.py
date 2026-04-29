@@ -195,6 +195,52 @@ class TestTorchLGM(unittest.TestCase):
         self.assertEqual(call_counter_torch["count"], 1)
         self.assertTrue(np.allclose(pv_np, pv_torch))
 
+    def test_capfloor_paths_accept_mps_tensor_inputs(self):
+        if not hasattr(torch.backends, "mps") or not torch.backends.mps.is_available():
+            self.skipTest("mps backend is not available")
+        model = TorchLGM1F(self.params, device="mps")
+        disc_curve = TorchDiscountCurve(
+            np.array([0.0, 0.5, 1.0], dtype=float),
+            np.array([1.0, 0.99, 0.98], dtype=float),
+            device="mps",
+        )
+        fwd_curve = TorchDiscountCurve(
+            np.array([0.0, 0.5, 1.0], dtype=float),
+            np.array([1.0, 0.992, 0.985], dtype=float),
+            device="mps",
+        )
+        capfloor = CapFloorDef(
+            trade_id="CF_MPS",
+            ccy="USD",
+            option_type="cap",
+            start_time=np.array([0.10], dtype=float),
+            end_time=np.array([0.50], dtype=float),
+            pay_time=np.array([0.60], dtype=float),
+            accrual=np.array([0.40], dtype=float),
+            notional=np.array([100.0], dtype=float),
+            strike=np.array([0.02], dtype=float),
+            gearing=np.array([1.0], dtype=float),
+            spread=np.array([0.0], dtype=float),
+            fixing_time=np.array([0.0], dtype=float),
+        )
+        times = np.array([0.0, 0.5, 1.0], dtype=float)
+        x_paths = torch.zeros((times.size, 2), dtype=disc_curve.dtype, device=disc_curve.device_obj)
+
+        pv = capfloor_npv_paths_torch(
+            model,
+            disc_curve,
+            fwd_curve,
+            capfloor,
+            times,
+            x_paths,
+            lock_fixings=True,
+            return_numpy=True,
+        )
+
+        self.assertIsInstance(pv, np.ndarray)
+        self.assertEqual(pv.shape, (times.size, 2))
+        self.assertTrue(np.all(np.isfinite(pv)))
+
 
 if __name__ == "__main__":
     unittest.main()

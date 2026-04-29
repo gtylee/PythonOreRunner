@@ -1722,6 +1722,41 @@ def test_live_capfloor_with_past_coupon_stays_native_and_filters_paid_cashflows(
     assert support["requires_swig_trade_ids"] == []
 
 
+def test_live_capfloor_filters_invalid_coupon_time_ordering():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_INVALID_COUPON_TIMES",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_live_capfloor_with_past_coupon_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, asof="2026-04-15"),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(snapshot.config, asof="2026-04-15", analytics=("CVA",)),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    parse_date = adapter._irs_utils._parse_yyyymmdd
+    s_dates = [parse_date("2026-03-08"), parse_date("2027-09-08"), parse_date("2027-03-08")]
+    e_dates = [parse_date("2026-09-08"), parse_date("2027-03-08"), parse_date("2027-09-08")]
+    p_dates = [parse_date("2026-09-08"), parse_date("2027-09-08"), parse_date("2027-03-08")]
+
+    with patch.object(adapter._irs_utils, "_schedule_from_leg", return_value=(s_dates, e_dates, p_dates)):
+        state = adapter._build_generic_capfloor_state(trade, snapshot)
+
+    assert state is not None
+    definition = state["definition"]
+    start = np.asarray(definition.start_time, dtype=float)
+    end = np.asarray(definition.end_time, dtype=float)
+    pay = np.asarray(definition.pay_time, dtype=float)
+    assert pay.size == 1
+    assert np.all(end >= start - 1.0e-12)
+    assert np.all(pay >= end - 1.0e-12)
+
+
 def test_generic_capfloor_uses_period_notionals_from_xml_schedule():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -2125,6 +2160,193 @@ def test_generic_xccy_rate_swap_pricing_converts_each_leg_before_summing():
     vals, _ = adapter._price_trade_rate_swap_paths(spec, ctx)
 
     np.testing.assert_allclose(vals[0], np.array([100.0, 100.0], dtype=float))
+
+
+def test_generic_rate_swap_converts_jpy_to_usd_by_dividing_usdjpy():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+    spec = _TradeSpec(
+        trade=Trade(
+            trade_id="JPY_FIXED_TEST",
+            counterparty="CP_A",
+            netting_set="NS_USD",
+            trade_type="Swap",
+            product=GenericProduct(payload={"trade_type": "Swap", "xml": ""}),
+        ),
+        kind="RateSwap",
+        notional=11000.0,
+        ccy="JPY",
+        legs={
+            "rate_legs": [
+                {
+                    "kind": "FIXED",
+                    "ccy": "JPY",
+                    "pay_time": np.array([1.0], dtype=float),
+                    "start_time": np.array([0.0], dtype=float),
+                    "accrual": np.array([1.0], dtype=float),
+                    "amount": np.array([11000.0], dtype=float),
+                }
+            ]
+        },
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"USD": (lambda t: 1.0), "JPY": (lambda t: 1.0)},
+        forward_curves={"USD": (lambda t: 1.0), "JPY": (lambda t: 1.0)},
+        forward_curves_by_tenor={"USD": {}, "JPY": {}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={"USDJPY": 110.0},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=("USD/JPY",),
+        torch_device=None,
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    shared_fx_sim = _SharedFxSimulation(
+        hybrid=None,
+        sim={
+            "x": {"USD": np.zeros((1, 2), dtype=float), "JPY": np.zeros((1, 2), dtype=float)},
+            "s": {"USD/JPY": np.full((1, 2), 110.0, dtype=float)},
+        },
+        pair_keys=("USD/JPY",),
+    )
+    ctx = _PricingContext(
+        snapshot=_make_snapshot(),
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((1, 2), dtype=float),
+        irs_backend=None,
+        shared_fx_sim=shared_fx_sim,
+        n_times=1,
+        n_paths=2,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+
+    vals, _ = adapter._price_trade_rate_swap_paths(spec, ctx)
+
+    np.testing.assert_allclose(vals[0], np.array([100.0, 100.0], dtype=float))
+    assert np.max(np.abs(vals[0])) < 1000.0
+
+
+def test_torch_rate_swap_converts_jpy_to_usd_by_dividing_usdjpy():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    adapter._ensure_py_lgm_imports()
+
+    class _FakeTorchCurve:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def _fake_torch_pricer(*args, **kwargs):
+        return np.full((1, 2), 11000.0, dtype=float)
+
+    spec = _TradeSpec(
+        trade=Trade(
+            trade_id="JPY_FIXED_TORCH_TEST",
+            counterparty="CP_A",
+            netting_set="NS_USD",
+            trade_type="Swap",
+            product=GenericProduct(payload={"trade_type": "Swap", "xml": ""}),
+        ),
+        kind="RateSwap",
+        notional=11000.0,
+        ccy="JPY",
+        legs={
+            "rate_legs": [
+                {
+                    "kind": "FIXED",
+                    "ccy": "JPY",
+                    "pay_time": np.array([1.0], dtype=float),
+                    "start_time": np.array([0.0], dtype=float),
+                    "end_time": np.array([1.0], dtype=float),
+                    "accrual": np.array([1.0], dtype=float),
+                    "amount": np.array([11000.0], dtype=float),
+                }
+            ]
+        },
+    )
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"USD": (lambda t: 1.0), "JPY": (lambda t: 1.0)},
+        forward_curves={"USD": (lambda t: 1.0), "JPY": (lambda t: 1.0)},
+        forward_curves_by_tenor={"USD": {}, "JPY": {}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={"USDJPY": 110.0},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=("USD/JPY",),
+        torch_device="cpu",
+        trade_specs=(spec,),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+    shared_fx_sim = _SharedFxSimulation(
+        hybrid=None,
+        sim={
+            "x": {"USD": np.zeros((1, 2), dtype=float), "JPY": np.zeros((1, 2), dtype=float)},
+            "s": {"USD/JPY": np.full((1, 2), 110.0, dtype=float)},
+        },
+        pair_keys=("USD/JPY",),
+    )
+    ctx = _PricingContext(
+        snapshot=_make_snapshot(),
+        inputs=inputs,
+        model=_UnitDiscountModel(),
+        x_paths=np.zeros((1, 2), dtype=float),
+        irs_backend=(_FakeTorchCurve, None, None, "cpu", _fake_torch_pricer, None, None),
+        shared_fx_sim=shared_fx_sim,
+        n_times=1,
+        n_paths=2,
+        torch_curve_cache={},
+        torch_rate_leg_value_cache={},
+        irs_curve_cache={},
+    )
+
+    vals, _ = adapter._price_trade_rate_swap_paths(spec, ctx)
+
+    np.testing.assert_allclose(vals[0], np.array([100.0, 100.0], dtype=float))
+    assert np.max(np.abs(vals[0])) < 1000.0
 
 
 def test_standalone_cashflow_pricing_converts_to_reporting_currency():

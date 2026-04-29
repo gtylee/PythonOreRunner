@@ -3994,7 +3994,7 @@ class PythonLgmAdapter:
         fixing_base = e_dates if in_arrears else s_dates
         fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
         fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
-        live = pay_t >= -1.0e-12
+        live = (pay_t >= -1.0e-12) & (end_t >= start_t - 1.0e-12) & (pay_t >= end_t - 1.0e-12)
         if not np.any(live):
             self._generic_capfloor_state_cache[cache_key] = None
             self._generic_capfloor_state_xml_cache[xml_cache_key] = None
@@ -4439,7 +4439,13 @@ class PythonLgmAdapter:
                         amount = np.asarray(legs.get("fixed_amount", []), dtype=float)[live_fixed]
                         pv += np.sum(amount[:, None] * disc, axis=0)
                 vals[i, :] = pv
-            return vals, True
+            return self._convert_path_grid_to_reporting_ccy(
+                vals,
+                local_ccy=spec.ccy,
+                report_ccy=inputs.model_ccy,
+                inputs=inputs,
+                shared_fx_sim=ctx.shared_fx_sim,
+            ), spec.ccy.upper() == inputs.model_ccy.upper()
         if ctx.irs_backend is None or bool(legs.get("float_overnight_indexed", False)):
             vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
             for i, t in enumerate(inputs.times):
@@ -4526,7 +4532,13 @@ class PythonLgmAdapter:
                     realized_float_coupon=realized_coupon,
                     live_float_coupon=realized_coupon if use_exact_overnight else None,
                 )
-            return vals, True
+            return self._convert_path_grid_to_reporting_ccy(
+                vals,
+                local_ccy=spec.ccy,
+                report_ccy=inputs.model_ccy,
+                inputs=inputs,
+                shared_fx_sim=ctx.shared_fx_sim,
+            ), spec.ccy.upper() == inputs.model_ccy.upper()
         torch_curve_ctor, torch_pricer, _, torch_device, _, _, _ = ctx.irs_backend
         curve_key = (spec.ccy, index_name)
         curve_state = ctx.irs_curve_cache.get(curve_key)
@@ -4578,7 +4590,13 @@ class PythonLgmAdapter:
                 live_float_coupon=realized_coupon if use_exact_overnight else None,
                 return_numpy=True,
             )
-        return vals, True
+        return self._convert_path_grid_to_reporting_ccy(
+            vals,
+            local_ccy=spec.ccy,
+            report_ccy=inputs.model_ccy,
+            inputs=inputs,
+            shared_fx_sim=ctx.shared_fx_sim,
+        ), spec.ccy.upper() == inputs.model_ccy.upper()
 
     def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
         inputs = ctx.inputs
@@ -4607,7 +4625,7 @@ class PythonLgmAdapter:
             )
             ctx.torch_curve_cache[disc_key] = disc_curve
         p_disc = inputs.discount_curves[spec.ccy]
-        report_ccy = spec.ccy
+        report_ccy = inputs.model_ccy.upper()
         for leg in rate_legs:
             kind = str(leg.get("kind", "")).upper()
             leg_ccy = str(leg.get("ccy", spec.ccy)).upper()
@@ -4686,16 +4704,16 @@ class PythonLgmAdapter:
                             np.asarray([float(p_disc(float(T))) for T in principal_pay[live_principal]], dtype=float),
                         )
                         pv = np.sum(principal_amount[live_principal][:, None] * disc_principal, axis=0)
-                        leg_vals[i, :] += self._convert_amount_to_reporting_ccy(
-                            pv,
-                            local_ccy=leg_ccy,
-                            report_ccy=report_ccy,
-                            inputs=inputs,
-                            shared_fx_sim=ctx.shared_fx_sim,
-                            time_index=i,
-                        )
-                ctx.torch_rate_leg_value_cache[leg_cache_key] = leg_vals
-                vals += leg_vals
+                        leg_vals[i, :] += pv
+                leg_vals_report = self._convert_path_grid_to_reporting_ccy(
+                    leg_vals,
+                    local_ccy=leg_ccy,
+                    report_ccy=report_ccy,
+                    inputs=inputs,
+                    shared_fx_sim=ctx.shared_fx_sim,
+                )
+                ctx.torch_rate_leg_value_cache[leg_cache_key] = leg_vals_report
+                vals += leg_vals_report
                 continue
             pay = np.asarray(leg.get("pay_time", []), dtype=float)
             accr = np.asarray(leg.get("accrual", []), dtype=float)
@@ -6258,6 +6276,32 @@ class PythonLgmAdapter:
         if inverse > 0.0:
             return values / max(inverse, 1.0e-12)
         return values
+
+    def _convert_path_grid_to_reporting_ccy(
+        self,
+        values: np.ndarray,
+        *,
+        local_ccy: str,
+        report_ccy: str,
+        inputs: _PythonLgmInputs,
+        shared_fx_sim: _SharedFxSimulation | None,
+    ) -> np.ndarray:
+        local = str(local_ccy).upper()
+        report = str(report_ccy).upper()
+        out = np.asarray(values, dtype=float)
+        if local == report or out.size == 0:
+            return out
+        converted = np.empty_like(out)
+        for i in range(out.shape[0]):
+            converted[i, :] = self._convert_amount_to_reporting_ccy(
+                out[i, :],
+                local_ccy=local,
+                report_ccy=report,
+                inputs=inputs,
+                shared_fx_sim=shared_fx_sim,
+                time_index=i,
+            )
+        return converted
 
     def _assemble_result(
         self,
