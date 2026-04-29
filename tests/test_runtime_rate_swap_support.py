@@ -1408,6 +1408,32 @@ def test_python_runtime_builds_real_sifma_basis_curves_from_bma_ratio_only(trade
         adapter._resolve_index_curve(inputs, "USD", "USD-SIFMA-7D")
         is inputs.forward_curves_by_name["USD-SIFMA"]
     )
+    p = inputs.lgm_params
+    model = adapter._lgm_mod.LGM1F(
+        adapter._lgm_mod.LGMParams(
+            alpha_times=tuple(p["alpha_times"]),
+            alpha_values=tuple(p["alpha_values"]),
+            kappa_times=tuple(p["kappa_times"]),
+            kappa_values=tuple(p["kappa_values"]),
+            shift=p["shift"],
+            scaling=p["scaling"],
+        )
+    )
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    sifma_leg = next(leg for leg in state["rate_legs"] if "SIFMA" in str(leg.get("index_name", "")).upper())
+    assert bool(sifma_leg.get("overnight_indexed", False))
+    sifma_coupons = adapter._rate_leg_coupon_paths(
+        model,
+        sifma_leg,
+        "USD",
+        inputs,
+        0.0,
+        np.zeros(2, dtype=float),
+        snapshot=snapshot,
+    )
+    assert np.all(np.isfinite(sifma_coupons))
+    assert float(np.max(np.abs(sifma_coupons))) > 1.0e-6
 
     specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
     assert unsupported == []

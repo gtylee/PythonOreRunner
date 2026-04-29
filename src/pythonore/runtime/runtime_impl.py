@@ -2177,7 +2177,7 @@ class PythonLgmAdapter:
             if pair6 not in fx_vols and pair6[3:] + pair6[:3] not in fx_vols:
                 input_fallbacks.append(f"missing_fx_vol:{pair6}")
 
-        curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs)
+        curve_payload = self._load_ore_output_curves(snapshot, mapped, trade_specs, bma_ratio_curves=bma_ratio_curves)
         if curve_payload is not None:
             discount_curves = curve_payload.discount_curves
             discount_curve_dates = curve_payload.discount_curve_dates
@@ -2545,6 +2545,8 @@ class PythonLgmAdapter:
         snapshot: XVASnapshot,
         mapped: MappedInputs,
         trade_specs: Sequence[_TradeSpec],
+        *,
+        bma_ratio_curves: Mapping[str, Sequence[Tuple[float, float]]] | None = None,
     ) -> Optional[_CurveBundle]:
         """Build discount, forward, and funding curves from ORE output artefacts.
 
@@ -2630,13 +2632,15 @@ class PythonLgmAdapter:
                         for field in ("index_name", "index_name_1", "index_name_2"):
                             index_name = str(leg.get(field, "")).strip()
                             if index_name:
-                                requested_columns.add(index_name)
+                                if not _is_bma_sifma_index(index_name):
+                                    requested_columns.add(index_name)
                                 forward_names.add(index_name.upper())
                     continue
                 index_name = str(spec.legs.get("float_index", "")).strip()
                 tenor_key = str(spec.legs.get("float_index_tenor", "")).upper()
                 if index_name:
-                    requested_columns.add(index_name)
+                    if not _is_bma_sifma_index(index_name):
+                        requested_columns.add(index_name)
                     forward_names.add(index_name.upper())
                 if not index_name or not tenor_key:
                     continue
@@ -2691,6 +2695,34 @@ class PythonLgmAdapter:
             for index_name in sorted(forward_names):
                 if index_name in curve_data and index_name not in forward_curves_by_name:
                     forward_curves_by_name[index_name] = self._curve_from_column(curve_data, index_name)
+            for ccy, pts in (bma_ratio_curves or {}).items():
+                if not pts:
+                    continue
+                by_time: Dict[float, List[float]] = {}
+                for t, r in pts:
+                    by_time.setdefault(float(t), []).append(float(r))
+                ratio_pts = sorted(
+                    ((t, min(vals, key=lambda x: abs(x))) for t, vals in by_time.items()),
+                    key=lambda x: x[0],
+                )
+                if len(ratio_pts) == 1:
+                    ratio_pts = [
+                        (0.0, ratio_pts[0][1]),
+                        (max(float(snapshot.config.horizon_years), 1.0), ratio_pts[0][1]),
+                    ]
+                ratio_times = np.asarray([float(t) for t, _ in ratio_pts], dtype=float)
+                ratio_vals = np.asarray([float(v) for _, v in ratio_pts], dtype=float)
+                ccy_key = ccy.upper()
+                libor_curve = (
+                    forward_curves_by_name.get(f"{ccy_key}-LIBOR-3M")
+                    or forward_curves_by_tenor.get(ccy_key, {}).get("3M")
+                    or forward_curves.get(ccy_key, discount_curves.get(ccy_key))
+                )
+                if libor_curve is None:
+                    continue
+                bma_curve = _build_bma_proxy_curve(libor_curve, ratio_times, ratio_vals)
+                forward_curves_by_name[f"{ccy_key}-SIFMA"] = bma_curve
+                forward_curves_by_name[f"{ccy_key}-BMA"] = bma_curve
 
             for ccy, disc in discount_curves.items():
                 forward_curves.setdefault(ccy, disc)
@@ -4231,7 +4263,7 @@ class PythonLgmAdapter:
             coupon = np.asarray(leg.get("quoted_coupon", np.zeros(fixing_time.shape)), dtype=float).copy()
             if leg.get("kind") in {"FLOATING", "CMS"}:
                 index_name = str(leg.get("index_name", "")).upper()
-                if bool(leg.get("overnight_indexed", False)):
+                if bool(leg.get("overnight_indexed", False)) and not _is_bma_sifma_index(index_name):
                     leg["quoted_coupon"] = coupon
                     leg["is_historically_fixed"] = fixed_mask
                     continue
@@ -5670,7 +5702,11 @@ class PythonLgmAdapter:
         gearing = np.asarray(leg.get("gearing", np.ones(start.shape)), dtype=float)
         coupons = np.zeros((start.size, x_arr.size), dtype=float)
 
-        if bool(leg.get("overnight_indexed", False)) and snapshot is not None:
+        if (
+            bool(leg.get("overnight_indexed", False))
+            and not _is_bma_sifma_index(str(leg.get("index_name", "")))
+            and snapshot is not None
+        ):
             from pythonore.compute.overnight_capfloor_shim import price_average_overnight_coupon_paths, price_overnight_capfloor_coupon_paths
 
             if bool(leg.get("is_averaged", False)):
