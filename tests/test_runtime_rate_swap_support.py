@@ -797,6 +797,103 @@ def test_example79_usd_jpy_xccy_keeps_leg_currency_and_base_currency_separate():
     assert math.isfinite(float(result.pv_total))
 
 
+def test_generated_usd_jpy_overnight_xccy_uses_tonar_fx_reset_without_fx_blowup():
+    tmp, case_root = _clone_xccy_basis_case(
+        TOOLS_DIR / "Examples" / "Products" / "Input",
+        "USD_SOFR_TONAR_XCCY_NO_ORE",
+        trade_id="SOFR_TONAR_XCCY_NO_ORE",
+        counterparty="CPTY_A",
+        netting_set_id="CPTY_A",
+        asof_date="2025-02-10",
+        start_date="2025-04-10",
+        end_date="2026-04-10",
+        tenor="3M",
+        calendar="US,JP",
+        leg0={
+            "payer": True,
+            "currency": "USD",
+            "notional": 100000000.0,
+            "index": "USD-SOFR",
+            "spread": 0.0,
+        },
+        leg1={
+            "payer": False,
+            "currency": "JPY",
+            "notional": 15222818282.0,
+            "index": "JPY-TONAR",
+            "spread": 0.0,
+            "fx_reset": {
+                "foreign_currency": "USD",
+                "foreign_amount": 100000000.0,
+                "fx_index": "FX-BOE-USD-JPY",
+                "fixing_days": 2,
+            },
+        },
+        ore_file="ore.xml",
+    )
+    try:
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "SOFR_TONAR_XCCY_NO_ORE")
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        mapped = map_snapshot(snapshot)
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            inputs = adapter._extract_inputs(snapshot, mapped)
+        state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+        assert state is not None
+        usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+        jpy_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "JPY")
+        assert usd_leg["overnight_indexed"] is True
+        assert jpy_leg["overnight_indexed"] is True
+        assert usd_leg["fx_reset"] is None
+        assert jpy_leg["fx_reset"] is not None
+        assert jpy_leg["fx_reset"]["foreign_currency"] == "USD"
+        assert jpy_leg["fx_reset"]["foreign_amount"] == 100000000.0
+
+        usd_jpy = _today_spot_from_quotes("USDJPY", inputs)
+        assert usd_jpy > 100.0
+        p = inputs.lgm_params
+        model = adapter._lgm_mod.LGM1F(
+            adapter._lgm_mod.LGMParams(
+                alpha_times=tuple(p["alpha_times"]),
+                alpha_values=tuple(p["alpha_values"]),
+                kappa_times=tuple(p["kappa_times"]),
+                kappa_values=tuple(p["kappa_values"]),
+                shift=p["shift"],
+                scaling=p["scaling"],
+            )
+        )
+        jpy_coupons = adapter._rate_leg_coupon_paths(
+            model,
+            jpy_leg,
+            "JPY",
+            inputs,
+            0.0,
+            np.zeros(1, dtype=float),
+            snapshot=snapshot,
+        )
+        assert float(np.max(jpy_coupons[:, 0])) < 0.02
+        one_usd = adapter._convert_amount_to_reporting_ccy(
+            np.asarray([usd_jpy], dtype=float),
+            local_ccy="JPY",
+            report_ccy="USD",
+            inputs=inputs,
+            shared_fx_sim=None,
+            time_index=0,
+        )
+        assert np.allclose(one_usd, np.asarray([1.0]), rtol=0.0, atol=1.0e-10)
+
+        result = _run_python(snapshot, "usd-jpy-overnight-xccy-no-ore")
+        coverage = result.metadata["coverage"]
+        assert coverage["fallback_trades"] == 0
+        assert coverage["unsupported"] == []
+        assert math.isfinite(float(result.pv_total))
+    finally:
+        tmp.cleanup()
+
+
 def test_sofr_euribor_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime():
     if not LOCAL_ORE_BINARY.exists():
         return
@@ -1291,7 +1388,7 @@ def test_python_runtime_supports_real_fra_without_fallback():
     "trade_id",
     ("BASIS_USD_LIB3M_SIFMA_0001", "BASIS_USD_SOFR3M_SIFMA_0001"),
 )
-def test_python_runtime_supports_real_sifma_basis_cases_on_torch(trade_id):
+def test_python_runtime_builds_real_sifma_basis_curves_from_bma_ratio_only(trade_id):
     snapshot = _load_case("Examples/Generated/USD_AllRatesProductsSnapshot_20PerType/Input")
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == trade_id)
     snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(trade,)))
@@ -1316,21 +1413,15 @@ def test_python_runtime_supports_real_sifma_basis_cases_on_torch(trade_id):
     assert unsupported == []
     spec = next(s for s in specs if s.trade.trade_id == trade_id)
     assert spec.kind == "RateSwap"
-    assert adapter._supports_torch_rate_swap(spec)
-
-    with patch.object(adapter, "_price_generic_rate_swap", side_effect=AssertionError("generic path used")), patch(
-        "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
-    ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
-        torch_result = adapter.run(snapshot, mapped=mapped, run_id=f"sifma-{trade_id.lower()}-torch")
+    assert not adapter._supports_torch_rate_swap(spec)
 
     with patch.object(adapter, "_resolve_irs_pricing_backend", return_value=None), patch(
         "pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None
     ), patch("pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None):
         numpy_result = adapter.run(snapshot, mapped=mapped, run_id=f"sifma-{trade_id.lower()}-numpy")
 
-    assert math.isfinite(float(torch_result.pv_total))
-    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=2.0e-5, abs_tol=1.0e-8)
-    coverage = torch_result.metadata["coverage"]
+    assert math.isfinite(float(numpy_result.pv_total))
+    coverage = numpy_result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
 

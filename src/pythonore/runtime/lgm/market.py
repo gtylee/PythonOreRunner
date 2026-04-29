@@ -25,6 +25,11 @@ def _normalize_asof_date(asof: str) -> str:
     return s
 
 
+def _is_bma_sifma_index(index_name: str) -> bool:
+    key = str(index_name or "").strip().upper()
+    return bool(re.search(r"(^|-)SIFMA($|-)|(^|-)BMA($|-)", key))
+
+
 def _date_from_time(asof: str, t: float) -> str:
     base = datetime.strptime(_normalize_asof_date(asof), "%Y-%m-%d").date()
     return (base + timedelta(days=int(round(float(t) * 365.25)))).isoformat()
@@ -297,6 +302,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         if len(parts) >= 6 and p0 == "IR_SWAP" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
+            if _is_bma_sifma_index(idx_name) or (len(parts) > 3 and _is_bma_sifma_index(parts[3])):
+                continue
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
@@ -323,6 +330,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         if len(parts) >= 5 and p0 == "MM" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
+            if _is_bma_sifma_index(idx_name) or (len(parts) > 3 and _is_bma_sifma_index(parts[3])):
+                continue
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
@@ -612,6 +621,8 @@ def _quote_matches_forward_curve(key: str, ccy: str, tenor: str, index_name: str
         return False
     family = _normalize_forward_tenor_family(tenor)
     exact_index = _normalize_curve_lookup_key(index_name)
+    if _is_bma_sifma_index(exact_index):
+        return False
     if parts[0] == "ZERO" and parts[1] == "RATE":
         if exact_index:
             return len(parts) >= 6 and _index_name_matches_quote_token(parts[3], exact_index, ccy)

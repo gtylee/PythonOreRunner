@@ -7,6 +7,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import pytest
 
 from pythonore.domain.dataclasses import (
     BermudanSwaption,
@@ -47,6 +48,7 @@ from pythonore.runtime.runtime import (
     classify_portfolio_support,
 )
 from pythonore.compute.irs_xva_utils import curve_values
+from pythonore.runtime.lgm import market as lgm_market
 from pythonore.runtime.lgm.market import _forward_index_family as _lgm_forward_index_family
 from pythonore.mapping.mapper import map_snapshot
 
@@ -1620,6 +1622,82 @@ def test_parse_market_overlay_accepts_named_dated_zero_quotes():
     assert named[0][0] > 11.0
     assert abs(named[0][1] - 0.02) < 1.0e-12
     assert unnamed[0][0] > 11.0
+
+
+def test_parse_market_overlay_does_not_make_sifma_curve_from_swap_quotes():
+    overlay = _parse_market_overlay(
+        (
+            MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SIFMA/1Y/5Y", value=0.028),
+            MarketQuote(date="2026-03-08", key="MM/RATE/USD/USD-SIFMA/1W/1W", value=0.027),
+            MarketQuote(date="2026-03-08", key="BMA_SWAP/RATIO/USD/3M/5Y", value=0.75),
+            MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-LIBOR-3M/3M/5Y", value=0.04),
+        ),
+        asof_date="2026-03-08",
+    )
+
+    assert "USD-SIFMA" not in overlay["fwd_by_index"].get("USD", {})
+    assert "USD-SIFMA" not in overlay["fwd"].get("USD", {})
+    assert overlay["bma_ratio"]["USD"] == [(5.0, 0.75)]
+    lgm_overlay = lgm_market._parse_market_overlay(
+        (
+            MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SIFMA/1Y/5Y", value=0.028),
+            MarketQuote(date="2026-03-08", key="MM/RATE/USD/USD-SIFMA/1W/1W", value=0.027),
+            MarketQuote(date="2026-03-08", key="BMA_SWAP/RATIO/USD/3M/5Y", value=0.75),
+        ),
+        asof_date="2026-03-08",
+    )
+    assert "USD-SIFMA" not in lgm_overlay["fwd_by_index"].get("USD", {})
+    assert "USD-SIFMA" not in lgm_overlay["fwd"].get("USD", {})
+    assert lgm_overlay["bma_ratio"]["USD"] == [(5.0, 0.75)]
+
+
+def test_resolve_sifma_requires_bma_ratio_built_named_curve():
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+    inputs = _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={"USD": (lambda t: 0.99)},
+        forward_curves={"USD": (lambda t: 0.98)},
+        forward_curves_by_tenor={"USD": {"1D": (lambda t: 0.97), "3M": (lambda t: 0.96)}},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy="USD",
+        seed=42,
+        fx_spots={},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=(),
+        torch_device=None,
+        trade_specs=(),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+        input_fallbacks=(),
+    )
+
+    with pytest.raises(EngineRunError, match="BMA_SWAP/RATIO"):
+        adapter._resolve_index_curve(inputs, "USD", "USD-SIFMA-1W")
+
+    bma_curve = lambda t: 0.95
+    inputs_with_bma = replace(
+        inputs,
+        forward_curves_by_name={"USD-SIFMA": bma_curve, "USD-BMA": bma_curve},
+    )
+    assert adapter._resolve_index_curve(inputs_with_bma, "USD", "USD-SIFMA-7D") is bma_curve
+    assert adapter._resolve_index_curve(inputs_with_bma, "USD", "USD-BMA") is bma_curve
 
 
 def test_loader_from_ore_xml_matches_from_files():

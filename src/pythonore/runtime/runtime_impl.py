@@ -132,6 +132,11 @@ def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[st
     return ""
 
 
+def _is_bma_sifma_index(index_name: str) -> bool:
+    key = str(index_name or "").strip().upper()
+    return bool(re.search(r"(^|-)SIFMA($|-)|(^|-)BMA($|-)", key))
+
+
 def _trade_curve_need_signature(
     trade_specs: Sequence[Any],
     swap_index_forward_tenors: Mapping[str, str],
@@ -152,10 +157,11 @@ def _trade_curve_need_signature(
             )
             continue
         if kind == "RATESWAP" and isinstance(legs, dict):
-            leg_sigs: list[tuple[str, str, str]] = []
+            leg_sigs: list[tuple[str, str, str, str]] = []
             for leg in legs.get("rate_legs", []):
                 leg_sigs.append(
                     (
+                        str(leg.get("ccy", ccy)).upper(),
                         str(leg.get("index_name", "")).upper(),
                         str(leg.get("index_name_1", "")).upper(),
                         str(leg.get("index_name_2", "")).upper(),
@@ -185,12 +191,13 @@ def _derive_curve_needs_from_signature(
             if tenor:
                 needed_tenors.setdefault(ccy, set()).add(tenor)
         elif kind == "RATESWAP":
-            for index_name, _, _ in spec[2]:
+            for leg_ccy, index_name, _, _ in spec[2]:
+                curve_ccy = str(leg_ccy or ccy).upper()
                 if index_name:
-                    needed_forward_names.setdefault(ccy, set()).add(index_name)
+                    needed_forward_names.setdefault(curve_ccy, set()).add(index_name)
                     tenor = swap_index_forward_tenors.get(index_name, "")
                     if tenor:
-                        needed_tenors.setdefault(ccy, set()).add(str(tenor).upper())
+                        needed_tenors.setdefault(curve_ccy, set()).add(str(tenor).upper())
     tenors_sig = tuple((ccy, tuple(sorted(tenors))) for ccy, tenors in sorted(needed_tenors.items()))
     names_sig = tuple((ccy, tuple(sorted(names))) for ccy, names in sorted(needed_forward_names.items()))
     return tenors_sig, names_sig
@@ -481,6 +488,7 @@ class PythonLgmAdapter:
             if str(leg.get("kind", "")).upper() != "FLOATING":
                 continue
             schedule_rule = str(leg.get("schedule_rule", "FORWARD")).upper()
+            index_name = str(leg.get("index_name", "")).upper()
             if bool(leg.get("overnight_indexed", False)):
                 return False
             if any(
@@ -492,7 +500,7 @@ class PythonLgmAdapter:
                 return False
             if int(leg.get("rate_cutoff", 0) or 0) != 0:
                 return False
-            if any(tag in str(leg.get("index_name", "")).upper() for tag in ("BMA", "SIFMA", "BASIS")) and schedule_rule != "FORWARD":
+            if any(tag in index_name for tag in ("BMA", "SIFMA", "BASIS")) and schedule_rule != "FORWARD":
                 return False
         return all(
             str(leg.get("kind", "")).upper() in {"FIXED", "FLOATING"}
@@ -5166,6 +5174,10 @@ class PythonLgmAdapter:
             for candidate_name, curve in inputs.forward_curves_by_name.items():
                 if _normalize_curve_lookup_key(candidate_name) == normalized_key:
                     return curve
+        if _is_bma_sifma_index(key):
+            raise EngineRunError(
+                f"{key} curve is required but was not built from BMA_SWAP/RATIO market quotes"
+            )
         mapped_tenor = inputs.swap_index_forward_tenors.get(key, "")
         if not mapped_tenor and normalized_key:
             for candidate_name, candidate_tenor in inputs.swap_index_forward_tenors.items():
@@ -5181,7 +5193,8 @@ class PythonLgmAdapter:
             if tenor in inputs.forward_curves_by_tenor.get(ccy, {}):
                 return inputs.forward_curves_by_tenor[ccy][tenor]
         if family == "1D":
-            overnight_curve = inputs.forward_curves_by_tenor.get(ccy, {}).get("1D")
+            overnight_curves = inputs.forward_curves_by_tenor.get(ccy, {})
+            overnight_curve = overnight_curves.get("1D") or overnight_curves.get("0D")
             if overnight_curve is not None:
                 return overnight_curve
             return inputs.discount_curves[ccy]
@@ -7079,6 +7092,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         if len(parts) >= 6 and p0 == "IR_SWAP" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
+            if _is_bma_sifma_index(idx_name) or (len(parts) > 3 and _is_bma_sifma_index(parts[3])):
+                continue
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
@@ -7105,6 +7120,8 @@ def _parse_market_overlay(raw_quotes: Sequence[Any], asof_date: str | None = Non
         if len(parts) >= 5 and p0 == "MM" and p1 == "RATE":
             ccy = parts[2]
             idx_name = parts[4].upper()
+            if _is_bma_sifma_index(idx_name) or (len(parts) > 3 and _is_bma_sifma_index(parts[3])):
+                continue
             idx_tenor = idx_name.split("-")[-1].upper()
             tenor = parts[-1]
             try:
@@ -7675,6 +7692,8 @@ def _quote_matches_forward_curve(key: str, ccy: str, tenor: str, index_name: str
         return False
     family = _normalize_forward_tenor_family(tenor)
     exact_index = _normalize_curve_lookup_key(index_name)
+    if _is_bma_sifma_index(exact_index):
+        return False
     if parts[0] == "ZERO" and parts[1] == "RATE":
         if exact_index:
             return len(parts) >= 6 and _index_name_matches_quote_token(parts[3], exact_index, ccy)
