@@ -108,8 +108,7 @@ def _curve_handle_from_curve(
         return cached
 
     if dates is not None and dfs is not None:
-        ql_dates = []
-        ql_dfs = []
+        ql_nodes: dict[int, tuple[Any, float]] = {}
         for d, df in zip(dates, dfs):
             try:
                 if isinstance(d, str):
@@ -121,10 +120,14 @@ def _curve_handle_from_curve(
                     qd = ql.Date(day, month, year)
                 else:
                     continue
-                ql_dates.append(qd)
-                ql_dfs.append(max(float(df), 1.0e-10))
+                ql_nodes[int(qd.serialNumber())] = (qd, max(float(df), 1.0e-10))
             except Exception:
                 continue
+        ql_dates = []
+        ql_dfs = []
+        for _, (qd, df) in sorted(ql_nodes.items(), key=lambda item: item[0]):
+            ql_dates.append(qd)
+            ql_dfs.append(df)
         if ql_dates and ql_dfs:
             handle = ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
             _QL_CURVE_HANDLE_CACHE[cache_key] = handle
@@ -138,11 +141,15 @@ def _curve_handle_from_curve(
             except Exception:
                 continue
     grid = sorted(grid)
-    ql_dates = [eval_date]
-    ql_dfs = [1.0]
+    ql_nodes = {int(eval_date.serialNumber()): (eval_date, 1.0)}
     for tt in grid[1:]:
-        ql_dates.append(eval_date + int(round(365.25 * tt)))
-        ql_dfs.append(max(float(curve(tt)), 1.0e-10))
+        qd = eval_date + int(round(365.25 * tt))
+        ql_nodes[int(qd.serialNumber())] = (qd, max(float(curve(tt)), 1.0e-10))
+    ql_dates = []
+    ql_dfs = []
+    for _, (qd, df) in sorted(ql_nodes.items(), key=lambda item: item[0]):
+        ql_dates.append(qd)
+        ql_dfs.append(df)
     handle = ql.YieldTermStructureHandle(ql.DiscountCurve(ql_dates, ql_dfs, ql.Actual365Fixed()))
     _QL_CURVE_HANDLE_CACHE[cache_key] = handle
     return handle

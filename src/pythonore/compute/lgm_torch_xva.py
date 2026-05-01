@@ -224,7 +224,10 @@ def _tensorize_legs(legs: Mapping[str, np.ndarray], *, device: str, dtype):
     torch = _require_torch()
     out = {}
     for k, v in legs.items():
-        arr = _to_numpy_float_array(v)
+        try:
+            arr = _to_numpy_float_array(v)
+        except (TypeError, ValueError):
+            continue
         if arr.dtype.kind in ("f", "i", "u"):
             out[k] = torch.as_tensor(arr, dtype=dtype, device=torch.device(device))
     return out

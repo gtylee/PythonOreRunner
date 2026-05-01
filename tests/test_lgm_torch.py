@@ -241,6 +241,19 @@ class TestTorchLGM(unittest.TestCase):
         self.assertEqual(pv.shape, (times.size, 2))
         self.assertTrue(np.all(np.isfinite(pv)))
 
+    def test_swap_tensorizer_ignores_string_metadata(self):
+        from py_ore_tools.lgm_torch_xva import _tensorize_legs
+
+        legs = {
+            "float_pay_time": np.asarray([1.0], dtype=float),
+            "float_index": "USD-LIBOR-3M",
+            "float_index_by_leg": np.asarray(["USD-LIBOR-3M"], dtype=object),
+        }
+        out = _tensorize_legs(legs, device="cpu", dtype=torch.float64)
+        self.assertIn("float_pay_time", out)
+        self.assertNotIn("float_index", out)
+        self.assertNotIn("float_index_by_leg", out)
+
 
 if __name__ == "__main__":
     unittest.main()

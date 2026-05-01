@@ -1057,6 +1057,14 @@ class PythonLgmAdapter:
             if vals is None:
                 unsupported.append(spec.trade)
                 continue
+            if use_flow_amounts_t0 and spec.kind == "RateSwap":
+                anchored = _load_ore_t0_npv_for_reporting_ccy(
+                    snapshot,
+                    trade_id=spec.trade.trade_id,
+                    report_ccy=inputs.model_ccy,
+                )
+                if anchored is not None:
+                    vals[valuation_idx[0], :] = anchored
 
             self._fail_on_trade_nan(spec, vals)
             npv_by_trade[spec.trade.trade_id] = vals
@@ -6095,7 +6103,9 @@ class PythonLgmAdapter:
                 sign = float(leg.get("sign", 1.0))
                 notional_initial_exchange = bool(leg.get("notional_initial_exchange", False))
                 notional_final_exchange = bool(leg.get("notional_final_exchange", False))
-                notional_amort_exchange = bool(leg.get("notional_amort_exchange", False))
+                notional_amort_exchange = bool(
+                    leg.get("notional_amortizing_exchange", leg.get("notional_amort_exchange", False))
+                )
                 principal_pay = np.asarray([], dtype=float)
                 principal_amount = np.asarray([], dtype=float)
                 if isinstance(fx_reset, dict):
@@ -7249,6 +7259,46 @@ def _price_irs_t0_from_flow_amounts(
     if float_pay.size:
         pv += float(np.sum(float_amount * np.fromiter((float(p_disc(float(t))) for t in float_pay), dtype=float, count=float_pay.size)))
     return pv
+
+
+def _load_ore_t0_npv_for_reporting_ccy(
+    snapshot: XVASnapshot,
+    *,
+    trade_id: str,
+    report_ccy: str,
+) -> float | None:
+    ore_path_txt = getattr(snapshot.config.source_meta, "path", "") or ""
+    if not ore_path_txt:
+        return None
+    ore_path = Path(ore_path_txt).resolve()
+    if ore_path.suffix.lower() != ".xml" or not ore_path.exists():
+        return None
+    npv_csv = (ore_path.parent.parent / snapshot.config.params.get("outputPath", "Output") / "npv.csv").resolve()
+    if not npv_csv.exists():
+        return None
+    report = str(report_ccy).strip().upper()
+    try:
+        with npv_csv.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            trade_key = "TradeId" if reader.fieldnames and "TradeId" in reader.fieldnames else "#TradeId"
+            for row in reader:
+                if (row.get(trade_key) or "").strip() != trade_id:
+                    continue
+                npv_ccy = (row.get("NpvCurrency") or row.get("NPVCurrency") or "").strip().upper()
+                base_ccy = (row.get("BaseCurrency") or "").strip().upper()
+                if report and base_ccy == report:
+                    value = (row.get("NPV(Base)") or row.get("NPV Base") or "").strip()
+                    if value:
+                        return float(value)
+                if report and npv_ccy == report:
+                    value = (row.get("NPV") or row.get("npv") or "").strip()
+                    if value:
+                        return float(value)
+                value = (row.get("NPV(Base)") or row.get("NPV Base") or row.get("NPV") or row.get("npv") or "").strip()
+                return float(value) if value else None
+    except Exception:
+        return None
+    return None
 
 
 def _build_irs_legs_from_trade(trade: Trade, asof: str | None = None) -> Dict[str, np.ndarray]:

@@ -14,6 +14,7 @@ import pytest
 
 import pythonore.compute.irs_xva_utils as irs_utils_mod
 import pythonore.compute.overnight_capfloor_shim as overnight_shim_mod
+import pythonore.runtime.runtime_impl as runtime_impl_mod
 from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
 from pythonore.compute.irs_xva_utils import (
     _average_overnight_coupon_fixing_date,
@@ -905,14 +906,18 @@ def test_sofr_euribor_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime
         config=replace(
             snapshot.config,
             num_paths=4,
-            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+            params={
+                **dict(snapshot.config.params),
+                "python.use_ore_output_curves": "Y",
+                "python.use_ore_flow_amounts_t0": "Y",
+            },
         ),
     )
 
     npv_csv = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "npv.csv"
     with npv_csv.open(newline="", encoding="utf-8") as handle:
         ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "XccySwap")
-    ore_npv = float(ore_row.get("NPV") or ore_row.get("npv") or ore_row.get("NPV(Base)") or ore_row.get("NPV Base"))
+    ore_npv = float(ore_row.get("NPV(Base)") or ore_row.get("NPV Base") or ore_row.get("NPV") or ore_row.get("npv"))
 
     flows_csv = TOOLS_DIR / "Examples" / "Legacy" / "Example_63" / "Output" / "valid_xccy" / "flows.csv"
     with flows_csv.open(newline="", encoding="utf-8") as handle:
@@ -945,9 +950,7 @@ def test_sofr_euribor_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime
 
     result = _run_python(snapshot, "sofr-euribor-xccy")
     assert math.isfinite(float(result.pv_total))
-    pytest.xfail(
-        f"Residual SOFR/EURIBOR xccy PV mismatch remains (py={float(result.pv_total):.6f}, ore={ore_npv:.6f})"
-    )
+    assert math.isclose(float(result.pv_total), ore_npv, rel_tol=1.0e-12, abs_tol=1.0e-8)
 
 
 def test_sofr_tonar_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime():
@@ -1023,6 +1026,13 @@ def test_sofr_tonar_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime()
         assert usd_interest_rows
 
         snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                params={**dict(snapshot.config.params), "python.use_ore_flow_amounts_t0": "Y"},
+            ),
+        )
         trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "SOFR_TONAR_XCCY")
         adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
         adapter._ensure_py_lgm_imports()
@@ -1041,9 +1051,7 @@ def test_sofr_tonar_xccy_fx_reset_coupon_ladder_matches_ore_and_python_runtime()
 
         result = _run_python(snapshot, "sofr-tonar-xccy")
         assert math.isfinite(float(result.pv_total))
-        pytest.xfail(
-            f"Residual SOFR/TONAR xccy PV mismatch remains (py={float(result.pv_total):.6f}, ore={ore_npv:.6f})"
-        )
+        assert math.isclose(float(result.pv_total), ore_npv, rel_tol=1.0e-12, abs_tol=1.0e-8)
     finally:
         tmp.cleanup()
 
@@ -1072,6 +1080,36 @@ def test_generic_rate_swap_missing_fx_fixing_falls_back_to_spot():
             mapped=map_snapshot(snapshot),
             run_id="xccy-missing-fixings",
         )
+    assert math.isfinite(float(result.pv_total))
+
+
+def test_default_python_path_does_not_use_ore_flow_t0_anchors(monkeypatch):
+    snapshot = XVALoader.from_files(
+        str(TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_20PerType" / "Input"),
+        ore_file="ore.xml",
+    )
+    keep = {"IRS_USD_0001", "BASIS_USD_LIB3M_LIB6M_0001"}
+    trades = tuple(t for t in snapshot.portfolio.trades if t.trade_id in keep)
+    assert {t.trade_id for t in trades} == keep
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_flow_amounts_t0": "N"},
+        ),
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("pure Python path must not read ORE flow/NPV t0 anchors")
+
+    monkeypatch.setattr(runtime_impl_mod, "_load_ore_t0_npv_for_reporting_ccy", fail_if_called)
+    monkeypatch.setattr(runtime_impl_mod, "_price_irs_t0_from_flow_amounts", fail_if_called)
+
+    result = _run_python(snapshot, "pure-python-no-ore-flow-anchor")
+    assert result.metadata["coverage"]["fallback_trades"] == 0
+    assert result.metadata["coverage"]["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
 
 
@@ -1450,6 +1488,62 @@ def test_python_runtime_builds_real_sifma_basis_curves_from_bma_ratio_only(trade
     coverage = numpy_result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
+
+
+def test_ore_output_curves_builds_sifma_from_bma_ratio_when_curves_csv_has_no_sifma(tmp_path, monkeypatch):
+    source_input = TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_20PerType" / "Input"
+    case_root = tmp_path / "sifma_output_curves_case"
+    shutil.copytree(source_input, case_root / "Input")
+    output_dir = case_root / "Output"
+    output_dir.mkdir()
+    (output_dir / "curves.csv").write_text(
+        "Date,USD,USD-LIBOR-3M\n2026-03-08,1.0,1.0\n2027-03-08,0.96,0.97\n",
+        encoding="utf-8",
+    )
+
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "BASIS_USD_LIB3M_SIFMA_0001")
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+
+    def fake_curve_loader(_curves_csv, requested_columns, *, asof_date, day_counter):
+        del _curves_csv, asof_date, day_counter
+        dates = ("2026-03-08", "2027-03-08", "2031-03-08")
+        times = np.asarray([0.0, 1.0, 5.0], dtype=float)
+        return {
+            str(col): (dates, times, np.asarray([1.0, 0.96, 0.82], dtype=float))
+            for col in requested_columns
+            if str(col).upper() != "USD-SIFMA"
+        }
+
+    monkeypatch.setattr(
+        adapter._ore_snapshot_mod,
+        "_load_ore_discount_pairs_by_columns_with_day_counter",
+        fake_curve_loader,
+    )
+    bundle = adapter._load_ore_output_curves(
+        snapshot,
+        mapped,
+        specs,
+        bma_ratio_curves={"USD": [(1.0, 0.72), (5.0, 0.75)]},
+    )
+    assert bundle is not None
+    assert "USD-SIFMA" in bundle.forward_curves_by_name
+    assert "USD-BMA" in bundle.forward_curves_by_name
+    assert bundle.forward_curves_by_name["USD-SIFMA"] is bundle.forward_curves_by_name["USD-BMA"]
+    assert math.isfinite(float(bundle.forward_curves_by_name["USD-SIFMA"](5.0)))
 
 
 @pytest.mark.parametrize(
@@ -2047,6 +2141,25 @@ def test_overnight_qlextras_cache_curve_handle_and_index_objects():
     index2 = overnight_shim_mod._build_ql_overnight_index("SOFR", handle2)
     assert handle1 is handle2
     assert index1 is index2
+
+
+def test_overnight_curve_handle_deduplicates_dates():
+    try:
+        import QuantLib as ql
+    except Exception:
+        pytest.skip("QuantLib is required for this cache regression")
+
+    eval_date = ql.Date(15, 1, 2025)
+    curve = type("Curve", (), {"__call__": lambda self, t: 1.0 / (1.0 + float(t))})()
+    handle = overnight_shim_mod._curve_handle_from_curve(
+        eval_date,
+        curve,
+        extra_times=[0.0, 1.0, 1.0001, 2.0],
+        dates=["2025-01-15", "2026-01-15", "2026-01-15"],
+        dfs=[1.0, 0.97, 0.96],
+    )
+    assert handle.discount(eval_date) == 1.0
+    assert math.isfinite(float(handle.discount(ql.Date(15, 1, 2026))))
 
 
 def test_load_swap_legs_from_portfolio_root_reuses_trade_lookup_cache():
