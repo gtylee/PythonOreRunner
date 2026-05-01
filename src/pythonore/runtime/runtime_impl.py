@@ -6892,16 +6892,22 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
     model_ccy: str,
     trade_specs: Sequence[_TradeSpec],
 ) -> Tuple[str, ...]:
+    def trade_fx_pairs() -> set[str]:
+        pairs: set[str] = {
+            f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
+            for spec in trade_specs
+            if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
+        }
+        for spec in trade_specs:
+            if spec.kind != "RateSwap":
+                continue
+            ccys = _rate_leg_currencies(spec.legs, spec.ccy)
+            if len(ccys) == 2:
+                pairs.add(f"{ccys[0]}/{ccys[1]}")
+        return pairs
+
     if not xml_text.strip():
-        return tuple(
-            sorted(
-                {
-                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
-                    for spec in trade_specs
-                    if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
-                }
-            )
-        )
+        return tuple(sorted(trade_fx_pairs()))
     try:
         root = ET.fromstring(xml_text)
     except Exception:
@@ -6919,32 +6925,20 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
         elif len(item) == 6:
             normalized_market_pairs.add(f"{item[:3]}/{item[3:]}")
     if normalized_market_pairs:
-        return tuple(
-            sorted(
-                {
-                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
-                    for spec in trade_specs
-                    if spec.kind == "FXForward"
-                    and isinstance(spec.trade.product, FXForward)
-                    and f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}" in normalized_market_pairs
-                }
-            )
-        )
+        out = []
+        for pair in trade_fx_pairs():
+            base, quote = pair.split("/")
+            resolved = _resolve_fx_pair_name(base, quote, normalized_market_pairs)
+            if resolved in normalized_market_pairs:
+                out.append(resolved)
+        return tuple(sorted(set(out)))
     domestic = str(
         root.findtext("./CrossAssetModel/DomesticCcy")
         or model_ccy
     ).strip().upper()
     foreign_nodes = root.findall("./CrossAssetModel/ForeignExchangeModels/CrossCcyLGM")
     if not foreign_nodes:
-        return tuple(
-            sorted(
-                {
-                    f"{spec.trade.product.pair[:3].upper()}/{spec.trade.product.pair[3:].upper()}"
-                    for spec in trade_specs
-                    if spec.kind == "FXForward" and isinstance(spec.trade.product, FXForward)
-                }
-            )
-        )
+        return tuple(sorted(trade_fx_pairs()))
     supported_foreigns = {
         str(node.attrib.get("foreignCcy") or "").strip().upper()
         for node in foreign_nodes
@@ -6953,11 +6947,8 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
     has_default = "DEFAULT" in supported_foreigns
     explicit_foreigns = {ccy for ccy in supported_foreigns if ccy != "DEFAULT"}
     out = []
-    for spec in trade_specs:
-        if spec.kind != "FXForward" or not isinstance(spec.trade.product, FXForward):
-            continue
-        base = spec.trade.product.pair[:3].upper()
-        quote = spec.trade.product.pair[3:].upper()
+    for pair in trade_fx_pairs():
+        base, quote = pair.split("/")
         if base == domestic and (quote in explicit_foreigns or (has_default and quote != domestic)):
             out.append(f"{base}/{quote}")
         elif quote == domestic and (base in explicit_foreigns or (has_default and base != domestic)):

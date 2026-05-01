@@ -75,6 +75,7 @@ def _trade_blocks(count_per_type: int) -> list[str]:
             _basis_fedfunds_libor_3m_trade_xml(suffix),
             _basis_sofr_3m_libor_3m_trade_xml(suffix),
             _basis_sofr_3m_sifma_trade_xml(suffix),
+            _basis_sofr_tonar_xccy_trade_xml(suffix),
         ]
         blocks.extend(batch)
     return blocks
@@ -1059,6 +1060,69 @@ def _basis_sofr_3m_sifma_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
+def _basis_sofr_tonar_xccy_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="XCCY_USD_SOFR_JPY_TONAR_{suffix}">
+    <TradeType>Swap</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals>
+          <Notional>100000000</Notional>
+          <Exchanges>
+            <NotionalInitialExchange>true</NotionalInitialExchange>
+            <NotionalFinalExchange>true</NotionalFinalExchange>
+          </Exchanges>
+        </Notionals>
+        <DayCounter>ACT/360</DayCounter>
+        <PaymentConvention>ModifiedFollowing</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SOFR</Index>
+          <Spreads><Spread>0.0000</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2025-04-10</StartDate><EndDate>2028-04-10</EndDate><Tenor>3M</Tenor><Calendar>US,JP</Calendar><Convention>ModifiedFollowing</Convention><TermConvention>ModifiedFollowing</TermConvention><Rule>Forward</Rule><EndOfMonth>false</EndOfMonth></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>JPY</Currency>
+        <Notionals>
+          <Notional>15222818282</Notional>
+          <FXReset>
+            <ForeignCurrency>USD</ForeignCurrency>
+            <ForeignAmount>100000000</ForeignAmount>
+            <FXIndex>FX-BOE-USD-JPY</FXIndex>
+            <FixingDays>2</FixingDays>
+          </FXReset>
+          <Exchanges>
+            <NotionalInitialExchange>true</NotionalInitialExchange>
+            <NotionalFinalExchange>true</NotionalFinalExchange>
+          </Exchanges>
+        </Notionals>
+        <DayCounter>ACT/360</DayCounter>
+        <PaymentConvention>ModifiedFollowing</PaymentConvention>
+        <FloatingLegData>
+          <Index>JPY-TONAR</Index>
+          <Spreads><Spread>0.0000</Spread></Spreads>
+          <Gearings><Gearing>1.0</Gearing></Gearings>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>2025-04-10</StartDate><EndDate>2028-04-10</EndDate><Tenor>3M</Tenor><Calendar>US,JP</Calendar><Convention>ModifiedFollowing</Convention><TermConvention>ModifiedFollowing</TermConvention><Rule>Forward</Rule><EndOfMonth>false</EndOfMonth></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>"""
+
+
 def _portfolio_xml(count_per_type: int) -> str:
     trades = "\n".join(_trade_blocks(count_per_type))
     return f"""<?xml version="1.0"?>
@@ -1084,6 +1148,7 @@ def _simulation_xml() -> str:
     <DomesticCcy>USD</DomesticCcy>
     <Currencies>
       <Currency>USD</Currency>
+      <Currency>JPY</Currency>
     </Currencies>
     <BootstrapTolerance>0.0001</BootstrapTolerance>
     <InterestRateModels>
@@ -1113,14 +1178,60 @@ def _simulation_xml() -> str:
           <Scaling>1.0</Scaling>
         </ParameterTransformation>
       </LGM>
+      <LGM ccy="JPY">
+        <CalibrationType>Bootstrap</CalibrationType>
+        <Volatility>
+          <Calibrate>N</Calibrate>
+          <VolatilityType>Hagan</VolatilityType>
+          <ParamType>Piecewise</ParamType>
+          <TimeGrid>1.0,2.0,3.0,5.0,10.0</TimeGrid>
+          <InitialValue>0.01,0.01,0.01,0.01,0.01,0.01</InitialValue>
+        </Volatility>
+        <Reversion>
+          <Calibrate>N</Calibrate>
+          <ReversionType>HullWhite</ReversionType>
+          <ParamType>Constant</ParamType>
+          <TimeGrid/>
+          <InitialValue>0.03</InitialValue>
+        </Reversion>
+        <CalibrationSwaptions>
+          <Expiries>6M,1Y,2Y,3Y,5Y,10Y</Expiries>
+          <Terms>1Y,2Y,3Y,5Y,10Y,30Y</Terms>
+          <Strikes/>
+        </CalibrationSwaptions>
+        <ParameterTransformation>
+          <ShiftHorizon>0.0</ShiftHorizon>
+          <Scaling>1.0</Scaling>
+        </ParameterTransformation>
+      </LGM>
     </InterestRateModels>
-    <ForeignExchangeModels/>
-    <InstantaneousCorrelations/>
+    <ForeignExchangeModels>
+      <CrossCcyLGM foreignCcy="JPY">
+        <DomesticCcy>USD</DomesticCcy>
+        <CalibrationType>Bootstrap</CalibrationType>
+        <Sigma>
+          <Calibrate>N</Calibrate>
+          <ParamType>Piecewise</ParamType>
+          <TimeGrid>1.0,2.0,3.0,5.0,7.0,10.0</TimeGrid>
+          <InitialValue>0.10,0.10,0.10,0.10,0.10,0.10,0.10</InitialValue>
+        </Sigma>
+        <CalibrationOptions>
+          <Expiries>1Y,2Y,3Y,5Y,10Y</Expiries>
+          <Strikes/>
+        </CalibrationOptions>
+      </CrossCcyLGM>
+    </ForeignExchangeModels>
+    <InstantaneousCorrelations>
+      <Correlation factor1="IR:USD" factor2="IR:JPY">0.30</Correlation>
+      <Correlation factor1="IR:USD" factor2="FX:USDJPY">0.00</Correlation>
+      <Correlation factor1="IR:JPY" factor2="FX:USDJPY">0.00</Correlation>
+    </InstantaneousCorrelations>
   </CrossAssetModel>
   <Market>
     <BaseCurrency>USD</BaseCurrency>
     <Currencies>
       <Currency>USD</Currency>
+      <Currency>JPY</Currency>
     </Currencies>
     <YieldCurves>
       <Configuration>
@@ -1136,6 +1247,7 @@ def _simulation_xml() -> str:
       <Index>USD-SIFMA</Index>
       <Index>USD-SOFR</Index>
       <Index>USD-SOFR-3M</Index>
+      <Index>JPY-TONAR</Index>
     </Indices>
     <SwapIndices>
       <SwapIndex>
@@ -1147,6 +1259,13 @@ def _simulation_xml() -> str:
         <DiscountingIndex>USD-SOFR</DiscountingIndex>
       </SwapIndex>
     </SwapIndices>
+    <FxVolatilities>
+      <ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay>
+      <CurrencyPairs>
+        <CurrencyPair>USDJPY</CurrencyPair>
+      </CurrencyPairs>
+      <Expiries>1M,3M,6M,1Y,2Y,3Y,5Y,10Y</Expiries>
+    </FxVolatilities>
     <DefaultCurves>
       <Names/>
       <Tenors>6M,1Y,2Y</Tenors>
@@ -1161,6 +1280,7 @@ def _simulation_xml() -> str:
     </SwaptionVolatilities>
     <AggregationScenarioDataCurrencies>
       <Currency>USD</Currency>
+      <Currency>JPY</Currency>
     </AggregationScenarioDataCurrencies>
     <AggregationScenarioDataIndices>
       <Index>USD-FedFunds</Index>
@@ -1169,6 +1289,7 @@ def _simulation_xml() -> str:
       <Index>USD-SIFMA</Index>
       <Index>USD-SOFR</Index>
       <Index>USD-SOFR-3M</Index>
+      <Index>JPY-TONAR</Index>
     </AggregationScenarioDataIndices>
   </Market>
 </Simulation>
@@ -1370,6 +1491,7 @@ def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("Basis FedFunds/LIBOR3M", count_per_type)
     yield ("Basis SOFR3M/LIBOR3M", count_per_type)
     yield ("Basis SOFR3M/SIFMA", count_per_type)
+    yield ("XCCY SOFR/TONAR", count_per_type)
 
 
 def main() -> int:
@@ -1394,7 +1516,7 @@ def main() -> int:
     print("  product_counts :")
     for name, count in _product_counts(args.count_per_type):
         print(f"    - {name}: {count}")
-    print("  note           : book now includes CMS-family and amortizing native IR trades; SOFR cap/floor remain useful unsupported controls")
+    print("  note           : book includes CMS, amortizing, SIFMA, overnight SOFR/TONAR, and USD/JPY XCCY native IR trades")
     print()
     print("Next scale-up:")
     print("  python3 example_ore_snapshot_usd_all_rates_products.py --count-per-type 100 --overwrite")

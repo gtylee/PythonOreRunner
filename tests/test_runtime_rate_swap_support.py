@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+import example_ore_snapshot_usd_all_rates_products as broad_rates_example
 import pythonore.compute.irs_xva_utils as irs_utils_mod
 import pythonore.compute.overnight_capfloor_shim as overnight_shim_mod
 import pythonore.runtime.runtime_impl as runtime_impl_mod
@@ -1186,6 +1187,49 @@ def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orien
     assert trade.product.option_type == "Call"
     assert trade.product.pay_fixed is False
     assert _exercise_sign(trade.product) == 1.0
+
+
+def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_Variants"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    trade_ids = {t.trade_id for t in snapshot.portfolio.trades}
+    assert "CAP_USD_SOFR3M_0001" in trade_ids
+    assert "FLOOR_USD_LIB3M_0001" in trade_ids
+    assert "BASIS_USD_LIB3M_SIFMA_0001" in trade_ids
+    assert "BASIS_USD_SOFR3M_SIFMA_0001" in trade_ids
+    assert "XCCY_USD_SOFR_JPY_TONAR_0001" in trade_ids
+
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XCCY_USD_SOFR_JPY_TONAR_0001")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    state = adapter._build_generic_rate_swap_legs(trade, snapshot)
+    assert state is not None
+    usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")
+    jpy_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "JPY")
+    assert usd_leg["overnight_indexed"] is True
+    assert jpy_leg["overnight_indexed"] is True
+    assert jpy_leg["fx_reset"] is not None
+    assert jpy_leg["fx_reset"]["foreign_currency"] == "USD"
+    assert jpy_leg["fx_reset"]["foreign_amount"] == 100000000.0
+
+    mapped = map_snapshot(snapshot)
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        inputs = adapter._extract_inputs(snapshot, mapped)
+        assert "USD/JPY" in inputs.stochastic_fx_pairs
+        assert _today_spot_from_quotes("USDJPY", inputs) > 100.0
+        result = adapter.run(
+            replace(snapshot, config=replace(snapshot.config, num_paths=4)),
+            mapped=mapped,
+            run_id="generated-all-rates-variants",
+        )
+    coverage = result.metadata["coverage"]
+    assert coverage["fallback_trades"] == 0
+    assert coverage["unsupported"] == []
+    assert math.isfinite(float(result.pv_total))
 
 
 def test_bermudan_swaption_uses_trade_specific_gsr_calibration_when_available():
