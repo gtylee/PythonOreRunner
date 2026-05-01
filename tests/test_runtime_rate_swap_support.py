@@ -1232,6 +1232,55 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert math.isfinite(float(result.pv_total))
 
 
+def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path):
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pytest.skip("torch is required for backend parity regression")
+
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_BackendParity"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+    base_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+
+    def run_backend(device: str):
+        snapshot = replace(
+            base_snapshot,
+            config=replace(
+                base_snapshot.config,
+                num_paths=16,
+                params={
+                    **dict(base_snapshot.config.params),
+                    "python.torch_device": device,
+                    "python.lgm_rng_mode": "numpy",
+                    "python.progress": "N",
+                    "python.store_npv_cube_paths": "Y",
+                },
+            ),
+        )
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            return XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id=f"generated-all-rates-{device}",
+            )
+
+    numpy_result = run_backend("numpy")
+    torch_result = run_backend("cpu")
+    assert numpy_result.metadata["irs_pricing_backend"] == "numpy"
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-7)
+
+    numpy_cube = numpy_result.cubes["npv_cube"].payload
+    torch_cube = torch_result.cubes["npv_cube"].payload
+    assert set(torch_cube) == set(numpy_cube)
+    for trade_id, numpy_payload in numpy_cube.items():
+        numpy_t0 = float(numpy_payload["npv_mean"][0])
+        torch_t0 = float(torch_cube[trade_id]["npv_mean"][0])
+        assert math.isclose(torch_t0, numpy_t0, rel_tol=0.0, abs_tol=1.0e-7), trade_id
+
+
 def test_bermudan_swaption_uses_trade_specific_gsr_calibration_when_available():
     case_dir = TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_134PerType" / "Input"
     result = price_bermudan_from_ore_case(
