@@ -21,6 +21,7 @@ import csv
 import math
 from datetime import date, datetime, timedelta
 import re
+import weakref
 import xml.etree.ElementTree as ET
 import numpy as np
 
@@ -35,7 +36,7 @@ _ARRAY_CACHE_MAX_ITEMS = 256
 _SCHEDULE_ALIGNMENT_TOLERANCE_DAYS = 7
 _PORTFOLIO_TRADE_LOOKUP_CACHE: dict[int, tuple[ET.Element, dict[str, ET.Element]]] = {}
 _SWAP_LEG_CACHE: dict[int, tuple[ET.Element, dict[tuple[str, str, str], Dict[str, np.ndarray]]]] = {}
-_CURVE_VALUES_CACHE: dict[tuple[int, tuple[tuple[int, ...], bytes]], np.ndarray] = {}
+_CURVE_VALUES_CACHE: dict[tuple[int, tuple[tuple[int, ...], bytes]], tuple[weakref.ReferenceType[object], np.ndarray]] = {}
 _PORTFOLIO_AGGREGATION_CACHE: dict[tuple[object, ...], Dict[str, Dict[str, np.ndarray] | np.ndarray]] = {}
 
 
@@ -374,7 +375,21 @@ def curve_values(
     if t_arr.ndim == 0:
         return float(curve(float(t_arr)))
     flat = t_arr.reshape(-1)
+    try:
+        curve_ref = weakref.ref(curve)
+    except TypeError:
+        out = np.fromiter((float(curve(float(t))) for t in flat), dtype=float, count=flat.size)
+        return out.reshape(t_arr.shape)
+    key = (id(curve), _array_cache_key(flat))
+    cached = _CURVE_VALUES_CACHE.get(key)
+    if cached is not None:
+        cached_ref, cached_out = cached
+        if cached_ref() is curve:
+            return cached_out.reshape(t_arr.shape)
     out = np.fromiter((float(curve(float(t))) for t in flat), dtype=float, count=flat.size)
+    if len(_CURVE_VALUES_CACHE) >= _ARRAY_CACHE_MAX_ITEMS:
+        _CURVE_VALUES_CACHE.pop(next(iter(_CURVE_VALUES_CACHE)))
+    _CURVE_VALUES_CACHE[key] = (curve_ref, out)
     return out.reshape(t_arr.shape)
 
 
