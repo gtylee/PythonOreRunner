@@ -479,11 +479,14 @@ class PythonLgmAdapter:
             return False
         if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1:
             return False
-        # The torch path supports plain vanilla fixed/floating coupons, including
-        # basis swaps whose floating legs resolve to exact index curves. We still
-        # keep the generic builder for overnight-indexed coupons, cap/floor
-        # features, naked-option legs, and other conventions that need ORE's
-        # stripping, lookback, or rate-cutoff handling.
+        floating_count = sum(str(leg.get("kind", "")).upper() == "FLOATING" for leg in rate_legs)
+        fixed_count = sum(str(leg.get("kind", "")).upper() == "FIXED" for leg in rate_legs)
+        if floating_count > 1 and fixed_count == 0:
+            return False
+        # The torch path supports plain vanilla fixed/floating coupons. We still
+        # keep the generic builder for pure floating basis swaps, overnight-indexed
+        # coupons, cap/floor features, naked-option legs, and other conventions
+        # that need ORE's stripping, lookback, or rate-cutoff handling.
         for leg in rate_legs:
             if str(leg.get("kind", "")).upper() != "FLOATING":
                 continue

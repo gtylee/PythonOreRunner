@@ -1232,14 +1232,15 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert math.isfinite(float(result.pv_total))
 
 
-def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path):
+@pytest.mark.parametrize("count_per_type", (1, 5))
+def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path, count_per_type):
     try:
         import torch  # noqa: F401
     except Exception:
         pytest.skip("torch is required for backend parity regression")
 
     case_root = tmp_path / "USD_AllRatesProductsSnapshot_BackendParity"
-    broad_rates_example._write_files(case_root, count_per_type=1)
+    broad_rates_example._write_files(case_root, count_per_type=count_per_type)
     base_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
 
     def run_backend(device: str):
@@ -1271,6 +1272,12 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path):
     assert numpy_result.metadata["irs_pricing_backend"] == "numpy"
     assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
     assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-7)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-6,
+    )
 
     numpy_cube = numpy_result.cubes["npv_cube"].payload
     torch_cube = torch_result.cubes["npv_cube"].payload
@@ -1279,6 +1286,31 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path):
         numpy_t0 = float(numpy_payload["npv_mean"][0])
         torch_t0 = float(torch_cube[trade_id]["npv_mean"][0])
         assert math.isclose(torch_t0, numpy_t0, rel_tol=0.0, abs_tol=1.0e-7), trade_id
+
+    for path_key in ("npv_paths", "npv_xva_paths"):
+        for trade_id, numpy_payload in numpy_cube.items():
+            max_abs_diff = float(
+                np.max(
+                    np.abs(
+                        np.asarray(torch_cube[trade_id][path_key])
+                        - np.asarray(numpy_payload[path_key])
+                    )
+                )
+            )
+            assert max_abs_diff <= 1.0e-6, (path_key, trade_id, max_abs_diff)
+
+    mapped = map_snapshot(base_snapshot)
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    specs, unsupported, _ = adapter._classify_portfolio_trades(base_snapshot, mapped)
+    assert unsupported == []
+    basis_specs = [
+        spec
+        for spec in specs
+        if spec.trade.trade_id.startswith(("BASIS_USD_LIB3M_LIB6M", "BASIS_USD_SOFR3M_LIB3M"))
+    ]
+    assert basis_specs
+    assert all(not adapter._supports_torch_rate_swap(spec) for spec in basis_specs)
 
 
 def test_bermudan_swaption_uses_trade_specific_gsr_calibration_when_available():
