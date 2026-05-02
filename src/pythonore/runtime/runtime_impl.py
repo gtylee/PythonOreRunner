@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 import importlib
@@ -64,7 +64,6 @@ from pythonore.domain.dataclasses import (
     InflationCapFloor,
     InflationSwap,
     IRS,
-    MporConfig,
     Trade,
     XVASnapshot,
 )
@@ -85,24 +84,17 @@ from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.core import RunnerAdapter, SessionState, _ConsoleRunReporter, XVAEngine, XVASession
 from pythonore.runtime.lgm import inputs as lgm_inputs
 from pythonore.runtime.lgm import market as lgm_market
+from pythonore.runtime.lgm.types import (
+    _CurveBundle,
+    _PricingContext,
+    _PythonLgmInputs,
+    _SharedFxSimulation,
+    _TradeSpec,
+)
 from pythonore.runtime.swig import ORESwigAdapter
 from pythonore.runtime.toy import DeterministicToyAdapter, _toy_trade_numbers
 from pythonore.runtime.results import CubeAccessor, XVAResult, xva_total_from_metrics
 from pythonore.repo_paths import find_engine_repo_root
-
-
-@dataclass
-class _CurveBundle:
-    """Curve artefacts produced by the market-curve building paths."""
-    discount_curves: dict[str, Callable[[float], float]]
-    discount_curve_dates: dict[str, tuple[str, ...]]
-    discount_curve_dfs: dict[str, tuple[float, ...]]
-    forward_curves: dict[str, Callable[[float], float]]
-    forward_curves_by_tenor: dict[str, dict[str, Callable[[float], float]]]
-    forward_curves_by_name: dict[str, Callable[[float], float]]
-    xva_discount_curve: Callable[[float], float] | None
-    funding_borrow_curve: Callable[[float], float] | None
-    funding_lend_curve: Callable[[float], float] | None
 
 
 def _normalize_forward_tenor_family(tenor: str) -> str:
@@ -291,84 +283,6 @@ def _resolve_fx_pair_name(ccy1: str, ccy2: str, available_pairs: Sequence[str]) 
     if inverse in available:
         return inverse
     return direct
-
-
-@dataclass(frozen=True)
-class _TradeSpec:
-    trade: Trade          # Original Trade dataclass instance.
-    kind: str             # Pricing branch selector: "IRS" or "FXForward".
-    notional: float       # Absolute notional in the trade currency.
-    ccy: str              # ISO currency code for the trade (domestic leg for FX).
-    legs: Dict[str, np.ndarray] | None = None  # Leg schedule arrays loaded from ORE flows output; None for FX trades.
-    sticky_state: Dict[str, object] | None = None
-
-
-@dataclass(frozen=True)
-class _PythonLgmInputs:
-    asof: str
-    times: np.ndarray              # Full simulation grid (valuation grid plus sticky closeout grid).
-    valuation_times: np.ndarray    # Augmented valuation grid (union of exposure grid and trade cash-flow dates).
-    observation_times: np.ndarray  # Subset of times used as XVA observation points (from simulation.xml or fallback).
-    observation_closeout_times: np.ndarray  # Sticky closeout times associated with observation_times.
-    discount_curves: Dict[str, Callable[[float], float]]   # Risk-free discount curves keyed by ISO currency.
-    forward_curves: Dict[str, Callable[[float], float]]    # Composite forward/index curves keyed by ISO currency.
-    forward_curves_by_tenor: Dict[str, Dict[str, Callable[[float], float]]]  # Forward curves keyed by (ccy, tenor string).
-    forward_curves_by_name: Dict[str, Callable[[float], float]]  # Forward curves keyed by exact index name.
-    swap_index_forward_tenors: Dict[str, str]  # CMS/swap index name -> underlying ibor tenor, from conventions.xml.
-    inflation_curves: Dict[Tuple[str, str], Any]  # Inflation curves keyed by (index, curve_type) where curve_type is ZC or YY.
-    xva_discount_curve: Optional[Callable[[float], float]]  # Simulation-market discount curve used for XVA deflation; falls back to discount_curves[base_ccy].
-    funding_borrow_curve: Optional[Callable[[float], float]]  # Own-name borrowing curve used in FCA calculation; None when not configured.
-    funding_lend_curve: Optional[Callable[[float], float]]    # Own-name lending curve used in FBA calculation; None when not configured.
-    survival_curves: Dict[str, Callable[[float], float]]  # Optional ORE-style survival curves keyed by counterparty / own-name.
-    hazard_times: Dict[str, np.ndarray]   # Piecewise-constant hazard rate node times keyed by counterparty / own-name.
-    hazard_rates: Dict[str, np.ndarray]   # Piecewise-constant hazard rate values aligned with hazard_times.
-    recovery_rates: Dict[str, float]
-    lgm_params: Dict[str, object]         # Parsed LGM calibration parameters (alpha_times, alpha_values, kappa_times, kappa_values, shift, scaling).
-    model_ccy: str
-    seed: int
-    fx_spots: Dict[str, float]
-    fx_vols: Dict[str, List[Tuple[float, float]]]
-    swaption_normal_vols: Dict[Tuple[str, str], List[Tuple[float, float]]]
-    cms_correlations: Dict[Tuple[str, str], List[Tuple[float, float]]]
-    stochastic_fx_pairs: Tuple[str, ...]
-    torch_device: str | None
-    trade_specs: Tuple[_TradeSpec, ...]
-    unsupported: Tuple[Trade, ...]
-    mpor: MporConfig
-    input_provenance: Dict[str, str]  # Diagnostic dict recording which source was used for each input (model_params, market, grid, portfolio).
-    input_fallbacks: Tuple[str, ...] = ()
-    fx_forwards: Dict[str, List[Tuple[float, float]]] = field(default_factory=dict)
-    fx_spots_today: Dict[str, float] = field(default_factory=dict)
-    discount_curve_dates: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
-    observation_dates: Tuple[str, ...] = ()  # ORE exposure report dates aligned with observation_times.
-    discount_curve_dfs: Dict[str, Tuple[float, ...]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class _SharedFxSimulation:
-    hybrid: Any
-    sim: Dict[str, Any]
-    pair_keys: Tuple[str, ...]
-
-
-@dataclass
-class _PricingContext:
-    snapshot: XVASnapshot
-    inputs: _PythonLgmInputs
-    model: Any
-    x_paths: np.ndarray
-    irs_backend: Any
-    shared_fx_sim: Any
-    n_times: int
-    n_paths: int
-    torch_curve_cache: Dict[tuple[str, str], object] = field(default_factory=dict)
-    torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
-    capfloor_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
-    swaption_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
-    trade_value_cache: Dict[tuple[object, ...], tuple[np.ndarray | None, bool]] = field(default_factory=dict)
-    irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = field(default_factory=dict)
-    last_trade_backend: str = ""
-    last_trade_backend_detail: str = ""
 
 
 class PythonLgmAdapter:
@@ -1564,9 +1478,9 @@ class PythonLgmAdapter:
             if times.size > 1:
                 grid_source = "xml"
             else:
-                times = _fallback_exposure_grid(snapshot)
+                times = lgm_inputs._fallback_exposure_grid(snapshot)
         else:
-            times = _fallback_exposure_grid(snapshot)
+            times = lgm_inputs._fallback_exposure_grid(snapshot)
         if times.size < 2:
             times = np.array([0.0, max(float(snapshot.config.horizon_years), 1.0)], dtype=float)
         observation_times = np.asarray(times, dtype=float)
@@ -6753,9 +6667,9 @@ class PythonLgmAdapter:
             reports.update(fallback.reports)
             cubes.update(fallback.cubes)
 
-        total_notional = sum(_trade_notional(t) for t in snapshot.portfolio.trades) or 1.0
-        py_notional = sum(_trade_notional(s.trade) for s in inputs.trade_specs if s.trade.trade_id in npv_by_trade)
-        fallback_notional = sum(_trade_notional(t) for t in fallback_trades)
+        total_notional = sum(lgm_inputs._trade_notional(t) for t in snapshot.portfolio.trades) or 1.0
+        py_notional = sum(lgm_inputs._trade_notional(s.trade) for s in inputs.trade_specs if s.trade.trade_id in npv_by_trade)
+        fallback_notional = sum(lgm_inputs._trade_notional(t) for t in fallback_trades)
 
         metadata = {
             "engine": "python-lgm",
@@ -7101,19 +7015,6 @@ def _parse_stochastic_fx_pairs_from_simulation_xml_text(
     return tuple(sorted(set(out)))
 
 
-def _fallback_exposure_grid(snapshot: XVASnapshot) -> np.ndarray:
-    max_mat = float(snapshot.config.horizon_years)
-    for t in snapshot.portfolio.trades:
-        p = t.product
-        m = getattr(p, "maturity_years", None)
-        if isinstance(m, (int, float)):
-            max_mat = max(max_mat, float(m))
-    if max_mat <= 0.0:
-        max_mat = 1.0
-    steps = max(4, int(np.ceil(max_mat * 4.0)))
-    return np.linspace(0.0, max_mat, steps + 1)
-
-
 def _build_sticky_closeout_times(times: np.ndarray, mpor_years: float) -> np.ndarray:
     t = np.asarray(times, dtype=float)
     if t.size == 0:
@@ -7437,140 +7338,6 @@ def _load_ore_t0_npv_for_reporting_ccy(
     return None
 
 
-def _build_irs_legs_from_trade(trade: Trade, asof: str | None = None) -> Dict[str, np.ndarray]:
-    """Last-resort IRS leg builder using the dataclass schedule fields, no historical fixings.
-
-    This path is reached only when neither flows.csv nor portfolio.xml loading
-    succeeded.  Results will be approximate — calendar, day-count and index
-    conventions are hard-coded.  Always prefer loading legs from ORE output
-    artifacts or a portfolio XML.
-    """
-    import warnings as _warnings
-    _warnings.warn(
-        f"Using fallback leg schedule for trade {trade.trade_id} "
-        "(no flows.csv or portfolio.xml available). "
-        "Schedule timing is generated from the IRS dataclass fields and remains approximate for calendars/day-count roll rules.",
-        UserWarning,
-        stacklevel=3,
-    )
-    p = trade.product
-    if not isinstance(p, IRS):
-        raise EngineRunError(f"Cannot build IRS legs for non-IRS trade {trade.trade_id}")
-    start_offset, end_offset = _irs_schedule_bounds(p, asof)
-    fixed_pay, fixed_start, fixed_end = _schedule_periods(
-        start_offset, end_offset, p.fixed_leg_tenor, p.fixed_schedule_rule
-    )
-    float_pay, float_start, float_end = _schedule_periods(
-        start_offset, end_offset, p.float_leg_tenor, p.float_schedule_rule
-    )
-    fixing = float_start - (float(p.fixing_days) / 365.25)
-    fixed_sign = -1.0 if p.pay_fixed else 1.0
-    float_sign = -fixed_sign
-    float_index = str(p.float_index or trade.additional_fields.get("index", _default_index_for_ccy(p.ccy))).upper()
-    float_index_tenor = float_index.split("-")[-1].upper() if "-" in float_index else ""
-    overnight_indexed = _forward_index_family(float_index) == "1D"
-    lookback_days = 0
-    rate_cutoff = 0
-    naked_option = False
-    local_cap_floor = False
-    cap = None
-    floor = None
-    apply_observation_shift = False
-    return {
-        "fixed_pay_time": fixed_pay,
-        "fixed_accrual": np.maximum(fixed_end - fixed_start, 0.0),
-        "fixed_rate": np.full(fixed_pay.shape, float(p.fixed_rate)),
-        "fixed_notional": np.full(fixed_pay.shape, float(p.notional)),
-        "fixed_sign": np.full(fixed_pay.shape, fixed_sign),
-        "fixed_amount": fixed_sign * float(p.notional) * float(p.fixed_rate) * np.maximum(fixed_end - fixed_start, 0.0),
-        "float_pay_time": float_pay,
-        "float_start_time": float_start,
-        "float_end_time": float_end,
-        "float_accrual": np.maximum(float_end - float_start, 0.0),
-        "float_notional": np.full(float_pay.shape, float(p.notional)),
-        "float_sign": np.full(float_pay.shape, float_sign),
-        "float_spread": np.full(float_pay.shape, float(p.float_spread)),
-        "float_coupon": np.zeros(float_pay.shape),
-        "float_amount": np.zeros(float_pay.shape),
-        "float_fixing_time": fixing,
-        "float_is_historically_fixed": np.zeros(float_pay.shape, dtype=bool),
-        "float_index": float_index,
-        "float_index_tenor": float_index_tenor,
-        "float_overnight_indexed": overnight_indexed,
-        "float_lookback_days": lookback_days,
-        "float_rate_cutoff": rate_cutoff,
-        "float_naked_option": naked_option,
-        "float_local_cap_floor": local_cap_floor,
-        "float_cap": cap,
-        "float_floor": floor,
-        "float_apply_observation_shift": apply_observation_shift,
-        "float_gearing": np.ones(float_pay.shape),
-        "float_is_in_arrears": True,
-        "float_fixing_days": int(p.fixing_days),
-    }
-
-
-def _irs_schedule_bounds(product: IRS, asof: str | None) -> Tuple[float, float]:
-    if product.start_date and asof:
-        start = _normalize_asof_date(product.start_date)
-        ref = _normalize_asof_date(asof)
-        start_offset = (datetime.strptime(start, "%Y-%m-%d") - datetime.strptime(ref, "%Y-%m-%d")).days / 365.25
-    else:
-        start_offset = 0.0
-    if product.end_date and asof:
-        end = _normalize_asof_date(product.end_date)
-        ref = _normalize_asof_date(asof)
-        end_offset = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(ref, "%Y-%m-%d")).days / 365.25
-    else:
-        end_offset = start_offset + float(product.maturity_years)
-    end_offset = max(end_offset, start_offset + 1.0 / 365.25)
-    return float(start_offset), float(end_offset)
-
-
-def _schedule_periods(start: float, end: float, tenor: str, rule: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    step = _tenor_to_years(tenor)
-    if step <= 0.0:
-        raise EngineRunError(f"Unsupported IRS tenor '{tenor}'")
-    rule_name = str(rule or "Forward").strip().lower()
-    starts: List[float] = []
-    stops: List[float] = []
-    if rule_name == "backward":
-        current = float(end)
-        while current > start + 1.0e-12:
-            prev = max(start, current - step)
-            starts.append(prev)
-            stops.append(current)
-            current = prev
-        starts.reverse()
-        stops.reverse()
-    else:
-        current = float(start)
-        while current < end - 1.0e-12:
-            nxt = min(end, current + step)
-            starts.append(current)
-            stops.append(nxt)
-            current = nxt
-    start_arr = np.asarray(starts, dtype=float)
-    stop_arr = np.asarray(stops, dtype=float)
-    return stop_arr.copy(), start_arr, stop_arr
-
-
-def _tenor_to_years(tenor: str) -> float:
-    text = str(tenor).strip().upper()
-    m = re.fullmatch(r"(\d+)([DWMY])", text)
-    if not m:
-        return 0.0
-    n = float(m.group(1))
-    unit = m.group(2)
-    if unit == "D":
-        return n / 365.25
-    if unit == "W":
-        return (7.0 * n) / 365.25
-    if unit == "M":
-        return n / 12.0
-    return n
-
-
 def _counterparty_for_netting(snapshot: XVASnapshot, netting_set: str) -> str:
     for t in snapshot.portfolio.trades:
         if t.netting_set == netting_set:
@@ -7663,14 +7430,6 @@ def _market_yield_spread(snapshot: XVASnapshot, ccy: str, curve_name: str | None
     if not vals:
         return None
     return float(np.mean(vals))
-
-
-def _trade_notional(trade: Trade) -> float:
-    p = trade.product
-    n = getattr(p, "notional", None)
-    if isinstance(n, (int, float)):
-        return abs(float(n))
-    return 0.0
 
 
 def _spot_from_quotes(pair6: str, inputs: _PythonLgmInputs, default: float = 1.0) -> float:
