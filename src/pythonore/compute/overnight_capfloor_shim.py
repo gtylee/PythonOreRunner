@@ -937,6 +937,12 @@ def capfloor_surface_rate_computation_period(snapshot: Any, *, ccy: str) -> str 
     cached = _CAPFLOOR_SURFACE_PERIOD_CACHE.get(cache_key)
     if cached is not None or cache_key in _CAPFLOOR_SURFACE_PERIOD_CACHE:
         return cached
+    if hasattr(snapshot, "config"):
+        config = _capfloor_curve_config(snapshot, ccy=ccy)
+        configured_period = str(config.get("RateComputationPeriod", "")).strip()
+        if configured_period:
+            _CAPFLOOR_SURFACE_PERIOD_CACHE[cache_key] = configured_period
+            return configured_period
     for quote in snapshot.market.raw_quotes:
         raw_key = str(getattr(quote, "key", "")).strip().upper()
         if not raw_key.startswith(f"CAPFLOOR/RATE_NVOL/{ccy.upper()}/"):

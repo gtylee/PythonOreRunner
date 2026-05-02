@@ -553,7 +553,7 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
         ):
             pure_result = adapter.run(pure_snapshot, mapped=map_snapshot(pure_snapshot), run_id="example59-cap-pure-parity")
 
-        assert math.isclose(float(pure_result.pv_total), ore_npv_base, rel_tol=0.0, abs_tol=5.0)
+        assert math.isclose(float(pure_result.pv_total), ore_npv_base, rel_tol=0.0, abs_tol=4.0)
 
         replay_snapshot = replace(
             snapshot,
@@ -582,6 +582,13 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
         )
     finally:
         tmp.cleanup()
+
+
+def test_capfloor_surface_rate_computation_period_uses_curve_config_not_quote_tenor():
+    snapshot = XVALoader.from_files(str(TOOLS_DIR / "Examples" / "Legacy" / "Example_59" / "Input"), ore_file="ore.xml")
+    overnight_shim_mod._CAPFLOOR_SURFACE_PERIOD_CACHE.clear()
+
+    assert overnight_shim_mod.capfloor_surface_rate_computation_period(snapshot, ccy="USD") == "3M"
 
 
 def test_example63_xccy_notional_rows_follow_fx_reset_ladder():
