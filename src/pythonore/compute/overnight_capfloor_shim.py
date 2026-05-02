@@ -1369,6 +1369,18 @@ def price_overnight_capfloor_coupon_paths(
         floor = leg.get("floor")
         cap = leg.get("cap")
         if local_cap_floor:
+            if naked_option:
+                coupons[i, :] = pricer.global_coupon_rate(
+                    raw_rate=raw_rate,
+                    cap=cap,
+                    floor=floor,
+                    naked_option=True,
+                    expiry_time=float(expiry_times[i]),
+                    fixing_date=fixing_dates[i] if i < len(fixing_dates) else None,
+                    fixing_dates=fixing_dates,
+                    asof_date=asof_date,
+                )
+                continue
             coupons[i, :] = pricer.local_coupon_rate(
                 raw_rate=raw_rate,
                 cap=cap,

@@ -221,6 +221,7 @@
 		<CapFloorVolatility key="GBP-LIBOR-6M">CapFloorVolatility/GBP/GBP</CapFloorVolatility>
 		<CapFloorVolatility key="MXN-TIIE-28D">CapFloorVolatility/MXN/MXN</CapFloorVolatility>
 		<CapFloorVolatility key="USD-FedFunds">CapFloorVolatility/USD/USD</CapFloorVolatility>
+		<CapFloorVolatility key="USD-LIBOR-3M">CapFloorVolatility/USD-LIBOR-3M/USD-LIBOR-3M</CapFloorVolatility>
 		<CapFloorVolatility key="USD-SOFR">CapFloorVolatility/USD-SOFR/USD-SOFR</CapFloorVolatility>
 		<CapFloorVolatility key="USD-SOFR-3M">CapFloorVolatility/USD-SOFR-3M/USD-SOFR-3M</CapFloorVolatility>
 	</CapFloorVolatilities>

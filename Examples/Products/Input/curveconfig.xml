@@ -431,6 +431,21 @@
 			</ProxyConfig>
 			<Report/>
 		</CapFloorVolatility>
+		<CapFloorVolatility>
+			<CurveId>USD-LIBOR-3M</CurveId>
+			<CurveDescription>USD-LIBOR-3M vols proxied by SOFR vols</CurveDescription>
+			<ProxyConfig>
+				<Source>
+					<CurveId>CapFloorVolatility/USD-SOFR/USD-SOFR</CurveId>
+					<Index>USD-SOFR</Index>
+					<RateComputationPeriod>3M</RateComputationPeriod>
+				</Source>
+				<Target>
+					<Index>USD-LIBOR-3M</Index>
+				</Target>
+			</ProxyConfig>
+			<Report/>
+		</CapFloorVolatility>
 	</CapFloorVolatilities>
 	<CDSVolatilities>
 		<CDSVolatility>

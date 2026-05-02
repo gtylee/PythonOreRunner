@@ -597,6 +597,7 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
     (
         (False, False, 700.0),
         (True, False, 1000.0),
+        (True, True, 35.0),
     ),
 )
 def test_example59_overnight_floor_local_and_global_coupon_parity(local_cap_floor, naked_option, abs_tol):
@@ -1453,6 +1454,7 @@ def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_pat
         text=True,
         timeout=240,
     )
+    assert "did not find capfloor curve for key" not in (case_root / "Output" / "log.txt").read_text(errors="ignore")
     with (case_root / "Output" / "npv.csv").open(newline="", encoding="utf-8") as handle:
         ore_npvs = {
             row.get("TradeId") or row.get("#TradeId"): float(row["NPV(Base)"])
@@ -1465,6 +1467,9 @@ def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_pat
         ("CAP_USD_SOFR3M_0001", 6000.0),
         ("FLOOR_USD_SOFR3M_0001", 1500.0),
         ("FLOOR_USD_SOFR3M_FORWARD_0001", 1500.0),
+        ("CAP_USD_LIB3M_0001", 5000.0),
+        ("FLOOR_USD_LIB3M_0001", 500.0),
+        ("CAP_USD_LIB3M_SHORT_GEARED_0001", 75000.0),
     ):
         trade = next(t for t in base_snapshot.portfolio.trades if t.trade_id == trade_id)
         snapshot = replace(
