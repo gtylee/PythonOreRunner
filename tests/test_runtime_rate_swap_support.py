@@ -517,7 +517,6 @@ def test_generic_rate_swap_parses_xccy_fx_reset_metadata():
 def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
     if not LOCAL_ORE_BINARY.exists():
         return
-    pytest.xfail("Example_59 Cap_USD_SOFR still uses the local overnight cap/floor shim; exact QuantExt parity is not wired in")
     tmp, case_root = _clone_pricing_only_case("Example_59", trade_ids=("Cap_USD_SOFR",))
     try:
         subprocess.run(
@@ -542,6 +541,7 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
                     **dict(snapshot.config.params),
                     "python.use_flows_csv": "Y",
                     "python.use_ore_output_curves": "Y",
+                    "python.use_ore_flow_amounts_t0": "Y",
                 },
             ),
         )
