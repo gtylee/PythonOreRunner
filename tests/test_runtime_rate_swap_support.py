@@ -129,6 +129,14 @@ def _clone_sofr_averaging_case(
     return tmp, case_root
 
 
+def _set_xml_child(parent: ET.Element, tag: str, text: str) -> ET.Element:
+    node = parent.find(f"./{tag}")
+    if node is None:
+        node = ET.SubElement(parent, tag)
+    node.text = text
+    return node
+
+
 def _build_xccy_basis_trade(
     *,
     trade_id: str,
@@ -580,6 +588,67 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
             rel_tol=1.0e-12,
             abs_tol=1.0e-9,
         )
+    finally:
+        tmp.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("local_cap_floor", "naked_option", "abs_tol"),
+    (
+        (False, False, 700.0),
+        (True, False, 1000.0),
+    ),
+)
+def test_example59_overnight_floor_local_and_global_coupon_parity(local_cap_floor, naked_option, abs_tol):
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_pricing_only_case("Example_59", trade_ids=("Cap_USD_SOFR",))
+    try:
+        portfolio_path = case_root / "Input" / "portfolio.xml"
+        portfolio = ET.parse(portfolio_path)
+        floating_data = portfolio.getroot().find("./Trade[@id='Cap_USD_SOFR']/SwapData/LegData/FloatingLegData")
+        assert floating_data is not None
+        _set_xml_child(floating_data, "NakedOption", "true" if naked_option else "false")
+        _set_xml_child(floating_data, "LocalCapFloor", "true" if local_cap_floor else "false")
+        portfolio.write(portfolio_path, encoding="utf-8", xml_declaration=True)
+
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        with (case_root / "Output" / "npv.csv").open(newline="", encoding="utf-8") as handle:
+            ore_row = next(row for row in csv.DictReader(handle) if (row.get("TradeId") or row.get("#TradeId")) == "Cap_USD_SOFR")
+        ore_npv_base = float(ore_row["NPV(Base)"])
+
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=8,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.use_flows_csv": "Y",
+                    "python.use_ore_output_curves": "Y",
+                    "python.use_ore_flow_amounts_t0": "N",
+                    "python.progress": "N",
+                },
+            ),
+        )
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            result = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id=f"example59-overnight-floor-local-{local_cap_floor}",
+            )
+
+        assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=0.0, abs_tol=abs_tol)
     finally:
         tmp.cleanup()
 
@@ -1206,6 +1275,49 @@ def test_geared_usd_sofr_ois_matches_ore_and_scales_coupon_forward_only():
         geared_tmp.cleanup()
 
 
+def test_averaged_sofr_floor_price_only_matches_ore_cashflow_parity():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_sofr_averaging_case(
+        "USD_SOFRAveragingFloored",
+        gearing=1.0,
+        spread=0.0,
+    )
+    try:
+        portfolio_path = case_root / "Input" / "portfolio.xml"
+        portfolio = ET.parse(portfolio_path)
+        floating_data = portfolio.getroot().find("./Trade[@id='USD_SOFR_OIS_AVG_TRUE']/SwapData/LegData[2]/FloatingLegData")
+        assert floating_data is not None
+        floors = floating_data.find("./Floors")
+        if floors is None:
+            floors = ET.SubElement(floating_data, "Floors")
+        _set_xml_child(floors, "Floor", "0.052")
+        _set_xml_child(floating_data, "NakedOption", "false")
+        _set_xml_child(floating_data, "LocalCapFloor", "false")
+        portfolio.write(portfolio_path, encoding="utf-8", xml_declaration=True)
+
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        payload = ore_snapshot_cli._compute_price_only_case(
+            case_root / "Input" / "ore.xml",
+            anchor_t0_npv=False,
+            use_reference_artifacts=True,
+        )
+
+        assert math.isfinite(float(payload["pricing"]["ore_t0_npv"]))
+        assert math.isfinite(float(payload["pricing"]["py_t0_npv"]))
+        assert payload["pricing"]["leg_source"] == "flows"
+        assert payload["pricing"]["t0_npv_abs_diff"] < 0.05
+    finally:
+        tmp.cleanup()
+
+
 def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orientation():
     snapshot = XVALoader.from_files(
         str(TOOLS_DIR / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot_134PerType" / "Input"),
@@ -1325,6 +1437,62 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
+
+
+def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_path):
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_CapFloorOreParity"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+
+    subprocess.run(
+        [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+        cwd=case_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+    with (case_root / "Output" / "npv.csv").open(newline="", encoding="utf-8") as handle:
+        ore_npvs = {
+            row.get("TradeId") or row.get("#TradeId"): float(row["NPV(Base)"])
+            for row in csv.DictReader(handle)
+            if row.get("NPV(Base)") not in {"", "#N/A", None}
+        }
+
+    base_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    for trade_id, abs_tol in (
+        ("CAP_USD_SOFR3M_0001", 6000.0),
+        ("FLOOR_USD_SOFR3M_0001", 1500.0),
+        ("FLOOR_USD_SOFR3M_FORWARD_0001", 1500.0),
+    ):
+        trade = next(t for t in base_snapshot.portfolio.trades if t.trade_id == trade_id)
+        snapshot = replace(
+            base_snapshot,
+            portfolio=replace(base_snapshot.portfolio, trades=(trade,)),
+            config=replace(
+                base_snapshot.config,
+                num_paths=8,
+                params={
+                    **dict(base_snapshot.config.params),
+                    "python.use_ore_output_curves": "Y",
+                    "python.progress": "N",
+                    "python.use_ore_flow_amounts_t0": "N",
+                },
+            ),
+        )
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            result = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id=f"generated-sofr-capfloor-ore-parity-{trade_id.lower()}",
+            )
+        ore_npv = ore_npvs[trade_id]
+        py_npv = float(result.pv_total)
+        assert math.copysign(1.0, py_npv) == math.copysign(1.0, ore_npv)
+        assert abs(py_npv - ore_npv) <= abs_tol
 
 
 @pytest.mark.parametrize("count_per_type", (1, 5))

@@ -1250,6 +1250,17 @@ def price_average_overnight_coupon_paths(
             )
         except Exception:
             coupons[i, :] = 0.0
+    if leg.get("cap") is not None or leg.get("floor") is not None:
+        naked_option = bool(leg.get("naked_option", False))
+        for i in range(start.size):
+            coupons[i, :] = _apply_local_cap_floor(
+                runtime,
+                coupons[i, :],
+                cap=leg.get("cap"),
+                floor=leg.get("floor"),
+                naked_option=naked_option,
+                option_stddev=np.zeros_like(x_arr, dtype=float),
+            )
     return coupons
 
 
