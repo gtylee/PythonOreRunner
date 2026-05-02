@@ -67,6 +67,9 @@ def _trade_blocks(count_per_type: int) -> list[str]:
             _cashflow_trade_xml(suffix),
             _swaption_trade_xml(suffix),
             _bermudan_swaption_trade_xml(suffix),
+            _bermudan_receiver_put_swaption_trade_xml(suffix),
+            _bermudan_short_call_swaption_trade_xml(suffix),
+            _bermudan_past_exercise_swaption_trade_xml(suffix),
             _cms_trade_xml(suffix),
             _cmsspread_trade_xml(suffix),
             _digital_cmsspread_trade_xml(suffix),
@@ -764,9 +767,69 @@ def _swaption_trade_xml(suffix: str) -> str:
 
 
 def _bermudan_swaption_trade_xml(suffix: str) -> str:
+    return _bermudan_swaption_template(
+        trade_id=f"BERMUDAN_SWAPTION_USD_{suffix}",
+        suffix=suffix,
+        long_short="Long",
+        option_type="Call",
+        fixed_payer="false",
+        float_payer="true",
+        fixed_rate="0.039",
+    )
+
+
+def _bermudan_receiver_put_swaption_trade_xml(suffix: str) -> str:
+    return _bermudan_swaption_template(
+        trade_id=f"BERMUDAN_SWAPTION_USD_RECEIVER_PUT_{suffix}",
+        suffix=suffix,
+        long_short="Long",
+        option_type="Put",
+        fixed_payer="true",
+        float_payer="false",
+        fixed_rate="0.041",
+    )
+
+
+def _bermudan_short_call_swaption_trade_xml(suffix: str) -> str:
+    return _bermudan_swaption_template(
+        trade_id=f"BERMUDAN_SWAPTION_USD_SHORT_CALL_{suffix}",
+        suffix=suffix,
+        long_short="Short",
+        option_type="Call",
+        fixed_payer="false",
+        float_payer="true",
+        fixed_rate="0.0385",
+    )
+
+
+def _bermudan_past_exercise_swaption_trade_xml(suffix: str) -> str:
+    return _bermudan_swaption_template(
+        trade_id=f"BERMUDAN_SWAPTION_USD_PAST_EXERCISE_{suffix}",
+        suffix=suffix,
+        long_short="Long",
+        option_type="Call",
+        fixed_payer="false",
+        float_payer="true",
+        fixed_rate="0.0395",
+        include_past_exercise=True,
+    )
+
+
+def _bermudan_swaption_template(
+    *,
+    trade_id: str,
+    suffix: str,
+    long_short: str,
+    option_type: str,
+    fixed_payer: str,
+    float_payer: str,
+    fixed_rate: str,
+    include_past_exercise: bool = False,
+) -> str:
     start_year = 2027 + ((int(suffix) - 1) % 2)
     end_year = start_year + 10
-    return f"""  <Trade id="BERMUDAN_SWAPTION_USD_{suffix}">
+    past_exercise = "          <ExerciseDate>2024-02-10</ExerciseDate>\n" if include_past_exercise else ""
+    return f"""  <Trade id="{trade_id}">
     <TradeType>Swaption</TradeType>
     <Envelope>
       <CounterParty>CPTY_A</CounterParty>
@@ -775,12 +838,13 @@ def _bermudan_swaption_trade_xml(suffix: str) -> str:
     </Envelope>
     <SwaptionData>
       <OptionData>
-        <LongShort>Long</LongShort>
-        <OptionType>Call</OptionType>
+        <LongShort>{long_short}</LongShort>
+        <OptionType>{option_type}</OptionType>
         <Style>Bermudan</Style>
         <Settlement>Physical</Settlement>
         <PayOffAtExpiry>false</PayOffAtExpiry>
         <ExerciseDates>
+{past_exercise.rstrip()}
           <ExerciseDate>{start_year}-02-10</ExerciseDate>
           <ExerciseDate>{start_year + 1}-02-10</ExerciseDate>
           <ExerciseDate>{start_year + 2}-02-10</ExerciseDate>
@@ -788,7 +852,7 @@ def _bermudan_swaption_trade_xml(suffix: str) -> str:
       </OptionData>
       <LegData>
         <LegType>Floating</LegType>
-        <Payer>true</Payer>
+        <Payer>{float_payer}</Payer>
         <Currency>USD</Currency>
         <Notionals>
           <Notional>10000000</Notional>
@@ -816,7 +880,7 @@ def _bermudan_swaption_trade_xml(suffix: str) -> str:
       </LegData>
       <LegData>
         <LegType>Fixed</LegType>
-        <Payer>false</Payer>
+        <Payer>{fixed_payer}</Payer>
         <Currency>USD</Currency>
         <Notionals>
           <Notional>10000000</Notional>
@@ -825,7 +889,7 @@ def _bermudan_swaption_trade_xml(suffix: str) -> str:
         <PaymentConvention>F</PaymentConvention>
         <FixedLegData>
           <Rates>
-            <Rate>0.039</Rate>
+            <Rate>{fixed_rate}</Rate>
           </Rates>
         </FixedLegData>
         <ScheduleData>
@@ -1482,7 +1546,7 @@ def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("LIBOR Floor", count_per_type)
     yield ("Cashflow", count_per_type)
     yield ("Swaption", count_per_type)
-    yield ("Bermudan Swaption", count_per_type)
+    yield ("Bermudan Swaption", 4 * count_per_type)
     yield ("CMS Swap", count_per_type)
     yield ("CMS Spread Swap", count_per_type)
     yield ("Digital CMS Spread Swap", count_per_type)

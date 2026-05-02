@@ -1210,6 +1210,55 @@ def test_bermudan_swaption_exercise_sign_follows_option_type_not_fixed_leg_orien
     assert _exercise_sign(trade.product) == 1.0
 
 
+def test_generated_all_rates_smoke_includes_bermudan_variants(tmp_path):
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_BermudanVariants"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    trades = {t.trade_id: t for t in snapshot.portfolio.trades}
+    expected_ids = {
+        "BERMUDAN_SWAPTION_USD_0001",
+        "BERMUDAN_SWAPTION_USD_RECEIVER_PUT_0001",
+        "BERMUDAN_SWAPTION_USD_SHORT_CALL_0001",
+        "BERMUDAN_SWAPTION_USD_PAST_EXERCISE_0001",
+    }
+    assert expected_ids <= set(trades)
+
+    base = trades["BERMUDAN_SWAPTION_USD_0001"].product
+    receiver_put = trades["BERMUDAN_SWAPTION_USD_RECEIVER_PUT_0001"].product
+    short_call = trades["BERMUDAN_SWAPTION_USD_SHORT_CALL_0001"].product
+    past_exercise = trades["BERMUDAN_SWAPTION_USD_PAST_EXERCISE_0001"].product
+
+    assert base.option_type == "Call"
+    assert base.long_short == "Long"
+    assert base.pay_fixed is False
+    assert _exercise_sign(base) == 1.0
+
+    assert receiver_put.option_type == "Put"
+    assert receiver_put.long_short == "Long"
+    assert receiver_put.pay_fixed is True
+    assert _exercise_sign(receiver_put) == -1.0
+
+    assert short_call.option_type == "Call"
+    assert short_call.long_short == "Short"
+    assert short_call.pay_fixed is False
+    assert _exercise_sign(short_call) == -1.0
+
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    mapped = map_snapshot(snapshot)
+    state = adapter._build_bermudan_swaption_state(
+        trades["BERMUDAN_SWAPTION_USD_PAST_EXERCISE_0001"],
+        snapshot,
+        mapped,
+    )
+    assert state is not None
+    exercise_times = np.asarray(state["definition"].exercise_times, dtype=float)
+    assert len(past_exercise.exercise_dates) == 4
+    assert exercise_times.size == 3
+    assert np.all(exercise_times > 0.0)
+
+
 def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     case_root = tmp_path / "USD_AllRatesProductsSnapshot_Variants"
     broad_rates_example._write_files(case_root, count_per_type=1)
