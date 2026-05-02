@@ -648,6 +648,7 @@ class PythonLgmAdapter:
         *,
         torch_backend: tuple[object, ...],
         curve_cache: Dict[tuple[str, str], object],
+        snapshot: XVASnapshot | None = None,
     ) -> np.ndarray:
         kind = str(leg.get("kind", "")).upper()
         torch_curve_ctor, _, _, torch_device, _, torch_par_swap = torch_backend
@@ -4863,6 +4864,7 @@ class PythonLgmAdapter:
                     x_t,
                     torch_backend=ctx.irs_backend,
                     curve_cache=ctx.torch_curve_cache,
+                    snapshot=ctx.snapshot,
                 )[live, :]
                 amount = sign * notionals[live, None] * accr[live, None] * coupons
                 vals[i, :] += np.sum(amount * disc, axis=0)

@@ -1776,6 +1776,53 @@ def test_python_runtime_reprices_example25_cmsspread_from_input_market():
         tmp.cleanup()
 
 
+@pytest.mark.parametrize("trade_id", ("CMS_Spread_Swap", "Digital_CMS_Spread"))
+def test_example25_cmsspread_replay_mode_anchors_rate_swap_t0_to_ore_npv(trade_id):
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_pricing_only_case("Example_25", trade_ids=(trade_id,))
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        with (case_root / "Output" / "npv.csv").open(newline="", encoding="utf-8") as handle:
+            ore_npv = float(next(csv.DictReader(handle))["NPV(Base)"])
+
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=4,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.use_ore_flow_amounts_t0": "Y",
+                    "python.progress": "N",
+                    "python.store_npv_cube_paths": "Y",
+                },
+            ),
+        )
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            result = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
+                snapshot,
+                mapped=map_snapshot(snapshot),
+                run_id=f"{trade_id.lower()}-ore-replay",
+            )
+
+        assert math.isclose(float(result.pv_total), ore_npv, rel_tol=1.0e-12, abs_tol=1.0e-8)
+        cube_t0 = float(result.cubes["npv_cube"].payload[trade_id]["npv_mean"][0])
+        assert math.isclose(cube_t0, ore_npv, rel_tol=1.0e-12, abs_tol=1.0e-8)
+    finally:
+        tmp.cleanup()
+
+
 def test_example25_ore_output_curves_alias_cms_indices_to_underlying_forward_curve():
     if not LOCAL_ORE_BINARY.exists():
         return
