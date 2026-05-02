@@ -1274,13 +1274,31 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     trade_ids = {t.trade_id for t in snapshot.portfolio.trades}
     assert "CAP_USD_SOFR3M_0001" in trade_ids
     assert "FLOOR_USD_LIB3M_0001" in trade_ids
+    assert "FLOOR_USD_SOFR3M_FORWARD_0001" in trade_ids
+    assert "CAP_USD_LIB3M_SHORT_GEARED_0001" in trade_ids
     assert "BASIS_USD_LIB3M_SIFMA_0001" in trade_ids
     assert "BASIS_USD_SOFR3M_SIFMA_0001" in trade_ids
     assert "XCCY_USD_SOFR_JPY_TONAR_0001" in trade_ids
 
-    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XCCY_USD_SOFR_JPY_TONAR_0001")
     adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
     adapter._ensure_py_lgm_imports()
+
+    forward_floor = next(t for t in snapshot.portfolio.trades if t.trade_id == "FLOOR_USD_SOFR3M_FORWARD_0001")
+    forward_floor_state = adapter._build_generic_capfloor_state(forward_floor, snapshot)
+    assert forward_floor_state is not None
+    assert forward_floor_state["definition"].option_type == "floor"
+    assert np.allclose(forward_floor_state["definition"].gearing, 1.25)
+    assert np.allclose(forward_floor_state["definition"].spread, 0.0010)
+
+    short_cap = next(t for t in snapshot.portfolio.trades if t.trade_id == "CAP_USD_LIB3M_SHORT_GEARED_0001")
+    short_cap_state = adapter._build_generic_capfloor_state(short_cap, snapshot)
+    assert short_cap_state is not None
+    assert short_cap_state["definition"].option_type == "cap"
+    assert short_cap_state["definition"].position == -1.0
+    assert np.allclose(short_cap_state["definition"].gearing, 1.50)
+    assert np.allclose(short_cap_state["definition"].spread, 0.0010)
+
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XCCY_USD_SOFR_JPY_TONAR_0001")
     state = adapter._build_generic_rate_swap_legs(trade, snapshot)
     assert state is not None
     usd_leg = next(leg for leg in state["rate_legs"] if leg["ccy"] == "USD")

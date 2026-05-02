@@ -62,8 +62,10 @@ def _trade_blocks(count_per_type: int) -> list[str]:
             _amortizing_irs_trade_xml(suffix),
             _cap_trade_xml(suffix),
             _floor_trade_xml(suffix),
+            _sofr_forward_floor_trade_xml(suffix),
             _native_cap_trade_xml(suffix),
             _native_floor_trade_xml(suffix),
+            _native_short_geared_cap_trade_xml(suffix),
             _cashflow_trade_xml(suffix),
             _swaption_trade_xml(suffix),
             _bermudan_swaption_trade_xml(suffix),
@@ -327,6 +329,55 @@ def _floor_trade_xml(suffix: str) -> str:
   </Trade>"""
 
 
+def _sofr_forward_floor_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="FLOOR_USD_SOFR3M_FORWARD_{suffix}">
+    <TradeType>CapFloor</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <CapFloorData>
+      <LongShort>Long</LongShort>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <DayCounter>ACT</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <Notionals>
+          <Notional>1000000</Notional>
+        </Notionals>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2030-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+        <FloatingLegData>
+          <Index>USD-SOFR-3M</Index>
+          <Spreads>
+            <Spread>0.0010</Spread>
+          </Spreads>
+          <Gearings>
+            <Gearing>1.25</Gearing>
+          </Gearings>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>0</FixingDays>
+        </FloatingLegData>
+      </LegData>
+      <Caps/>
+      <Floors>
+        <Floor>0.025</Floor>
+      </Floors>
+    </CapFloorData>
+  </Trade>"""
+
+
 def _native_cap_trade_xml(suffix: str) -> str:
     notionals = "\n".join(
         f"          <Notional>{n}</Notional>"
@@ -423,6 +474,59 @@ def _native_floor_trade_xml(suffix: str) -> str:
       <Floors>
         <Floor>0.015</Floor>
       </Floors>
+    </CapFloorData>
+  </Trade>"""
+
+
+def _native_short_geared_cap_trade_xml(suffix: str) -> str:
+    notionals = "\n".join(
+        f"          <Notional>{n}</Notional>"
+        for n in (2_000_000, 1_900_000, 1_800_000, 1_700_000, 1_600_000, 1_500_000, 1_400_000, 1_300_000)
+    )
+    return f"""  <Trade id="CAP_USD_LIB3M_SHORT_GEARED_{suffix}">
+    <TradeType>CapFloor</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <CapFloorData>
+      <LongShort>Short</LongShort>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <DayCounter>A360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <Notionals>
+{notionals}
+        </Notionals>
+        <ScheduleData>
+          <Rules>
+            <StartDate>{ASOF_DATE}</StartDate>
+            <EndDate>2027-02-10</EndDate>
+            <Tenor>3M</Tenor>
+            <Calendar>USD</Calendar>
+            <Convention>MF</Convention>
+            <Rule>Forward</Rule>
+          </Rules>
+        </ScheduleData>
+        <FloatingLegData>
+          <Index>USD-LIBOR-3M</Index>
+          <Spreads>
+            <Spread>0.0010</Spread>
+          </Spreads>
+          <Gearings>
+            <Gearing>1.50</Gearing>
+          </Gearings>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>2</FixingDays>
+        </FloatingLegData>
+      </LegData>
+      <Caps>
+        <Cap>0.040</Cap>
+      </Caps>
+      <Floors/>
     </CapFloorData>
   </Trade>"""
 
@@ -1542,8 +1646,10 @@ def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("Amortizing IRS", count_per_type)
     yield ("SOFR Cap", count_per_type)
     yield ("SOFR Floor", count_per_type)
+    yield ("SOFR Forward Floor", count_per_type)
     yield ("LIBOR Cap", count_per_type)
     yield ("LIBOR Floor", count_per_type)
+    yield ("LIBOR Short Geared Cap", count_per_type)
     yield ("Cashflow", count_per_type)
     yield ("Swaption", count_per_type)
     yield ("Bermudan Swaption", 4 * count_per_type)

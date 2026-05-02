@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -210,32 +211,74 @@ def _minimal_python_lgm_inputs(*, model_ccy: str, fx_spots: dict[str, float]) ->
     )
 
 
-def _generic_capfloor_trade_xml() -> str:
-    return """
+def _torch_irs_backend(device: str = "cpu"):
+    from pythonore.compute.lgm_torch_xva import (
+        TorchDiscountCurve,
+        capfloor_npv_paths_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        par_swap_rate_paths_torch,
+        price_plain_rate_leg_paths_torch,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+    )
+
+    return (
+        TorchDiscountCurve,
+        swap_npv_paths_from_ore_legs_dual_curve_torch,
+        deflate_lgm_npv_paths_torch_batched,
+        device,
+        price_plain_rate_leg_paths_torch,
+        par_swap_rate_paths_torch,
+        capfloor_npv_paths_torch,
+    )
+
+
+def _generic_capfloor_trade_xml(
+    *,
+    option: str = "cap",
+    long_short: str = "Long",
+    ccy: str = "EUR",
+    index: str = "EUR-EURIBOR-6M",
+    tenor: str = "6M",
+    calendar: str = "TARGET",
+    day_counter: str = "A360",
+    fixing_days: int = 2,
+    in_arrears: bool = False,
+    gearing: float = 1.0,
+    spread: float = 0.0,
+    strike: float | None = None,
+) -> str:
+    option = option.strip().lower()
+    if option not in {"cap", "floor"}:
+        raise ValueError(f"unsupported capfloor option {option!r}")
+    strike = 0.03 if strike is None and option == "cap" else 0.01 if strike is None else float(strike)
+    caps = f"<Caps><Cap>{strike}</Cap></Caps>" if option == "cap" else "<Caps/>"
+    floors = f"<Floors><Floor>{strike}</Floor></Floors>" if option == "floor" else "<Floors/>"
+    return f"""
 <CapFloorData>
-  <LongShort>Long</LongShort>
-  <Caps><Cap>0.03</Cap></Caps>
+  <LongShort>{long_short}</LongShort>
+  {caps}
+  {floors}
   <LegData>
     <LegType>Floating</LegType>
-    <Currency>EUR</Currency>
+    <Currency>{ccy}</Currency>
     <PaymentConvention>F</PaymentConvention>
-    <DayCounter>A360</DayCounter>
+    <DayCounter>{day_counter}</DayCounter>
     <Notionals><Notional>1000000</Notional></Notionals>
     <ScheduleData>
       <Rules>
         <StartDate>2026-03-08</StartDate>
         <EndDate>2027-09-08</EndDate>
-        <Tenor>6M</Tenor>
-        <Calendar>TARGET</Calendar>
+        <Tenor>{tenor}</Tenor>
+        <Calendar>{calendar}</Calendar>
         <Convention>F</Convention>
       </Rules>
     </ScheduleData>
     <FloatingLegData>
-      <Index>EUR-EURIBOR-6M</Index>
-      <FixingDays>2</FixingDays>
-      <IsInArrears>false</IsInArrears>
-      <Spreads><Spread>0.0</Spread></Spreads>
-      <Gearings><Gearing>1.0</Gearing></Gearings>
+      <Index>{index}</Index>
+      <FixingDays>{fixing_days}</FixingDays>
+      <IsInArrears>{"true" if in_arrears else "false"}</IsInArrears>
+      <Spreads><Spread>{spread}</Spread></Spreads>
+      <Gearings><Gearing>{gearing}</Gearing></Gearings>
     </FloatingLegData>
   </LegData>
 </CapFloorData>
@@ -1420,29 +1463,72 @@ def test_torch_generic_capfloor_matches_numpy_runtime():
         numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="capfloor-numpy")
 
     torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
-    from pythonore.compute.lgm_torch_xva import (
-        TorchDiscountCurve,
-        capfloor_npv_paths_torch,
-        deflate_lgm_npv_paths_torch_batched,
-        par_swap_rate_paths_torch,
-        price_plain_rate_leg_paths_torch,
-        swap_npv_paths_from_ore_legs_dual_curve_torch,
-    )
-
-    backend = (
-        TorchDiscountCurve,
-        swap_npv_paths_from_ore_legs_dual_curve_torch,
-        deflate_lgm_npv_paths_torch_batched,
-        "cpu",
-        price_plain_rate_leg_paths_torch,
-        par_swap_rate_paths_torch,
-        capfloor_npv_paths_torch,
-    )
-    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=backend):
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
         torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="capfloor-torch")
 
     assert abs(float(torch_result.pv_total) - float(numpy_result.pv_total)) < 1.0e-8
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
+
+
+@pytest.mark.parametrize(
+    ("trade_id", "xml"),
+    (
+        ("CAP_EUR_FORWARD_GEARED", _generic_capfloor_trade_xml(option="cap", gearing=1.35, spread=0.001, strike=0.028)),
+        ("FLOOR_EUR_SHORT", _generic_capfloor_trade_xml(option="floor", long_short="Short", strike=0.012)),
+        (
+            "CAP_USD_SOFR_IN_ARREARS",
+            _generic_capfloor_trade_xml(
+                option="cap",
+                ccy="USD",
+                index="USD-SOFR-3M",
+                tenor="3M",
+                calendar="US",
+                fixing_days=0,
+                in_arrears=True,
+                gearing=1.20,
+                spread=-0.0005,
+                strike=0.035,
+            ),
+        ),
+    ),
+)
+def test_torch_generic_capfloor_variant_matrix_matches_numpy_runtime(trade_id, xml):
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id=trade_id,
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": xml}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("4,6M")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id=f"{trade_id.lower()}-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id=f"{trade_id.lower()}-torch")
+
+    assert math.isfinite(float(numpy_result.pv_total))
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
 
 
 def test_torch_generic_rate_swap_supports_in_arrears_non_unit_gearing():
