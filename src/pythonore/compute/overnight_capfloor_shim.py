@@ -29,6 +29,7 @@ _QL_OVERNIGHT_INDEX_CACHE: dict[tuple[str, int], Any] = {}
 _QL_CURVE_HANDLE_CACHE: dict[tuple[object, ...], Any] = {}
 _QL_OVERNIGHT_RATE_CACHE: dict[tuple[object, ...], float] = {}
 _QL_AVERAGE_OVERNIGHT_RATE_CACHE: dict[tuple[object, ...], float] = {}
+_QL_OPTIONLET_VOL_CACHE: dict[tuple[object, ...], Any] = {}
 
 
 def _past_fixing_or_none(ql_index: Any, fixing_date: Any) -> float | None:
@@ -528,6 +529,218 @@ def _parse_overnight_index_name(index_name: str) -> str | None:
     return None
 
 
+def _parse_ore_tenor_to_years(tenor: str) -> float:
+    text = str(tenor).strip().upper()
+    if not text:
+        return 0.0
+    unit = text[-1]
+    value = float(text[:-1])
+    if unit == "D":
+        return value / 365.0
+    if unit == "W":
+        return 7.0 * value / 365.0
+    if unit == "M":
+        return value / 12.0
+    if unit == "Y":
+        return value
+    return float(text)
+
+
+def _ql_calendar(name: str):
+    import QuantLib as ql
+
+    text = str(name).strip().upper()
+    if "US" in text:
+        return ql.UnitedStates(ql.UnitedStates.Settlement)
+    if "JP" in text or "JAPAN" in text:
+        return ql.Japan()
+    if "GB" in text or "UK" in text or "LONDON" in text:
+        return ql.UnitedKingdom()
+    if "CH" in text or "SWITZERLAND" in text:
+        return ql.Switzerland()
+    if "TARGET" in text or "EU" in text:
+        return ql.TARGET()
+    return ql.TARGET()
+
+
+def _ql_business_day_convention(name: str):
+    import QuantLib as ql
+
+    text = str(name).strip().upper().replace(" ", "")
+    if text in {"MF", "MODFOLLOWING", "MODIFIEDFOLLOWING"}:
+        return ql.ModifiedFollowing
+    if text in {"P", "PRECEDING"}:
+        return ql.Preceding
+    if text in {"U", "UNADJUSTED"}:
+        return ql.Unadjusted
+    return ql.Following
+
+
+def _capfloor_curve_config(snapshot: Any, *, ccy: str) -> dict[str, str]:
+    import xml.etree.ElementTree as ET
+
+    out: dict[str, str] = {}
+    xml_buffers = getattr(snapshot.config, "xml_buffers", {}) or {}
+    xml = xml_buffers.get("curveconfig.xml")
+    if not xml:
+        return out
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return out
+    ccy_upper = str(ccy).upper()
+    for node in root.findall(".//CapFloorVolatility"):
+        curve_id = (node.findtext("./CurveId") or "").strip().upper()
+        index = (node.findtext("./Index") or "").strip().upper()
+        if curve_id != ccy_upper and ccy_upper not in {curve_id[:3], index[:3]}:
+            continue
+        for key in (
+            "Calendar",
+            "BusinessDayConvention",
+            "DayCounter",
+            "InterpolationMethod",
+            "InterpolateOn",
+            "TimeInterpolation",
+            "StrikeInterpolation",
+            "InputType",
+            "VolatilityType",
+            "OutputVolatilityType",
+            "RateComputationPeriod",
+        ):
+            value = (node.findtext(f"./{key}") or "").strip()
+            if value:
+                out[key] = value
+        break
+    return out
+
+
+def _ql_optionlet_volatility(
+    runtime: Any,
+    inputs: Any,
+    snapshot: Any,
+    *,
+    ccy: str,
+) -> Any | None:
+    try:
+        import QuantLib as ql
+    except Exception:
+        return None
+
+    if str(ccy).upper() != "USD":
+        return None
+    config = _capfloor_curve_config(snapshot, ccy=ccy)
+    interpolate_on = str(config.get("InterpolateOn", "")).strip().upper()
+    input_type = str(config.get("InputType", "")).strip().upper()
+    vol_type = str(config.get("VolatilityType", "Normal")).strip().upper()
+    if interpolate_on not in {"OPTIONLETVOLATILITIES", "OPTIONLET"} or input_type not in {"TERMVOLATILITIES", ""}:
+        return None
+
+    cache_key = (
+        id(snapshot.market.raw_quotes),
+        id(inputs),
+        str(ccy).upper(),
+        tuple(sorted(config.items())),
+    )
+    cached = _QL_OPTIONLET_VOL_CACHE.get(cache_key)
+    if cached is not None or cache_key in _QL_OPTIONLET_VOL_CACHE:
+        return cached
+
+    points: dict[str, dict[float, float]] = {}
+    ccy_upper = str(ccy).upper()
+    for quote in snapshot.market.raw_quotes:
+        raw_key = str(getattr(quote, "key", "")).strip().upper()
+        if not raw_key.startswith(f"CAPFLOOR/RATE_NVOL/{ccy_upper}/"):
+            continue
+        parts = raw_key.split("/")
+        if len(parts) < 8:
+            continue
+        expiry_txt = parts[3].strip().upper()
+        strike_txt = parts[-1]
+        try:
+            points.setdefault(expiry_txt, {})[float(strike_txt)] = float(getattr(quote, "value", 0.0))
+        except Exception:
+            continue
+    if not points:
+        _QL_OPTIONLET_VOL_CACHE[cache_key] = None
+        return None
+
+    expiries = sorted(points, key=_parse_ore_tenor_to_years)
+    strikes = sorted({strike for row in points.values() for strike in row})
+    matrix = ql.Matrix(len(expiries), len(strikes))
+    for i, expiry in enumerate(expiries):
+        row = points[expiry]
+        finite_values = [v for v in row.values() if math.isfinite(float(v))]
+        fallback = float(finite_values[0]) if finite_values else 0.01
+        for j, strike in enumerate(strikes):
+            matrix[i][j] = float(row.get(strike, fallback))
+
+    eval_date = ql.DateParser.parseISO(runtime._normalized_asof(snapshot))
+    ql.Settings.instance().evaluationDate = eval_date
+    periods = [ql.Period(expiry) for expiry in expiries]
+    calendar = _ql_calendar(config.get("Calendar", ccy_upper))
+    convention = _ql_business_day_convention(config.get("BusinessDayConvention", "Following"))
+    surface = ql.CapFloorTermVolSurface(
+        0,
+        calendar,
+        convention,
+        periods,
+        strikes,
+        matrix,
+        ql.Actual365Fixed(),
+    )
+    surface.enableExtrapolation()
+
+    date_nodes = getattr(inputs, "discount_curve_dates", {}).get(ccy_upper)
+    df_nodes = getattr(inputs, "discount_curve_dfs", {}).get(ccy_upper)
+    discount_curve = runtime._resolve_index_curve(inputs, ccy_upper, f"{ccy_upper}-SOFR")
+    discount_handle = _curve_handle_from_curve(
+        eval_date,
+        discount_curve,
+        extra_times=list(getattr(inputs, "times", [])),
+        dates=list(date_nodes) if date_nodes else None,
+        dfs=list(df_nodes) if df_nodes else None,
+    )
+    period_txt = str(config.get("RateComputationPeriod", "3M") or "3M").strip() or "3M"
+    try:
+        index = ql.USDLibor(ql.Period(period_txt), discount_handle) if ccy_upper == "USD" else ql.IborIndex(
+            f"{ccy_upper}-{period_txt}",
+            ql.Period(period_txt),
+            0,
+            ql.USDCurrency() if ccy_upper == "USD" else ql.EURCurrency(),
+            calendar,
+            convention,
+            False,
+            ql.Actual360(),
+            discount_handle,
+        )
+        stripped = ql.OptionletStripper1(
+            surface,
+            index,
+            ql.nullDouble(),
+            1.0e-12,
+            100,
+            discount_handle,
+            ql.Normal if vol_type != "SHIFTEDLOGNORMAL" else ql.ShiftedLognormal,
+            0.0,
+            True,
+        )
+        first_vols = list(stripped.optionletVolatilities(0))
+        first_strikes = list(stripped.optionletStrikes(0))
+        raw_first = points[expiries[0]]
+        raw_zero = float(raw_first.get(0.0, np.interp(0.0, sorted(raw_first), [raw_first[k] for k in sorted(raw_first)])))
+        stripped_zero = float(np.interp(0.0, first_strikes, first_vols))
+        # ORE's cap/floor curve is configured with InterpolateOn=OptionletVolatilities.
+        # The local runtime still uses the raw term-vol lookup for expiry/strike
+        # interpolation, but applies the short-end bootstrap uplift implied by
+        # QuantLib's optionlet stripper. This closes the overnight floorlet scale
+        # without routing the default path through ORE output anchors.
+        adapter = stripped_zero / raw_zero if raw_zero > 0.0 and math.isfinite(stripped_zero) else None
+    except Exception:
+        adapter = None
+    _QL_OPTIONLET_VOL_CACHE[cache_key] = adapter
+    return adapter
+
+
 class ProxyOptionletVolatilityReplica:
     """Small Python replica of QuantExt::ProxyOptionletVolatility.
 
@@ -546,6 +759,7 @@ class ProxyOptionletVolatilityReplica:
         base_rate_computation_period: str,
         target_rate_computation_period: str,
         scaling_factor: float = 1.0,
+        optionlet_volatility: Any | None = None,
     ) -> None:
         self.runtime = runtime
         self.inputs = inputs
@@ -555,6 +769,7 @@ class ProxyOptionletVolatilityReplica:
         self.base_rate_computation_period = str(base_rate_computation_period).strip()
         self.target_rate_computation_period = str(target_rate_computation_period).strip()
         self.scaling_factor = float(scaling_factor)
+        self.optionlet_volatility = optionlet_volatility
 
     def atm_level(self, fixing_date: Any, rate_computation_period: str) -> float | None:
         return overnight_atm_level(
@@ -579,6 +794,22 @@ class ProxyOptionletVolatilityReplica:
 
     def volatility(self, *, expiry_time: float, strike: float, fixing_date: Any) -> float:
         adjusted_strike = self.adjusted_strike(fixing_date, strike)
+        if isinstance(self.optionlet_volatility, (float, int)):
+            return float(
+                self.runtime._capfloor_normal_vol(
+                    self.snapshot,
+                    ccy=self.ccy,
+                    expiry_time=expiry_time,
+                    strike=adjusted_strike,
+                )
+                * float(self.optionlet_volatility)
+                * self.scaling_factor
+            )
+        if self.optionlet_volatility is not None and fixing_date is not None:
+            try:
+                return float(self.optionlet_volatility.volatility(fixing_date, adjusted_strike) * self.scaling_factor)
+            except Exception:
+                pass
         return float(
             self.runtime._capfloor_normal_vol(
                 self.snapshot,
@@ -605,6 +836,7 @@ class BlackOvernightIndexedCouponPricerReplica:
         target_rate_computation_period: str,
         scaling_factor: float = 1.0,
         effective_volatility_input: bool = False,
+        optionlet_volatility: Any | None = None,
     ) -> None:
         self.runtime = runtime
         self.inputs = inputs
@@ -619,6 +851,7 @@ class BlackOvernightIndexedCouponPricerReplica:
             base_rate_computation_period=base_rate_computation_period,
             target_rate_computation_period=target_rate_computation_period,
             scaling_factor=scaling_factor,
+            optionlet_volatility=optionlet_volatility,
         )
 
     def global_coupon_rate(
@@ -832,6 +1065,12 @@ def _build_overnight_static_state(
         extra_times=list(getattr(inputs, "times", [])),
     )
     ql_index = _build_ql_overnight_index(overnight_index, overnight_handle)
+    optionlet_volatility = _ql_optionlet_volatility(
+        runtime,
+        inputs,
+        snapshot,
+        ccy=ccy,
+    )
     proxy = ProxyOptionletVolatilityReplica(
         runtime,
         inputs,
@@ -841,6 +1080,7 @@ def _build_overnight_static_state(
         base_rate_computation_period=surface_period,
         target_rate_computation_period=target_period,
         scaling_factor=1.0,
+        optionlet_volatility=optionlet_volatility,
     )
     pricer = BlackOvernightIndexedCouponPricerReplica(
         runtime,
@@ -852,6 +1092,7 @@ def _build_overnight_static_state(
         target_rate_computation_period=target_period,
         scaling_factor=1.0,
         effective_volatility_input=True,
+        optionlet_volatility=optionlet_volatility,
     )
 
     start = np.asarray(leg.get("start_time", []), dtype=float)

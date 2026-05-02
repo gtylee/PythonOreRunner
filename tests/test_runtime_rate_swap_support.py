@@ -532,7 +532,30 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
         ore_npv_base = float(ore_row["NPV(Base)"])
 
         snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
-        snapshot = replace(
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+
+        pure_snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=8,
+                params={
+                    **dict(snapshot.config.params),
+                    "python.use_flows_csv": "Y",
+                    "python.use_ore_output_curves": "Y",
+                    "python.use_ore_flow_amounts_t0": "N",
+                },
+            ),
+        )
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            pure_result = adapter.run(pure_snapshot, mapped=map_snapshot(pure_snapshot), run_id="example59-cap-pure-parity")
+
+        assert math.isclose(float(pure_result.pv_total), ore_npv_base, rel_tol=0.0, abs_tol=5.0)
+
+        replay_snapshot = replace(
             snapshot,
             config=replace(
                 snapshot.config,
@@ -545,12 +568,10 @@ def test_example59_cap_usd_sofr_matches_ore_npv_when_replaying_flows_csv():
                 },
             ),
         )
-        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
-        adapter._ensure_py_lgm_imports()
         with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
         ):
-            result = adapter.run(snapshot, mapped=map_snapshot(snapshot), run_id="example59-cap-ore-flows-parity")
+            result = adapter.run(replay_snapshot, mapped=map_snapshot(replay_snapshot), run_id="example59-cap-ore-flows-parity")
 
         assert math.isclose(float(result.pv_total), ore_npv_base, rel_tol=1.0e-12, abs_tol=1.0e-9)
         assert math.isclose(
