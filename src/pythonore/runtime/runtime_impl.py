@@ -137,6 +137,14 @@ def _is_bma_sifma_index(index_name: str) -> bool:
     return bool(re.search(r"(^|-)SIFMA($|-)|(^|-)BMA($|-)", key))
 
 
+def _default_index_for_ccy_tenor(ccy: str, tenor: str) -> str:
+    base = _default_index_for_ccy(ccy).upper()
+    tenor_key = str(tenor or "").strip().upper()
+    if not tenor_key:
+        return base
+    return re.sub(r"(\d+[YMWD])$", tenor_key, base)
+
+
 def _trade_curve_need_signature(
     trade_specs: Sequence[Any],
     swap_index_forward_tenors: Mapping[str, str],
@@ -191,9 +199,11 @@ def _derive_curve_needs_from_signature(
             if tenor:
                 needed_tenors.setdefault(ccy, set()).add(tenor)
         elif kind == "RATESWAP":
-            for leg_ccy, index_name, _, _ in spec[2]:
+            for leg_ccy, *index_names in spec[2]:
                 curve_ccy = str(leg_ccy or ccy).upper()
-                if index_name:
+                for index_name in index_names:
+                    if not index_name:
+                        continue
                     needed_forward_names.setdefault(curve_ccy, set()).add(index_name)
                     tenor = swap_index_forward_tenors.get(index_name, "")
                     if tenor:
@@ -2644,6 +2654,7 @@ class PythonLgmAdapter:
             requested_columns.update(meta["source_column"] for meta in xva_discount_meta.values())
             forward_specs: Dict[str, Dict[str, str]] = {}
             forward_names: set[str] = set()
+            swap_index_forward_tenors = self._parse_swap_index_forward_tenors(mapped.xml_buffers.get("conventions.xml", ""))
             for spec in trade_specs:
                 if spec.kind != "IRS" or spec.legs is None:
                     if spec.kind != "RateSwap" or spec.legs is None:
@@ -2652,7 +2663,14 @@ class PythonLgmAdapter:
                         for field in ("index_name", "index_name_1", "index_name_2"):
                             index_name = str(leg.get(field, "")).strip()
                             if index_name:
-                                if not _is_bma_sifma_index(index_name):
+                                mapped_tenor = swap_index_forward_tenors.get(index_name.upper(), "")
+                                if mapped_tenor:
+                                    underlying_index = _default_index_for_ccy_tenor(str(leg.get("ccy", spec.ccy)), mapped_tenor)
+                                    requested_columns.add(underlying_index)
+                                    forward_specs.setdefault(str(leg.get("ccy", spec.ccy)).upper(), {})[
+                                        _normalize_forward_tenor_family(mapped_tenor)
+                                    ] = underlying_index
+                                elif not _is_bma_sifma_index(index_name):
                                     requested_columns.add(index_name)
                                 forward_names.add(index_name.upper())
                     continue
@@ -2715,6 +2733,12 @@ class PythonLgmAdapter:
             for index_name in sorted(forward_names):
                 if index_name in curve_data and index_name not in forward_curves_by_name:
                     forward_curves_by_name[index_name] = self._curve_from_column(curve_data, index_name)
+                elif index_name not in forward_curves_by_name:
+                    mapped_tenor = _normalize_forward_tenor_family(swap_index_forward_tenors.get(index_name, ""))
+                    index_ccy = index_name.split("-", 1)[0].upper()
+                    curve = forward_curves_by_tenor.get(index_ccy, {}).get(mapped_tenor)
+                    if curve is not None:
+                        forward_curves_by_name[index_name] = curve
             for ccy, pts in (bma_ratio_curves or {}).items():
                 if not pts:
                     continue

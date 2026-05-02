@@ -1776,6 +1776,41 @@ def test_python_runtime_reprices_example25_cmsspread_from_input_market():
         tmp.cleanup()
 
 
+def test_example25_ore_output_curves_alias_cms_indices_to_underlying_forward_curve():
+    if not LOCAL_ORE_BINARY.exists():
+        return
+    tmp, case_root = _clone_pricing_only_case("Example_25", trade_ids=("CMS_Spread_Swap",))
+    try:
+        subprocess.run(
+            [str(LOCAL_ORE_BINARY), "Input/ore.xml"],
+            cwd=case_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            config=replace(
+                snapshot.config,
+                num_paths=4,
+                params={**dict(snapshot.config.params), "python.use_ore_output_curves": "Y"},
+            ),
+        )
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        adapter._ensure_py_lgm_imports()
+        with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+            "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+        ):
+            inputs = adapter._extract_inputs(snapshot, map_snapshot(snapshot))
+
+        assert inputs.forward_curves_by_name["EUR-CMS-10Y"] is inputs.forward_curves_by_name["EUR-EURIBOR-6M"]
+        assert inputs.forward_curves_by_name["EUR-CMS-2Y"] is inputs.forward_curves_by_name["EUR-EURIBOR-6M"]
+    finally:
+        tmp.cleanup()
+
+
 def test_python_runtime_supports_real_bma_basis_case_without_fallback():
     snapshot = _load_case("Examples/Legacy/Example_27/Input")
     result = _run_python(snapshot, "bma-test")
