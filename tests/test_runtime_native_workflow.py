@@ -45,6 +45,7 @@ from pythonore.runtime.runtime import (
     _parse_market_overlay,
     _quote_matches_discount_curve,
     _quote_matches_forward_curve,
+    _convert_fx_forward_npv_to_reporting_ccy,
     classify_portfolio_support,
 )
 from pythonore.compute.irs_xva_utils import curve_values
@@ -163,6 +164,50 @@ class _UnitDiscountModel:
     def discount_bond_paths(self, t, maturities, x_t, p_t, p_T):
         mats = np.asarray(maturities, dtype=float)
         return np.ones((mats.size, np.asarray(x_t, dtype=float).size), dtype=float)
+
+
+def _minimal_python_lgm_inputs(*, model_ccy: str, fx_spots: dict[str, float]) -> _PythonLgmInputs:
+    unit_curve = lambda t: 1.0
+    ccys = {model_ccy.upper()}
+    for pair in fx_spots:
+        if "/" in pair:
+            base, quote = pair.split("/", 1)
+        else:
+            base, quote = pair[:3], pair[3:6]
+        ccys.update({base.upper(), quote.upper()})
+    return _PythonLgmInputs(
+        asof="2026-03-08",
+        times=np.array([0.0], dtype=float),
+        valuation_times=np.array([0.0], dtype=float),
+        observation_times=np.array([0.0], dtype=float),
+        observation_closeout_times=np.array([0.0], dtype=float),
+        discount_curves={ccy: unit_curve for ccy in ccys},
+        forward_curves={ccy: unit_curve for ccy in ccys},
+        forward_curves_by_tenor={ccy: {} for ccy in ccys},
+        forward_curves_by_name={},
+        swap_index_forward_tenors={},
+        inflation_curves={},
+        xva_discount_curve=None,
+        funding_borrow_curve=None,
+        funding_lend_curve=None,
+        survival_curves={},
+        hazard_times={},
+        hazard_rates={},
+        recovery_rates={},
+        lgm_params={"alpha_times": (), "alpha_values": (0.01,), "kappa_times": (), "kappa_values": (0.03,), "shift": 0.0, "scaling": 1.0},
+        model_ccy=model_ccy.upper(),
+        seed=42,
+        fx_spots={k.replace("/", "").upper(): float(v) for k, v in fx_spots.items()},
+        fx_vols={},
+        swaption_normal_vols={},
+        cms_correlations={},
+        stochastic_fx_pairs=(),
+        torch_device=None,
+        trade_specs=(),
+        unsupported=(),
+        mpor=SimpleNamespace(),
+        input_provenance={},
+    )
 
 
 def _generic_capfloor_trade_xml() -> str:
@@ -2425,6 +2470,37 @@ def test_torch_rate_swap_converts_jpy_to_usd_by_dividing_usdjpy():
 
     np.testing.assert_allclose(vals[0], np.array([100.0, 100.0], dtype=float))
     assert np.max(np.abs(vals[0])) < 1000.0
+
+
+def test_fx_forward_quote_npv_reports_base_currency_by_dividing_live_spot():
+    inputs = _minimal_python_lgm_inputs(model_ccy="EUR", fx_spots={"EURUSD": 1.132337})
+    npv_quote = np.array([203_138.757488], dtype=float)
+    converted = _convert_fx_forward_npv_to_reporting_ccy(
+        npv_quote=npv_quote,
+        report_ccy="EUR",
+        base_ccy="EUR",
+        quote_ccy="USD",
+        spot_path=np.array([1.132337], dtype=float),
+        inputs=inputs,
+    )
+
+    np.testing.assert_allclose(converted, npv_quote / 1.132337, rtol=0.0, atol=1.0e-10)
+    assert converted[0] < npv_quote[0]
+
+
+def test_fx_forward_cross_reporting_converts_jpy_quote_npv_by_dividing_usdjpy():
+    inputs = _minimal_python_lgm_inputs(model_ccy="USD", fx_spots={"USDJPY": 110.0})
+    converted = _convert_fx_forward_npv_to_reporting_ccy(
+        npv_quote=np.array([11_000.0], dtype=float),
+        report_ccy="USD",
+        base_ccy="EUR",
+        quote_ccy="JPY",
+        spot_path=np.array([130.0], dtype=float),
+        inputs=inputs,
+    )
+
+    np.testing.assert_allclose(converted, np.array([100.0], dtype=float), rtol=0.0, atol=1.0e-12)
+    assert converted[0] < 1_000.0
 
 
 def test_standalone_cashflow_pricing_converts_to_reporting_currency():

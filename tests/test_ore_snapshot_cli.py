@@ -3763,6 +3763,27 @@ class TestOreSnapshotCli(unittest.TestCase):
         )
         self.assertEqual(float(payload["pricing"]["t0_npv_abs_diff"]), 0.0)
 
+    def test_inflation_swap_trade_id_override_prices_selected_trade(self):
+        ore_xml = TOOLS_DIR / "Examples" / "Legacy" / "Example_17" / "Input" / "ore.xml"
+        expected = {
+            "CPI_Swap_1": (2167085.146541, "CPI"),
+            "CPI_Swap_2": (829612.548929, "CPI"),
+            "YearOnYear_Swap": (267955.312135, "YY"),
+        }
+
+        for trade_id, (ore_npv, inflation_kind) in expected.items():
+            with self.subTest(trade_id=trade_id):
+                payload = ore_snapshot_cli._compute_price_only_case(
+                    ore_xml,
+                    anchor_t0_npv=False,
+                    trade_id_override=trade_id,
+                )
+                self.assertEqual(payload["trade_id"], trade_id)
+                self.assertEqual(payload["pricing"]["inflation_kind"], inflation_kind)
+                self.assertAlmostEqual(float(payload["pricing"]["ore_t0_npv"]), ore_npv, places=6)
+                self.assertAlmostEqual(float(payload["pricing"]["py_t0_npv"]), ore_npv, places=6)
+                self.assertEqual(float(payload["pricing"]["t0_npv_abs_diff"]), 0.0)
+
     def test_unique_report_case_slug_avoids_collisions(self):
         first = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_ba.xml"
         second = TOOLS_DIR / "Examples" / "Exposure" / "Input" / "ore_measure_lgm.xml"

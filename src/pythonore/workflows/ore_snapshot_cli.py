@@ -633,6 +633,7 @@ def _build_minimal_pricing_payload(
     *,
     anchor_t0_npv: bool,
     use_reference_artifacts: bool = False,
+    trade_id_override: str | None = None,
 ) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
@@ -658,12 +659,16 @@ def _build_minimal_pricing_payload(
     todaysmarket_xml = (input_dir / setup_params.get("marketConfigFile", "../../Input/todaysmarket.xml")).resolve()
     portfolio_xml = (input_dir / setup_params.get("portfolioFile", "portfolio.xml")).resolve()
     portfolio_root = ET.parse(portfolio_xml).getroot()
-    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_id = str(trade_id_override or ore_snapshot_mod._get_first_trade_id(portfolio_root)).strip()
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
     counterparty = ore_snapshot_mod._get_cpty_from_portfolio(portfolio_root, trade_id)
     netting_set_id = ore_snapshot_mod._get_netting_set_from_portfolio(portfolio_root, trade_id)
     if trade_type == "FxForward":
-        return _build_fx_forward_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
+        return _build_fx_forward_pricing_payload(
+            ore_xml,
+            use_reference_artifacts=use_reference_artifacts,
+            trade_id_override=trade_id,
+        )
     if trade_type == "FxOption":
         return _build_fx_option_pricing_payload(ore_xml, use_reference_artifacts=use_reference_artifacts)
     if trade_type == "Swaption":
@@ -2093,7 +2098,12 @@ def _build_capfloor_defs_from_portfolio(
     return defs
 
 
-def _build_fx_forward_pricing_payload(ore_xml: Path, *, use_reference_artifacts: bool = False) -> dict[str, Any]:
+def _build_fx_forward_pricing_payload(
+    ore_xml: Path,
+    *,
+    use_reference_artifacts: bool = False,
+    trade_id_override: str | None = None,
+) -> dict[str, Any]:
     ore_xml_path = ore_xml.resolve()
     ore_root = ET.parse(ore_xml_path).getroot()
     setup_params = {
@@ -2117,7 +2127,7 @@ def _build_fx_forward_pricing_payload(ore_xml: Path, *, use_reference_artifacts:
     pricing_config_id = markets_params.get("pricing", "default")
 
     portfolio_root = ET.parse(portfolio_xml).getroot()
-    trade_id = ore_snapshot_mod._get_first_trade_id(portfolio_root)
+    trade_id = str(trade_id_override or ore_snapshot_mod._get_first_trade_id(portfolio_root)).strip()
     trade_type = ore_snapshot_mod._get_trade_type(portfolio_root, trade_id)
     if trade_type != "FxForward":
         raise ValueError(f"Unsupported FX pricing trade type '{trade_type}' in {ore_xml_path}")
@@ -4424,6 +4434,7 @@ def _compute_price_only_case(
         ore_xml,
         anchor_t0_npv=anchor_t0_npv,
         use_reference_artifacts=use_reference_artifacts,
+        trade_id_override=trade_id,
     )
     if payload.get("inflation_product") and payload.get("trade_type") == "Swap":
         if payload.get("inflation_kind") == "YY":
