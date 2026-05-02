@@ -351,9 +351,12 @@ class _PricingContext:
     shared_fx_sim: Any
     n_times: int
     n_paths: int
-    torch_curve_cache: Dict[tuple[str, str], object]
-    torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray]
-    irs_curve_cache: Dict[tuple[str, str], Dict[str, object]]
+    torch_curve_cache: Dict[tuple[str, str], object] = field(default_factory=dict)
+    torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
+    capfloor_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
+    swaption_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
+    trade_value_cache: Dict[tuple[object, ...], tuple[np.ndarray | None, bool]] = field(default_factory=dict)
+    irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = field(default_factory=dict)
     last_trade_backend: str = ""
     last_trade_backend_detail: str = ""
 
@@ -1041,6 +1044,9 @@ class PythonLgmAdapter:
         irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = {}
         torch_curve_cache: Dict[tuple[str, str], object] = {}
         torch_rate_leg_value_cache: Dict[tuple[object, ...], np.ndarray] = {}
+        capfloor_value_cache: Dict[tuple[object, ...], np.ndarray] = {}
+        swaption_value_cache: Dict[tuple[object, ...], np.ndarray] = {}
+        trade_value_cache: Dict[tuple[object, ...], tuple[np.ndarray | None, bool]] = {}
         pricing_ctx = _PricingContext(
             snapshot=snapshot,
             inputs=inputs,
@@ -1052,6 +1058,9 @@ class PythonLgmAdapter:
             n_paths=n_paths,
             torch_curve_cache=torch_curve_cache,
             torch_rate_leg_value_cache=torch_rate_leg_value_cache,
+            capfloor_value_cache=capfloor_value_cache,
+            swaption_value_cache=swaption_value_cache,
+            trade_value_cache=trade_value_cache,
             irs_curve_cache=irs_curve_cache,
         )
 
@@ -4380,6 +4389,41 @@ class PythonLgmAdapter:
         spec: _TradeSpec,
         ctx: _PricingContext,
     ) -> tuple[np.ndarray | None, bool]:
+        def _freeze_value(value: object) -> object:
+            if isinstance(value, Mapping):
+                return tuple(sorted((str(k), _freeze_value(v)) for k, v in value.items()))
+            if isinstance(value, (list, tuple)):
+                return tuple(_freeze_value(v) for v in value)
+            try:
+                arr = np.asarray(value)
+                if arr.ndim > 0:
+                    arr = np.ascontiguousarray(arr)
+                    if arr.dtype.kind in {"f", "i", "u", "b"}:
+                        return arr.shape, arr.dtype.str, arr.tobytes()
+                    return arr.shape, arr.dtype.str, tuple(map(str, arr.reshape(-1).tolist()))
+            except Exception:
+                pass
+            if isinstance(value, (str, int, float, bool, type(None))):
+                return value
+            return str(value)
+
+        trade_cache_key = None
+        if spec.kind in {"IRS", "RateSwap"}:
+            trade_cache_key = (
+                "trade_paths",
+                spec.kind,
+                spec.ccy,
+                float(spec.notional),
+                _freeze_value(spec.legs),
+                _freeze_value(spec.sticky_state),
+                ctx.irs_backend is not None,
+                tuple(getattr(ctx.shared_fx_sim, "pair_keys", ()) or ()),
+            )
+            cached_trade = ctx.trade_value_cache.get(trade_cache_key)
+            if cached_trade is not None:
+                ctx.last_trade_backend = f"{spec.kind.lower()}-cache"
+                ctx.last_trade_backend_detail = "economic-definition"
+                return cached_trade
         handlers = {
             "IRS": self._price_trade_irs_paths,
             "RateSwap": self._price_trade_rate_swap_paths,
@@ -4394,7 +4438,10 @@ class PythonLgmAdapter:
         handler = handlers.get(spec.kind)
         if handler is None:
             return None, False
-        return handler(spec, ctx)
+        result = handler(spec, ctx)
+        if trade_cache_key is not None:
+            ctx.trade_value_cache[trade_cache_key] = result
+        return result
 
     def _price_trade_irs_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
         inputs = ctx.inputs
@@ -4811,12 +4858,39 @@ class PythonLgmAdapter:
             ctx.last_trade_backend = "capfloor-missing-definition"
             ctx.last_trade_backend_detail = "no-definition"
             return None, False
+        def _array_key(value: object, *, dtype: object = float) -> tuple[tuple[int, ...], str, bytes]:
+            arr = np.ascontiguousarray(np.asarray(value, dtype=dtype))
+            return arr.shape, arr.dtype.str, arr.tobytes()
+
+        capfloor_cache_key = (
+            "capfloor_paths",
+            spec.ccy,
+            index_name.upper(),
+            str(definition.option_type).strip().lower(),
+            float(definition.position),
+            _array_key(definition.start_time),
+            _array_key(definition.end_time),
+            _array_key(definition.pay_time),
+            _array_key(definition.accrual),
+            _array_key(definition.notional),
+            _array_key(definition.strike),
+            _array_key(definition.gearing if definition.gearing is not None else np.ones_like(definition.strike)),
+            _array_key(definition.spread if definition.spread is not None else np.zeros_like(definition.strike)),
+            _array_key(definition.fixing_time if definition.fixing_time is not None else definition.start_time),
+            tuple(np.asarray(definition.fixing_date, dtype=object).tolist()) if definition.fixing_date is not None else None,
+            ctx.irs_backend is not None,
+        )
+        cached_vals = ctx.capfloor_value_cache.get(capfloor_cache_key)
+        if cached_vals is not None:
+            ctx.last_trade_backend = "capfloor-cache"
+            ctx.last_trade_backend_detail = "economic-definition"
+            return cached_vals, False
         p_disc = ctx.inputs.discount_curves[spec.ccy]
         p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, index_name)
         if ctx.irs_backend is None:
             ctx.last_trade_backend = "capfloor-numpy"
             ctx.last_trade_backend_detail = "capfloor_npv_paths"
-            return self._ir_options_mod.capfloor_npv_paths(
+            vals = self._ir_options_mod.capfloor_npv_paths(
                 model=ctx.model,
                 p0_disc=p_disc,
                 p0_fwd=p_fwd,
@@ -4826,7 +4900,9 @@ class PythonLgmAdapter:
                 lock_fixings=True,
                 fixings=self._fixings_lookup(ctx.snapshot),
                 fixing_index=index_name,
-            ), False
+            )
+            ctx.capfloor_value_cache[capfloor_cache_key] = vals
+            return vals, False
         torch_curve_ctor, _, _, torch_device, _, _, torch_capfloor_pricer = ctx.irs_backend
         ctx.last_trade_backend = "capfloor-torch"
         ctx.last_trade_backend_detail = "torch_capfloor_pricer"
@@ -4883,6 +4959,7 @@ class PythonLgmAdapter:
             lock_fixings=True,
             return_numpy=True,
         )
+        ctx.capfloor_value_cache[capfloor_cache_key] = vals
         return vals, False
 
     def _price_swaption_premium_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> np.ndarray | None:
@@ -4945,6 +5022,43 @@ class PythonLgmAdapter:
         if definition is None:
             return None, False
         premium_sign = float(spec.sticky_state.get("premium_sign", 1.0))
+        def _array_key(value: object, *, dtype: object = float) -> tuple[tuple[int, ...], str, bytes]:
+            arr = np.ascontiguousarray(np.asarray(value, dtype=dtype))
+            return arr.shape, arr.dtype.str, arr.tobytes()
+
+        def _leg_key(legs: Mapping[str, object]) -> tuple[tuple[str, tuple[tuple[int, ...], str, bytes]], ...]:
+            out = []
+            for key in sorted(legs):
+                value = legs[key]
+                try:
+                    out.append((str(key), _array_key(value)))
+                except Exception:
+                    out.append((str(key), _array_key(np.asarray(value, dtype=object), dtype=object)))
+            return tuple(out)
+
+        premium_records = tuple(spec.sticky_state.get("premium_records", ()))
+        premium_key = tuple(
+            tuple(sorted((str(k), str(v)) for k, v in dict(record).items()))
+            for record in premium_records
+        )
+        swaption_cache_key = (
+            "swaption_paths",
+            spec.ccy,
+            str(spec.sticky_state.get("index_name", "")).upper(),
+            str(spec.sticky_state.get("style", "")).lower(),
+            str(getattr(definition, "settlement", "")).lower(),
+            float(getattr(definition, "exercise_sign", 0.0)),
+            float(premium_sign),
+            _array_key(getattr(definition, "exercise_times", np.asarray([], dtype=float))),
+            _leg_key(getattr(definition, "underlying_legs", {})),
+            premium_key,
+            ctx.irs_backend is not None,
+        )
+        cached_vals = ctx.swaption_value_cache.get(swaption_cache_key)
+        if cached_vals is not None:
+            ctx.last_trade_backend = "swaption-cache"
+            ctx.last_trade_backend_detail = "economic-definition"
+            return cached_vals, False
         p_disc = ctx.inputs.discount_curves[spec.ccy]
         float_index = str(spec.sticky_state.get("index_name", ""))
         p_fwd = self._resolve_index_curve(ctx.inputs, spec.ccy, float_index)
@@ -5014,6 +5128,7 @@ class PythonLgmAdapter:
             premium_vals = self._price_swaption_premium_paths(spec, ctx)
             if premium_vals is not None:
                 vals = vals - premium_sign * premium_vals
+            ctx.swaption_value_cache[swaption_cache_key] = vals
             return vals, False
         vals = self._ir_options_mod.bermudan_npv_paths(
             model=ctx.model,
@@ -5026,6 +5141,7 @@ class PythonLgmAdapter:
         premium_vals = self._price_swaption_premium_paths(spec, ctx)
         if premium_vals is not None:
             vals = vals - premium_sign * premium_vals
+        ctx.swaption_value_cache[swaption_cache_key] = vals
         return vals, False
 
     def _price_trade_cashflow_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray | None, bool]:
