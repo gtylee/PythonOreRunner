@@ -110,6 +110,12 @@ from pythonore.runtime.lgm.products.simple_rates import (
     price_trade_cashflow_paths as _lgm_price_trade_cashflow_paths,
     price_trade_fra_paths as _lgm_price_trade_fra_paths,
 )
+from pythonore.runtime.lgm.products.rate_coupons import (
+    capped_floored_rate as _lgm_capped_floored_rate,
+    digital_option_rate as _lgm_digital_option_rate,
+    rate_leg_pricing_cache_key as _lgm_rate_leg_pricing_cache_key,
+    torch_curve_from_handle as _lgm_torch_curve_from_handle,
+)
 from pythonore.runtime.swig import ORESwigAdapter
 from pythonore.runtime.toy import DeterministicToyAdapter, _toy_trade_numbers
 from pythonore.runtime.results import CubeAccessor, XVAResult, xva_total_from_metrics
@@ -465,19 +471,7 @@ class PythonLgmAdapter:
         curve: Callable[[float], float],
         sample_times: np.ndarray,
     ):
-        cached = curve_cache.get(key)
-        if cached is not None:
-            return cached
-        pts = np.unique(np.asarray(sample_times, dtype=float))
-        pts = pts[np.isfinite(pts)]
-        pts.sort()
-        cached = torch_curve_ctor(
-            times=pts,
-            dfs=np.asarray([float(curve(float(t))) for t in pts], dtype=float),
-            device=torch_device,
-        )
-        curve_cache[key] = cached
-        return cached
+        return _lgm_torch_curve_from_handle(curve_cache, torch_curve_ctor, torch_device, key, curve, sample_times)
 
     def _torch_capped_floored_rate(
         self,
@@ -485,12 +479,7 @@ class PythonLgmAdapter:
         cap: Optional[float] = None,
         floor: Optional[float] = None,
     ) -> np.ndarray:
-        out = np.asarray(raw_rate, dtype=float).copy()
-        if floor is not None:
-            out = np.maximum(out, float(floor))
-        if cap is not None:
-            out = np.minimum(out, float(cap))
-        return out
+        return _lgm_capped_floored_rate(raw_rate, cap=cap, floor=floor)
 
     def _torch_digital_option_rate(
         self,
@@ -516,59 +505,7 @@ class PythonLgmAdapter:
         )
 
     def _rate_leg_pricing_cache_key(self, ccy: str, leg: Dict[str, object]) -> tuple[object, ...]:
-        kind = str(leg.get("kind", "")).upper()
-        key: list[object] = [ccy.upper(), kind]
-        scalar_fields = (
-            "notional",
-            "sign",
-            "index_name",
-            "index_name_1",
-            "index_name_2",
-            "fixing_days",
-            "is_in_arrears",
-            "is_averaged",
-            "has_sub_periods",
-            "day_counter",
-            "call_strike",
-            "call_payoff",
-            "put_strike",
-            "put_payoff",
-            "call_position",
-            "put_position",
-            "is_call_atm_included",
-            "is_put_atm_included",
-            "naked_option",
-            "cap",
-            "floor",
-        )
-        for field in scalar_fields:
-            value = leg.get(field)
-            if isinstance(value, np.ndarray):
-                continue
-            key.append((field, value))
-        array_fields = (
-            "pay_time",
-            "start_time",
-            "end_time",
-            "pay_date",
-            "start_date",
-            "end_date",
-            "fixing_date",
-            "fixing_time",
-            "amount",
-            "spread",
-            "gearing",
-            "accrual",
-            "index_accrual",
-            "quoted_coupon",
-            "is_historically_fixed",
-        )
-        for field in array_fields:
-            if field not in leg:
-                continue
-            arr = np.asarray(leg.get(field))
-            key.append((field, str(arr.dtype), tuple(arr.tolist())))
-        return tuple(key)
+        return _lgm_rate_leg_pricing_cache_key(ccy, leg)
 
     def _rate_leg_coupon_paths_torch(
         self,
@@ -5213,12 +5150,7 @@ class PythonLgmAdapter:
         cap: Optional[float] = None,
         floor: Optional[float] = None,
     ) -> np.ndarray:
-        out = np.asarray(raw_rate, dtype=float).copy()
-        if floor is not None:
-            out = np.maximum(out, float(floor))
-        if cap is not None:
-            out = np.minimum(out, float(cap))
-        return out
+        return _lgm_capped_floored_rate(raw_rate, cap=cap, floor=floor)
 
     def _digital_option_rate(
         self,
@@ -5232,45 +5164,16 @@ class PythonLgmAdapter:
         atm_included: bool,
         capped_rate_fn: Optional[Callable[[float, float], np.ndarray]] = None,
     ) -> np.ndarray:
-        if math.isnan(float(strike)):
-            return np.zeros_like(raw_rate, dtype=float)
-        strike_value = float(strike)
-        eps = 1.0e-4
-        if is_call and abs(strike_value) < eps / 2.0:
-            strike_value = eps / 2.0
-
-        if fixed_mode:
-            if is_call:
-                hit = raw_rate >= strike_value if atm_included else raw_rate > strike_value
-            else:
-                hit = raw_rate <= strike_value if atm_included else raw_rate < strike_value
-            step = float(payoff) if not math.isnan(float(payoff)) else strike_value
-            if math.isnan(float(payoff)):
-                vanilla = np.maximum(raw_rate - strike_value, 0.0) if is_call else np.maximum(strike_value - raw_rate, 0.0)
-                return float(long_short) * (step * hit.astype(float) + (vanilla if is_call else -vanilla))
-            return float(long_short) * step * hit.astype(float)
-
-        right = strike_value + eps / 2.0
-        left = strike_value - eps / 2.0
-        if capped_rate_fn is not None:
-            next_rate = capped_rate_fn(right if is_call else math.nan, math.nan if is_call else right)
-            prev_rate = capped_rate_fn(left if is_call else math.nan, math.nan if is_call else left)
-        elif is_call:
-            next_rate = self._capped_floored_rate(raw_rate, cap=right)
-            prev_rate = self._capped_floored_rate(raw_rate, cap=left)
-        else:
-            next_rate = self._capped_floored_rate(raw_rate, floor=right)
-            prev_rate = self._capped_floored_rate(raw_rate, floor=left)
-        step = float(payoff) if not math.isnan(float(payoff)) else strike_value
-        option_rate = step * (next_rate - prev_rate) / eps
-        if math.isnan(float(payoff)):
-            if capped_rate_fn is not None:
-                at_strike = capped_rate_fn(strike_value if is_call else math.nan, math.nan if is_call else strike_value)
-            else:
-                at_strike = self._capped_floored_rate(raw_rate, cap=strike_value) if is_call else self._capped_floored_rate(raw_rate, floor=strike_value)
-            vanilla = raw_rate - at_strike if is_call else -raw_rate + at_strike
-            option_rate = option_rate + vanilla if is_call else option_rate - vanilla
-        return float(long_short) * option_rate
+        return _lgm_digital_option_rate(
+            raw_rate,
+            strike,
+            payoff,
+            is_call=is_call,
+            long_short=long_short,
+            fixed_mode=fixed_mode,
+            atm_included=atm_included,
+            capped_rate_fn=capped_rate_fn,
+        )
 
     def _rate_leg_coupon_paths(
         self,
