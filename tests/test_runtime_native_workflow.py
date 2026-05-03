@@ -1971,6 +1971,85 @@ def test_cross_currency_csa_threshold_is_converted_to_reporting_currency():
     assert math.isclose(usd_collateral - eur_collateral, 50.0, rel_tol=0.0, abs_tol=1.0e-8)
 
 
+def test_cross_currency_vm_balance_is_converted_to_reporting_currency():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CF_USD_VM_BALANCE",
+        counterparty="CP_A",
+        netting_set="NS_USD_VM",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_cashflow_leg_swap_trade_xml(
+                    payments=[("2027-03-08", 1000.0)],
+                    currency="USD",
+                ),
+            }
+        ),
+    )
+    market = replace(
+        snapshot.market,
+        raw_quotes=tuple(q for q in snapshot.market.raw_quotes if str(q.key).upper() != "FX/EUR/USD")
+        + (
+            MarketQuote(date="2026-03-08", key="FX/USD/EUR", value=0.5),
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0100),
+        ),
+    )
+
+    def _run_with_vm(variation_margin: float):
+        case = replace(
+            snapshot,
+            market=market,
+            portfolio=replace(snapshot.portfolio, trades=(trade,)),
+            netting=NettingConfig(
+                netting_sets={
+                    "NS_USD_VM": NettingSet(
+                        netting_set_id="NS_USD_VM",
+                        counterparty="CP_A",
+                        active_csa=True,
+                        csa_currency="USD",
+                        threshold_receive=10_000.0,
+                        threshold_pay=10_000.0,
+                        mta_receive=0.0,
+                        mta_pay=0.0,
+                    )
+                }
+            ),
+            collateral=CollateralConfig(
+                balances=(
+                    CollateralBalance(
+                        netting_set_id="NS_USD_VM",
+                        currency="USD",
+                        variation_margin=variation_margin,
+                    ),
+                )
+            ),
+            config=replace(
+                snapshot.config,
+                analytics=("CVA",),
+                num_paths=4,
+                horizon_years=1,
+                xml_buffers={"simulation.xml": _simulation_xml_with_grid("1Y")},
+            ),
+        )
+        mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(case).state.mapped_inputs
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        with patch.object(adapter, "_resolve_irs_pricing_backend", return_value=None):
+            return adapter.run(case, mapped=mapped, run_id=f"usd-vm-{variation_margin:g}")
+
+    no_vm = _run_with_vm(0.0).exposure_profiles_by_netting_set["NS_USD_VM"]
+    usd_vm = _run_with_vm(100.0).exposure_profiles_by_netting_set["NS_USD_VM"]
+    no_vm_epe = float(no_vm["valuation_epe"][0])
+    usd_vm_epe = float(usd_vm["valuation_epe"][0])
+    usd_vm_collateral = float(usd_vm["expected_collateral"][0])
+
+    assert math.isclose(usd_vm_collateral, 50.0, rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(no_vm_epe - usd_vm_epe, 50.0, rel_tol=0.0, abs_tol=1.0e-8)
+    assert not math.isclose(no_vm_epe - usd_vm_epe, 100.0, rel_tol=0.0, abs_tol=1.0e-8)
+
+
 def test_native_runtime_handles_usd_digital_cmsspread_without_nan():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -2096,6 +2175,92 @@ def test_torch_generic_capfloor_matches_numpy_runtime_with_zero_threshold_csa_mp
     np.testing.assert_allclose(
         np.asarray(torch_profile["closeout_epe"], dtype=float)[1:],
         np.asarray(numpy_profile["closeout_epe"], dtype=float)[1:],
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+
+
+def test_torch_generic_xccy_swap_matches_numpy_runtime_with_cross_currency_csa():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="XCCY_TORCH_CSA_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_XCCY_CSA",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_xccy_float_swap_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SOFR/1Y/2Y", value=0.0320),
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_XCCY_CSA": NettingSet(
+                    netting_set_id="NS_XCCY_CSA",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="USD",
+                    threshold_receive=100.0,
+                    threshold_pay=100.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(
+                CollateralBalance(
+                    netting_set_id="NS_XCCY_CSA",
+                    currency="USD",
+                    variation_margin=50.0,
+                ),
+            )
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="xccy-csa-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="xccy-csa-torch")
+
+    numpy_profile = numpy_result.exposure_profiles_by_netting_set["NS_XCCY_CSA"]
+    torch_profile = torch_result.exposure_profiles_by_netting_set["NS_XCCY_CSA"]
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_profile["valuation_epe"], dtype=float),
+        np.asarray(numpy_profile["valuation_epe"], dtype=float),
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_profile["expected_collateral"], dtype=float),
+        np.asarray(numpy_profile["expected_collateral"], dtype=float),
         rtol=0.0,
         atol=1.0e-8,
     )
