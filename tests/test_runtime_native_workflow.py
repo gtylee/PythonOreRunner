@@ -1498,6 +1498,136 @@ def test_native_runtime_fva_uses_explicit_funding_curves_from_market_overlay():
     assert float(result.xva_by_metric["FBA"]) < 0.0
 
 
+def test_native_runtime_fva_with_mpor_uses_closeout_exposure_after_csa_thresholds():
+    runtime = RuntimeConfig(
+        xva_analytic=XVAAnalyticConfig(
+            dva_name="BANK",
+            fva_borrowing_curve="BANK_BORROW",
+            fva_lending_curve="BANK_LEND",
+        )
+    )
+    snapshot = _make_snapshot(runtime=runtime)
+    trades = (
+        Trade(
+            trade_id="CF_POS_MPOR_FVA",
+            counterparty="CP_A",
+            netting_set="NS_POS_MPOR",
+            trade_type="Cashflow",
+            product=GenericProduct(
+                payload={
+                    "trade_type": "Cashflow",
+                    "xml": _cashflow_trade_xml(payment_date="2028-03-08", amount=1000.0),
+                }
+            ),
+        ),
+        Trade(
+            trade_id="CF_NEG_MPOR_FVA",
+            counterparty="CP_A",
+            netting_set="NS_NEG_MPOR",
+            trade_type="Cashflow",
+            product=GenericProduct(
+                payload={
+                    "trade_type": "Cashflow",
+                    "xml": _cashflow_trade_xml(payment_date="2028-03-08", amount=-700.0),
+                }
+            ),
+        ),
+    )
+    funding_quotes = (
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/1Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/2Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/1Y", value=0.0050),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/2Y", value=0.0050),
+        MarketQuote(date="2026-03-08", key="ZERO/YIELD_SPREAD/EUR/BANK_BORROW/1Y", value=0.0200),
+        MarketQuote(date="2026-03-08", key="ZERO/YIELD_SPREAD/EUR/BANK_LEND/1Y", value=-0.0050),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, raw_quotes=tuple(snapshot.market.raw_quotes) + funding_quotes),
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_POS_MPOR": NettingSet(
+                    netting_set_id="NS_POS_MPOR",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_receive=100.0,
+                    threshold_pay=100.0,
+                    mta_receive=25.0,
+                    mta_pay=25.0,
+                ),
+                "NS_NEG_MPOR": NettingSet(
+                    netting_set_id="NS_NEG_MPOR",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_receive=100.0,
+                    threshold_pay=100.0,
+                    mta_receive=25.0,
+                    mta_pay=25.0,
+                ),
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(
+                CollateralBalance(netting_set_id="NS_POS_MPOR", currency="EUR"),
+                CollateralBalance(netting_set_id="NS_NEG_MPOR", currency="EUR"),
+            )
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("FVA",),
+            num_paths=4,
+            horizon_years=2,
+            runtime=runtime,
+            params={**snapshot.config.params, "python.mpor_source_override": "1Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y,18M,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    result = adapter.run(snapshot, mapped=mapped, run_id="funding-curves-csa-mpor")
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    cube = result.cube("exposure_cube").payload
+    times = np.asarray(cube["NS_POS_MPOR"]["times"], dtype=float)
+    q_c = (
+        np.asarray([inputs.survival_curves["CP_A"](float(t)) for t in times], dtype=float)
+        if "CP_A" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["CP_A"], inputs.hazard_rates["CP_A"])
+    )
+    q_b = (
+        np.asarray([inputs.survival_curves["BANK"](float(t)) for t in times], dtype=float)
+        if "BANK" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["BANK"], inputs.hazard_rates["BANK"])
+    )
+    assert inputs.funding_borrow_curve is not None
+    assert inputs.funding_lend_curve is not None
+    p_ois = inputs.xva_discount_curve or inputs.discount_curves["EUR"]
+    df_ois = np.asarray([p_ois(float(t)) for t in times], dtype=float)
+    df_borrow = np.asarray([inputs.funding_borrow_curve(float(t)) for t in times], dtype=float)
+    df_lend = np.asarray([inputs.funding_lend_curve(float(t)) for t in times], dtype=float)
+    dcf_borrow = df_borrow[:-1] / df_borrow[1:] - df_ois[:-1] / df_ois[1:]
+    dcf_lend = df_lend[:-1] / df_lend[1:] - df_ois[:-1] / df_ois[1:]
+    surv_joint = q_c[:-1] * q_b[:-1]
+
+    closeout_epe = sum(np.asarray(cube[ns]["closeout_epe"], dtype=float) for ns in ("NS_POS_MPOR", "NS_NEG_MPOR"))
+    closeout_ene = sum(np.asarray(cube[ns]["closeout_ene"], dtype=float) for ns in ("NS_POS_MPOR", "NS_NEG_MPOR"))
+    valuation_epe = sum(np.asarray(cube[ns]["valuation_epe"], dtype=float) for ns in ("NS_POS_MPOR", "NS_NEG_MPOR"))
+    valuation_ene = sum(np.asarray(cube[ns]["valuation_ene"], dtype=float) for ns in ("NS_POS_MPOR", "NS_NEG_MPOR"))
+    expected_fca = float(np.sum(surv_joint * closeout_epe[1:] * dcf_borrow))
+    expected_fba = float(np.sum(surv_joint * closeout_ene[1:] * dcf_lend))
+    valuation_fva = float(np.sum(surv_joint * valuation_epe[1:] * dcf_borrow) + np.sum(surv_joint * valuation_ene[1:] * dcf_lend))
+
+    assert result.metadata["mpor_enabled"] is True
+    assert max(float(x) for x in closeout_epe) > max(float(x) for x in valuation_epe)
+    assert math.isclose(float(result.xva_by_metric["FCA"]), expected_fca, rel_tol=0.0, abs_tol=1.0e-10)
+    assert math.isclose(float(result.xva_by_metric["FBA"]), expected_fba, rel_tol=0.0, abs_tol=1.0e-10)
+    assert math.isclose(float(result.xva_by_metric["FVA"]), expected_fba + expected_fca, rel_tol=0.0, abs_tol=1.0e-10)
+    assert not math.isclose(float(result.xva_by_metric["FVA"]), valuation_fva, rel_tol=0.0, abs_tol=1.0e-8)
+
+
 def test_zero_threshold_csa_uses_sticky_mpor_closeout_not_same_day_valuation():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -1737,6 +1867,55 @@ def test_torch_generic_capfloor_matches_numpy_runtime():
 
     assert abs(float(torch_result.pv_total) - float(numpy_result.pv_total)) < 1.0e-8
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
+
+
+def test_torch_generic_capfloor_matches_numpy_runtime_with_zero_threshold_csa_mpor():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CAP_TORCH_MPOR_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(payload={"trade_type": "CapFloor", "xml": _generic_capfloor_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            params={**snapshot.config.params, "python.mpor_source_override": "1Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y,18M,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="capfloor-mpor-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="capfloor-mpor-torch")
+
+    numpy_profile = numpy_result.exposure_profiles_by_netting_set["NS_EUR"]
+    torch_profile = torch_result.exposure_profiles_by_netting_set["NS_EUR"]
+    assert numpy_result.metadata["mpor_enabled"] is True
+    assert torch_result.metadata["mpor_enabled"] is True
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_profile["closeout_epe"], dtype=float)[1:],
+        np.asarray(numpy_profile["closeout_epe"], dtype=float)[1:],
+        rtol=0.0,
+        atol=1.0e-8,
+    )
 
 
 @pytest.mark.parametrize(
