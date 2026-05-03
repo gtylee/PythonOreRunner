@@ -1389,6 +1389,115 @@ def test_native_runtime_supports_generic_cashflow_capfloor_and_swaption():
     assert coverage["unsupported"] == []
 
 
+def test_native_runtime_fva_uses_explicit_funding_curves_from_market_overlay():
+    runtime = RuntimeConfig(
+        xva_analytic=XVAAnalyticConfig(
+            dva_name="BANK",
+            fva_borrowing_curve="BANK_BORROW",
+            fva_lending_curve="BANK_LEND",
+        )
+    )
+    snapshot = _make_snapshot(runtime=runtime)
+    trades = (
+        Trade(
+            trade_id="CF_POS",
+            counterparty="CP_A",
+            netting_set="NS_POS",
+            trade_type="Cashflow",
+            product=GenericProduct(
+                payload={
+                    "trade_type": "Cashflow",
+                    "xml": _cashflow_trade_xml(payment_date="2028-03-08", amount=1000.0),
+                }
+            ),
+        ),
+        Trade(
+            trade_id="CF_NEG",
+            counterparty="CP_A",
+            netting_set="NS_NEG",
+            trade_type="Cashflow",
+            product=GenericProduct(
+                payload={
+                    "trade_type": "Cashflow",
+                    "xml": _cashflow_trade_xml(payment_date="2028-03-08", amount=-700.0),
+                }
+            ),
+        ),
+    )
+    funding_quotes = (
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/1Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/2Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/1Y", value=0.0050),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/2Y", value=0.0050),
+        MarketQuote(date="2026-03-08", key="ZERO/YIELD_SPREAD/EUR/BANK_BORROW/1Y", value=0.0200),
+        MarketQuote(date="2026-03-08", key="ZERO/YIELD_SPREAD/EUR/BANK_LEND/1Y", value=-0.0050),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, raw_quotes=tuple(snapshot.market.raw_quotes) + funding_quotes),
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_POS": NettingSet(netting_set_id="NS_POS", counterparty="CP_A", active_csa=False, csa_currency="EUR"),
+                "NS_NEG": NettingSet(netting_set_id="NS_NEG", counterparty="CP_A", active_csa=False, csa_currency="EUR"),
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(
+                CollateralBalance(netting_set_id="NS_POS", currency="EUR"),
+                CollateralBalance(netting_set_id="NS_NEG", currency="EUR"),
+            )
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("FVA",),
+            num_paths=4,
+            horizon_years=2,
+            runtime=runtime,
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("1Y,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    result = adapter.run(snapshot, mapped=mapped, run_id="funding-curves-fva")
+    inputs = adapter._extract_inputs(snapshot, mapped)
+
+    cube = result.cube("exposure_cube").payload
+    times = np.asarray(cube["NS_POS"]["times"], dtype=float)
+    assert times[0] == 0.0
+    assert times[-1] >= 2.0 - 1.0e-12
+    epe = sum(np.asarray(cube[ns]["closeout_epe"], dtype=float) for ns in ("NS_POS", "NS_NEG"))
+    ene = sum(np.asarray(cube[ns]["closeout_ene"], dtype=float) for ns in ("NS_POS", "NS_NEG"))
+    q_c = (
+        np.asarray([inputs.survival_curves["CP_A"](float(t)) for t in times], dtype=float)
+        if "CP_A" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["CP_A"], inputs.hazard_rates["CP_A"])
+    )
+    q_b = (
+        np.asarray([inputs.survival_curves["BANK"](float(t)) for t in times], dtype=float)
+        if "BANK" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["BANK"], inputs.hazard_rates["BANK"])
+    )
+    assert inputs.funding_borrow_curve is not None
+    assert inputs.funding_lend_curve is not None
+    p_ois = inputs.xva_discount_curve or inputs.discount_curves["EUR"]
+    p_borrow = inputs.funding_borrow_curve
+    p_lend = inputs.funding_lend_curve
+    df_ois = np.asarray([p_ois(float(t)) for t in times], dtype=float)
+    df_borrow = np.asarray([p_borrow(float(t)) for t in times], dtype=float)
+    df_lend = np.asarray([p_lend(float(t)) for t in times], dtype=float)
+    surv_joint = q_c[:-1] * q_b[:-1]
+    expected_fca = float(np.sum(surv_joint * epe[1:] * (df_borrow[:-1] / df_borrow[1:] - df_ois[:-1] / df_ois[1:])))
+    expected_fba = float(np.sum(surv_joint * ene[1:] * (df_lend[:-1] / df_lend[1:] - df_ois[:-1] / df_ois[1:])))
+
+    assert math.isclose(float(result.xva_by_metric["FCA"]), expected_fca, rel_tol=0.0, abs_tol=1.0e-10)
+    assert math.isclose(float(result.xva_by_metric["FBA"]), expected_fba, rel_tol=0.0, abs_tol=1.0e-10)
+    assert math.isclose(float(result.xva_by_metric["FVA"]), expected_fba + expected_fca, rel_tol=0.0, abs_tol=1.0e-10)
+    assert float(result.xva_by_metric["FCA"]) > 0.0
+    assert float(result.xva_by_metric["FBA"]) < 0.0
+
+
 def test_native_runtime_handles_usd_digital_cmsspread_without_nan():
     snapshot = _make_snapshot()
     trade = Trade(
