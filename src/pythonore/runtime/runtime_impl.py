@@ -1137,6 +1137,7 @@ class PythonLgmAdapter:
             inputs=inputs,
             model=model,
             x_paths=x_paths,
+            shared_fx_sim=shared_fx_sim,
             npv_by_trade=npv_by_trade,
             pv_total_precomputed=pv_total_native,
             npv_cube_payload_precomputed=npv_cube_payload,
@@ -5868,6 +5869,7 @@ class PythonLgmAdapter:
         fallback: XVAResult | None,
         fallback_trades: List[Trade],
         unsupported: List[Trade],
+        shared_fx_sim: _SharedFxSimulation | None = None,
         pv_total_precomputed: float | None = None,
         npv_cube_payload_precomputed: Dict[str, Dict[str, object]] | None = None,
         exposure_profiles_by_trade_precomputed: Dict[str, Dict[str, object]] | None = None,
@@ -5955,7 +5957,14 @@ class PythonLgmAdapter:
         valuation_ene_by_ns_paths: Dict[str, np.ndarray] = {}
         for ns, valuation_paths in ns_valuation_paths.items():
             closeout_paths = ns_closeout_paths[ns]
-            collateral_paths = _estimate_vm_collateral_paths(snapshot, ns, valuation_paths)
+            collateral_paths = _estimate_vm_collateral_paths(
+                snapshot,
+                ns,
+                valuation_paths,
+                inputs=inputs,
+                shared_fx_sim=shared_fx_sim,
+                converter=self._convert_path_grid_to_reporting_ccy,
+            )
             valuation_paths_net = valuation_paths - collateral_paths
             closeout_paths_net = closeout_paths - collateral_paths
             valuation_epe_by_ns_paths[ns] = np.mean(np.maximum(valuation_paths_net, 0.0), axis=1)
@@ -6781,10 +6790,30 @@ def _counterparty_for_netting(snapshot: XVASnapshot, netting_set: str) -> str:
     return netting_set
 
 
-def _estimate_vm_collateral_paths(snapshot: XVASnapshot, netting_set: str, valuation_paths: np.ndarray) -> np.ndarray:
+def _estimate_vm_collateral_paths(
+    snapshot: XVASnapshot,
+    netting_set: str,
+    valuation_paths: np.ndarray,
+    *,
+    inputs: _PythonLgmInputs | None = None,
+    shared_fx_sim: _SharedFxSimulation | None = None,
+    converter: Callable[..., np.ndarray] | None = None,
+) -> np.ndarray:
     ns_cfg = snapshot.netting.netting_sets.get(netting_set)
     if ns_cfg is None or not bool(ns_cfg.active_csa):
         return np.zeros_like(valuation_paths)
+
+    report_ccy = str(snapshot.config.base_currency or "").upper()
+    csa_ccy = str(ns_cfg.csa_currency or report_ccy).upper()
+    paths_for_call = np.asarray(valuation_paths, dtype=float)
+    if inputs is not None and converter is not None and csa_ccy and report_ccy and csa_ccy != report_ccy:
+        paths_for_call = converter(
+            paths_for_call,
+            local_ccy=report_ccy,
+            report_ccy=csa_ccy,
+            inputs=inputs,
+            shared_fx_sim=shared_fx_sim,
+        )
 
     threshold_recv = float(ns_cfg.threshold_receive or 0.0)
     threshold_pay = float(ns_cfg.threshold_pay or 0.0)
@@ -6792,14 +6821,33 @@ def _estimate_vm_collateral_paths(snapshot: XVASnapshot, netting_set: str, valua
     mta_pay = max(float(ns_cfg.mta_pay or 0.0), 0.0)
 
     vm_balance = 0.0
+    collateral = None
     for balance in snapshot.collateral.balances:
         if balance.netting_set_id == netting_set:
             vm_balance = float(balance.variation_margin)
+            balance_ccy = str(balance.currency or csa_ccy).upper()
+            if inputs is not None and converter is not None and balance_ccy and csa_ccy and balance_ccy != csa_ccy:
+                collateral = converter(
+                    np.full_like(paths_for_call, vm_balance, dtype=float),
+                    local_ccy=balance_ccy,
+                    report_ccy=csa_ccy,
+                    inputs=inputs,
+                    shared_fx_sim=shared_fx_sim,
+                )
             break
+    if collateral is None:
+        collateral = np.full_like(paths_for_call, vm_balance, dtype=float)
 
-    collateral = np.full_like(valuation_paths, vm_balance, dtype=float)
-    collateral = np.where(valuation_paths > (threshold_recv + mta_recv), valuation_paths - threshold_recv, collateral)
-    collateral = np.where(valuation_paths < -(threshold_pay + mta_pay), valuation_paths + threshold_pay, collateral)
+    collateral = np.where(paths_for_call > (threshold_recv + mta_recv), paths_for_call - threshold_recv, collateral)
+    collateral = np.where(paths_for_call < -(threshold_pay + mta_pay), paths_for_call + threshold_pay, collateral)
+    if inputs is not None and converter is not None and csa_ccy and report_ccy and csa_ccy != report_ccy:
+        return converter(
+            collateral,
+            local_ccy=csa_ccy,
+            report_ccy=report_ccy,
+            inputs=inputs,
+            shared_fx_sim=shared_fx_sim,
+        )
     return collateral
 
 

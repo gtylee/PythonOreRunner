@@ -1628,6 +1628,115 @@ def test_native_runtime_fva_with_mpor_uses_closeout_exposure_after_csa_threshold
     assert not math.isclose(float(result.xva_by_metric["FVA"]), valuation_fva, rel_tol=0.0, abs_tol=1.0e-8)
 
 
+def test_native_runtime_fx_forward_fva_with_mpor_has_both_funding_sides():
+    runtime = RuntimeConfig(
+        xva_analytic=XVAAnalyticConfig(
+            dva_name="BANK",
+            fva_borrowing_curve="BANK_BORROW",
+            fva_lending_curve="BANK_LEND",
+        )
+    )
+    snapshot = _make_snapshot(runtime=runtime)
+    trades = (
+        Trade(
+            trade_id="FXFWD_POS_MPOR_FVA",
+            counterparty="CP_A",
+            netting_set="NS_FXFWD_POS",
+            trade_type="FxForward",
+            product=FXForward(pair="EURUSD", notional=1_000_000.0, strike=1.0, maturity_years=2.0, buy_base=True),
+        ),
+        Trade(
+            trade_id="FXFWD_NEG_MPOR_FVA",
+            counterparty="CP_A",
+            netting_set="NS_FXFWD_NEG",
+            trade_type="FxForward",
+            product=FXForward(pair="EURUSD", notional=1_000_000.0, strike=1.0, maturity_years=2.0, buy_base=False),
+        ),
+    )
+    funding_quotes = (
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/1Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_BORROW/A365F/2Y", value=0.0300),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/1Y", value=0.0050),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/BANK_LEND/A365F/2Y", value=0.0050),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, raw_quotes=tuple(snapshot.market.raw_quotes) + funding_quotes),
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_FXFWD_POS": NettingSet(
+                    netting_set_id="NS_FXFWD_POS",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_receive=1_000.0,
+                    threshold_pay=1_000.0,
+                ),
+                "NS_FXFWD_NEG": NettingSet(
+                    netting_set_id="NS_FXFWD_NEG",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_receive=1_000.0,
+                    threshold_pay=1_000.0,
+                ),
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(
+                CollateralBalance(netting_set_id="NS_FXFWD_POS", currency="EUR"),
+                CollateralBalance(netting_set_id="NS_FXFWD_NEG", currency="EUR"),
+            )
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("FVA",),
+            num_paths=8,
+            horizon_years=2,
+            runtime=runtime,
+            params={**snapshot.config.params, "python.mpor_source_override": "1Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y,18M,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    result = adapter.run(snapshot, mapped=mapped, run_id="fx-forward-fva-csa-mpor")
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    cube = result.cube("exposure_cube").payload
+    times = np.asarray(cube["NS_FXFWD_POS"]["times"], dtype=float)
+    q_c = (
+        np.asarray([inputs.survival_curves["CP_A"](float(t)) for t in times], dtype=float)
+        if "CP_A" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["CP_A"], inputs.hazard_rates["CP_A"])
+    )
+    q_b = (
+        np.asarray([inputs.survival_curves["BANK"](float(t)) for t in times], dtype=float)
+        if "BANK" in inputs.survival_curves
+        else adapter._irs_utils.survival_probability_from_hazard(times, inputs.hazard_times["BANK"], inputs.hazard_rates["BANK"])
+    )
+    assert inputs.funding_borrow_curve is not None
+    assert inputs.funding_lend_curve is not None
+    p_ois = inputs.xva_discount_curve or inputs.discount_curves["EUR"]
+    df_ois = np.asarray([p_ois(float(t)) for t in times], dtype=float)
+    df_borrow = np.asarray([inputs.funding_borrow_curve(float(t)) for t in times], dtype=float)
+    df_lend = np.asarray([inputs.funding_lend_curve(float(t)) for t in times], dtype=float)
+    closeout_epe = sum(np.asarray(cube[ns]["closeout_epe"], dtype=float) for ns in ("NS_FXFWD_POS", "NS_FXFWD_NEG"))
+    closeout_ene = sum(np.asarray(cube[ns]["closeout_ene"], dtype=float) for ns in ("NS_FXFWD_POS", "NS_FXFWD_NEG"))
+    expected_fca = float(np.sum(q_c[:-1] * q_b[:-1] * closeout_epe[1:] * (df_borrow[:-1] / df_borrow[1:] - df_ois[:-1] / df_ois[1:])))
+    expected_fba = float(np.sum(q_c[:-1] * q_b[:-1] * closeout_ene[1:] * (df_lend[:-1] / df_lend[1:] - df_ois[:-1] / df_ois[1:])))
+
+    assert result.metadata["mpor_enabled"] is True
+    assert max(float(x) for x in closeout_epe) > 0.0
+    assert max(float(x) for x in closeout_ene) > 0.0
+    assert math.isclose(float(result.xva_by_metric["FCA"]), expected_fca, rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(float(result.xva_by_metric["FBA"]), expected_fba, rel_tol=0.0, abs_tol=1.0e-8)
+    assert float(result.xva_by_metric["FCA"]) > 0.0
+    assert float(result.xva_by_metric["FBA"]) < 0.0
+
+
 def test_zero_threshold_csa_uses_sticky_mpor_closeout_not_same_day_valuation():
     snapshot = _make_snapshot()
     trade = Trade(
@@ -1786,6 +1895,80 @@ def test_fx_forward_zero_threshold_csa_uses_sticky_mpor_closeout_interpolation()
         np.asarray(npv_cube["npv_xva_mean"], dtype=float),
         atol=1.0e-10,
     )
+
+
+def test_cross_currency_csa_threshold_is_converted_to_reporting_currency():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="CF_USD_CSA_THRESHOLD",
+        counterparty="CP_A",
+        netting_set="NS_USD_CSA",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_cashflow_leg_swap_trade_xml(
+                    payments=[("2027-03-08", 1000.0)],
+                    currency="USD",
+                ),
+            }
+        ),
+    )
+    market = replace(
+        snapshot.market,
+        raw_quotes=tuple(q for q in snapshot.market.raw_quotes if str(q.key).upper() != "FX/EUR/USD")
+        + (
+            MarketQuote(date="2026-03-08", key="FX/USD/EUR", value=0.5),
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+            MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0100),
+        ),
+    )
+
+    def _run_with_csa_currency(csa_currency: str):
+        case = replace(
+            snapshot,
+            market=market,
+            portfolio=replace(snapshot.portfolio, trades=(trade,)),
+            netting=NettingConfig(
+                netting_sets={
+                    "NS_USD_CSA": NettingSet(
+                        netting_set_id="NS_USD_CSA",
+                        counterparty="CP_A",
+                        active_csa=True,
+                        csa_currency=csa_currency,
+                        threshold_receive=100.0,
+                        threshold_pay=100.0,
+                        mta_receive=0.0,
+                        mta_pay=0.0,
+                    )
+                }
+            ),
+            collateral=CollateralConfig(
+                balances=(CollateralBalance(netting_set_id="NS_USD_CSA", currency=csa_currency),)
+            ),
+            config=replace(
+                snapshot.config,
+                analytics=("CVA",),
+                num_paths=4,
+                horizon_years=1,
+                xml_buffers={"simulation.xml": _simulation_xml_with_grid("1Y")},
+            ),
+        )
+        mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(case).state.mapped_inputs
+        adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+        with patch.object(adapter, "_resolve_irs_pricing_backend", return_value=None):
+            return adapter.run(case, mapped=mapped, run_id=f"csa-{csa_currency.lower()}-threshold")
+
+    eur_csa = _run_with_csa_currency("EUR").exposure_profiles_by_netting_set["NS_USD_CSA"]
+    usd_csa = _run_with_csa_currency("USD").exposure_profiles_by_netting_set["NS_USD_CSA"]
+    eur_residual = float(eur_csa["valuation_epe"][0])
+    usd_residual = float(usd_csa["valuation_epe"][0])
+    eur_collateral = float(eur_csa["expected_collateral"][0])
+    usd_collateral = float(usd_csa["expected_collateral"][0])
+
+    assert math.isclose(eur_residual, 100.0, rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(usd_residual, 50.0, rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(usd_collateral - eur_collateral, 50.0, rel_tol=0.0, abs_tol=1.0e-8)
 
 
 def test_native_runtime_handles_usd_digital_cmsspread_without_nan():
