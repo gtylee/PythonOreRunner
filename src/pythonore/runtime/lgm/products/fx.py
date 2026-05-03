@@ -139,6 +139,13 @@ def fx_forward_closeout_paths(
     maturity = float(p.maturity_years)
     out = np.zeros((observation_times.size, npv_paths.shape[1]), dtype=float)
     for i, (obs_t, co_t) in enumerate(zip(observation_times, closeout_times)):
+        if float(co_t) <= float(obs_t) + 1.0e-12:
+            target = float(obs_t)
+            idx = int(np.searchsorted(times, target))
+            if idx >= times.size:
+                idx = times.size - 1
+            out[i, :] = npv_paths[idx, :]
+            continue
         if obs_t >= maturity - 1.0e-12:
             continue
         target = float(co_t)

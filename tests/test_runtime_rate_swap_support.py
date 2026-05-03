@@ -16,7 +16,15 @@ import example_ore_snapshot_usd_all_rates_products as broad_rates_example
 import pythonore.compute.irs_xva_utils as irs_utils_mod
 import pythonore.compute.overnight_capfloor_shim as overnight_shim_mod
 import pythonore.runtime.runtime_impl as runtime_impl_mod
-from pythonore.domain.dataclasses import GenericProduct, RuntimeConfig, XVAAnalyticConfig
+from pythonore.domain.dataclasses import (
+    CollateralBalance,
+    CollateralConfig,
+    GenericProduct,
+    NettingConfig,
+    NettingSet,
+    RuntimeConfig,
+    XVAAnalyticConfig,
+)
 from pythonore.compute.irs_xva_utils import (
     _average_overnight_coupon_fixing_date,
     _infer_index_day_counter,
@@ -990,6 +998,84 @@ def test_generated_usd_jpy_overnight_xccy_uses_tonar_fx_reset_without_fx_blowup(
         assert coverage["fallback_trades"] == 0
         assert coverage["unsupported"] == []
         assert math.isfinite(float(result.pv_total))
+    finally:
+        tmp.cleanup()
+
+
+def test_generated_usd_jpy_overnight_xccy_zero_threshold_csa_mpor_has_finite_closeout():
+    tmp, case_root = _clone_xccy_basis_case(
+        TOOLS_DIR / "Examples" / "Products" / "Input",
+        "USD_SOFR_TONAR_XCCY_MPOR_NO_ORE",
+        trade_id="SOFR_TONAR_XCCY_MPOR_NO_ORE",
+        counterparty="CPTY_A",
+        netting_set_id="CPTY_A",
+        asof_date="2025-02-10",
+        start_date="2025-04-10",
+        end_date="2026-04-10",
+        tenor="3M",
+        calendar="US,JP",
+        leg0={
+            "payer": True,
+            "currency": "USD",
+            "notional": 100000000.0,
+            "index": "USD-SOFR",
+            "spread": 0.0,
+        },
+        leg1={
+            "payer": False,
+            "currency": "JPY",
+            "notional": 15222818282.0,
+            "index": "JPY-TONAR",
+            "spread": 0.0,
+            "fx_reset": {
+                "foreign_currency": "USD",
+                "foreign_amount": 100000000.0,
+                "fx_index": "FX-BOE-USD-JPY",
+                "fixing_days": 2,
+            },
+        },
+        ore_file="ore.xml",
+    )
+    try:
+        snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+        snapshot = replace(
+            snapshot,
+            netting=NettingConfig(
+                netting_sets={
+                    "CPTY_A": NettingSet(
+                        netting_set_id="CPTY_A",
+                        counterparty="CPTY_A",
+                        active_csa=True,
+                        csa_currency="USD",
+                        threshold_pay=0.0,
+                        threshold_receive=0.0,
+                        mta_pay=0.0,
+                        mta_receive=0.0,
+                    )
+                }
+            ),
+            collateral=CollateralConfig(
+                balances=(CollateralBalance(netting_set_id="CPTY_A", currency="USD"),)
+            ),
+            config=replace(
+                snapshot.config,
+                analytics=("CVA",),
+                num_paths=4,
+                params={**snapshot.config.params, "python.mpor_source_override": "1Y"},
+            ),
+        )
+        result = _run_python(snapshot, "usd-jpy-overnight-xccy-zero-threshold-mpor")
+        profile = result.exposure_profiles_by_netting_set["CPTY_A"]
+        coverage = result.metadata["coverage"]
+
+        assert coverage["fallback_trades"] == 0
+        assert result.metadata["mpor_enabled"] is True
+        assert result.metadata["mpor_source"] == "python.mpor_source_override"
+        assert max(abs(float(x)) for x in profile["valuation_epe"]) <= 1.0e-8
+        assert max(float(x) for x in profile["closeout_epe"]) > 0.0
+        assert max(float(x) for x in profile["closeout_epe"]) < 1.0e9
+        assert all(math.isfinite(float(x)) for x in profile["closeout_epe"])
+        assert all(math.isfinite(float(x)) for x in profile["closeout_ene"])
     finally:
         tmp.cleanup()
 

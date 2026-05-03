@@ -1576,6 +1576,88 @@ def test_zero_threshold_csa_uses_sticky_mpor_closeout_not_same_day_valuation():
     )
 
 
+def test_fx_forward_zero_threshold_csa_uses_sticky_mpor_closeout_interpolation():
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="FXFWD_ZERO_THRESHOLD_MPOR",
+        counterparty="CP_A",
+        netting_set="NS_FX_MPOR",
+        trade_type="FxForward",
+        product=FXForward(pair="EURUSD", notional=1_000_000.0, strike=1.0, maturity_years=2.0, buy_base=True),
+    )
+    extra_quotes = (
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+        MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
+    )
+    base_snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, raw_quotes=tuple(snapshot.market.raw_quotes) + extra_quotes),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_FX_MPOR": NettingSet(
+                    netting_set_id="NS_FX_MPOR",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_pay=0.0,
+                    threshold_receive=0.0,
+                    mta_pay=0.0,
+                    mta_receive=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_FX_MPOR", currency="EUR"),)
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=2,
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y,18M,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(base_snapshot).state.mapped_inputs
+    adapter_no_mpor = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    no_mpor = adapter_no_mpor.run(base_snapshot, mapped=mapped, run_id="fx-zero-threshold-no-mpor")
+    no_mpor_profile = no_mpor.exposure_profiles_by_netting_set["NS_FX_MPOR"]
+    assert max(abs(float(x)) for x in no_mpor_profile["valuation_epe"]) <= 1.0e-10
+    assert max(abs(float(x)) for x in no_mpor_profile["closeout_epe"]) <= 1.0e-10
+
+    mpor_snapshot = replace(
+        base_snapshot,
+        config=replace(
+            base_snapshot.config,
+            params={**base_snapshot.config.params, "python.mpor_source_override": "1Y"},
+        ),
+    )
+    mapped_mpor = XVAEngine(adapter=DeterministicToyAdapter()).create_session(mpor_snapshot).state.mapped_inputs
+    adapter_mpor = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with_mpor = adapter_mpor.run(mpor_snapshot, mapped=mapped_mpor, run_id="fx-zero-threshold-with-mpor")
+    mpor_profile = with_mpor.exposure_profiles_by_netting_set["NS_FX_MPOR"]
+    npv_cube = with_mpor.cube("npv_cube").payload["FXFWD_ZERO_THRESHOLD_MPOR"]
+
+    assert with_mpor.metadata["mpor_enabled"] is True
+    assert max(abs(float(x)) for x in mpor_profile["valuation_epe"]) <= 1.0e-10
+    assert max(float(x) for x in mpor_profile["closeout_epe"]) > 1.0
+    assert np.allclose(
+        np.asarray(mpor_profile["closeout_times"], dtype=float),
+        np.minimum(np.asarray(mpor_profile["times"], dtype=float) + 1.0, float(np.asarray(mpor_profile["times"], dtype=float)[-1])),
+        atol=1.0e-12,
+    )
+    assert np.allclose(
+        np.asarray(npv_cube["closeout_times"], dtype=float),
+        np.minimum(np.asarray(npv_cube["times"], dtype=float) + 1.0, float(np.asarray(npv_cube["times"], dtype=float)[-1])),
+        atol=1.0e-12,
+    )
+    assert not np.allclose(
+        np.asarray(npv_cube["closeout_npv_mean"], dtype=float),
+        np.asarray(npv_cube["npv_xva_mean"], dtype=float),
+        atol=1.0e-10,
+    )
+
+
 def test_native_runtime_handles_usd_digital_cmsspread_without_nan():
     snapshot = _make_snapshot()
     trade = Trade(
