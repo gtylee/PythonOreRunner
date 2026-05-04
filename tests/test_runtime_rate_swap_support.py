@@ -39,6 +39,7 @@ from pythonore.io.loader import XVALoader
 from pythonore.mapping.mapper import map_snapshot
 from py_ore_tools import ore_snapshot_cli
 from pythonore.runtime.bermudan import _exercise_sign, price_bermudan_from_ore_case
+from pythonore.runtime.exceptions import EngineRunError
 from pythonore.runtime.runtime import XVAEngine
 from pythonore.runtime.runtime_impl import _today_spot_from_quotes
 
@@ -1524,6 +1525,83 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
+
+
+def test_generated_all_rates_strict_ore_inputs_cover_required_market_families(tmp_path):
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_StrictInputs"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    wanted = {
+        "BASIS_USD_LIB3M_SIFMA_0001",
+        "CMS_SWAP_USD_0001",
+        "CAP_USD_SOFR3M_0001",
+        "XCCY_USD_SOFR_JPY_TONAR_0001",
+    }
+    trades = tuple(t for t in snapshot.portfolio.trades if t.trade_id in wanted)
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=trades),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.strict_ore_inputs": "Y"},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ):
+        inputs = adapter._extract_inputs(snapshot, map_snapshot(snapshot))
+
+    assert not inputs.input_fallbacks
+    assert "USD-SIFMA" in inputs.forward_curves_by_name
+    assert math.isfinite(float(adapter._resolve_index_curve(inputs, "USD", "USD-CMS-30Y")(5.0)))
+    assert "USD-SOFR" in inputs.forward_curves_by_name or "1D" in inputs.forward_curves_by_tenor.get("USD", {})
+    assert "JPY-TONAR" in inputs.forward_curves_by_name or "1D" in inputs.forward_curves_by_tenor.get("JPY", {})
+    assert _today_spot_from_quotes("USDJPY", inputs) > 100.0
+
+
+@pytest.mark.parametrize(
+    ("trade_id", "drop_prefix", "expected"),
+    (
+        ("BASIS_USD_LIB3M_SIFMA_0001", "BMA_SWAP/RATIO/USD", "missing_bma_ratio_curve:USD-SIFMA"),
+        ("CAP_USD_SOFR3M_0001", "SOFR", "missing_forward_curve:USD-SOFR-3M"),
+        ("XCCY_USD_SOFR_JPY_TONAR_0001", "FX/RATE/USD/JPY", "missing_fx_spot:USDJPY"),
+        ("XCCY_USD_SOFR_JPY_TONAR_0001", "IR_SWAP/RATE/JPY/2D/1D", "missing_forward_curve:JPY-TONAR"),
+    ),
+)
+def test_generated_all_rates_strict_ore_inputs_fail_fast_when_market_family_missing(tmp_path, trade_id, drop_prefix, expected):
+    case_root = tmp_path / f"USD_AllRatesProductsSnapshot_StrictMissing_{trade_id}"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+    snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    trade = next(t for t in snapshot.portfolio.trades if t.trade_id == trade_id)
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(
+                q
+                for q in snapshot.market.raw_quotes
+                if drop_prefix.upper() not in str(q.key).upper()
+                and not (drop_prefix.upper() == "IR_SWAP/RATE/JPY/2D/1D" and str(q.key).upper().startswith("MM/RATE/JPY/0D/1D"))
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            snapshot.config,
+            num_paths=4,
+            params={**dict(snapshot.config.params), "python.strict_ore_inputs": "Y"},
+        ),
+    )
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+
+    with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+        "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+    ), pytest.raises(EngineRunError, match=expected):
+        adapter._extract_inputs(snapshot, map_snapshot(snapshot))
 
 
 def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_path):

@@ -181,6 +181,10 @@ def _trade_curve_need_signature(
                 )
             )
             continue
+        sticky_state = getattr(spec, "sticky_state", None)
+        if kind == "CAPFLOOR" and isinstance(sticky_state, dict):
+            spec_sig.append((kind, ccy, str(sticky_state.get("index_name", "")).upper()))
+            continue
         if kind == "RATESWAP" and isinstance(legs, dict):
             leg_sigs: list[tuple[str, str, str, str]] = []
             for leg in legs.get("rate_legs", []):
@@ -215,6 +219,10 @@ def _derive_curve_needs_from_signature(
                 needed_forward_names.setdefault(ccy, set()).add(index_name)
             if tenor:
                 needed_tenors.setdefault(ccy, set()).add(tenor)
+        elif kind == "CAPFLOOR":
+            index_name = str(spec[2]).upper()
+            if index_name:
+                needed_forward_names.setdefault(ccy, set()).add(index_name)
         elif kind == "RATESWAP":
             for leg_ccy, *index_names in spec[2]:
                 curve_ccy = str(leg_ccy or ccy).upper()
@@ -228,6 +236,50 @@ def _derive_curve_needs_from_signature(
     tenors_sig = tuple((ccy, tuple(sorted(tenors))) for ccy, tenors in sorted(needed_tenors.items()))
     names_sig = tuple((ccy, tuple(sorted(names))) for ccy, names in sorted(needed_forward_names.items()))
     return tenors_sig, names_sig
+
+
+def _strict_missing_forward_curve_reasons(
+    needed_forward_names: Mapping[str, set[str]],
+    forward_curves_by_tenor: Mapping[str, Mapping[str, Callable[[float], float]]],
+    forward_curves_by_name: Mapping[str, Callable[[float], float]],
+    swap_index_forward_tenors: Mapping[str, str],
+    bma_ratio_curves: Mapping[str, Sequence[Tuple[float, float]]],
+) -> List[str]:
+    missing: List[str] = []
+    named_keys = {_normalize_curve_lookup_key(name) for name in forward_curves_by_name}
+    for ccy, names in needed_forward_names.items():
+        tenor_curves = {
+            _normalize_forward_tenor_family(tenor)
+            for tenor in forward_curves_by_tenor.get(str(ccy).upper(), {})
+        }
+        for raw_name in sorted(names):
+            name = _normalize_curve_lookup_key(raw_name)
+            lookup = name
+            if lookup in {"USD-SIFMA-1W", "USD-SIFMA-7D"}:
+                lookup = "USD-SIFMA"
+            elif lookup in {"USD-BMA-1W", "USD-BMA-7D"}:
+                lookup = "USD-BMA"
+            if _is_bma_sifma_index(name) and not bma_ratio_curves.get(str(ccy).upper()):
+                missing.append(f"missing_bma_ratio_curve:{name}")
+                continue
+            if lookup in named_keys:
+                continue
+            family = _forward_index_family(name, swap_index_forward_tenors)
+            if "SOFR" in name:
+                if f"{str(ccy).upper()}-SOFR" in named_keys or "1D" in tenor_curves or "0D" in tenor_curves:
+                    continue
+                missing.append(f"missing_forward_curve:{name}")
+                continue
+            mapped_tenor = _normalize_forward_tenor_family(swap_index_forward_tenors.get(name, ""))
+            if mapped_tenor and mapped_tenor in tenor_curves:
+                continue
+            if family and family in tenor_curves:
+                continue
+            if _is_bma_sifma_index(name):
+                missing.append(f"missing_bma_ratio_curve:{name}")
+            else:
+                missing.append(f"missing_forward_curve:{name}")
+    return missing
 
 
 def _index_name_matches_quote_token(token: str, index_name: str, ccy: str) -> bool:
@@ -2050,6 +2102,13 @@ class PythonLgmAdapter:
         bma_ratio_curves = overlay.get("bma_ratio", {})
         hazards = overlay["hazard"]
         recoveries = overlay["recovery"]
+        input_fallbacks: List[str] = []
+        strict_family_inputs = str(snapshot.config.params.get("python.strict_ore_inputs", "N")).strip().upper() in {
+            "Y",
+            "YES",
+            "TRUE",
+            "1",
+        }
 
         trade_specs, unsupported, ccy_set = self._classify_portfolio_trades(snapshot, mapped)
         inflation_curves = self._load_inflation_curves(snapshot, trade_specs)
@@ -2058,6 +2117,11 @@ class PythonLgmAdapter:
             model_ccy=model_ccy,
             trade_specs=trade_specs,
         )
+        if strict_family_inputs:
+            for pair in stochastic_fx_pairs:
+                pair6 = str(pair).upper().replace("/", "")
+                if pair6 and pair6 not in fx_spots and pair6[3:] + pair6[:3] not in fx_spots:
+                    input_fallbacks.append(f"missing_fx_spot:{pair6}")
         need_sig = _trade_curve_need_signature(trade_specs, swap_index_forward_tenors)
         needed_tenors_sig, needed_forward_names_sig = _derive_curve_needs_from_signature(*need_sig)
         needed_tenors = {ccy: set(tenors) for ccy, tenors in needed_tenors_sig}
@@ -2067,7 +2131,6 @@ class PythonLgmAdapter:
         if quote_dicts is None:
             quote_dicts = _scan_market_quotes(snapshot.market.raw_quotes)
             self._quote_dict_cache[market_cache_key] = quote_dicts
-        input_fallbacks: List[str] = []
         strict_ore_inputs = self._is_ore_case_snapshot(snapshot)
 
         for spec in trade_specs:
@@ -2316,6 +2379,16 @@ class PythonLgmAdapter:
             forward_curves_by_name,
             xva_discount_curve,
         )
+        if strict_ore_inputs and strict_family_inputs:
+            input_fallbacks.extend(
+                _strict_missing_forward_curve_reasons(
+                    needed_forward_names,
+                    forward_curves_by_tenor,
+                    forward_curves_by_name,
+                    swap_index_forward_tenors,
+                    bma_ratio_curves,
+                )
+            )
 
         calibrated_specs: List[_TradeSpec] = []
         frozen_spreads = snapshot.config.params.get("python.frozen_float_spreads", {})

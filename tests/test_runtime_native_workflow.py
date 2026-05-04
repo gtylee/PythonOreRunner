@@ -232,6 +232,31 @@ def _torch_irs_backend(device: str = "cpu"):
     )
 
 
+def _assert_numpy_safe_result_arrays(result):
+    for cube in result.cubes.values():
+        payload = cube.payload
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.values():
+            if not isinstance(item, dict):
+                continue
+            for value in item.values():
+                if isinstance(value, (list, tuple)):
+                    try:
+                        arr = np.asarray(value, dtype=float)
+                    except (TypeError, ValueError):
+                        continue
+                    assert not hasattr(arr, "detach")
+    for profile in result.exposure_profiles_by_netting_set.values():
+        for value in profile.values():
+            if isinstance(value, (list, tuple)):
+                try:
+                    arr = np.asarray(value, dtype=float)
+                except (TypeError, ValueError):
+                    continue
+                assert not hasattr(arr, "detach")
+
+
 def _generic_capfloor_trade_xml(
     *,
     option: str = "cap",
@@ -900,6 +925,55 @@ def _generic_xccy_float_swap_trade_xml() -> str:
       <Spreads><Spread>0.0</Spread></Spreads>
       <Gearings><Gearing>1.0</Gearing></Gearings>
     </FloatingLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Payer>true</Payer>
+    <Currency>USD</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1100000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>USD</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SOFR</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _generic_xccy_fixed_float_swap_trade_xml() -> str:
+    return """
+<SwapData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Payer>false</Payer>
+    <Currency>EUR</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>30/360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>TARGET</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
   </LegData>
   <LegData>
     <LegType>Floating</LegType>
@@ -2131,6 +2205,76 @@ def test_torch_generic_capfloor_matches_numpy_runtime():
     assert abs(float(torch_result.xva_by_metric.get("CVA", 0.0)) - float(numpy_result.xva_by_metric.get("CVA", 0.0))) < 1.0e-8
 
 
+def test_torch_generic_rate_swap_matches_numpy_runtime_with_zero_threshold_csa_mpor():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="SWAP_TORCH_MPOR_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_SWAP_MPOR",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_rate_swap_trade_xml(end_date="2028-03-08")}),
+    )
+    snapshot = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_SWAP_MPOR": NettingSet(
+                    netting_set_id="NS_SWAP_MPOR",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="EUR",
+                    threshold_receive=0.0,
+                    threshold_pay=0.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_SWAP_MPOR", currency="EUR"),)
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=2,
+            params={**snapshot.config.params, "python.mpor_source_override": "1Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y,18M,2Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="swap-mpor-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="swap-mpor-torch")
+
+    numpy_profile = numpy_result.exposure_profiles_by_netting_set["NS_SWAP_MPOR"]
+    torch_profile = torch_result.exposure_profiles_by_netting_set["NS_SWAP_MPOR"]
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert numpy_result.metadata["mpor_enabled"] is True
+    assert torch_result.metadata["mpor_enabled"] is True
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_profile["closeout_epe"], dtype=float),
+        np.asarray(numpy_profile["closeout_epe"], dtype=float),
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
+
+
 def test_torch_generic_capfloor_matches_numpy_runtime_with_zero_threshold_csa_mpor():
     pytest.importorskip("torch")
     snapshot = _make_snapshot()
@@ -2178,6 +2322,7 @@ def test_torch_generic_capfloor_matches_numpy_runtime_with_zero_threshold_csa_mp
         rtol=0.0,
         atol=1.0e-8,
     )
+    _assert_numpy_safe_result_arrays(torch_result)
 
 
 def test_torch_generic_xccy_swap_matches_numpy_runtime_with_cross_currency_csa():
@@ -2264,6 +2409,84 @@ def test_torch_generic_xccy_swap_matches_numpy_runtime_with_cross_currency_csa()
         rtol=0.0,
         atol=1.0e-8,
     )
+
+
+def test_torch_generic_xccy_fixed_float_swap_matches_numpy_runtime_with_fx_conversion():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="XCCY_FIXED_FLOAT_TORCH_FX_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_XCCY_FIXED_FLOAT",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_xccy_fixed_float_swap_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SOFR/1Y/2Y", value=0.0320),
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_XCCY_FIXED_FLOAT": NettingSet(
+                    netting_set_id="NS_XCCY_FIXED_FLOAT",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="USD",
+                    threshold_receive=100.0,
+                    threshold_pay=100.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_XCCY_FIXED_FLOAT", currency="USD"),)
+        ),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            params={**snapshot.config.params, "python.mpor_source_override": "6M"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_grid("6M,1Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="xccy-fixed-float-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="xccy-fixed-float-torch")
+
+    numpy_profile = numpy_result.exposure_profiles_by_netting_set["NS_XCCY_FIXED_FLOAT"]
+    torch_profile = torch_result.exposure_profiles_by_netting_set["NS_XCCY_FIXED_FLOAT"]
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert torch_result.metadata["mpor_enabled"] is True
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_profile["closeout_epe"], dtype=float),
+        np.asarray(numpy_profile["closeout_epe"], dtype=float),
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
 
 
 @pytest.mark.parametrize(
