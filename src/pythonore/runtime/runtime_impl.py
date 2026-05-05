@@ -499,6 +499,26 @@ class PythonLgmAdapter:
             return False
         return True
 
+    def _supports_torch_plain_overnight_rate_leg(self, leg: Dict[str, object]) -> bool:
+        if str(leg.get("kind", "")).upper() != "FLOATING":
+            return False
+        if not bool(leg.get("overnight_indexed", False)) or bool(leg.get("is_averaged", False)):
+            return False
+        index_name = str(leg.get("index_name", "")).upper()
+        if _is_bma_sifma_index(index_name):
+            return False
+        if leg.get("cap") is not None or leg.get("floor") is not None:
+            return False
+        if bool(leg.get("naked_option", False)) or bool(leg.get("local_cap_floor", False)):
+            return False
+        if bool(leg.get("apply_observation_shift", False)) or bool(leg.get("has_sub_periods", False)):
+            return False
+        if int(leg.get("lookback_days", 0) or 0) != 0:
+            return False
+        if int(leg.get("rate_cutoff", 0) or 0) != 0:
+            return False
+        return True
+
     def _torch_rate_swap_exclusion_reasons(self, spec: _TradeSpec) -> tuple[str, ...]:
         reasons: list[str] = []
         if spec.kind != "RateSwap" or not isinstance(spec.legs, dict):
@@ -547,7 +567,8 @@ class PythonLgmAdapter:
             schedule_rule = str(leg.get("schedule_rule", "FORWARD")).upper()
             index_name = str(leg.get("index_name", "")).upper()
             averaged_overnight_torch = self._supports_torch_averaged_overnight_rate_leg(leg)
-            if bool(leg.get("overnight_indexed", False)) and not averaged_overnight_torch:
+            plain_overnight_torch = self._supports_torch_plain_overnight_rate_leg(leg)
+            if bool(leg.get("overnight_indexed", False)) and not (averaged_overnight_torch or plain_overnight_torch):
                 reasons.append("overnight_indexed")
             if bool(leg.get("is_averaged", False)) and not averaged_overnight_torch:
                 reasons.append("averaged_coupon")
@@ -4680,7 +4701,10 @@ class PythonLgmAdapter:
                         )
                         ctx.torch_curve_cache[fwd_key] = fwd_curve
                 live_coupon_grid = None
-                if kind == "FLOATING" and self._supports_torch_averaged_overnight_rate_leg(leg):
+                if kind == "FLOATING" and (
+                    self._supports_torch_averaged_overnight_rate_leg(leg)
+                    or self._supports_torch_plain_overnight_rate_leg(leg)
+                ):
                     live_coupon_grid = np.stack(
                         [
                             self._rate_leg_coupon_paths(

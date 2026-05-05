@@ -722,7 +722,7 @@ def price_plain_rate_leg_paths_torch(
             pv = torch.sum(p_tp_d * amount[None, :, None] * live[:, :, None], dim=1)
             return pv.detach().cpu().numpy() if return_numpy else pv
 
-        uses_explicit_coupon_grid = bool(leg.get("overnight_indexed", False)) and bool(leg.get("is_averaged", False)) and live_coupon_grid is not None
+        uses_explicit_coupon_grid = bool(leg.get("overnight_indexed", False)) and live_coupon_grid is not None
         if fwd_curve is None and not uses_explicit_coupon_grid:
             raise ValueError("floating rate leg requires fwd_curve")
 
