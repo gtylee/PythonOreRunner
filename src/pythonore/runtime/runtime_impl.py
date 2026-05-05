@@ -479,6 +479,26 @@ class PythonLgmAdapter:
     def _supports_torch_rate_swap(self, spec: _TradeSpec) -> bool:
         return not self._torch_rate_swap_exclusion_reasons(spec)
 
+    def _supports_torch_averaged_overnight_rate_leg(self, leg: Dict[str, object]) -> bool:
+        if str(leg.get("kind", "")).upper() != "FLOATING":
+            return False
+        if not bool(leg.get("overnight_indexed", False)) or not bool(leg.get("is_averaged", False)):
+            return False
+        index_name = str(leg.get("index_name", "")).upper()
+        if _is_bma_sifma_index(index_name):
+            return False
+        if leg.get("cap") is not None or leg.get("floor") is not None:
+            return False
+        if bool(leg.get("naked_option", False)) or bool(leg.get("local_cap_floor", False)):
+            return False
+        if bool(leg.get("apply_observation_shift", False)) or bool(leg.get("has_sub_periods", False)):
+            return False
+        if int(leg.get("lookback_days", 0) or 0) != 0:
+            return False
+        if int(leg.get("rate_cutoff", 0) or 0) != 0:
+            return False
+        return True
+
     def _torch_rate_swap_exclusion_reasons(self, spec: _TradeSpec) -> tuple[str, ...]:
         reasons: list[str] = []
         if spec.kind != "RateSwap" or not isinstance(spec.legs, dict):
@@ -506,9 +526,10 @@ class PythonLgmAdapter:
                 continue
             schedule_rule = str(leg.get("schedule_rule", "FORWARD")).upper()
             index_name = str(leg.get("index_name", "")).upper()
-            if bool(leg.get("overnight_indexed", False)):
+            averaged_overnight_torch = self._supports_torch_averaged_overnight_rate_leg(leg)
+            if bool(leg.get("overnight_indexed", False)) and not averaged_overnight_torch:
                 reasons.append("overnight_indexed")
-            if bool(leg.get("is_averaged", False)):
+            if bool(leg.get("is_averaged", False)) and not averaged_overnight_torch:
                 reasons.append("averaged_coupon")
             if leg.get("cap") is not None:
                 reasons.append("cap")
@@ -518,6 +539,10 @@ class PythonLgmAdapter:
                 reasons.append("naked_option")
             if bool(leg.get("local_cap_floor", False)):
                 reasons.append("local_cap_floor")
+            if bool(leg.get("apply_observation_shift", False)):
+                reasons.append("observation_shift")
+            if bool(leg.get("has_sub_periods", False)):
+                reasons.append("sub_periods")
             if int(leg.get("lookback_days", 0) or 0) != 0:
                 reasons.append("lookback_days")
             if int(leg.get("rate_cutoff", 0) or 0) != 0:
@@ -4624,6 +4649,23 @@ class PythonLgmAdapter:
                             device=torch_device,
                         )
                         ctx.torch_curve_cache[fwd_key] = fwd_curve
+                live_coupon_grid = None
+                if kind == "FLOATING" and self._supports_torch_averaged_overnight_rate_leg(leg):
+                    live_coupon_grid = np.stack(
+                        [
+                            self._rate_leg_coupon_paths(
+                                ctx.model,
+                                leg,
+                                leg_ccy,
+                                inputs,
+                                float(t_eval),
+                                ctx.x_paths[i_eval, :],
+                                snapshot=ctx.snapshot,
+                            )
+                            for i_eval, t_eval in enumerate(inputs.times)
+                        ],
+                        axis=0,
+                    )
                 leg_vals = torch_plain_leg_pricer(
                     ctx.model,
                     disc_curve,
@@ -4631,6 +4673,7 @@ class PythonLgmAdapter:
                     np.asarray(inputs.times, dtype=float),
                     ctx.x_paths,
                     fwd_curve=fwd_curve,
+                    live_coupon_grid=live_coupon_grid,
                     return_numpy=True,
                 )
                 principal_pay = np.asarray([], dtype=float)

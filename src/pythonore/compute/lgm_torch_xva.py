@@ -689,6 +689,7 @@ def price_plain_rate_leg_paths_torch(
     x_paths,
     *,
     fwd_curve: Optional[TorchDiscountCurve] = None,
+    live_coupon_grid: Optional[np.ndarray] = None,
     return_numpy: bool = True,
 ):
     torch = _require_torch()
@@ -721,7 +722,8 @@ def price_plain_rate_leg_paths_torch(
             pv = torch.sum(p_tp_d * amount[None, :, None] * live[:, :, None], dim=1)
             return pv.detach().cpu().numpy() if return_numpy else pv
 
-        if fwd_curve is None:
+        uses_explicit_coupon_grid = bool(leg.get("overnight_indexed", False)) and bool(leg.get("is_averaged", False)) and live_coupon_grid is not None
+        if fwd_curve is None and not uses_explicit_coupon_grid:
             raise ValueError("floating rate leg requires fwd_curve")
 
         start_np = np.asarray(leg.get("start_time", []), dtype=float)
@@ -746,31 +748,40 @@ def price_plain_rate_leg_paths_torch(
         accr = torch.as_tensor(accr_np, dtype=x.dtype, device=x.device)
         index_accr = torch.as_tensor(index_accr_np, dtype=x.dtype, device=x.device)
 
-        p_t_f = fwd_curve.discount(eval_times)
-        p_te_f = discount_bond_path_grid_torch(
-            model,
-            eval_times_np,
-            end_np,
-            x,
-            p_t_f,
-            fwd_curve.discount(end),
-        )
-        p_ts_f = discount_bond_path_grid_torch(
-            model,
-            eval_times_np,
-            start_np,
-            x,
-            p_t_f,
-            fwd_curve.discount(start),
-        )
-        after_start = eval_times[:, None] >= start[None, :] - 1.0e-12
-        p_ts_f = torch.where(after_start[:, :, None], torch.ones_like(p_ts_f), p_ts_f)
-        tau = torch.clamp(index_accr[None, :, None], min=torch.as_tensor(1.0e-8, dtype=x.dtype, device=x.device))
-        floating_base = (p_ts_f / p_te_f - 1.0) / tau
-        floating_base = torch.nan_to_num(floating_base, nan=0.0, posinf=0.0, neginf=0.0)
         fixed_now = fixed_mask[None, :] | (fixing[None, :] <= eval_times[:, None] + 1.0e-12)
-        base = torch.where(fixed_now[:, :, None], quoted[None, :, None], floating_base)
-        coupon = gearing[None, :, None] * base + spread[None, :, None]
+        if uses_explicit_coupon_grid:
+            grid_np = np.asarray(live_coupon_grid, dtype=float)
+            expected_shape = (eval_times_np.size, start_np.size, x.shape[1])
+            if grid_np.shape != expected_shape:
+                raise ValueError(f"live_coupon_grid must have shape {expected_shape}, got {grid_np.shape}")
+            base = torch.nan_to_num(torch.as_tensor(grid_np, dtype=x.dtype, device=x.device), nan=0.0, posinf=0.0, neginf=0.0)
+            coupon = base
+        else:
+            assert fwd_curve is not None
+            p_t_f = fwd_curve.discount(eval_times)
+            p_te_f = discount_bond_path_grid_torch(
+                model,
+                eval_times_np,
+                end_np,
+                x,
+                p_t_f,
+                fwd_curve.discount(end),
+            )
+            p_ts_f = discount_bond_path_grid_torch(
+                model,
+                eval_times_np,
+                start_np,
+                x,
+                p_t_f,
+                fwd_curve.discount(start),
+            )
+            after_start = eval_times[:, None] >= start[None, :] - 1.0e-12
+            p_ts_f = torch.where(after_start[:, :, None], torch.ones_like(p_ts_f), p_ts_f)
+            tau = torch.clamp(index_accr[None, :, None], min=torch.as_tensor(1.0e-8, dtype=x.dtype, device=x.device))
+            floating_base = (p_ts_f / p_te_f - 1.0) / tau
+            floating_base = torch.nan_to_num(floating_base, nan=0.0, posinf=0.0, neginf=0.0)
+            base = torch.where(fixed_now[:, :, None], quoted[None, :, None], floating_base)
+            coupon = gearing[None, :, None] * base + spread[None, :, None]
         notional = torch.as_tensor(
             np.asarray(leg.get("notional", np.zeros(start_np.shape)), dtype=float),
             dtype=x.dtype,

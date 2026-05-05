@@ -600,6 +600,58 @@ def _generic_rate_swap_trade_xml(
 """.strip()
 
 
+def _generic_averaged_overnight_rate_swap_trade_xml(*, ccy: str = "USD", index: str = "USD-SOFR") -> str:
+    calendar = "US" if ccy.upper() == "USD" else "JP" if ccy.upper() == "JPY" else "TARGET"
+    fixed_dc = "A360" if ccy.upper() in {"USD", "JPY"} else "30/360"
+    return f"""
+<SwapData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>{ccy}</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>{fixed_dc}</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>6M</Tenor>
+        <Calendar>{calendar}</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>{ccy}</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>{calendar}</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>{index}</Index>
+      <FixingDays>0</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <IsAveraged>true</IsAveraged>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
 def _generic_cms_trade_xml(*, gearing: float = 1.0, spread: float = 0.0, index_name: str = "USD-CMS-10Y") -> str:
     return f"""
 <SwapData>
@@ -663,13 +715,13 @@ def _generic_sifma_rate_swap_trade_xml(*, rate_cutoff: int = 1) -> str:
 """.strip()
 
 
-def _simulation_xml_with_usd_grid(spec: str) -> str:
+def _simulation_xml_with_ccy_grid(spec: str, ccy: str) -> str:
     return f"""
 <Simulation>
   <Parameters><Grid>{spec}</Grid></Parameters>
   <CrossAssetModel>
     <InterestRateModels>
-      <LGM ccy="USD">
+      <LGM ccy="{ccy.upper()}">
         <Reversion><Value>0.03</Value></Reversion>
         <Volatility><Value>0.01</Value></Volatility>
         <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
@@ -678,6 +730,10 @@ def _simulation_xml_with_usd_grid(spec: str) -> str:
   </CrossAssetModel>
 </Simulation>
 """.strip()
+
+
+def _simulation_xml_with_usd_grid(spec: str) -> str:
+    return _simulation_xml_with_ccy_grid(spec, "USD")
 
 
 def _swaption_premium_runtime_case(
@@ -2269,6 +2325,108 @@ def test_torch_generic_rate_swap_matches_numpy_runtime_with_zero_threshold_csa_m
     np.testing.assert_allclose(
         np.asarray(torch_profile["closeout_epe"], dtype=float),
         np.asarray(numpy_profile["closeout_epe"], dtype=float),
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
+
+
+@pytest.mark.parametrize(
+    ("ccy", "index_name", "quotes"),
+    (
+        (
+            "USD",
+            "USD-SOFR",
+            (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0315),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SOFR/1Y/2Y", value=0.0320),
+                MarketQuote(date="2026-03-08", key="MM/RATE/USD/SOFR/0D/1D", value=0.0310),
+            ),
+        ),
+        (
+            "JPY",
+            "JPY-TONAR",
+            (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/JPY/2Y", value=0.0040),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/JPY/2D/1D/2Y", value=0.0045),
+                MarketQuote(date="2026-03-08", key="MM/RATE/JPY/0D/1D", value=0.0038),
+            ),
+        ),
+    ),
+)
+def test_torch_averaged_overnight_rate_swap_matches_numpy_runtime_with_csa_mpor(ccy, index_name, quotes):
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id=f"AVG_{ccy}_OIS_TORCH_MPOR_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_AVG_OIS",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_averaged_overnight_rate_swap_trade_xml(ccy=ccy, index=index_name)}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + tuple(quotes),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_AVG_OIS": NettingSet(
+                    netting_set_id="NS_AVG_OIS",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency=ccy,
+                    threshold_receive=0.0,
+                    threshold_pay=0.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_AVG_OIS", currency=ccy),)
+        ),
+        config=replace(
+            snapshot.config,
+            base_currency=ccy,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            params={**snapshot.config.params, "python.mpor_source_override": "2W", "python.store_npv_cube_paths": "Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_ccy_grid("3M,6M,9M,1Y", ccy)},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade.trade_id)
+    assert adapter._supports_torch_rate_swap(spec)
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id=f"avg-{ccy.lower()}-ois-mpor-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id=f"avg-{ccy.lower()}-ois-mpor-torch")
+
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert "torch_rate_swap_exclusions" not in torch_result.metadata
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert math.isclose(
+        float(torch_result.xva_by_metric.get("CVA", 0.0)),
+        float(numpy_result.xva_by_metric.get("CVA", 0.0)),
+        rel_tol=0.0,
+        abs_tol=1.0e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(torch_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        np.asarray(numpy_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
         rtol=0.0,
         atol=1.0e-8,
     )
