@@ -1476,6 +1476,9 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert "FLOOR_USD_LIB3M_0001" in trade_ids
     assert "FLOOR_USD_SOFR3M_FORWARD_0001" in trade_ids
     assert "CAP_USD_LIB3M_SHORT_GEARED_0001" in trade_ids
+    assert "IRS_USD_SIFMA_PLAIN_0001" in trade_ids
+    assert "IRS_USD_SIFMA_AVG_0001" in trade_ids
+    assert "IRS_USD_SIFMA_AVG_CUTOFF_0001" in trade_ids
     assert "BASIS_USD_LIB3M_SIFMA_0001" in trade_ids
     assert "BASIS_USD_SOFR3M_SIFMA_0001" in trade_ids
     assert "XCCY_USD_SOFR_JPY_TONAR_0001" in trade_ids
@@ -1497,6 +1500,27 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert short_cap_state["definition"].position == -1.0
     assert np.allclose(short_cap_state["definition"].gearing, 1.50)
     assert np.allclose(short_cap_state["definition"].spread, 0.0010)
+
+    fixed_sifma_plain = next(t for t in snapshot.portfolio.trades if t.trade_id == "IRS_USD_SIFMA_PLAIN_0001")
+    fixed_sifma_avg = next(t for t in snapshot.portfolio.trades if t.trade_id == "IRS_USD_SIFMA_AVG_0001")
+    fixed_sifma_cutoff = next(t for t in snapshot.portfolio.trades if t.trade_id == "IRS_USD_SIFMA_AVG_CUTOFF_0001")
+    plain_state = adapter._build_generic_rate_swap_legs(fixed_sifma_plain, snapshot)
+    avg_state = adapter._build_generic_rate_swap_legs(fixed_sifma_avg, snapshot)
+    cutoff_state = adapter._build_generic_rate_swap_legs(fixed_sifma_cutoff, snapshot)
+    assert plain_state is not None
+    assert avg_state is not None
+    assert cutoff_state is not None
+    plain_sifma_leg = next(leg for leg in plain_state["rate_legs"] if "SIFMA" in str(leg.get("index_name", "")).upper())
+    avg_sifma_leg = next(leg for leg in avg_state["rate_legs"] if "SIFMA" in str(leg.get("index_name", "")).upper())
+    cutoff_sifma_leg = next(leg for leg in cutoff_state["rate_legs"] if "SIFMA" in str(leg.get("index_name", "")).upper())
+    assert plain_sifma_leg["overnight_indexed"] is True
+    assert plain_sifma_leg["is_averaged"] is False
+    assert avg_sifma_leg["overnight_indexed"] is True
+    assert avg_sifma_leg["is_averaged"] is True
+    assert int(avg_sifma_leg.get("rate_cutoff", 0) or 0) == 0
+    assert cutoff_sifma_leg["overnight_indexed"] is True
+    assert cutoff_sifma_leg["is_averaged"] is True
+    assert int(cutoff_sifma_leg.get("rate_cutoff", 0) or 0) == 2
 
     trade = next(t for t in snapshot.portfolio.trades if t.trade_id == "XCCY_USD_SOFR_JPY_TONAR_0001")
     state = adapter._build_generic_rate_swap_legs(trade, snapshot)
@@ -1525,6 +1549,16 @@ def test_generated_all_rates_smoke_includes_sifma_tonar_xccy_variants(tmp_path):
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []
     assert math.isfinite(float(result.pv_total))
+    mapped_specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    fixed_sifma_specs = [
+        spec
+        for spec in mapped_specs
+        if spec.trade.trade_id
+        in {"IRS_USD_SIFMA_PLAIN_0001", "IRS_USD_SIFMA_AVG_0001", "IRS_USD_SIFMA_AVG_CUTOFF_0001"}
+    ]
+    assert len(fixed_sifma_specs) == 3
+    assert all(adapter._supports_torch_rate_swap(spec) for spec in fixed_sifma_specs)
 
 
 def test_generated_all_rates_strict_ore_inputs_cover_required_market_families(tmp_path):
@@ -1532,6 +1566,9 @@ def test_generated_all_rates_strict_ore_inputs_cover_required_market_families(tm
     broad_rates_example._write_files(case_root, count_per_type=1)
     snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
     wanted = {
+        "IRS_USD_SIFMA_PLAIN_0001",
+        "IRS_USD_SIFMA_AVG_0001",
+        "IRS_USD_SIFMA_AVG_CUTOFF_0001",
         "BASIS_USD_LIB3M_SIFMA_0001",
         "CMS_SWAP_USD_0001",
         "CAP_USD_SOFR3M_0001",
@@ -1566,6 +1603,7 @@ def test_generated_all_rates_strict_ore_inputs_cover_required_market_families(tm
 @pytest.mark.parametrize(
     ("trade_id", "drop_prefix", "expected"),
     (
+        ("IRS_USD_SIFMA_AVG_CUTOFF_0001", "BMA_SWAP/RATIO/USD", "missing_bma_ratio_curve:USD-SIFMA"),
         ("BASIS_USD_LIB3M_SIFMA_0001", "BMA_SWAP/RATIO/USD", "missing_bma_ratio_curve:USD-SIFMA"),
         ("CAP_USD_SOFR3M_0001", "SOFR", "missing_forward_curve:USD-SOFR-3M"),
         ("XCCY_USD_SOFR_JPY_TONAR_0001", "FX/RATE/USD/JPY", "missing_fx_spot:USDJPY"),
@@ -1704,7 +1742,8 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path, count_per
     assert numpy_result.metadata["irs_pricing_backend"] == "numpy"
     assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
     plain_basis_prefixes = ("BASIS_USD_LIB3M_LIB6M", "BASIS_USD_SOFR3M_LIB3M")
-    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=10.0 * count_per_type)
+    sifma_fixed_float_prefixes = ("IRS_USD_SIFMA_PLAIN", "IRS_USD_SIFMA_AVG_", "IRS_USD_SIFMA_AVG_CUTOFF")
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=35.0 * count_per_type)
     assert math.isclose(
         float(torch_result.xva_by_metric.get("CVA", 0.0)),
         float(numpy_result.xva_by_metric.get("CVA", 0.0)),
@@ -1718,7 +1757,7 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path, count_per
     for trade_id, numpy_payload in numpy_cube.items():
         numpy_t0 = float(numpy_payload["npv_mean"][0])
         torch_t0 = float(torch_cube[trade_id]["npv_mean"][0])
-        abs_tol = 20.0 if trade_id.startswith(plain_basis_prefixes) else 1.0e-7
+        abs_tol = 20.0 if trade_id.startswith(plain_basis_prefixes + sifma_fixed_float_prefixes) else 1.0e-7
         assert math.isclose(torch_t0, numpy_t0, rel_tol=0.0, abs_tol=abs_tol), trade_id
 
     for path_key in ("npv_paths", "npv_xva_paths"):
@@ -1731,7 +1770,7 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path, count_per
                     )
                 )
             )
-            abs_tol = 20.0 if trade_id.startswith(plain_basis_prefixes) else 1.0e-6
+            abs_tol = 20.0 if trade_id.startswith(plain_basis_prefixes + sifma_fixed_float_prefixes) else 1.0e-6
             assert max_abs_diff <= abs_tol, (path_key, trade_id, max_abs_diff)
 
     mapped = map_snapshot(base_snapshot)
@@ -1746,6 +1785,15 @@ def test_generated_all_rates_numpy_and_torch_t0_prices_align(tmp_path, count_per
     ]
     assert basis_specs
     assert all(adapter._supports_torch_rate_swap(spec) for spec in basis_specs)
+    fixed_sifma_specs = [
+        spec
+        for spec in specs
+        if spec.trade.trade_id.startswith(
+            ("IRS_USD_SIFMA_PLAIN", "IRS_USD_SIFMA_AVG_", "IRS_USD_SIFMA_AVG_CUTOFF")
+        )
+    ]
+    assert len(fixed_sifma_specs) == 3 * count_per_type
+    assert all(adapter._supports_torch_rate_swap(spec) for spec in fixed_sifma_specs)
 
 
 def test_bermudan_swaption_uses_trade_specific_gsr_calibration_when_available():

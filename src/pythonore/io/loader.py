@@ -603,6 +603,20 @@ def _parse_product_from_trade_xml(trade: ET.Element, trade_type: str):
         if generic_rate_leg is not None or len(floating_legs) > 1:
             return GenericProduct(payload={"trade_type": trade_type, "subtype": "GenericRateSwap", "xml": _product_inner_xml(trade)})
         if fixed_leg is not None and float_leg is not None:
+            float_index = _text(float_leg, "./FloatingLegData/Index") or ""
+            floating_data = float_leg.find("./FloatingLegData")
+            is_special_fixed_float = (
+                any(tag in float_index.upper() for tag in ("BMA", "SIFMA"))
+                or (
+                    floating_data is not None
+                    and any(
+                        (floating_data.findtext(f"./{field}") or "").strip()
+                        for field in ("IsAveraged", "RateCutoff", "Lookback", "NakedOption", "LocalCapFloor")
+                    )
+                )
+            )
+            if is_special_fixed_float:
+                return GenericProduct(payload={"trade_type": trade_type, "subtype": "GenericRateSwap", "xml": _product_inner_xml(trade)})
             ccy = _text(fixed_leg, "./Currency") or "EUR"
             notional = float(_text(fixed_leg, "./Notionals/Notional") or 0.0)
             fixed_rate = float(_text(fixed_leg, "./FixedLegData/Rates/Rate") or 0.0)

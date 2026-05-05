@@ -75,6 +75,9 @@ def _trade_blocks(count_per_type: int) -> list[str]:
             _cms_trade_xml(suffix),
             _cmsspread_trade_xml(suffix),
             _digital_cmsspread_trade_xml(suffix),
+            _fixed_sifma_trade_xml(suffix),
+            _fixed_sifma_averaged_trade_xml(suffix),
+            _fixed_sifma_averaged_cutoff_trade_xml(suffix),
             _basis_libor_3m_6m_trade_xml(suffix),
             _basis_libor_3m_sifma_trade_xml(suffix),
             _basis_fedfunds_libor_3m_trade_xml(suffix),
@@ -1012,6 +1015,123 @@ def _bermudan_swaption_template(
   </Trade>"""
 
 
+def _fixed_sifma_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="IRS_USD_SIFMA_PLAIN_{suffix}">
+    <TradeType>Swap</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>30/360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.030</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>6M</Tenor><Calendar>USD</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>ACT/ACT</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SIFMA</Index>
+          <Spreads><Spread>0.0005</Spread></Spreads>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>1</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>3M</Tenor><Calendar>US-NYSE</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>"""
+
+
+def _fixed_sifma_averaged_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="IRS_USD_SIFMA_AVG_{suffix}">
+    <TradeType>Swap</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>30/360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.030</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>6M</Tenor><Calendar>USD</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>ACT/ACT</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SIFMA</Index>
+          <Spreads><Spread>0.0005</Spread></Spreads>
+          <IsAveraged>true</IsAveraged>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>1</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>3M</Tenor><Calendar>US-NYSE</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>"""
+
+
+def _fixed_sifma_averaged_cutoff_trade_xml(suffix: str) -> str:
+    return f"""  <Trade id="IRS_USD_SIFMA_AVG_CUTOFF_{suffix}">
+    <TradeType>Swap</TradeType>
+    <Envelope>
+      <CounterParty>CPTY_A</CounterParty>
+      <NettingSetId>CPTY_A</NettingSetId>
+      <AdditionalFields/>
+    </Envelope>
+    <SwapData>
+      <LegData>
+        <LegType>Fixed</LegType>
+        <Payer>true</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>30/360</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FixedLegData><Rates><Rate>0.030</Rate></Rates></FixedLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>6M</Tenor><Calendar>USD</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+      <LegData>
+        <LegType>Floating</LegType>
+        <Payer>false</Payer>
+        <Currency>USD</Currency>
+        <Notionals><Notional>10000000</Notional></Notionals>
+        <DayCounter>ACT/ACT</DayCounter>
+        <PaymentConvention>MF</PaymentConvention>
+        <FloatingLegData>
+          <Index>USD-SIFMA</Index>
+          <Spreads><Spread>0.0005</Spread></Spreads>
+          <IsAveraged>true</IsAveraged>
+          <RateCutoff>2</RateCutoff>
+          <IsInArrears>false</IsInArrears>
+          <FixingDays>1</FixingDays>
+        </FloatingLegData>
+        <ScheduleData><Rules><StartDate>{ASOF_DATE}</StartDate><EndDate>2030-02-10</EndDate><Tenor>3M</Tenor><Calendar>US-NYSE</Calendar><Convention>MF</Convention><TermConvention>MF</TermConvention><Rule>Forward</Rule></Rules></ScheduleData>
+      </LegData>
+    </SwapData>
+  </Trade>"""
+
+
 def _basis_libor_3m_6m_trade_xml(suffix: str) -> str:
     return f"""  <Trade id="BASIS_USD_LIB3M_LIB6M_{suffix}">
     <TradeType>Swap</TradeType>
@@ -1656,6 +1776,9 @@ def _product_counts(count_per_type: int) -> Iterable[tuple[str, int]]:
     yield ("CMS Swap", count_per_type)
     yield ("CMS Spread Swap", count_per_type)
     yield ("Digital CMS Spread Swap", count_per_type)
+    yield ("Fixed/SIFMA Plain Swap", count_per_type)
+    yield ("Fixed/SIFMA Averaged Swap", count_per_type)
+    yield ("Fixed/SIFMA Averaged Cutoff Swap", count_per_type)
     yield ("Basis LIBOR3M/LIBOR6M", count_per_type)
     yield ("Basis LIBOR3M/SIFMA", count_per_type)
     yield ("Basis FedFunds/LIBOR3M", count_per_type)
