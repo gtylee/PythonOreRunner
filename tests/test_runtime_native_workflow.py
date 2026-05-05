@@ -703,6 +703,57 @@ def _generic_plain_overnight_rate_swap_trade_xml(*, ccy: str = "USD", index: str
 """.strip()
 
 
+def _generic_sifma_fixed_float_rate_swap_trade_xml(*, rate_cutoff: int = 0, is_averaged: bool = False) -> str:
+    return f"""
+<SwapData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Currency>USD</Currency>
+    <Payer>true</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.020</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Currency>USD</Currency>
+    <Payer>false</Payer>
+    <PaymentConvention>F</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>F</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>USD-SIFMA-1W</Index>
+      <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <IsAveraged>{"true" if is_averaged else "false"}</IsAveraged>
+      <RateCutoff>{int(rate_cutoff)}</RateCutoff>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
 def _generic_float_float_basis_swap_trade_xml(
     *,
     index0: str = "USD-LIBOR-3M",
@@ -2690,6 +2741,86 @@ def test_torch_plain_overnight_rate_swap_matches_numpy_runtime(ccy, index_name, 
     _assert_numpy_safe_result_arrays(torch_result)
 
 
+def test_torch_plain_sifma_rate_swap_uses_bma_curve_and_matches_numpy_runtime():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="PLAIN_SIFMA_TORCH_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_SIFMA",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_sifma_fixed_float_rate_swap_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0315),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-LIBOR-3M/1Y/2Y", value=0.0320),
+                MarketQuote(date="2026-03-08", key="BMA_SWAP/RATIO/USD/3M/2Y", value=0.72),
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_SIFMA": NettingSet(
+                    netting_set_id="NS_SIFMA",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="USD",
+                    threshold_receive=0.0,
+                    threshold_pay=0.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_SIFMA", currency="USD"),)
+        ),
+        config=replace(
+            snapshot.config,
+            base_currency="USD",
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            params={**snapshot.config.params, "python.mpor_source_override": "2W", "python.store_npv_cube_paths": "Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_usd_grid("3M,6M,9M,1Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    inputs = adapter._extract_inputs(snapshot, mapped)
+    assert "USD-SIFMA" in inputs.forward_curves_by_name
+    assert inputs.forward_curves_by_name["USD-SIFMA"] is inputs.forward_curves_by_name["USD-BMA"]
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade.trade_id)
+    assert adapter._supports_torch_rate_swap(spec)
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="plain-sifma-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="plain-sifma-torch")
+
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert "torch_rate_swap_exclusions" not in torch_result.metadata
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=1.0e-8, abs_tol=1.0e-8)
+    np.testing.assert_allclose(
+        np.asarray(torch_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        np.asarray(numpy_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
+
+
 @pytest.mark.parametrize(
     ("trade_id", "xml", "quotes"),
     (
@@ -3992,7 +4123,33 @@ def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
     )
     sifma_reasons = adapter._torch_rate_swap_exclusion_reasons(sifma_basis_spec)
     assert "floating_basis_swap" in sifma_reasons
-    assert "overnight_indexed" in sifma_reasons
+    assert "overnight_indexed" not in sifma_reasons
+
+    plain_sifma_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={"rate_legs": [fixed_leg, {**vanilla_float, "index_name": "USD-SIFMA-1W", "overnight_indexed": True}]},
+    )
+    assert adapter._torch_rate_swap_exclusion_reasons(plain_sifma_spec) == ()
+    assert adapter._supports_torch_rate_swap(plain_sifma_spec)
+
+    averaged_sifma_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={
+            "rate_legs": [
+                fixed_leg,
+                {**vanilla_float, "index_name": "USD-SIFMA-1W", "overnight_indexed": True, "is_averaged": True},
+            ]
+        },
+    )
+    averaged_sifma_reasons = adapter._torch_rate_swap_exclusion_reasons(averaged_sifma_spec)
+    assert "overnight_indexed" in averaged_sifma_reasons
+    assert "averaged_coupon" in averaged_sifma_reasons
 
 
 def test_classify_portfolio_trades_collects_all_generic_xccy_swap_currencies():
