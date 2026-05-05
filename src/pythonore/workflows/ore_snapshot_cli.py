@@ -3461,6 +3461,229 @@ def _resolve_case_output_dir(ore_xml: Path) -> Path:
     return (run_dir / setup_params.get("outputPath", "Output")).resolve()
 
 
+def _case_uses_sifma_or_bma(ore_xml: Path) -> set[str]:
+    portfolio_xml = _resolve_case_portfolio_path(ore_xml)
+    if portfolio_xml is None or not portfolio_xml.exists():
+        return set()
+    text = portfolio_xml.read_text(encoding="utf-8", errors="ignore").upper()
+    if "SIFMA" not in text and "BMA" not in text:
+        return set()
+    ccys = set(re.findall(r"\b([A-Z]{3})-(?:SIFMA|BMA)\b", text))
+    return ccys or {"USD"}
+
+
+def _market_data_contains_bma_ratio(ore_xml: Path, ccy: str) -> bool:
+    input_dir, setup = _resolve_case_input_dir_and_setup(ore_xml)
+    market_data = (input_dir / setup.get("marketDataFile", "marketdata.csv")).resolve()
+    if not market_data.exists():
+        return False
+    text = market_data.read_text(encoding="utf-8", errors="ignore").upper()
+    return f"BMA_SWAP/RATIO/{str(ccy).upper()}" in text
+
+
+def _parse_output_lgm_params(calibration_xml: Path, ccy: str) -> None:
+    ore_snapshot_mod.parse_lgm_params_from_calibration_xml(str(calibration_xml), ccy_key=str(ccy).upper())
+
+
+def _ore_snapshot_runtime_artifact_status(
+    ore_xml: Path,
+    *,
+    model_ccy: str,
+    require_lgm_calibration: bool,
+) -> dict[str, Any]:
+    output_dir = _resolve_case_output_dir(ore_xml)
+    curves_csv = output_dir / "curves.csv"
+    calibration_xml = output_dir / "calibration.xml"
+    status: dict[str, Any] = {
+        "output_dir": output_dir,
+        "curves_csv": curves_csv,
+        "calibration_xml": calibration_xml,
+        "curves_ok": curves_csv.exists() and curves_csv.stat().st_size > 0,
+        "lgm_ok": not require_lgm_calibration,
+        "errors": [],
+    }
+    if require_lgm_calibration:
+        if not calibration_xml.exists() or calibration_xml.stat().st_size == 0:
+            status["errors"].append(f"missing_lgm_calibration:{calibration_xml}")
+        else:
+            try:
+                _parse_output_lgm_params(calibration_xml, model_ccy)
+                status["lgm_ok"] = True
+            except Exception as exc:
+                status["errors"].append(f"invalid_lgm_calibration:{calibration_xml}:{exc}")
+    if not status["curves_ok"]:
+        status["errors"].append(f"missing_curves_csv:{curves_csv}")
+    return status
+
+
+def _activate_analytic(root: ET.Element, analytic_type: str) -> ET.Element:
+    analytics = root.find("./Analytics")
+    if analytics is None:
+        analytics = ET.SubElement(root, "Analytics")
+    analytic = analytics.find(f"./Analytic[@type='{analytic_type}']")
+    if analytic is None:
+        analytic = ET.SubElement(analytics, "Analytic", {"type": analytic_type})
+    active = analytic.find("./Parameter[@name='active']")
+    if active is None:
+        active = ET.SubElement(analytic, "Parameter", {"name": "active"})
+    active.text = "Y"
+    return analytic
+
+
+def _set_analytic_param(analytic: ET.Element, name: str, value: str) -> None:
+    node = analytic.find(f"./Parameter[@name='{name}']")
+    if node is None:
+        node = ET.SubElement(analytic, "Parameter", {"name": name})
+    node.text = value
+
+
+def _run_ore_to_build_runtime_artifacts(
+    ore_xml: Path,
+    *,
+    need_curves: bool,
+    need_lgm_calibration: bool,
+) -> None:
+    ore_bin = default_ore_bin()
+    if not ore_bin.exists():
+        missing = []
+        if need_curves:
+            missing.append("Output/curves.csv")
+        if need_lgm_calibration:
+            missing.append("Output/calibration.xml")
+        raise FileNotFoundError(
+            "ORE runtime artifacts are missing and cannot be constructed because the ORE executable was not found. "
+            f"missing={missing}, expected_ore_bin={ore_bin}"
+        )
+    input_dir, setup_params = _resolve_case_input_dir_and_setup(ore_xml)
+    output_dir = _resolve_case_output_dir(ore_xml)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tree = ET.parse(ore_xml)
+    root = tree.getroot()
+    setup = root.find("./Setup")
+    if setup is None:
+        setup = ET.SubElement(root, "Setup")
+    setup_nodes = {
+        (node.attrib.get("name", "") or "").strip(): node
+        for node in setup.findall("./Parameter")
+    }
+    for name, value in (
+        ("inputPath", str(input_dir)),
+        ("outputPath", str(output_dir)),
+        ("logMask", "31"),
+    ):
+        node = setup_nodes.get(name)
+        if node is None:
+            node = ET.SubElement(setup, "Parameter", {"name": name})
+        node.text = value
+    if need_curves:
+        curves = _activate_analytic(root, "curves")
+        markets = root.find("./Markets")
+        pricing_cfg = "default"
+        if markets is not None:
+            pricing_cfg = (
+                markets.findtext("./Parameter[@name='pricing']")
+                or markets.findtext("./Parameter[@name='simulation']")
+                or "default"
+            ).strip() or "default"
+        _set_analytic_param(curves, "configuration", pricing_cfg)
+        _set_analytic_param(curves, "outputFileName", "curves.csv")
+    if need_lgm_calibration:
+        calibration = _activate_analytic(root, "calibration")
+        sim_cfg = "simulation.xml"
+        sim_analytic = root.find("./Analytics/Analytic[@type='simulation']")
+        if sim_analytic is not None:
+            sim_cfg = (
+                sim_analytic.findtext("./Parameter[@name='simulationConfigFile']")
+                or sim_cfg
+            ).strip() or sim_cfg
+        simulation_xml = (input_dir / sim_cfg).resolve()
+        _set_analytic_param(calibration, "configFile", str(simulation_xml))
+        _set_analytic_param(calibration, "outputFile", "calibration.csv")
+    with tempfile.TemporaryDirectory(prefix="ore_snapshot_artifacts_") as td:
+        target = Path(td) / ore_xml.name
+        tree.write(target, encoding="utf-8", xml_declaration=True)
+        cp = subprocess.run(
+            [str(ore_bin), str(target)],
+            cwd=str(ore_xml.resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if cp.returncode != 0:
+        raise RuntimeError(
+            "ORE failed while constructing runtime artifacts "
+            f"(returncode={cp.returncode}). stdout_tail={cp.stdout.splitlines()[-20:]}, "
+            f"stderr_tail={cp.stderr.splitlines()[-20:]}"
+        )
+
+
+def _ensure_ore_snapshot_runtime_artifacts(
+    ore_xml: Path,
+    *,
+    model_ccy: str,
+    require_lgm_calibration: bool = True,
+) -> dict[str, Any]:
+    sifma_ccys = _case_uses_sifma_or_bma(ore_xml)
+    missing_bma = sorted(ccy for ccy in sifma_ccys if not _market_data_contains_bma_ratio(ore_xml, ccy))
+    if missing_bma:
+        raise RuntimeError(
+            "SIFMA/BMA trades require BMA ratio market quotes; refusing to construct proxy curves. "
+            + ", ".join(f"missing_bma_ratio_curve:{ccy}-SIFMA" for ccy in missing_bma)
+        )
+    before = _ore_snapshot_runtime_artifact_status(
+        ore_xml,
+        model_ccy=model_ccy,
+        require_lgm_calibration=require_lgm_calibration,
+    )
+    if before["curves_ok"] and before["lgm_ok"]:
+        return {**before, "constructed": False}
+    _run_ore_to_build_runtime_artifacts(
+        ore_xml,
+        need_curves=not bool(before["curves_ok"]),
+        need_lgm_calibration=require_lgm_calibration and not bool(before["lgm_ok"]),
+    )
+    after = _ore_snapshot_runtime_artifact_status(
+        ore_xml,
+        model_ccy=model_ccy,
+        require_lgm_calibration=require_lgm_calibration,
+    )
+    if not after["curves_ok"] or not after["lgm_ok"]:
+        raise RuntimeError(
+            "ORE runtime artifact construction completed but required inputs are still unavailable: "
+            + ", ".join(str(x) for x in after["errors"])
+        )
+    return {**after, "constructed": True, "initial_errors": tuple(before["errors"])}
+
+
+def _ore_snapshot_model_ccy(ore_xml: Path) -> str:
+    input_dir, _setup = _resolve_case_input_dir_and_setup(ore_xml)
+    try:
+        root = ET.parse(ore_xml).getroot()
+        sim_analytic = root.find("./Analytics/Analytic[@type='simulation']")
+        sim_cfg = "simulation.xml"
+        if sim_analytic is not None:
+            sim_cfg = (
+                sim_analytic.findtext("./Parameter[@name='simulationConfigFile']")
+                or sim_cfg
+            ).strip() or sim_cfg
+        sim_path = (input_dir / sim_cfg).resolve()
+        if sim_path.exists():
+            sim_root = ET.parse(sim_path).getroot()
+            ccy = (
+                sim_root.findtext("./DomesticCcy")
+                or sim_root.findtext("./CrossAssetModel/DomesticCcy")
+                or ""
+            ).strip().upper()
+            if ccy:
+                return ccy
+    except Exception:
+        pass
+    try:
+        return str(XVALoader.from_files(str(input_dir), ore_file=ore_xml.name).config.base_currency).upper()
+    except Exception:
+        return "USD"
+
+
 def _examples_root() -> Path:
     return Path(__file__).resolve().parents[3] / "Examples"
 
@@ -6277,6 +6500,7 @@ def _compute_portfolio_xva_case(
     config_params = dict(snapshot.config.params)
     config_params["python.lgm_rng_mode"] = str(rng_mode)
     config_params["python.use_ore_flow_amounts_t0"] = "Y" if str(xva_mode).strip().lower() == "ore" else "N"
+    config_params["python.strict_ore_inputs"] = "Y"
     runtime = snapshot.config.runtime
     if runtime is not None:
         simulation = runtime.simulation
@@ -6417,6 +6641,7 @@ def _run_sensitivity_case(
                 params={
                     **dict(snapshot.config.params),
                     "python.lgm_param_source": str(lgm_param_source or "auto"),
+                    "python.strict_ore_inputs": "Y",
                 },
             ),
         )
@@ -8409,6 +8634,31 @@ def _run_case(
         else validate_ore_input_snapshot(ore_xml, requested_modes=[name for name, enabled in asdict(modes).items() if enabled])
     )
     case_summary["input_validation"] = validation
+    runtime_artifacts: dict[str, Any] | None = None
+    if engine != "ore" and (modes.xva or modes.sensi):
+        require_lgm = str(getattr(args, "lgm_param_source", "auto")).strip().lower() not in {
+            "simulation_xml",
+            "provided",
+        }
+        try:
+            runtime_artifacts = _ensure_ore_snapshot_runtime_artifacts(
+                ore_xml,
+                model_ccy=_ore_snapshot_model_ccy(ore_xml),
+                require_lgm_calibration=require_lgm,
+            )
+            case_summary["runtime_artifacts"] = {
+                "curves_csv": str(runtime_artifacts["curves_csv"]),
+                "calibration_xml": str(runtime_artifacts["calibration_xml"]),
+                "constructed": bool(runtime_artifacts.get("constructed", False)),
+                "initial_errors": list(runtime_artifacts.get("initial_errors", ())),
+            }
+        except Exception as exc:
+            if engine == "python":
+                raise
+            case_summary["runtime_artifacts"] = {
+                "constructed": False,
+                "error": str(exc),
+            }
 
     if modes.xva:
         try:

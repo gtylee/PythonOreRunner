@@ -130,6 +130,114 @@ def _patch_swap_floating_tenor(xml_text: str, tenor: str) -> str:
 
 
 class TestOreSnapshotCli(unittest.TestCase):
+    def _write_runtime_artifact_case(self, root: Path, *, marketdata: str = "") -> Path:
+        input_dir = root / "Input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "ore.xml").write_text(
+            """<?xml version="1.0"?>
+<ORE>
+  <Setup>
+    <Parameter name="asofDate">2026-03-08</Parameter>
+    <Parameter name="inputPath">Input</Parameter>
+    <Parameter name="outputPath">Output</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+    <Parameter name="marketDataFile">marketdata.csv</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+  </Setup>
+  <Markets><Parameter name="pricing">default</Parameter><Parameter name="simulation">default</Parameter></Markets>
+  <Analytics>
+    <Analytic type="simulation"><Parameter name="active">Y</Parameter><Parameter name="simulationConfigFile">simulation.xml</Parameter></Analytic>
+  </Analytics>
+</ORE>
+""",
+            encoding="utf-8",
+        )
+        (input_dir / "portfolio.xml").write_text(
+            """<Portfolio>
+  <Trade id="SIFMA_SWAP">
+    <TradeType>Swap</TradeType>
+    <Envelope><CounterParty>CPTY_A</CounterParty><NettingSetId>NS_A</NettingSetId></Envelope>
+    <SwapData>
+      <LegData><LegType>Floating</LegType><Currency>USD</Currency><FloatingLegData><Index>USD-SIFMA</Index></FloatingLegData></LegData>
+    </SwapData>
+  </Trade>
+</Portfolio>
+""",
+            encoding="utf-8",
+        )
+        (input_dir / "marketdata.csv").write_text(marketdata, encoding="utf-8")
+        (input_dir / "simulation.xml").write_text(
+            """<Simulation><CrossAssetModel><DomesticCcy>USD</DomesticCcy><InterestRateModels><LGM ccy="USD"><Volatility><TimeGrid>1</TimeGrid><InitialValue>0.01,0.01</InitialValue></Volatility><Reversion><TimeGrid>1</TimeGrid><InitialValue>0.03,0.03</InitialValue></Reversion><ParameterTransformation><Scaling>1</Scaling></ParameterTransformation></LGM></InterestRateModels></CrossAssetModel></Simulation>""",
+            encoding="utf-8",
+        )
+        for name in ("todaysmarket.xml", "curveconfig.xml", "conventions.xml"):
+            (input_dir / name).write_text("<Root/>", encoding="utf-8")
+        return input_dir / "ore.xml"
+
+    def test_runtime_artifact_preflight_builds_missing_curves_and_lgm_params(self):
+        with tempfile.TemporaryDirectory() as td:
+            ore_xml = self._write_runtime_artifact_case(
+                Path(td),
+                marketdata="2026-03-08,BMA_SWAP/RATIO/USD/3M/2Y,0.72\n",
+            )
+            fake_ore = Path(td) / "ore"
+            fake_ore.write_text("#!/bin/sh\n", encoding="utf-8")
+
+            def fake_run(_cmd, **_kwargs):
+                output = Path(td) / "Output"
+                output.mkdir(exist_ok=True)
+                (output / "curves.csv").write_text("Date,USD\n2026-03-08,1.0\n2027-03-08,0.97\n", encoding="utf-8")
+                (output / "calibration.xml").write_text(
+                    """<Calibration><InterestRateModels><LGM key="USD"><Volatility><TimeGrid>1</TimeGrid><InitialValue>0.01,0.01</InitialValue></Volatility><Reversion><TimeGrid>1</TimeGrid><InitialValue>0.03,0.03</InitialValue></Reversion><ParameterTransformation><Scaling>1</Scaling></ParameterTransformation></LGM></InterestRateModels></Calibration>""",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(ore_snapshot_cli, "default_ore_bin", return_value=fake_ore), patch.object(
+                ore_snapshot_cli.subprocess, "run", side_effect=fake_run
+            ):
+                status = ore_snapshot_cli._ensure_ore_snapshot_runtime_artifacts(
+                    ore_xml,
+                    model_ccy="USD",
+                    require_lgm_calibration=True,
+                )
+
+            self.assertTrue(status["constructed"])
+            self.assertTrue((Path(td) / "Output" / "curves.csv").exists())
+            self.assertTrue((Path(td) / "Output" / "calibration.xml").exists())
+
+    def test_runtime_artifact_preflight_fails_sifma_without_bma_ratio_quote(self):
+        with tempfile.TemporaryDirectory() as td:
+            ore_xml = self._write_runtime_artifact_case(Path(td), marketdata="")
+            with self.assertRaisesRegex(RuntimeError, "missing_bma_ratio_curve:USD-SIFMA"):
+                ore_snapshot_cli._ensure_ore_snapshot_runtime_artifacts(
+                    ore_xml,
+                    model_ccy="USD",
+                    require_lgm_calibration=True,
+                )
+
+    def test_runtime_artifact_preflight_errors_if_ore_build_still_leaves_missing_inputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            ore_xml = self._write_runtime_artifact_case(
+                Path(td),
+                marketdata="2026-03-08,BMA_SWAP/RATIO/USD/3M/2Y,0.72\n",
+            )
+            fake_ore = Path(td) / "ore"
+            fake_ore.write_text("#!/bin/sh\n", encoding="utf-8")
+            with patch.object(ore_snapshot_cli, "default_ore_bin", return_value=fake_ore), patch.object(
+                ore_snapshot_cli.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "still unavailable"):
+                    ore_snapshot_cli._ensure_ore_snapshot_runtime_artifacts(
+                        ore_xml,
+                        model_ccy="USD",
+                        require_lgm_calibration=True,
+                    )
+
     def test_resolve_case_portfolio_path_uses_setup_portfolio_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
