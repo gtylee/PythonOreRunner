@@ -495,8 +495,6 @@ class PythonLgmAdapter:
             return False
         if int(leg.get("lookback_days", 0) or 0) != 0:
             return False
-        if int(leg.get("rate_cutoff", 0) or 0) != 0:
-            return False
         return True
 
     def _supports_torch_plain_overnight_rate_leg(self, leg: Dict[str, object]) -> bool:
@@ -583,7 +581,7 @@ class PythonLgmAdapter:
                 reasons.append("sub_periods")
             if int(leg.get("lookback_days", 0) or 0) != 0:
                 reasons.append("lookback_days")
-            if int(leg.get("rate_cutoff", 0) or 0) != 0:
+            if int(leg.get("rate_cutoff", 0) or 0) != 0 and not averaged_overnight_torch:
                 reasons.append("rate_cutoff")
             if any(tag in index_name for tag in ("BMA", "SIFMA", "BASIS")) and schedule_rule != "FORWARD":
                 reasons.append("non_forward_bma_sifma_basis")

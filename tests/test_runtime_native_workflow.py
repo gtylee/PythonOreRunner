@@ -600,7 +600,7 @@ def _generic_rate_swap_trade_xml(
 """.strip()
 
 
-def _generic_averaged_overnight_rate_swap_trade_xml(*, ccy: str = "USD", index: str = "USD-SOFR") -> str:
+def _generic_averaged_overnight_rate_swap_trade_xml(*, ccy: str = "USD", index: str = "USD-SOFR", rate_cutoff: int = 0) -> str:
     calendar = "US" if ccy.upper() == "USD" else "JP" if ccy.upper() == "JPY" else "TARGET"
     fixed_dc = "A360" if ccy.upper() in {"USD", "JPY"} else "30/360"
     return f"""
@@ -644,6 +644,7 @@ def _generic_averaged_overnight_rate_swap_trade_xml(*, ccy: str = "USD", index: 
       <FixingDays>0</FixingDays>
       <IsInArrears>false</IsInArrears>
       <IsAveraged>true</IsAveraged>
+      <RateCutoff>{int(rate_cutoff)}</RateCutoff>
       <Spreads><Spread>0.0</Spread></Spreads>
       <Gearings><Gearing>1.0</Gearing></Gearings>
     </FloatingLegData>
@@ -2651,6 +2652,103 @@ def test_torch_averaged_overnight_rate_swap_matches_numpy_runtime_with_csa_mpor(
     (
         (
             "USD",
+            "USD-SOFR",
+            (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0315),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SOFR/1Y/2Y", value=0.0320),
+                MarketQuote(date="2026-03-08", key="MM/RATE/USD/SOFR/0D/1D", value=0.0310),
+            ),
+        ),
+        (
+            "JPY",
+            "JPY-TONAR",
+            (
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/JPY/2Y", value=0.0040),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/JPY/2D/1D/2Y", value=0.0045),
+                MarketQuote(date="2026-03-08", key="MM/RATE/JPY/0D/1D", value=0.0038),
+            ),
+        ),
+    ),
+)
+def test_torch_averaged_overnight_with_cutoff_matches_numpy_runtime(ccy, index_name, quotes):
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id=f"AVG_{ccy}_OIS_CUTOFF_TORCH_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_AVG_OIS_CUTOFF",
+        trade_type="Swap",
+        product=GenericProduct(
+            payload={
+                "trade_type": "Swap",
+                "xml": _generic_averaged_overnight_rate_swap_trade_xml(ccy=ccy, index=index_name, rate_cutoff=2),
+            }
+        ),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(snapshot.market, raw_quotes=tuple(snapshot.market.raw_quotes) + tuple(quotes)),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_AVG_OIS_CUTOFF": NettingSet(
+                    netting_set_id="NS_AVG_OIS_CUTOFF",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency=ccy,
+                    threshold_receive=0.0,
+                    threshold_pay=0.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_AVG_OIS_CUTOFF", currency=ccy),)
+        ),
+        config=replace(
+            snapshot.config,
+            base_currency=ccy,
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            params={**snapshot.config.params, "python.mpor_source_override": "2W", "python.store_npv_cube_paths": "Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_ccy_grid("3M,6M,9M,1Y", ccy)},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade.trade_id)
+    assert adapter._supports_torch_rate_swap(spec)
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id=f"avg-{ccy.lower()}-ois-cutoff-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id=f"avg-{ccy.lower()}-ois-cutoff-torch")
+
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert "torch_rate_swap_exclusions" not in torch_result.metadata
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=1.0e-8, abs_tol=1.0e-8)
+    np.testing.assert_allclose(
+        np.asarray(torch_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        np.asarray(numpy_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
+
+
+@pytest.mark.parametrize(
+    ("ccy", "index_name", "quotes"),
+    (
+        (
+            "USD",
             "USD-FEDFUNDS",
             (
                 MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0315),
@@ -4064,7 +4162,6 @@ def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
     for expected in (
         "overnight_indexed",
         "averaged_coupon",
-        "rate_cutoff",
         "lookback_days",
         "local_cap_floor",
         "cap",
@@ -4072,6 +4169,7 @@ def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
         "non_forward_bma_sifma_basis",
     ):
         assert expected in reasons
+    assert "rate_cutoff" in reasons
     assert not adapter._supports_torch_rate_swap(overnight_spec)
 
     plain_overnight_spec = _TradeSpec(
@@ -4094,6 +4192,21 @@ def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
     cutoff_reasons = adapter._torch_rate_swap_exclusion_reasons(cutoff_overnight_spec)
     assert "overnight_indexed" in cutoff_reasons
     assert "rate_cutoff" in cutoff_reasons
+
+    averaged_cutoff_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={
+            "rate_legs": [
+                fixed_leg,
+                {**vanilla_float, "index_name": "USD-SOFR", "overnight_indexed": True, "is_averaged": True, "rate_cutoff": 2},
+            ]
+        },
+    )
+    assert adapter._torch_rate_swap_exclusion_reasons(averaged_cutoff_spec) == ()
+    assert adapter._supports_torch_rate_swap(averaged_cutoff_spec)
 
     xccy_spec = _TradeSpec(
         trade=base_trade,
@@ -4150,6 +4263,23 @@ def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
     averaged_sifma_reasons = adapter._torch_rate_swap_exclusion_reasons(averaged_sifma_spec)
     assert "overnight_indexed" in averaged_sifma_reasons
     assert "averaged_coupon" in averaged_sifma_reasons
+
+    averaged_sifma_cutoff_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={
+            "rate_legs": [
+                fixed_leg,
+                {**vanilla_float, "index_name": "USD-SIFMA-1W", "overnight_indexed": True, "is_averaged": True, "rate_cutoff": 2},
+            ]
+        },
+    )
+    averaged_sifma_cutoff_reasons = adapter._torch_rate_swap_exclusion_reasons(averaged_sifma_cutoff_spec)
+    assert "overnight_indexed" in averaged_sifma_cutoff_reasons
+    assert "averaged_coupon" in averaged_sifma_cutoff_reasons
+    assert "rate_cutoff" in averaged_sifma_cutoff_reasons
 
 
 def test_classify_portfolio_trades_collects_all_generic_xccy_swap_currencies():
