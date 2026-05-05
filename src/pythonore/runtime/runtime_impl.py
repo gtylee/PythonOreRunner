@@ -406,6 +406,7 @@ class PythonLgmAdapter:
         ] = {}
         self._curve_fit_cache: Dict[tuple[object, ...], Optional[_CurveBundle]] = {}
         self._swap_pricing_backend_cache: Dict[tuple[str, bool], tuple[object, ...] | None] = {}
+        self._last_irs_backend_error: str = ""
         self._par_swap_deterministic_cache: Dict[tuple[int, float, float, float, int], np.ndarray] = {}
         self._coupon_path_cache: Dict[tuple[object, ...], np.ndarray] = {}
         self._lgm_path_cache: Dict[tuple[object, ...], tuple[np.ndarray, Any | None]] = {}
@@ -429,6 +430,7 @@ class PythonLgmAdapter:
         )
 
     def _resolve_irs_pricing_backend(self, inputs: _PythonLgmInputs):
+        self._last_irs_backend_error = ""
         irs_count = sum(1 for spec in inputs.trade_specs if spec.kind == "IRS")
         rate_swap_count = sum(1 for spec in inputs.trade_specs if spec.kind == "RateSwap")
         if irs_count == 0 and rate_swap_count == 0:
@@ -446,7 +448,8 @@ class PythonLgmAdapter:
                 price_plain_rate_leg_paths_torch,
                 swap_npv_paths_from_ore_legs_dual_curve_torch,
             )
-        except Exception:
+        except Exception as exc:
+            self._last_irs_backend_error = f"{type(exc).__name__}: {exc}"
             return None
         mps_available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
         device = requested_device
@@ -474,45 +477,54 @@ class PythonLgmAdapter:
         return backend
 
     def _supports_torch_rate_swap(self, spec: _TradeSpec) -> bool:
+        return not self._torch_rate_swap_exclusion_reasons(spec)
+
+    def _torch_rate_swap_exclusion_reasons(self, spec: _TradeSpec) -> tuple[str, ...]:
+        reasons: list[str] = []
         if spec.kind != "RateSwap" or not isinstance(spec.legs, dict):
-            return False
+            return ("not_rate_swap",)
         rate_legs = list(spec.legs.get("rate_legs", []))
         if not rate_legs:
-            return False
+            return ("no_rate_legs",)
         if any(isinstance(leg.get("fx_reset"), dict) for leg in rate_legs):
-            return False
+            reasons.append("fx_reset")
         if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1:
-            return False
+            reasons.append("multi_currency")
         floating_count = sum(str(leg.get("kind", "")).upper() == "FLOATING" for leg in rate_legs)
         fixed_count = sum(str(leg.get("kind", "")).upper() == "FIXED" for leg in rate_legs)
         if floating_count > 1 and fixed_count == 0:
-            return False
+            reasons.append("floating_basis_swap")
         # The torch path supports plain vanilla fixed/floating coupons. We still
         # keep the generic builder for pure floating basis swaps, overnight-indexed
         # coupons, cap/floor features, naked-option legs, and other conventions
         # that need ORE's stripping, lookback, or rate-cutoff handling.
         for leg in rate_legs:
-            if str(leg.get("kind", "")).upper() != "FLOATING":
+            kind = str(leg.get("kind", "")).upper()
+            if kind not in {"FIXED", "FLOATING"}:
+                reasons.append(f"unsupported_leg_kind:{kind or 'UNKNOWN'}")
+            if kind != "FLOATING":
                 continue
             schedule_rule = str(leg.get("schedule_rule", "FORWARD")).upper()
             index_name = str(leg.get("index_name", "")).upper()
             if bool(leg.get("overnight_indexed", False)):
-                return False
-            if any(
-                leg.get(key) is not None if key in {"cap", "floor"} else bool(leg.get(key, False))
-                for key in ("cap", "floor", "naked_option", "local_cap_floor")
-            ):
-                return False
+                reasons.append("overnight_indexed")
+            if bool(leg.get("is_averaged", False)):
+                reasons.append("averaged_coupon")
+            if leg.get("cap") is not None:
+                reasons.append("cap")
+            if leg.get("floor") is not None:
+                reasons.append("floor")
+            if bool(leg.get("naked_option", False)):
+                reasons.append("naked_option")
+            if bool(leg.get("local_cap_floor", False)):
+                reasons.append("local_cap_floor")
             if int(leg.get("lookback_days", 0) or 0) != 0:
-                return False
+                reasons.append("lookback_days")
             if int(leg.get("rate_cutoff", 0) or 0) != 0:
-                return False
+                reasons.append("rate_cutoff")
             if any(tag in index_name for tag in ("BMA", "SIFMA", "BASIS")) and schedule_rule != "FORWARD":
-                return False
-        return all(
-            str(leg.get("kind", "")).upper() in {"FIXED", "FLOATING"}
-            for leg in rate_legs
-        )
+                reasons.append("non_forward_bma_sifma_basis")
+        return tuple(dict.fromkeys(reasons))
 
     def _torch_curve_from_handle(
         self,
@@ -1208,6 +1220,13 @@ class PythonLgmAdapter:
         )
         result.metadata["python_lgm_rng_mode"] = rng_mode
         result.metadata["irs_pricing_backend"] = f"torch:{irs_backend[3]}" if irs_backend is not None else "numpy"
+        if self._last_irs_backend_error:
+            result.metadata["irs_pricing_backend_error"] = self._last_irs_backend_error
+        if pricing_ctx.torch_rate_swap_exclusions:
+            result.metadata["torch_rate_swap_exclusions"] = {
+                trade_id: list(reasons)
+                for trade_id, reasons in sorted(pricing_ctx.torch_rate_swap_exclusions.items())
+            }
         if dim_mode in supported_python_dim_models:
             dim_result = calculate_python_dim(snapshot.config.params, dim_model=dim_mode)
             result.reports.update(dim_result.reports)
@@ -4541,9 +4560,14 @@ class PythonLgmAdapter:
 
     def _price_trade_rate_swap_paths(self, spec: _TradeSpec, ctx: _PricingContext) -> tuple[np.ndarray, bool]:
         inputs = ctx.inputs
-        if ctx.irs_backend is None or not self._supports_torch_rate_swap(spec):
+        torch_exclusions = self._torch_rate_swap_exclusion_reasons(spec)
+        if ctx.irs_backend is None or torch_exclusions:
             ctx.last_trade_backend = "rateSwap-generic"
-            ctx.last_trade_backend_detail = "price_generic_rate_swap"
+            if torch_exclusions:
+                ctx.torch_rate_swap_exclusions[spec.trade.trade_id] = torch_exclusions
+                ctx.last_trade_backend_detail = "price_generic_rate_swap;torch_excluded=" + ",".join(torch_exclusions)
+            else:
+                ctx.last_trade_backend_detail = "price_generic_rate_swap"
             return self._price_generic_rate_swap(spec, inputs, ctx.model, ctx.x_paths, ctx.shared_fx_sim, ctx.snapshot), False
         torch_curve_ctor, _, _, torch_device, torch_plain_leg_pricer, _, _ = ctx.irs_backend
         ctx.last_trade_backend = "rateSwap-torch"

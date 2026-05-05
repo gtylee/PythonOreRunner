@@ -2124,6 +2124,9 @@ def test_python_runtime_builds_real_sifma_basis_curves_from_bma_ratio_only(trade
         numpy_result = adapter.run(snapshot, mapped=mapped, run_id=f"sifma-{trade_id.lower()}-numpy")
 
     assert math.isfinite(float(numpy_result.pv_total))
+    exclusions = numpy_result.metadata["torch_rate_swap_exclusions"][trade_id]
+    assert "floating_basis_swap" in exclusions
+    assert "overnight_indexed" in exclusions
     coverage = numpy_result.metadata["coverage"]
     assert coverage["fallback_trades"] == 0
     assert coverage["unsupported"] == []

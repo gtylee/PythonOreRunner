@@ -3266,6 +3266,103 @@ def test_sifma_rate_swap_with_rate_cutoff_is_treated_as_overnight():
     assert bool(floating.get("overnight_indexed", False))
     assert int(floating.get("rate_cutoff", 0) or 0) == 1
     assert adapter._supports_torch_rate_swap(spec) is False
+    reasons = adapter._torch_rate_swap_exclusion_reasons(spec)
+    assert "overnight_indexed" in reasons
+    assert "rate_cutoff" in reasons
+
+
+def test_torch_rate_swap_exclusions_are_specific_for_non_plain_conventions():
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    base_trade = Trade(
+        trade_id="TORCH_GATE",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap"}),
+    )
+    fixed_leg = {
+        "kind": "FIXED",
+        "ccy": "USD",
+        "pay_time": np.array([0.5], dtype=float),
+        "start_time": np.array([0.0], dtype=float),
+        "end_time": np.array([0.5], dtype=float),
+        "accrual": np.array([0.5], dtype=float),
+        "notional": np.array([1_000_000.0], dtype=float),
+        "rate": np.array([0.03], dtype=float),
+    }
+    vanilla_float = {
+        "kind": "FLOATING",
+        "ccy": "USD",
+        "index_name": "USD-LIBOR-3M",
+        "schedule_rule": "FORWARD",
+        "pay_time": np.array([0.5], dtype=float),
+        "start_time": np.array([0.0], dtype=float),
+        "end_time": np.array([0.5], dtype=float),
+        "accrual": np.array([0.5], dtype=float),
+        "notional": np.array([1_000_000.0], dtype=float),
+        "spread": np.array([0.0], dtype=float),
+        "gearing": np.array([1.0], dtype=float),
+    }
+    vanilla_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={"rate_legs": [fixed_leg, vanilla_float]},
+    )
+    assert adapter._torch_rate_swap_exclusion_reasons(vanilla_spec) == ()
+    assert adapter._supports_torch_rate_swap(vanilla_spec)
+
+    overnight_float = {
+        **vanilla_float,
+        "index_name": "USD-SIFMA-1W",
+        "schedule_rule": "BACKWARD",
+        "overnight_indexed": True,
+        "is_averaged": True,
+        "rate_cutoff": 2,
+        "lookback_days": 1,
+        "local_cap_floor": True,
+        "cap": np.array([0.04], dtype=float),
+        "floor": np.array([0.0], dtype=float),
+    }
+    overnight_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={"rate_legs": [fixed_leg, overnight_float]},
+    )
+    reasons = adapter._torch_rate_swap_exclusion_reasons(overnight_spec)
+    for expected in (
+        "overnight_indexed",
+        "averaged_coupon",
+        "rate_cutoff",
+        "lookback_days",
+        "local_cap_floor",
+        "cap",
+        "floor",
+        "non_forward_bma_sifma_basis",
+    ):
+        assert expected in reasons
+    assert not adapter._supports_torch_rate_swap(overnight_spec)
+
+    xccy_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={"rate_legs": [fixed_leg, {**vanilla_float, "ccy": "JPY", "fx_reset": {"index": "FX-USD-JPY"}}]},
+    )
+    assert set(adapter._torch_rate_swap_exclusion_reasons(xccy_spec)).issuperset({"fx_reset", "multi_currency"})
+
+    basis_spec = _TradeSpec(
+        trade=base_trade,
+        kind="RateSwap",
+        notional=1_000_000.0,
+        ccy="USD",
+        legs={"rate_legs": [vanilla_float, {**vanilla_float, "index_name": "USD-LIBOR-6M"}]},
+    )
+    assert "floating_basis_swap" in adapter._torch_rate_swap_exclusion_reasons(basis_spec)
 
 
 def test_classify_portfolio_trades_collects_all_generic_xccy_swap_currencies():

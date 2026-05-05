@@ -97,6 +97,7 @@ class _PricingContext:
     swaption_value_cache: Dict[tuple[object, ...], np.ndarray] = field(default_factory=dict)
     trade_value_cache: Dict[tuple[object, ...], tuple[np.ndarray | None, bool]] = field(default_factory=dict)
     irs_curve_cache: Dict[tuple[str, str], Dict[str, object]] = field(default_factory=dict)
+    torch_rate_swap_exclusions: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     last_trade_backend: str = ""
     last_trade_backend_detail: str = ""
 
