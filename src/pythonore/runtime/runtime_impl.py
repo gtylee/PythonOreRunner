@@ -513,9 +513,26 @@ class PythonLgmAdapter:
         fixed_count = sum(str(leg.get("kind", "")).upper() == "FIXED" for leg in rate_legs)
         multi_currency = len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1
         supports_xccy_fixed_float = multi_currency and not has_fx_reset and fixed_count > 0 and floating_count <= 1
+        basis_has_special_index = any(
+            any(tag in str(leg.get("index_name", "")).upper() for tag in ("BMA", "SIFMA", "BASIS"))
+            for leg in rate_legs
+            if str(leg.get("kind", "")).upper() == "FLOATING"
+        )
+        supports_same_ccy_plain_basis = (
+            not multi_currency
+            and not has_fx_reset
+            and floating_count > 1
+            and fixed_count == 0
+            and not basis_has_special_index
+            and all(
+                not bool(leg.get("overnight_indexed", False)) and not bool(leg.get("is_averaged", False))
+                for leg in rate_legs
+                if str(leg.get("kind", "")).upper() == "FLOATING"
+            )
+        )
         if multi_currency and not supports_xccy_fixed_float:
             reasons.append("multi_currency")
-        if floating_count > 1 and fixed_count == 0:
+        if floating_count > 1 and fixed_count == 0 and not supports_same_ccy_plain_basis:
             reasons.append("floating_basis_swap")
         # The torch path supports plain vanilla fixed/floating coupons. We still
         # keep the generic builder for pure floating basis swaps, overnight-indexed
