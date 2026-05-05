@@ -484,9 +484,6 @@ class PythonLgmAdapter:
             return False
         if not bool(leg.get("overnight_indexed", False)) or not bool(leg.get("is_averaged", False)):
             return False
-        index_name = str(leg.get("index_name", "")).upper()
-        if _is_bma_sifma_index(index_name):
-            return False
         if leg.get("cap") is not None or leg.get("floor") is not None:
             return False
         if bool(leg.get("naked_option", False)) or bool(leg.get("local_cap_floor", False)):
