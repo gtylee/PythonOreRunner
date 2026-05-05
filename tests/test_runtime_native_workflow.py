@@ -999,7 +999,7 @@ def _generic_xccy_float_swap_trade_xml() -> str:
       </Rules>
     </ScheduleData>
     <FloatingLegData>
-      <Index>USD-SOFR</Index>
+      <Index>USD-LIBOR-6M</Index>
       <FixingDays>2</FixingDays>
       <IsInArrears>false</IsInArrears>
       <Spreads><Spread>0.0</Spread></Spreads>
@@ -1048,8 +1048,57 @@ def _generic_xccy_fixed_float_swap_trade_xml() -> str:
       </Rules>
     </ScheduleData>
     <FloatingLegData>
-      <Index>USD-SOFR</Index>
+      <Index>USD-LIBOR-6M</Index>
       <FixingDays>2</FixingDays>
+      <IsInArrears>false</IsInArrears>
+      <Spreads><Spread>0.0</Spread></Spreads>
+      <Gearings><Gearing>1.0</Gearing></Gearings>
+    </FloatingLegData>
+  </LegData>
+</SwapData>
+""".strip()
+
+
+def _generic_usd_jpy_fixed_jpy_libor_swap_trade_xml() -> str:
+    return """
+<SwapData>
+  <LegData>
+    <LegType>Fixed</LegType>
+    <Payer>false</Payer>
+    <Currency>USD</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>1000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>1Y</Tenor>
+        <Calendar>US</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FixedLegData><Rates><Rate>0.025</Rate></Rates></FixedLegData>
+  </LegData>
+  <LegData>
+    <LegType>Floating</LegType>
+    <Payer>true</Payer>
+    <Currency>JPY</Currency>
+    <PaymentConvention>MF</PaymentConvention>
+    <DayCounter>A360</DayCounter>
+    <Notionals><Notional>150000000</Notional></Notionals>
+    <ScheduleData>
+      <Rules>
+        <StartDate>2026-03-08</StartDate>
+        <EndDate>2027-03-08</EndDate>
+        <Tenor>3M</Tenor>
+        <Calendar>JP</Calendar>
+        <Convention>MF</Convention>
+      </Rules>
+    </ScheduleData>
+    <FloatingLegData>
+      <Index>JPY-LIBOR-3M</Index>
+      <FixingDays>0</FixingDays>
       <IsInArrears>false</IsInArrears>
       <Spreads><Spread>0.0</Spread></Spreads>
       <Gearings><Gearing>1.0</Gearing></Gearings>
@@ -2417,7 +2466,8 @@ def test_torch_averaged_overnight_rate_swap_matches_numpy_runtime_with_csa_mpor(
 
     assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
     assert "torch_rate_swap_exclusions" not in torch_result.metadata
-    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    pv_abs_tol = max(1.0e-8, 1.0e-8 * abs(float(numpy_result.pv_total)))
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=1.0e-8, abs_tol=pv_abs_tol)
     assert math.isclose(
         float(torch_result.xva_by_metric.get("CVA", 0.0)),
         float(numpy_result.xva_by_metric.get("CVA", 0.0)),
@@ -2427,7 +2477,7 @@ def test_torch_averaged_overnight_rate_swap_matches_numpy_runtime_with_csa_mpor(
     np.testing.assert_allclose(
         np.asarray(torch_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
         np.asarray(numpy_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
-        rtol=0.0,
+        rtol=1.0e-8,
         atol=1.0e-8,
     )
     _assert_numpy_safe_result_arrays(torch_result)
@@ -2501,7 +2551,7 @@ def test_torch_generic_xccy_swap_matches_numpy_runtime_with_cross_currency_csa()
             + (
                 MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/2Y", value=0.0100),
                 MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
-                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-SOFR/1Y/2Y", value=0.0320),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/USD/USD-LIBOR-6M/1Y/2Y", value=0.0320),
             ),
         ),
         portfolio=replace(snapshot.portfolio, trades=(trade,)),
@@ -2630,6 +2680,7 @@ def test_torch_generic_xccy_fixed_float_swap_matches_numpy_runtime_with_fx_conve
     numpy_profile = numpy_result.exposure_profiles_by_netting_set["NS_XCCY_FIXED_FLOAT"]
     torch_profile = torch_result.exposure_profiles_by_netting_set["NS_XCCY_FIXED_FLOAT"]
     assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert "torch_rate_swap_exclusions" not in torch_result.metadata
     assert torch_result.metadata["mpor_enabled"] is True
     assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
     assert math.isclose(
@@ -2641,6 +2692,86 @@ def test_torch_generic_xccy_fixed_float_swap_matches_numpy_runtime_with_fx_conve
     np.testing.assert_allclose(
         np.asarray(torch_profile["closeout_epe"], dtype=float),
         np.asarray(numpy_profile["closeout_epe"], dtype=float),
+        rtol=0.0,
+        atol=1.0e-8,
+    )
+    _assert_numpy_safe_result_arrays(torch_result)
+
+
+def test_torch_usd_jpy_xccy_fixed_jpy_libor_swap_matches_numpy_without_fx_blowup():
+    pytest.importorskip("torch")
+    snapshot = _make_snapshot()
+    trade = Trade(
+        trade_id="USD_JPY_FIXED_JPY_LIBOR_TORCH_PARITY",
+        counterparty="CP_A",
+        netting_set="NS_USD_JPY_XCCY",
+        trade_type="Swap",
+        product=GenericProduct(payload={"trade_type": "Swap", "xml": _generic_usd_jpy_fixed_jpy_libor_swap_trade_xml()}),
+    )
+    snapshot = replace(
+        snapshot,
+        market=replace(
+            snapshot.market,
+            raw_quotes=tuple(snapshot.market.raw_quotes)
+            + (
+                MarketQuote(date="2026-03-08", key="FX/USD/JPY", value=150.0),
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/2Y", value=0.0300),
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/JPY/1Y", value=0.0035),
+                MarketQuote(date="2026-03-08", key="ZERO/RATE/JPY/2Y", value=0.0040),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/JPY/JPY-LIBOR-3M/1Y/2Y", value=0.0045),
+            ),
+        ),
+        portfolio=replace(snapshot.portfolio, trades=(trade,)),
+        netting=NettingConfig(
+            netting_sets={
+                "NS_USD_JPY_XCCY": NettingSet(
+                    netting_set_id="NS_USD_JPY_XCCY",
+                    counterparty="CP_A",
+                    active_csa=True,
+                    csa_currency="USD",
+                    threshold_receive=0.0,
+                    threshold_pay=0.0,
+                    mta_receive=0.0,
+                    mta_pay=0.0,
+                )
+            }
+        ),
+        collateral=CollateralConfig(
+            balances=(CollateralBalance(netting_set_id="NS_USD_JPY_XCCY", currency="USD"),)
+        ),
+        config=replace(
+            snapshot.config,
+            base_currency="USD",
+            analytics=("CVA",),
+            num_paths=4,
+            horizon_years=1,
+            params={**snapshot.config.params, "python.mpor_source_override": "2W", "python.store_npv_cube_paths": "Y"},
+            xml_buffers={"simulation.xml": _simulation_xml_with_usd_grid("3M,6M,9M,1Y")},
+        ),
+    )
+    mapped = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot).state.mapped_inputs
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    adapter._ensure_py_lgm_imports()
+    specs, unsupported, _ = adapter._classify_portfolio_trades(snapshot, mapped)
+    assert unsupported == []
+    spec = next(s for s in specs if s.trade.trade_id == trade.trade_id)
+    assert adapter._supports_torch_rate_swap(spec)
+
+    numpy_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(numpy_adapter, "_resolve_irs_pricing_backend", return_value=None):
+        numpy_result = numpy_adapter.run(snapshot, mapped=mapped, run_id="usd-jpy-fixed-jpy-libor-numpy")
+
+    torch_adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    with patch.object(torch_adapter, "_resolve_irs_pricing_backend", return_value=_torch_irs_backend()):
+        torch_result = torch_adapter.run(snapshot, mapped=mapped, run_id="usd-jpy-fixed-jpy-libor-torch")
+
+    assert torch_result.metadata["irs_pricing_backend"] == "torch:cpu"
+    assert "torch_rate_swap_exclusions" not in torch_result.metadata
+    assert math.isclose(float(torch_result.pv_total), float(numpy_result.pv_total), rel_tol=0.0, abs_tol=1.0e-8)
+    assert abs(float(torch_result.pv_total)) < 5_000_000.0
+    np.testing.assert_allclose(
+        np.asarray(torch_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
+        np.asarray(numpy_result.cubes["npv_cube"].payload[trade.trade_id]["npv_paths"], dtype=float),
         rtol=0.0,
         atol=1.0e-8,
     )

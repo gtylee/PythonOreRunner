@@ -506,12 +506,15 @@ class PythonLgmAdapter:
         rate_legs = list(spec.legs.get("rate_legs", []))
         if not rate_legs:
             return ("no_rate_legs",)
-        if any(isinstance(leg.get("fx_reset"), dict) for leg in rate_legs):
+        has_fx_reset = any(isinstance(leg.get("fx_reset"), dict) for leg in rate_legs)
+        if has_fx_reset:
             reasons.append("fx_reset")
-        if len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1:
-            reasons.append("multi_currency")
         floating_count = sum(str(leg.get("kind", "")).upper() == "FLOATING" for leg in rate_legs)
         fixed_count = sum(str(leg.get("kind", "")).upper() == "FIXED" for leg in rate_legs)
+        multi_currency = len(_rate_leg_currencies(spec.legs, spec.ccy)) > 1
+        supports_xccy_fixed_float = multi_currency and not has_fx_reset and fixed_count > 0 and floating_count <= 1
+        if multi_currency and not supports_xccy_fixed_float:
+            reasons.append("multi_currency")
         if floating_count > 1 and fixed_count == 0:
             reasons.append("floating_basis_swap")
         # The torch path supports plain vanilla fixed/floating coupons. We still
@@ -4599,28 +4602,38 @@ class PythonLgmAdapter:
         ctx.last_trade_backend_detail = "torch_plain_leg_pricer"
         rate_legs = list((spec.legs or {}).get("rate_legs", []))
         vals = np.zeros((ctx.n_times, ctx.n_paths), dtype=float)
-        disc_key = ("disc", spec.ccy)
-        disc_curve = ctx.torch_curve_cache.get(disc_key)
-        if disc_curve is None:
-            sample_disc = [np.asarray(inputs.times, dtype=float)]
-            for leg in rate_legs:
-                sample_disc.append(np.asarray(leg.get("pay_time", []), dtype=float))
-            disc_times = np.unique(np.concatenate(sample_disc))
-            disc_times = disc_times[np.isfinite(disc_times)]
-            disc_times.sort()
-            disc_curve = torch_curve_ctor(
-                times=disc_times,
-                dfs=np.asarray([float(inputs.discount_curves[spec.ccy](float(t))) for t in disc_times], dtype=float),
-                device=torch_device,
-            )
-            ctx.torch_curve_cache[disc_key] = disc_curve
-        p_disc = inputs.discount_curves[spec.ccy]
         report_ccy = inputs.model_ccy.upper()
         for leg in rate_legs:
             kind = str(leg.get("kind", "")).upper()
             leg_ccy = str(leg.get("ccy", spec.ccy)).upper()
             if kind in {"FIXED", "FLOATING"}:
-                leg_cache_key = self._rate_leg_pricing_cache_key(spec.ccy, leg)
+                p_disc = inputs.discount_curves[leg_ccy]
+                if ctx.shared_fx_sim is not None and leg_ccy in ctx.shared_fx_sim.sim.get("x", {}):
+                    leg_x_paths = np.asarray(ctx.shared_fx_sim.sim["x"][leg_ccy], dtype=float)
+                else:
+                    leg_x_paths = ctx.x_paths
+                disc_key = ("disc", leg_ccy)
+                disc_curve = ctx.torch_curve_cache.get(disc_key)
+                if disc_curve is None:
+                    sample_disc = np.unique(
+                        np.concatenate(
+                            (
+                                np.asarray(inputs.times, dtype=float),
+                                np.asarray(leg.get("pay_time", []), dtype=float),
+                                np.asarray(leg.get("start_time", []), dtype=float),
+                                np.asarray(leg.get("end_time", []), dtype=float),
+                            )
+                        )
+                    )
+                    sample_disc = sample_disc[np.isfinite(sample_disc)]
+                    sample_disc.sort()
+                    disc_curve = torch_curve_ctor(
+                        times=sample_disc,
+                        dfs=np.asarray([float(p_disc(float(t))) for t in sample_disc], dtype=float),
+                        device=torch_device,
+                    )
+                    ctx.torch_curve_cache[disc_key] = disc_curve
+                leg_cache_key = self._rate_leg_pricing_cache_key(leg_ccy, leg)
                 cached_vals = ctx.torch_rate_leg_value_cache.get(leg_cache_key)
                 if cached_vals is not None:
                     vals += cached_vals
@@ -4631,7 +4644,7 @@ class PythonLgmAdapter:
                     fwd_key = ("fwd", index_name.upper())
                     fwd_curve = ctx.torch_curve_cache.get(fwd_key)
                     if fwd_curve is None:
-                        curve = self._resolve_index_curve(inputs, spec.ccy, index_name)
+                        curve = self._resolve_index_curve(inputs, leg_ccy, index_name)
                         sample_fwd = np.unique(
                             np.concatenate(
                                 (
@@ -4659,7 +4672,7 @@ class PythonLgmAdapter:
                                 leg_ccy,
                                 inputs,
                                 float(t_eval),
-                                ctx.x_paths[i_eval, :],
+                                leg_x_paths[i_eval, :],
                                 snapshot=ctx.snapshot,
                             )
                             for i_eval, t_eval in enumerate(inputs.times)
@@ -4671,7 +4684,7 @@ class PythonLgmAdapter:
                     disc_curve,
                     leg,
                     np.asarray(inputs.times, dtype=float),
-                    ctx.x_paths,
+                    leg_x_paths,
                     fwd_curve=fwd_curve,
                     live_coupon_grid=live_coupon_grid,
                     return_numpy=True,
@@ -4702,7 +4715,7 @@ class PythonLgmAdapter:
                         live_principal = (principal_pay >= 0.0) & (principal_pay > float(t) + 1.0e-12)
                         if not np.any(live_principal):
                             continue
-                        x_t = ctx.x_paths[i, :]
+                        x_t = leg_x_paths[i, :]
                         p_t = float(p_disc(float(t)))
                         disc_principal = ctx.model.discount_bond_paths(
                             float(t),
