@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 import pythonore.io.ore_snapshot as ore_snapshot_io
+import example_ore_snapshot_usd_all_rates_products as broad_rates_example
 from pythonore.compute.inflation import load_inflation_curve_from_market_data, load_zero_inflation_surface_quote
 from pythonore.runtime import bermudan as bermudan_runtime
 from pythonore.runtime.exposure_profiles import ore_pfe_quantile
@@ -130,6 +131,69 @@ def _patch_swap_floating_tenor(xml_text: str, tenor: str) -> str:
 
 
 class TestOreSnapshotCli(unittest.TestCase):
+    def _fake_snapshot_computation(self, ore_xml: Path, *, trade_id: str = "SIFMA_SWAP") -> ore_snapshot_cli.SnapshotComputation:
+        return ore_snapshot_cli.SnapshotComputation(
+            ore_xml=str(ore_xml),
+            trade_id=trade_id,
+            counterparty="CPTY_A",
+            netting_set_id="NS_A",
+            paths=4,
+            seed=42,
+            rng_mode="normal",
+            pricing={"ore_t0_npv": 0.0, "py_t0_npv": 0.0, "t0_npv_abs_diff": 0.0},
+            xva={
+                "ore_cva": 0.0,
+                "py_cva": 0.0,
+                "cva_rel_diff": 0.0,
+                "ore_dva": 0.0,
+                "py_dva": 0.0,
+                "dva_rel_diff": 0.0,
+                "ore_fba": 0.0,
+                "py_fba": 0.0,
+                "fba_rel_diff": 0.0,
+                "ore_fca": 0.0,
+                "py_fca": 0.0,
+                "fca_rel_diff": 0.0,
+            },
+            parity={"summary": {"requested_xva_metrics": ["CVA", "DVA", "FVA"]}},
+            diagnostics={"engine": "python_lgm_portfolio"},
+            maturity_date="2027-03-08",
+            maturity_time=1.0,
+            exposure_dates=["2026-03-08"],
+            exposure_times=[0.0],
+            py_epe=[0.0],
+            py_ene=[0.0],
+            py_pfe=[0.0],
+            exposure_profile_by_trade={trade_id: {}},
+            exposure_profile_by_netting_set={"NS_A": {}},
+            ore_basel_epe=0.0,
+            ore_basel_eepe=0.0,
+        )
+
+    def _install_fake_ore_artifact_builder(self, case_root: Path):
+        fake_ore = case_root / "ore"
+        fake_ore.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def fake_run(cmd, **kwargs):
+            target = Path(cmd[1])
+            root = ET.parse(target).getroot()
+            output_dir = Path(root.findtext("./Setup/Parameter[@name='outputPath']"))
+            curves = root.find("./Analytics/Analytic[@type='curves']")
+            calibration = root.find("./Analytics/Analytic[@type='calibration']")
+            self.assertIsNotNone(curves)
+            self.assertEqual(curves.findtext("./Parameter[@name='active']"), "Y")
+            self.assertIsNotNone(calibration)
+            self.assertEqual(calibration.findtext("./Parameter[@name='active']"), "Y")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "curves.csv").write_text("Date,USD\n2026-03-08,1.0\n2027-03-08,0.97\n", encoding="utf-8")
+            (output_dir / "calibration.xml").write_text(
+                """<Calibration><InterestRateModels><LGM key="USD"><Volatility><TimeGrid>1</TimeGrid><InitialValue>0.01,0.01</InitialValue></Volatility><Reversion><TimeGrid>1</TimeGrid><InitialValue>0.03,0.03</InitialValue></Reversion><ParameterTransformation><Scaling>1</Scaling></ParameterTransformation></LGM></InterestRateModels></Calibration>""",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        return fake_ore, fake_run
+
     def _write_runtime_artifact_case(self, root: Path, *, marketdata: str = "") -> Path:
         input_dir = root / "Input"
         input_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +272,53 @@ class TestOreSnapshotCli(unittest.TestCase):
             self.assertTrue((Path(td) / "Output" / "curves.csv").exists())
             self.assertTrue((Path(td) / "Output" / "calibration.xml").exists())
 
+    def test_cli_python_xva_preflight_builds_missing_runtime_artifacts_before_pricing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ore_xml = self._write_runtime_artifact_case(
+                root,
+                marketdata="2026-03-08,BMA_SWAP/RATIO/USD/3M/2Y,0.72\n",
+            )
+            fake_ore, fake_run = self._install_fake_ore_artifact_builder(root)
+            captured = {}
+
+            def fake_compute(case_ore_xml, **_kwargs):
+                output_dir = root / "Output"
+                self.assertTrue((output_dir / "curves.csv").exists())
+                self.assertTrue((output_dir / "calibration.xml").exists())
+                return self._fake_snapshot_computation(Path(case_ore_xml))
+
+            with patch.object(ore_snapshot_cli, "default_ore_bin", return_value=fake_ore), patch.object(
+                ore_snapshot_cli.subprocess, "run", side_effect=fake_run
+            ), patch.object(
+                ore_snapshot_cli, "validate_ore_input_snapshot", return_value={}
+            ), patch.object(
+                ore_snapshot_cli, "_portfolio_contains_swap_like_trade", return_value=True
+            ), patch.object(
+                ore_snapshot_cli, "_compute_portfolio_xva_case", side_effect=fake_compute
+            ) as compute_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(ore_xml),
+                        "--xva",
+                        "--engine",
+                        "python",
+                        "--paths",
+                        "4",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+                captured["summary"] = json.loads(
+                    next((root / "artifacts").glob("*/summary.json")).read_text(encoding="utf-8")
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(compute_mock.call_count, 1)
+            self.assertTrue(captured["summary"]["runtime_artifacts"]["constructed"])
+            self.assertIn("missing_curves_csv", ",".join(captured["summary"]["runtime_artifacts"]["initial_errors"]))
+            self.assertIn("missing_lgm_calibration", ",".join(captured["summary"]["runtime_artifacts"]["initial_errors"]))
+
     def test_runtime_artifact_preflight_fails_sifma_without_bma_ratio_quote(self):
         with tempfile.TemporaryDirectory() as td:
             ore_xml = self._write_runtime_artifact_case(Path(td), marketdata="")
@@ -237,6 +348,65 @@ class TestOreSnapshotCli(unittest.TestCase):
                         model_ccy="USD",
                         require_lgm_calibration=True,
                     )
+
+    def test_cli_python_xva_fails_fast_for_sifma_when_bma_ratio_curve_is_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ore_xml = self._write_runtime_artifact_case(root, marketdata="")
+            with patch.object(
+                ore_snapshot_cli, "validate_ore_input_snapshot", return_value={}
+            ), patch.object(
+                ore_snapshot_cli, "_run_ore_to_build_runtime_artifacts", side_effect=AssertionError("must fail before ORE construction")
+            ), patch.object(
+                ore_snapshot_cli, "_compute_portfolio_xva_case", side_effect=AssertionError("must fail before pricing")
+            ), self.assertRaisesRegex(RuntimeError, "missing_bma_ratio_curve:USD-SIFMA"):
+                ore_snapshot_cli.main(
+                    [
+                        str(ore_xml),
+                        "--xva",
+                        "--engine",
+                        "python",
+                        "--paths",
+                        "4",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+
+    def test_generated_sifma_averaged_cutoff_cli_preflight_requires_bma_ratio_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case_root = root / "GeneratedSifmaCutoff"
+            ore_xml, _ = broad_rates_example._write_files(case_root, count_per_type=1)
+            fake_ore, fake_run = self._install_fake_ore_artifact_builder(case_root)
+
+            with patch.object(ore_snapshot_cli, "default_ore_bin", return_value=fake_ore), patch.object(
+                ore_snapshot_cli.subprocess, "run", side_effect=fake_run
+            ), patch.object(
+                ore_snapshot_cli, "validate_ore_input_snapshot", return_value={}
+            ), patch.object(
+                ore_snapshot_cli,
+                "_compute_portfolio_xva_case",
+                return_value=self._fake_snapshot_computation(ore_xml, trade_id="IRS_USD_SIFMA_AVG_CUTOFF_0001"),
+            ) as compute_mock:
+                rc = ore_snapshot_cli.main(
+                    [
+                        str(ore_xml),
+                        "--xva",
+                        "--engine",
+                        "python",
+                        "--paths",
+                        "4",
+                        "--output-root",
+                        str(root / "artifacts"),
+                    ]
+                )
+
+            summary = json.loads(next((root / "artifacts").glob("*/summary.json")).read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(compute_mock.call_count, 1)
+            self.assertEqual(summary["trade_id"], "IRS_USD_SIFMA_AVG_CUTOFF_0001")
+            self.assertTrue(summary["runtime_artifacts"]["constructed"])
 
     def test_resolve_case_portfolio_path_uses_setup_portfolio_file(self):
         with tempfile.TemporaryDirectory() as tmp:
