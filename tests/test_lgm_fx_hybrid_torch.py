@@ -47,6 +47,40 @@ class TestTorchLgmFxHybrid(unittest.TestCase):
         self.assertEqual(self.torch_model.factor_ordering(), tuple(self.np_model.factor_ordering()))
         self.assertTrue(np.allclose(self.torch_model.corr_psd, self.np_model.corr_psd))
 
+    def test_permuted_factor_ordering_matches_numpy_with_shared_draws(self):
+        base = self._make_params()
+        labels = ("IR:EUR", "IR:GBP", "IR:USD", "FX:EUR/USD", "FX:GBP/USD")
+        permutation = [3, 0, 4, 2, 1]
+        ordered = tuple(labels[index] for index in permutation)
+        corr = np.eye(len(labels))
+        params = MultiCcyLgmParams(
+            ir_params=base.ir_params,
+            fx_vols=base.fx_vols,
+            corr=corr[np.ix_(permutation, permutation)],
+            factor_ordering=ordered,
+        )
+        numpy_model = LgmFxHybrid(params)
+        torch_model = TorchLgmFxHybrid(params)
+        times = np.array([0.0, 0.25, 1.0])
+        n_paths = 12
+        draws = np.random.default_rng(11).standard_normal((2, 5, n_paths))
+        np_result = numpy_model.simulate_paths(
+            times,
+            n_paths,
+            normal_draws=np.transpose(draws[:, permutation, :], (2, 0, 1)),
+        )
+        torch_result = simulate_hybrid_paths_torch(
+            torch_model,
+            times,
+            n_paths,
+            normal_draws=draws[:, permutation, :],
+        )
+        self.assertEqual(tuple(numpy_model.factor_ordering()), ordered)
+        for ccy in numpy_model.ir_ccys:
+            np.testing.assert_allclose(torch_result["x"][ccy], np_result["x"][ccy])
+        for pair in numpy_model.fx_pairs:
+            np.testing.assert_allclose(torch_result["s"][pair], np_result["s"][pair])
+
     def test_zc_bond_matches_numpy_hybrid(self):
         x = np.linspace(-0.02, 0.02, 11)
         got = self.torch_model.zc_bond("USD", 0.5, 2.0, x, 0.99, 0.94)

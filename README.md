@@ -342,6 +342,14 @@ Supported values:
 - `ore_sobol_bridge`
   Current best ORE-parity Sobol/Brownian-bridge path in Python.
 
+The native `PythonLgmAdapter` also accepts `python.lgm_rng_mode=ore_sobol_direct`.
+That opt-in mode uses QuantLib's `SobolBrownianGenerator` directly, reads the RNG
+ordering and process-grid settings from `simulation.xml`, and conditionally fills
+Python-only dates after generating the ORE grid. It is currently limited to
+single-factor, base-currency IR portfolios; it fails explicitly for stochastic FX
+or multi-factor CAM cases. The CLI's `--rng ore_sobol_bridge` remains a separate
+legacy path.
+
 Recommended default for current parity work:
 
 - `--rng ore_sobol_bridge`

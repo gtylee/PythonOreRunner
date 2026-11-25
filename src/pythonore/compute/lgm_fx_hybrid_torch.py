@@ -58,7 +58,11 @@ class TorchLgmFxHybrid(LgmFxHybrid):
             self._fx_times[p] = np.asarray(t, dtype=float)
             self._fx_vols[p] = np.asarray(v, dtype=float)
 
-        self.factor_labels = [f"IR:{c}" for c in self.ir_ccys] + [f"FX:{p}" for p in self.fx_pairs]
+        default_order = [f"IR:{c}" for c in self.ir_ccys] + [f"FX:{p}" for p in self.fx_pairs]
+        self.factor_labels = list(params.factor_ordering or default_order)
+        if len(self.factor_labels) != len(default_order) or set(self.factor_labels) != set(default_order):
+            raise ValueError("factor_ordering must permute the configured IR and FX factors")
+        self._factor_index = {label: i for i, label in enumerate(self.factor_labels)}
         self.n_factors = len(self.factor_labels)
         corr = np.asarray(params.corr, dtype=float)
         if corr.shape != (self.n_factors, self.n_factors):
@@ -209,7 +213,6 @@ def simulate_hybrid_paths_torch(
         for p in model.fx_pairs:
             ls_out[p][0, :].fill_(log_s0.get(p, 0.0))
 
-        ir_count = len(model.ir_ccys)
         fx_sigma_t = {
             p: torch_mod.as_tensor(model.fx_vol(p, mid_t.detach().cpu().numpy()), dtype=dtype, device=device_obj)
             for p in model.fx_pairs
@@ -225,11 +228,12 @@ def simulate_hybrid_paths_torch(
         for i in range(times_t.numel() - 1):
             zc = chol_t @ draws_t[i]
 
-            for j, c in enumerate(model.ir_ccys):
-                x_out[c][i + 1, :] = x_out[c][i, :] + ir_step_scale_t[c][i] * zc[j, :]
+            for c in model.ir_ccys:
+                factor_idx = model._factor_index[f"IR:{c}"]
+                x_out[c][i + 1, :] = x_out[c][i, :] + ir_step_scale_t[c][i] * zc[factor_idx, :]
 
-            for k, p in enumerate(model.fx_pairs):
-                idx = ir_count + k
+            for p in model.fx_pairs:
+                idx = model._factor_index[f"FX:{p}"]
                 sigma = fx_sigma_t[p][i]
                 mu = rd_minus_rf.get(p, 0.0)
                 dlog = (mu - 0.5 * sigma * sigma) * dt_t[i] + sigma * torch_mod.sqrt(dt_t[i]) * zc[idx, :]

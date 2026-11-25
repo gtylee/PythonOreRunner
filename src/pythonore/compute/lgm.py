@@ -289,15 +289,92 @@ class OreSobolBrownianBridgeGaussianRng:
         return self.next_sequence(int(size))
 
 
+class OreSobolBrownianGeneratorRng:
+    """QuantLib's ORE-style Sobol Brownian generator for a fixed process grid."""
+
+    def __init__(
+        self,
+        seed: int,
+        steps: int,
+        ordering: str = "Steps",
+        direction_integers: str = "JoeKuoD7",
+        factors: int = 1,
+    ) -> None:
+        self.seed = _coerce_seed(seed)
+        self.steps = int(steps)
+        self.factors = int(factors)
+        if self.steps <= 0:
+            raise ValueError("steps must be positive for SobolBrownianBridge")
+        if self.factors <= 0:
+            raise ValueError("factors must be positive for SobolBrownianBridge")
+        self.ordering = str(ordering)
+        self.direction_integers = str(direction_integers)
+
+        ql = _load_quantlib()
+        try:
+            ordering_value = getattr(ql.SobolBrownianGenerator, self.ordering)
+            direction_value = getattr(ql.SobolRsg, self.direction_integers)
+        except AttributeError as exc:
+            raise ValueError(
+                "Unsupported Sobol Brownian bridge ordering or direction integers: "
+                f"{self.ordering}/{self.direction_integers}"
+            ) from exc
+        self._ql = ql
+        self._generator = ql.SobolBrownianGenerator(
+            self.factors, self.steps, ordering_value, self.seed, direction_value
+        )
+
+    def next_path(self) -> np.ndarray:
+        """Return one path with shape ``(steps, factors)``."""
+        self._generator.nextPath()
+        out = np.empty((self.steps, self.factors), dtype=float)
+        step = self._ql.DoubleVector(self.factors)
+        for i in range(self.steps):
+            self._generator.nextStep(step)
+            for j in range(self.factors):
+                out[i, j] = float(step[j])
+        return out
+
+    def next_sequence(self, size: int) -> np.ndarray:
+        if self.factors != 1:
+            raise ValueError("next_sequence is only available for one-factor paths; use next_path")
+        if int(size) != self.steps:
+            raise ValueError(
+                "OreSobolBrownianGeneratorRng was initialized with "
+                f"{self.steps} steps, got {size}"
+            )
+        return self.next_path()[:, 0]
+
+    def standard_normal(self, size: Union[int, tuple[int, ...]]) -> np.ndarray:
+        if isinstance(size, tuple):
+            if size == (self.steps, self.factors):
+                return self.next_path()
+            if len(size) != 1:
+                raise ValueError("Sobol path shape must be (steps,) or (steps, factors)")
+            size = size[0]
+        return self.next_sequence(int(size))
+
+
 def make_ore_gaussian_rng(
-    seed: int, sequence_type: str = ORE_PARITY_SEQUENCE_TYPE
+    seed: int,
+    sequence_type: str = ORE_PARITY_SEQUENCE_TYPE,
+    *,
+    steps: Optional[int] = None,
+    factors: int = 1,
+    ordering: str = "Steps",
+    direction_integers: str = "JoeKuoD7",
 ) -> Union[
     OreMersenneTwisterGaussianRng,
     OreMersenneTwisterAntitheticGaussianRng,
     OreSobolGaussianRng,
     OreSobolBrownianBridgeGaussianRng,
+    OreSobolBrownianGeneratorRng,
 ]:
-    """Build a QuantLib-backed Gaussian RNG for Ore-style path-major simulation."""
+    """Build a QuantLib-backed Gaussian RNG for Ore-style path-major simulation.
+
+    Supplying ``steps`` for ``SobolBrownianBridge`` selects QuantLib's direct
+    ``SobolBrownianGenerator``. Omitting it retains the legacy lazy bridge mode.
+    """
     if sequence_type == ORE_PARITY_SEQUENCE_TYPE:
         return OreMersenneTwisterGaussianRng(seed)
     if sequence_type == ORE_PARITY_ANTITHETIC_SEQUENCE_TYPE:
@@ -305,6 +382,14 @@ def make_ore_gaussian_rng(
     if sequence_type == ORE_SOBOL_SEQUENCE_TYPE:
         return OreSobolGaussianRng(seed)
     if sequence_type == ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE:
+        if steps is not None:
+            return OreSobolBrownianGeneratorRng(
+                seed,
+                steps,
+                ordering=ordering,
+                direction_integers=direction_integers,
+                factors=factors,
+            )
         return OreSobolBrownianBridgeGaussianRng(seed)
     raise ValueError(
         f"unsupported sequence_type '{sequence_type}', expected one of "
@@ -312,6 +397,94 @@ def make_ore_gaussian_rng(
         f"'{ORE_SOBOL_SEQUENCE_TYPE}' or "
         f"'{ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE}'"
     )
+
+
+def build_ore_process_time_grid(
+    mandatory_times: Iterable[float], steps_per_year: int = 0
+) -> np.ndarray:
+    """Refine mandatory dates as QuantLib's ``TimeGrid(times, steps)`` does."""
+    steps_per_year = int(steps_per_year)
+    if steps_per_year < 0:
+        raise ValueError("steps_per_year must be non-negative")
+    mandatory = _validate_time_grid(mandatory_times)
+    if mandatory[0] > 0.0:
+        mandatory = np.concatenate(([0.0], mandatory))
+    if mandatory.size == 1:
+        return mandatory
+
+    steps = max(int(np.floor(steps_per_year * mandatory[-1] + 1.0)), 1)
+    dt_max = float(mandatory[-1]) / steps
+    grid = [0.0]
+    period_begin = 0.0
+    for period_end in mandatory:
+        period_end = float(period_end)
+        if period_end <= 0.0:
+            continue
+        n_steps = max(int(np.floor((period_end - period_begin) / dt_max + 0.5)), 1)
+        dt = (period_end - period_begin) / n_steps
+        grid.extend(period_begin + n * dt for n in range(1, n_steps + 1))
+        period_begin = period_end
+    return np.asarray(grid, dtype=float)
+
+
+def extend_lgm_paths_with_conditional_bridge(
+    model: "LGM1F",
+    base_times: Iterable[float],
+    base_paths: np.ndarray,
+    target_times: Iterable[float],
+    seed: int,
+) -> np.ndarray:
+    """Fill extra dates conditionally without altering simulated base paths."""
+    base = _validate_time_grid(base_times)
+    target = _validate_time_grid(target_times)
+    paths = np.asarray(base_paths, dtype=float)
+    if not np.isclose(base[0], target[0], atol=1.0e-12, rtol=0.0):
+        raise ValueError("target_times must start at the first base time")
+    if paths.ndim != 2 or paths.shape[0] != base.size:
+        raise ValueError("base_paths must have shape (len(base_times), n_paths)")
+    if paths.shape[1] == 0:
+        raise ValueError("base_paths must contain at least one path")
+
+    n_paths = paths.shape[1]
+    out = np.empty((target.size, n_paths), dtype=float)
+    known = np.zeros(target.size, dtype=bool)
+    base_idx = np.searchsorted(target, base)
+    if np.any(base_idx >= target.size) or not np.allclose(
+        target[np.minimum(base_idx, target.size - 1)], base, atol=1.0e-12, rtol=0.0
+    ):
+        raise ValueError("target_times must include every base time")
+    out[base_idx] = paths
+    known[base_idx] = True
+
+    rng = np.random.default_rng(int(seed) + 0x5A17C9E3)
+    zeta_base = np.asarray(model.zeta(base), dtype=float)
+    zeta_target = np.asarray(model.zeta(target), dtype=float)
+    for interval in range(base.size - 1):
+        lo, hi = base_idx[interval], base_idx[interval + 1]
+        pending = np.flatnonzero(~known[lo + 1 : hi]) + lo + 1
+        left_idx = lo
+        for target_idx in pending:
+            z_left = float(zeta_target[left_idx])
+            z_here = float(zeta_target[target_idx])
+            z_right = float(zeta_base[interval + 1])
+            denominator = z_right - z_left
+            if denominator <= 1.0e-16:
+                out[target_idx] = out[left_idx]
+            else:
+                fraction = np.clip((z_here - z_left) / denominator, 0.0, 1.0)
+                mean = out[left_idx] + fraction * (paths[interval + 1] - out[left_idx])
+                variance = max((z_here - z_left) * (z_right - z_here) / denominator, 0.0)
+                out[target_idx] = mean + np.sqrt(variance) * rng.standard_normal(n_paths)
+            known[target_idx] = True
+            left_idx = int(target_idx)
+
+    left_idx = int(base_idx[-1])
+    for target_idx in np.flatnonzero(~known & (np.arange(target.size) > left_idx)):
+        variance = max(float(zeta_target[target_idx] - zeta_target[left_idx]), 0.0)
+        out[target_idx] = out[left_idx] + np.sqrt(variance) * rng.standard_normal(n_paths)
+        known[target_idx] = True
+        left_idx = int(target_idx)
+    return out
 
 
 @dataclass(frozen=True)
@@ -976,8 +1149,13 @@ __all__ = [
     "LGMParams",
     "LGM1F",
     "ORE_PARITY_SEQUENCE_TYPE",
+    "ORE_SOBOL_SEQUENCE_TYPE",
+    "ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE",
     "OreMersenneTwisterGaussianRng",
+    "OreSobolBrownianGeneratorRng",
     "make_ore_gaussian_rng",
+    "build_ore_process_time_grid",
+    "extend_lgm_paths_with_conditional_bridge",
     "simulate_lgm_measure",
     "simulate_ba_measure",
 ]

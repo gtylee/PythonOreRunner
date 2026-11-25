@@ -350,6 +350,15 @@ This outperformed:
 - step-based Brownian bridge ordering
 - direct `SobolBrownianBridgeRsg` binding usage with skip-by-seed interpretation
 
+For the native `PythonLgmAdapter`, there is also an opt-in `ore_sobol_direct` mode.
+It calls QuantLib's `SobolBrownianGenerator` directly with the `Ordering`,
+`DirectionIntegers`, and `TimeStepsPerYear` settings from `simulation.xml`, then
+conditionally fills any Python-only dates without changing the generated ORE-grid
+paths. Set `snapshot.config.params["python.lgm_rng_mode"]` to that value. This mode
+is currently restricted to one base-currency IR factor and rejects stochastic FX
+or multi-factor CAM inputs; the CLI `--rng ore_sobol_bridge` still uses its legacy
+Sobol-plus-`BrownianBridge` implementation.
+
 For the benchmark cases investigated in this repo, `JoeKuoD7 + BrownianBridge(actual_times)` gave the best overall absolute parity on EPE/ENE and the best PFE parity among the Python-accessible variants that were tested.
 
 ### Pathwise ORE Sobol replication is now much tighter than before

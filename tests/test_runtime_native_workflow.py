@@ -1473,6 +1473,56 @@ def test_python_lgm_default_is_native_only_by_default():
     assert engine.adapter.fallback_to_swig is False
 
 
+def test_python_lgm_adapter_runs_direct_ore_sobol_on_xml_process_grid():
+    pytest.importorskip("QuantLib")
+    snapshot = _make_snapshot(
+        params={
+            "python.lgm_rng_mode": "ore_sobol_direct",
+            "python.torch_device": "numpy",
+            "python.progress": "N",
+        }
+    )
+    simulation_xml = """
+<Simulation>
+  <Parameters>
+    <Sequence>SobolBrownianBridge</Sequence>
+    <Ordering>Steps</Ordering>
+    <DirectionIntegers>JoeKuoD7</DirectionIntegers>
+    <Grid>10,6M</Grid><Calendar>TARGET</Calendar><DayCounter>A365F</DayCounter>
+    <TimeStepsPerYear>2</TimeStepsPerYear>
+  </Parameters>
+  <CrossAssetModel><DomesticCcy>EUR</DomesticCcy><InterestRateModels>
+    <LGM ccy="EUR">
+      <Volatility><TimeGrid/><InitialValue>0.01</InitialValue></Volatility>
+      <Reversion><TimeGrid/><InitialValue>0.03</InitialValue></Reversion>
+      <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+    </LGM>
+  </InterestRateModels></CrossAssetModel>
+</Simulation>
+""".strip()
+    snapshot = replace(
+        snapshot,
+        portfolio=Portfolio(trades=(snapshot.portfolio.trades[0],)),
+        config=replace(
+            snapshot.config,
+            num_paths=32,
+            xml_buffers={"simulation.xml": simulation_xml},
+        ),
+    )
+
+    result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(snapshot).run()
+
+    assert result.metadata["python_lgm_rng_mode"] == "ore_sobol_direct"
+    assert float(result.pv_total) != 0.0
+
+
+def test_direct_ore_sobol_rejects_unaligned_stochastic_fx_factors():
+    snapshot = _make_snapshot()
+    inputs = SimpleNamespace(stochastic_fx_pairs=("EUR/USD",), trade_specs=())
+    with pytest.raises(EngineRunError, match="single-factor IR-only portfolios"):
+        PythonLgmAdapter._validate_ore_sobol_direct_scope(snapshot, inputs)
+
+
 def test_native_runtime_filters_past_cashflow_payments():
     snapshot = _make_snapshot()
     past_cashflow_trade = Trade(

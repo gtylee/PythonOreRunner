@@ -51,6 +51,37 @@ class TestLgmFxHybrid(unittest.TestCase):
         self.assertTrue(np.allclose(out["x"]["EUR"][:, :4] + out["x"]["EUR"][:, 4:], 0.0, atol=1.0e-12))
         self.assertTrue(np.allclose(out["x"]["USD"][:, :4] + out["x"]["USD"][:, 4:], 0.0, atol=1.0e-12))
 
+    def test_explicit_factor_ordering_preserves_labeled_paths(self):
+        eur = LGMParams(alpha_times=(1.0,), alpha_values=(0.01, 0.01), kappa_times=(), kappa_values=(0.03,))
+        usd = LGMParams(alpha_times=(1.0,), alpha_values=(0.012, 0.012), kappa_times=(), kappa_values=(0.02,))
+        fx_vols = {"EUR/USD": (tuple(), (0.15,))}
+        corr = np.eye(3)
+        default_labels = ("IR:EUR", "IR:USD", "FX:EUR/USD")
+        permutation = [2, 1, 0]
+        ordered_labels = tuple(default_labels[index] for index in permutation)
+        default_model = LgmFxHybrid(
+            MultiCcyLgmParams({"EUR": eur, "USD": usd}, fx_vols, corr)
+        )
+        ordered_model = LgmFxHybrid(
+            MultiCcyLgmParams(
+                {"EUR": eur, "USD": usd},
+                fx_vols,
+                corr[np.ix_(permutation, permutation)],
+                factor_ordering=ordered_labels,
+            )
+        )
+        times = np.array([0.0, 0.5, 1.0])
+        n_paths = 8
+        draws = np.random.default_rng(19).standard_normal((n_paths, 2, 3))
+        default = default_model.simulate_paths(times, n_paths, normal_draws=draws)
+        ordered = ordered_model.simulate_paths(
+            times, n_paths, normal_draws=draws[:, :, permutation]
+        )
+        self.assertEqual(tuple(ordered_model.factor_ordering()), ordered_labels)
+        for ccy in ("EUR", "USD"):
+            self.assertTrue(np.allclose(default["x"][ccy], ordered["x"][ccy]))
+        self.assertTrue(np.allclose(default["s"]["EUR/USD"], ordered["s"]["EUR/USD"]))
+
     def test_fx_forward_identity(self):
         m = self._make_model(0.0)
         s = np.array([1.20, 1.30])

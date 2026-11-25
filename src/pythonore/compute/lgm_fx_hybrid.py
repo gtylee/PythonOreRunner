@@ -65,6 +65,7 @@ class MultiCcyLgmParams:
     ir_params: Mapping[str, LGMParams]
     fx_vols: Mapping[str, Tuple[Tuple[float, ...], Tuple[float, ...]]]
     corr: np.ndarray
+    factor_ordering: Tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.ir_params:
@@ -115,9 +116,11 @@ class LgmFxHybrid:
             self._fx_times[p] = np.asarray(t, dtype=float)
             self._fx_vols[p] = np.asarray(v, dtype=float)
 
-        # Keep an explicit factor ordering because the correlation matrix must match
-        # this exact sequence, just as ORE CAM diagnostics refer to named factors.
-        self.factor_labels = [f"IR:{c}" for c in self.ir_ccys] + [f"FX:{p}" for p in self.fx_pairs]
+        default_order = [f"IR:{c}" for c in self.ir_ccys] + [f"FX:{p}" for p in self.fx_pairs]
+        self.factor_labels = list(params.factor_ordering or default_order)
+        if len(self.factor_labels) != len(default_order) or set(self.factor_labels) != set(default_order):
+            raise ValueError("factor_ordering must permute the configured IR and FX factors")
+        self._factor_index = {label: i for i, label in enumerate(self.factor_labels)}
         self.n_factors = len(self.factor_labels)
         corr = np.asarray(params.corr, dtype=float)
         if corr.shape != (self.n_factors, self.n_factors):
@@ -167,11 +170,12 @@ class LgmFxHybrid:
         self,
         times: Sequence[float],
         n_paths: int,
-        rng: np.random.Generator,
+        rng: np.random.Generator | None = None,
         x0: Mapping[str, float] | None = None,
         log_s0: Mapping[str, float] | None = None,
         rd_minus_rf: Mapping[str, float] | None = None,
         antithetic: bool = False,
+        normal_draws: np.ndarray | None = None,
     ) -> Dict[str, np.ndarray]:
         """Simulate correlated IR factors and FX log-spot states.
 
@@ -192,6 +196,17 @@ class LgmFxHybrid:
             raise ValueError("times must start at 0.0")
         if n_paths <= 0:
             raise ValueError("n_paths must be positive")
+        if normal_draws is None and rng is None:
+            raise ValueError("rng is required when normal_draws are not supplied")
+        if normal_draws is not None:
+            normal_draws = np.asarray(normal_draws, dtype=float)
+            expected_shape = (n_paths, t.size - 1, self.n_factors)
+            if normal_draws.shape != expected_shape:
+                raise ValueError(f"normal_draws must have shape {expected_shape}, got {normal_draws.shape}")
+            if antithetic:
+                raise ValueError("antithetic=True cannot be combined with explicit normal_draws")
+            if antithetic:
+                raise ValueError("antithetic=True cannot be combined with explicit normal_draws")
 
         x0 = {k.upper(): float(v) for k, v in (x0 or {}).items()}
         log_s0 = {k.upper().replace("-", "/"): float(v) for k, v in (log_s0 or {}).items()}
@@ -205,7 +220,6 @@ class LgmFxHybrid:
         for p in self.fx_pairs:
             ls_out[p][0, :] = log_s0.get(p, 0.0)
 
-        ir_count = len(self.ir_ccys)
         half_paths = (n_paths + 1) // 2 if antithetic else n_paths
         for i in range(t.size - 1):
             t0 = t[i]
@@ -214,22 +228,27 @@ class LgmFxHybrid:
 
             # Draw all factor shocks together so the supplied CAM-style correlation
             # is respected pathwise across currencies and FX pairs.
-            z = rng.standard_normal(size=(self.n_factors, half_paths))
+            z = (
+                rng.standard_normal(size=(self.n_factors, half_paths))
+                if normal_draws is None
+                else normal_draws[:, i, :].T
+            )
             if antithetic:
                 z = np.concatenate((z, -z), axis=1)[:, :n_paths]
             zc = self._chol @ z
 
-            for j, c in enumerate(self.ir_ccys):
+            for c in self.ir_ccys:
                 m = self.ir_models[c]
                 # In the LGM measure the increment variance is exactly Delta zeta.
                 dz = float(m.zeta(t1) - m.zeta(t0))
                 if dz < -1.0e-14:
                     raise ValueError(f"non-monotone zeta interval for {c} at step {i}")
                 vol = np.sqrt(max(dz, 0.0))
-                x_out[c][i + 1, :] = x_out[c][i, :] + vol * zc[j, :]
+                factor_idx = self._factor_index[f"IR:{c}"]
+                x_out[c][i + 1, :] = x_out[c][i, :] + vol * zc[factor_idx, :]
 
-            for k, p in enumerate(self.fx_pairs):
-                idx = ir_count + k
+            for p in self.fx_pairs:
+                idx = self._factor_index[f"FX:{p}"]
                 # FX is evolved as a lognormal factor using the mid-interval vol
                 # bucket.  That is a lightweight proxy for the richer ORE CAM
                 # treatment, but it keeps all trades on one shared simulation grid.

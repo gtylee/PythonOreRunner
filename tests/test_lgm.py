@@ -11,6 +11,8 @@ from py_ore_tools.lgm import (
     ORE_PARITY_SEQUENCE_TYPE,
     ORE_SOBOL_SEQUENCE_TYPE,
     ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE,
+    build_ore_process_time_grid,
+    extend_lgm_paths_with_conditional_bridge,
     make_ore_gaussian_rng,
     simulate_ba_measure,
     simulate_lgm_measure,
@@ -179,6 +181,88 @@ class TestLGM(unittest.TestCase):
         seq_a = np.vstack([rng_a.next_sequence(dimension) for _ in range(4)])
         seq_b = np.vstack([rng_b.next_sequence(dimension) for _ in range(4)])
         self.assertTrue(np.array_equal(seq_a, seq_b))
+
+    def test_direct_sobol_brownian_generator_matches_quantlib(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        seed = 42
+        steps = 5
+        direct = ql.SobolBrownianGenerator(
+            1, steps, ql.SobolBrownianGenerator.Steps, seed, ql.SobolRsg.JoeKuoD7
+        )
+        expected = []
+        out = ql.DoubleVector(1)
+        for _ in range(4):
+            direct.nextPath()
+            path = []
+            for _ in range(steps):
+                direct.nextStep(out)
+                path.append(float(out[0]))
+            expected.append(path)
+
+        rng = make_ore_gaussian_rng(
+            seed,
+            sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE,
+            steps=steps,
+        )
+        actual = np.vstack([rng.next_sequence(steps) for _ in range(4)])
+        self.assertTrue(np.array_equal(actual, np.asarray(expected)))
+
+    def test_direct_sobol_brownian_generator_supports_multiple_factors(self):
+        if ql is None:
+            self.skipTest("QuantLib Python bindings are required for Ore parity tests")
+        seed = 29
+        steps = 4
+        factors = 3
+        direct = ql.SobolBrownianGenerator(
+            factors, steps, ql.SobolBrownianGenerator.Steps, seed, ql.SobolRsg.JoeKuoD7
+        )
+        expected = []
+        out = ql.DoubleVector(factors)
+        for _ in range(5):
+            direct.nextPath()
+            path = []
+            for _ in range(steps):
+                direct.nextStep(out)
+                path.append([float(out[i]) for i in range(factors)])
+            expected.append(path)
+
+        rng = make_ore_gaussian_rng(
+            seed,
+            sequence_type=ORE_SOBOL_BROWNIAN_BRIDGE_SEQUENCE_TYPE,
+            steps=steps,
+            factors=factors,
+        )
+        actual = np.stack([rng.next_path() for _ in range(5)])
+        self.assertTrue(np.array_equal(actual, np.asarray(expected)))
+        with self.assertRaisesRegex(ValueError, "next_path"):
+            rng.next_sequence(steps)
+
+    def test_ore_process_time_grid_preserves_mandatory_dates(self):
+        mandatory = np.array([0.0, 0.5, 1.0])
+        self.assertTrue(np.array_equal(build_ore_process_time_grid(mandatory), mandatory))
+        refined = build_ore_process_time_grid(mandatory, steps_per_year=4)
+        self.assertEqual(refined.size, 7)
+        self.assertTrue(np.all(np.isin(mandatory, refined)))
+        if ql is not None:
+            expected_steps = max(int(np.floor(4 * mandatory[-1] + 1.0)), 1)
+            oracle = ql.TimeGrid(mandatory.tolist(), expected_steps)
+            expected = np.asarray([oracle[i] for i in range(len(oracle))], dtype=float)
+            np.testing.assert_allclose(refined, expected, rtol=0.0, atol=1.0e-14)
+
+    def test_conditional_bridge_preserves_base_paths_and_is_reproducible(self):
+        base_times = np.array([0.0, 1.0, 2.0])
+        target_times = np.array([0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5])
+        base_paths = np.array([[0.0, 0.0], [0.02, -0.01], [0.01, 0.03]])
+        actual = extend_lgm_paths_with_conditional_bridge(
+            self.model, base_times, base_paths, target_times, seed=19
+        )
+        repeated = extend_lgm_paths_with_conditional_bridge(
+            self.model, base_times, base_paths, target_times, seed=19
+        )
+        base_idx = np.searchsorted(target_times, base_times)
+        self.assertTrue(np.array_equal(actual[base_idx], base_paths))
+        self.assertTrue(np.array_equal(actual, repeated))
 
     def test_discount_bond_profile_matches_when_paths_are_shared(self):
         payload = json.loads(self.parity_fixture.read_text(encoding="utf-8"))

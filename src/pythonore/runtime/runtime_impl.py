@@ -3022,10 +3022,235 @@ class PythonLgmAdapter:
 
         Reads ``python.lgm_rng_mode`` from the snapshot config and returns a
         normalised lower-case string (``"numpy"``, ``"ore_parity"``,
-        ``"ore_parity_antithetic"``, ``"ore_sobol"``, or
-        ``"ore_sobol_bridge"``).
+        ``"ore_parity_antithetic"``, ``"ore_sobol"``,
+        ``"ore_sobol_bridge"``, or ``"ore_sobol_direct"``).
         """
         return str(snapshot.config.params.get("python.lgm_rng_mode", "numpy")).strip().lower()
+
+    def _python_lgm_rng_settings(self, snapshot: XVASnapshot) -> Dict[str, Any]:
+        settings: Dict[str, Any] = {
+            "ordering": "Steps",
+            "direction_integers": "JoeKuoD7",
+            "time_steps_per_year": 0,
+        }
+        sim_xml = snapshot.config.xml_buffers.get("simulation.xml", "")
+        if not sim_xml:
+            raise EngineRunError("ore_sobol_direct requires simulation.xml RNG settings")
+        try:
+            params = ET.fromstring(sim_xml).find("./Parameters")
+            if params is None:
+                raise ValueError("missing Parameters block")
+            settings["ordering"] = (params.findtext("./Ordering") or "Steps").strip()
+            settings["direction_integers"] = (
+                params.findtext("./DirectionIntegers") or "JoeKuoD7"
+            ).strip()
+            settings["time_steps_per_year"] = max(
+                int((params.findtext("./TimeStepsPerYear") or "0").strip()), 0
+            )
+        except (ET.ParseError, ValueError) as exc:
+            raise EngineRunError(f"Failed to parse simulation.xml RNG settings: {exc}") from exc
+        return settings
+
+    def _ore_sobol_mandatory_times(self, snapshot: XVASnapshot) -> np.ndarray:
+        """Recreate ORE's simulation and close-out dates in model year units."""
+        sim_xml = snapshot.config.xml_buffers.get("simulation.xml", "")
+        try:
+            params = ET.fromstring(sim_xml).find("./Parameters") if sim_xml else None
+        except ET.ParseError as exc:
+            raise EngineRunError(f"Cannot parse simulation.xml for ORE Sobol grid: {exc}") from exc
+        if params is None:
+            raise EngineRunError("ore_sobol_direct requires simulation.xml Parameters/Grid")
+        sequence = (params.findtext("./Sequence") or "SobolBrownianBridge").strip()
+        if sequence != "SobolBrownianBridge":
+            raise EngineRunError(
+                "ore_sobol_direct requires simulation.xml Sequence=SobolBrownianBridge; "
+                f"got '{sequence}'"
+            )
+        grid_text = (params.findtext("./Grid") or "").strip()
+        calendar_name = (params.findtext("./Calendar") or "").strip()
+        if not grid_text or not calendar_name:
+            raise EngineRunError("ore_sobol_direct requires simulation.xml Grid and Calendar")
+        try:
+            import QuantLib as ql
+        except ImportError as exc:
+            raise EngineRunError("ore_sobol_direct requires QuantLib Python bindings") from exc
+
+        def parse_period(raw: str):
+            match = re.fullmatch(r"\s*(\d+)\s*([DWMY])\s*", raw.upper())
+            if match is None:
+                raise ValueError(f"unsupported ORE grid period '{raw}'")
+            unit = {"D": ql.Days, "W": ql.Weeks, "M": ql.Months, "Y": ql.Years}[match.group(2)]
+            return ql.Period(int(match.group(1)), unit)
+
+        def parse_calendar(name: str):
+            aliases = {
+                "TGT": "TARGET", "EUTA": "TARGET", "USD": "US", "USNY": "US",
+                "US-SET": "US", "GBLO": "GB", "GBP": "GB", "DEU": "DE",
+                "FRA": "DE", "JPN": "JP", "CAN": "CA", "AUS": "AU",
+            }
+            name = aliases.get(name.strip(), name.strip())
+            if name == "TARGET":
+                return ql.TARGET()
+            if name in ("US", "UnitedStates"):
+                return ql.UnitedStates(ql.UnitedStates.Settlement)
+            if name == "US-GOV":
+                return ql.UnitedStates(ql.UnitedStates.GovernmentBond)
+            if name == "US-FED":
+                return ql.UnitedStates(ql.UnitedStates.FederalReserve)
+            if name == "US-NYSE":
+                return ql.UnitedStates(ql.UnitedStates.NYSE)
+            if name in ("GB", "UnitedKingdom"):
+                return ql.UnitedKingdom(ql.UnitedKingdom.Settlement)
+            if name in ("DE", "Germany"):
+                return ql.Germany(ql.Germany.Settlement)
+            if name in ("JP", "Japan"):
+                return ql.Japan()
+            if name == "CA":
+                return ql.Canada()
+            if name == "AU":
+                return ql.Australia()
+            if name == "WeekendsOnly":
+                return ql.WeekendsOnly()
+            if name == "NullCalendar":
+                return ql.NullCalendar()
+            calendar_type = getattr(ql, name, None)
+            if calendar_type is not None:
+                try:
+                    return calendar_type()
+                except TypeError:
+                    pass
+            raise ValueError(f"unsupported QuantLib calendar alias '{name}'")
+
+        def calendar_from_xml(name: str):
+            parts = [part.strip() for part in re.split(r"[,()]", name) if part.strip()]
+            rule = ql.JoinBusinessDays if "JoinBusinessDays" in name else ql.JoinHolidays
+            parts = [part for part in parts if part not in ("JoinHolidays", "JoinBusinessDays")]
+            if not parts:
+                raise ValueError(f"unsupported ORE calendar '{name}'")
+            result = parse_calendar(parts[0])
+            for part in parts[1:]:
+                result = ql.JointCalendar(result, parse_calendar(part), rule)
+            return result
+
+        def day_counter_from_xml(name: str):
+            normalized = str(name).strip().upper().replace(" ", "")
+            if normalized in ("", "ACTUALACTUAL(ISDA)", "ACT/ACT(ISDA)", "ACTUALACTUALISDA"):
+                return ql.ActualActual(ql.ActualActual.ISDA)
+            if normalized in ("A365F", "A365", "ACTUAL/365(FIXED)", "ACT/365(FIXED)"):
+                return ql.Actual365Fixed()
+            if normalized in ("A360", "ACTUAL/360", "ACT/360"):
+                return ql.Actual360()
+            raise ValueError(f"unsupported ORE simulation day counter '{name}'")
+
+        try:
+            asof = datetime.strptime(str(snapshot.config.asof)[:10], "%Y-%m-%d")
+            asof_date = ql.Date(asof.day, getattr(ql, asof.strftime("%B")), asof.year)
+            calendar = calendar_from_xml(calendar_name)
+            day_counter = day_counter_from_xml(params.findtext("./DayCounter") or "")
+            tokens = [token.strip() for token in grid_text.split(",") if token.strip()]
+            grid_dates = []
+            if len(tokens) == 1 and tokens[0].upper() in ("ALPHA", "BETA"):
+                if tokens[0].upper() == "ALPHA":
+                    periods = [parse_period(f"{i * 3}M") for i in range(1, 40)]
+                    periods += [parse_period(f"{i}Y") for i in range(10, 30)]
+                    periods += [parse_period(f"{i}Y") for i in range(30, 105, 5)]
+                else:
+                    periods = [parse_period(f"{i}M") for i in range(1, 119)]
+                    periods += [parse_period(f"{i * 3}M") for i in range(40, 80)]
+                    periods += [parse_period(f"{i}Y") for i in range(20, 50)]
+                    periods += [parse_period(f"{i}Y") for i in range(50, 101, 5)]
+                tenor_specs = periods
+            elif len(tokens) == 2 and tokens[0].isdigit():
+                count = int(tokens[0])
+                step = parse_period(tokens[1])
+                if step.length() == 1 and step.units() == ql.Days:
+                    date = asof_date
+                    for _ in range(count):
+                        date = calendar.advance(date, ql.Period(1, ql.Days), ql.Following, False)
+                        grid_dates.append(date)
+                    tenor_specs = []
+                else:
+                    tenor_specs = [ql.Period(step.length() * i, step.units()) for i in range(1, count + 1)]
+            else:
+                tenor_specs = [parse_period(token) for token in tokens]
+            for period in tenor_specs:
+                if period.units() == ql.Days:
+                    date = calendar.adjust(asof_date + period, ql.Following)
+                else:
+                    date = calendar.advance(asof_date, period, ql.Following, False)
+                if not grid_dates or date != grid_dates[-1]:
+                    if grid_dates and date < grid_dates[-1]:
+                        raise ValueError("simulation Grid periods are not increasing")
+                    grid_dates.append(date)
+            if not grid_dates:
+                raise ValueError("simulation Grid produced no dates")
+            base_times = np.asarray(
+                [0.0, *(float(day_counter.yearFraction(asof_date, date)) for date in grid_dates)],
+                dtype=float,
+            )
+            closeout_times = base_times.copy()
+            lag_text = (params.findtext("./CloseOutLag") or "").strip()
+            if lag_text:
+                lag = parse_period(lag_text)
+                if lag.length() > 0:
+                    closeout_dates = []
+                    for date in grid_dates:
+                        closeout_date = (
+                            calendar.adjust(date + lag, ql.Following)
+                            if lag.units() == ql.Days
+                            else calendar.advance(date, lag, ql.Following, False)
+                        )
+                        closeout_dates.append(closeout_date)
+                    closeout_times = np.asarray(
+                        [0.0, *(float(day_counter.yearFraction(asof_date, date)) for date in closeout_dates)],
+                        dtype=float,
+                    )
+            return np.unique(np.concatenate((base_times, closeout_times)))
+        except Exception as exc:
+            raise EngineRunError(f"Cannot reproduce ORE Sobol DateGrid: {exc}") from exc
+
+    @staticmethod
+    def _validate_ore_sobol_direct_scope(snapshot: XVASnapshot, inputs: _PythonLgmInputs) -> None:
+        if inputs.stochastic_fx_pairs or any(spec.kind == "FXForward" for spec in inputs.trade_specs):
+            raise EngineRunError(
+                "ore_sobol_direct currently supports single-factor IR-only portfolios; "
+                "stochastic FX requires CAM factor alignment"
+            )
+        base_currency = snapshot.config.base_currency.upper()
+        foreign_rate_ccys = sorted(
+            {
+                str(spec.ccy).upper()
+                for spec in inputs.trade_specs
+                if spec.kind in {"IRS", "RateSwap"} and str(spec.ccy).upper() != base_currency
+            }
+        )
+        if foreign_rate_ccys:
+            raise EngineRunError(
+                "ore_sobol_direct currently supports base-currency IR trades only; "
+                f"foreign-currency trades: {', '.join(foreign_rate_ccys)}"
+            )
+        sim_xml = snapshot.config.xml_buffers.get("simulation.xml", "")
+        try:
+            cam = ET.fromstring(sim_xml).find("./CrossAssetModel") if sim_xml else None
+        except ET.ParseError as exc:
+            raise EngineRunError(f"Cannot validate simulation.xml CAM factors: {exc}") from exc
+        if cam is None:
+            return
+        active = []
+        for block_name in (
+            "ForeignExchangeModels", "CommodityModels", "EquityModels", "InflationModels",
+            "CreditModels", "CreditStateModels",
+        ):
+            block = cam.find(f"./{block_name}")
+            if block is not None and len(block):
+                active.append(block_name)
+        ir_models = cam.findall("./InterestRateModels/LGM")
+        if active or len(ir_models) > 1:
+            details = ", ".join(active) if active else "multiple interest-rate factors"
+            raise EngineRunError(
+                "ore_sobol_direct currently supports one IR factor; "
+                f"simulation.xml configures {details}"
+            )
 
     def _is_ore_case_snapshot(self, snapshot: XVASnapshot) -> bool:
         """Return True if the snapshot was loaded from a full ORE directory.
@@ -3089,7 +3314,14 @@ class PythonLgmAdapter:
             out = np.unique(np.concatenate([np.array([0.0]), out]))
         return out
 
-    def _build_lgm_rng(self, seed: int, rng_mode: str):
+    def _build_lgm_rng(
+        self,
+        seed: int,
+        rng_mode: str,
+        *,
+        steps: int | None = None,
+        rng_settings: Mapping[str, Any] | None = None,
+    ):
         """Construct the random number generator for LGM path simulation.
 
         Supports ``"numpy"`` (NumPy default RNG, time-major draw order),
@@ -3111,10 +3343,26 @@ class PythonLgmAdapter:
             return self._lgm_mod.make_ore_gaussian_rng(seed, sequence_type="Sobol"), "ore_path_major"
         if rng_mode == "ore_sobol_bridge":
             return self._lgm_mod.make_ore_gaussian_rng(seed, sequence_type="SobolBrownianBridge"), "ore_path_major"
+        if rng_mode == "ore_sobol_direct":
+            if steps is None or steps <= 0:
+                raise EngineRunError("ore_sobol_direct requires a positive ORE process-grid step count")
+            settings = dict(rng_settings or {})
+            try:
+                rng = self._lgm_mod.make_ore_gaussian_rng(
+                    seed,
+                    sequence_type="SobolBrownianBridge",
+                    steps=steps,
+                    factors=1,
+                    ordering=str(settings.get("ordering", "Steps")),
+                    direction_integers=str(settings.get("direction_integers", "JoeKuoD7")),
+                )
+            except (ImportError, ValueError, AttributeError) as exc:
+                raise EngineRunError(f"Cannot construct direct ORE Sobol Brownian generator: {exc}") from exc
+            return rng, "ore_path_major"
         raise EngineRunError(
             "Unsupported PythonLgmAdapter RNG mode "
             f"'{rng_mode}'. Use 'numpy', 'ore_parity', 'ore_parity_antithetic', 'ore_sobol' or "
-            "'ore_sobol_bridge'."
+            "'ore_sobol_bridge' or 'ore_sobol_direct'."
         )
 
     def _simulate_lgm_paths_cached(
@@ -3133,16 +3381,47 @@ class PythonLgmAdapter:
         cached = self._lgm_path_cache.get(cache_key)
         if cached is not None:
             return cached
-        rng, draw_order = self._build_lgm_rng(inputs.seed, rng_mode)
-        x_paths = self._lgm_mod.simulate_lgm_measure(
-            model,
-            inputs.times,
-            n_paths=n_paths,
-            rng=rng,
-            x0=0.0,
-            draw_order=draw_order,
-        )
-        shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
+        if rng_mode == "ore_sobol_direct":
+            self._validate_ore_sobol_direct_scope(snapshot, inputs)
+            rng_settings = self._python_lgm_rng_settings(snapshot)
+            mandatory_times = self._ore_sobol_mandatory_times(snapshot)
+            process_times = self._lgm_mod.build_ore_process_time_grid(
+                mandatory_times,
+                steps_per_year=int(rng_settings["time_steps_per_year"]),
+            )
+            if process_times.size < 2:
+                raise EngineRunError("ore_sobol_direct produced an empty ORE process grid")
+            rng, draw_order = self._build_lgm_rng(
+                inputs.seed,
+                rng_mode,
+                steps=process_times.size - 1,
+                rng_settings=rng_settings,
+            )
+            base_paths = self._lgm_mod.simulate_lgm_measure(
+                model,
+                process_times,
+                n_paths=n_paths,
+                rng=rng,
+                x0=0.0,
+                draw_order=draw_order,
+            )
+            all_times = np.unique(np.concatenate((process_times, np.asarray(inputs.times, dtype=float))))
+            all_paths = self._lgm_mod.extend_lgm_paths_with_conditional_bridge(
+                model, process_times, base_paths, all_times, seed=inputs.seed
+            )
+            x_paths = all_paths[np.searchsorted(all_times, inputs.times), :]
+            shared_fx_sim = None
+        else:
+            rng, draw_order = self._build_lgm_rng(inputs.seed, rng_mode)
+            x_paths = self._lgm_mod.simulate_lgm_measure(
+                model,
+                inputs.times,
+                n_paths=n_paths,
+                rng=rng,
+                x0=0.0,
+                draw_order=draw_order,
+            )
+            shared_fx_sim = self._build_shared_fx_simulation(snapshot, inputs, n_paths)
         if len(self._lgm_path_cache) >= 8:
             self._lgm_path_cache.pop(next(iter(self._lgm_path_cache)))
         self._lgm_path_cache[cache_key] = (x_paths, shared_fx_sim)
