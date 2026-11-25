@@ -350,6 +350,32 @@ single-factor, base-currency IR portfolios; it fails explicitly for stochastic F
 or multi-factor CAM cases. The CLI's `--rng ore_sobol_bridge` remains a separate
 legacy path.
 
+To select it through the native adapter (rather than the CLI), set the snapshot
+config parameter before creating the engine session:
+
+```python
+from dataclasses import replace
+
+from pythonore.io.loader import XVALoader
+from pythonore.runtime.runtime import XVAEngine
+
+snapshot = XVALoader.from_files("path/to/ORE/Input", ore_file="ore.xml")
+snapshot = replace(
+    snapshot,
+    config=replace(
+        snapshot.config,
+        params={
+            **snapshot.config.params,
+            "python.lgm_rng_mode": "ore_sobol_direct",
+        },
+    ),
+)
+
+engine = XVAEngine.python_lgm_default(fallback_to_swig=False)
+result = engine.create_session(snapshot).run(return_cubes=False)
+print(result.metadata["python_lgm_rng_mode"], result.xva_by_metric)
+```
+
 Recommended default for current parity work:
 
 - `--rng ore_sobol_bridge`
