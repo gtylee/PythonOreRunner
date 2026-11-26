@@ -43,7 +43,9 @@ import csv
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from functools import lru_cache
+import hashlib
 import importlib
+import json
 import math
 import os
 import re
@@ -66,6 +68,7 @@ from pythonore.domain.dataclasses import (
     IRS,
     Trade,
     XVASnapshot,
+    _fingerprint_normalize,
 )
 from pythonore.mapping.mapper import (
     MappedInputs,
@@ -102,6 +105,9 @@ from pythonore.runtime.lgm.products.fx import (
     today_spot_from_quotes as _today_spot_from_quotes,
 )
 from pythonore.runtime.lgm.products.capfloor import price_trade_capfloor_paths as _lgm_price_trade_capfloor_paths
+from pythonore.runtime.lgm.products.capfloor_market import (
+    proxy_capfloor_fallback_reason as _proxy_capfloor_fallback_reason,
+)
 from pythonore.runtime.lgm.products.swaption import (
     price_swaption_premium_paths as _lgm_price_swaption_premium_paths,
     price_trade_swaption_paths as _lgm_price_trade_swaption_paths,
@@ -132,6 +138,16 @@ def _normalize_forward_tenor_family(tenor: str) -> str:
 def _normalize_curve_lookup_key(name: str) -> str:
     token = str(name or "").strip().upper().replace("O/N", "ON")
     return token.replace("ESTER", "ESTR")
+
+
+def _content_fingerprint(value: object) -> str:
+    normalized = _fingerprint_normalize(value)
+    blob = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _text_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _forward_index_family(index_name: str, swap_index_forward_tenors: Mapping[str, str] | None = None) -> str:
@@ -374,31 +390,31 @@ class PythonLgmAdapter:
         self._inflation_mod = None
         self._ir_options_mod = None
         self._ore_snapshot_mod = None
-        self._asof_cache: Dict[int, str] = {}
-        self._fixings_cache: Dict[int, Dict[tuple[str, str], float]] = {}
-        self._time_date_cache: Dict[tuple[int, float], str] = {}
-        self._portfolio_root_cache: Dict[int, ET.Element] = {}
-        self._ore_root_cache: Dict[int, ET.Element] = {}
-        self._todaysmarket_root_cache: Dict[int, ET.Element] = {}
-        self._simulation_root_cache: Dict[int, ET.Element] = {}
-        self._simulation_tenor_cache: Dict[int, np.ndarray] = {}
-        self._swap_index_forward_tenor_cache: Dict[int, Dict[str, str]] = {}
-        self._fx_index_convention_cache: Dict[int, Dict[str, Dict[str, object]]] = {}
-        self._generic_rate_swap_legs_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
-        self._generic_capfloor_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
-        self._generic_swaption_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
-        self._generic_cashflow_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
-        self._generic_fra_state_cache: Dict[tuple[str, int], Optional[Dict[str, object]]] = {}
+        self._asof_cache: Dict[str, str] = {}
+        self._fixings_cache: Dict[tuple[str, tuple[object, ...]], Dict[tuple[str, str], float]] = {}
+        self._time_date_cache: Dict[tuple[str, float], str] = {}
+        self._portfolio_root_cache: Dict[str, ET.Element] = {}
+        self._ore_root_cache: Dict[str, ET.Element] = {}
+        self._todaysmarket_root_cache: Dict[str, ET.Element] = {}
+        self._simulation_root_cache: Dict[str, ET.Element] = {}
+        self._simulation_tenor_cache: Dict[str, np.ndarray] = {}
+        self._swap_index_forward_tenor_cache: Dict[str, Dict[str, str]] = {}
+        self._fx_index_convention_cache: Dict[str, Dict[str, Dict[str, object]]] = {}
+        self._generic_rate_swap_legs_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
+        self._generic_capfloor_state_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
+        self._generic_swaption_state_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
+        self._generic_cashflow_state_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
+        self._generic_fra_state_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_rate_swap_legs_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_capfloor_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_swaption_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_cashflow_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
         self._generic_fra_state_xml_cache: Dict[tuple[object, ...], Optional[Dict[str, object]]] = {}
-        self._irs_leg_cache: Dict[tuple[str, int], Dict[str, np.ndarray]] = {}
-        self._market_overlay_cache: Dict[int, Dict[str, Any]] = {}
+        self._irs_leg_cache: Dict[tuple[object, ...], Dict[str, np.ndarray]] = {}
+        self._market_overlay_cache: Dict[tuple[object, ...], Dict[str, Any]] = {}
         self._market_overlay_scan_cache: Dict[tuple[object, ...], Dict[str, Any]] = {}
-        self._capfloor_vol_cache: Dict[tuple[int, str], Dict[str, Any]] = {}
-        self._quote_dict_cache: Dict[int, Tuple[Dict[str, object], ...]] = {}
+        self._capfloor_vol_cache: Dict[tuple[tuple[object, ...], str], Dict[str, Any]] = {}
+        self._quote_dict_cache: Dict[tuple[object, ...], Tuple[Dict[str, object], ...]] = {}
         self._extract_inputs_cache: Dict[str, _PythonLgmInputs] = {}
         self._portfolio_classification_cache: Dict[
             tuple[object, ...],
@@ -956,7 +972,25 @@ class PythonLgmAdapter:
             "requires_swig_trade_types": swig_trade_types,
             "native_trade_count": len(native_trade_ids),
             "requires_swig_trade_count": len(swig_trade_ids),
+            "requires_swig_reasons": {
+                trade.trade_id: self._unsupported_trade_reason(trade, snapshot, mapped.xml_buffers)
+                for trade in unsupported
+            },
         }
+
+    def _unsupported_trade_reason(
+        self, trade: Trade, snapshot: XVASnapshot, xml_buffers: Mapping[str, str]
+    ) -> str:
+        product = trade.product
+        if isinstance(product, GenericProduct) and str(product.payload.get("trade_type", "")).strip() == "CapFloor":
+            state = self._build_generic_capfloor_state(trade, snapshot)
+            if state:
+                reason = _proxy_capfloor_fallback_reason(
+                    str(xml_buffers.get("curveconfig.xml", "")), str(state.get("index_name", ""))
+                )
+                if reason:
+                    return reason
+        return "unsupported product type or structure"
 
     def run(self, snapshot: XVASnapshot, mapped: MappedInputs, run_id: str) -> XVAResult:
         """Execute the Python-LGM XVA computation pipeline.
@@ -1088,46 +1122,52 @@ class PythonLgmAdapter:
                     f"rateSwap trade {spec.trade.trade_id}: backend={pricing_ctx.last_trade_backend}"
                     + (f" detail={pricing_ctx.last_trade_backend_detail}" if pricing_ctx.last_trade_backend_detail else "")
                 )
+            capfloor_pv_accounted = False
             if spec.kind == "CapFloor" and spec.sticky_state is not None:
                 reporter.log(
                     f"capfloor trade {spec.trade.trade_id}: backend={pricing_ctx.last_trade_backend}"
                     + (f" detail={pricing_ctx.last_trade_backend_detail}" if pricing_ctx.last_trade_backend_detail else "")
                 )
-                definition = spec.sticky_state.get("definition")
-                index_name = str(spec.sticky_state.get("index_name", ""))
-                if definition is not None:
+                if "t0-market-capfloor-anchor" in str(pricing_ctx.last_trade_backend_detail or ""):
+                    pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
+                    capfloor_pv_accounted = True
+                else:
+                    definition = spec.sticky_state.get("definition")
+                    index_name = str(spec.sticky_state.get("index_name", ""))
+                    if definition is not None:
+                        p_disc = inputs.discount_curves[spec.ccy]
+                        p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
+                        capfloor_t0 = float(inputs.times[valuation_idx[0]])
+                        realized_forward = None
+                        fixings = self._fixings_lookup(snapshot)
+                        if fixings and getattr(definition, "fixing_date", None) is not None:
+                            pay = np.asarray(definition.pay_time, dtype=float)
+                            live = pay >= capfloor_t0 - 1.0e-12
+                            if np.any(live):
+                                fix_dates = np.asarray(definition.fixing_date, dtype=object)[live]
+                                realized_forward = np.zeros((int(np.sum(live)), x_paths.shape[1]), dtype=float)
+                                for k_local, fix_date in enumerate(fix_dates):
+                                    fixing_key = (index_name.upper(), str(fix_date))
+                                    if fixing_key in fixings:
+                                        realized_forward[k_local, :] = float(fixings[fixing_key])
+                        capfloor_pv = self._ir_options_mod.capfloor_npv(
+                            model,
+                            p_disc,
+                            p_fwd,
+                            definition,
+                            capfloor_t0,
+                            x_paths[valuation_idx[0], :],
+                            realized_forward=realized_forward,
+                        )
+                        pv_total_native += float(np.mean(capfloor_pv))
+                        capfloor_pv_accounted = True
+            if not capfloor_pv_accounted:
+                if use_flow_amounts_t0 and spec.kind == "IRS" and spec.legs is not None:
                     p_disc = inputs.discount_curves[spec.ccy]
-                    p_fwd = self._resolve_index_curve(inputs, spec.ccy, index_name)
-                    capfloor_t0 = float(inputs.times[valuation_idx[0]])
-                    realized_forward = None
-                    fixings = self._fixings_lookup(snapshot)
-                    if fixings and getattr(definition, "fixing_date", None) is not None:
-                        pay = np.asarray(definition.pay_time, dtype=float)
-                        live = pay >= capfloor_t0 - 1.0e-12
-                        if np.any(live):
-                            fix_dates = np.asarray(definition.fixing_date, dtype=object)[live]
-                            realized_forward = np.zeros((int(np.sum(live)), x_paths.shape[1]), dtype=float)
-                            for k_local, fix_date in enumerate(fix_dates):
-                                fixing_key = (index_name.upper(), str(fix_date))
-                                if fixing_key in fixings:
-                                    realized_forward[k_local, :] = float(fixings[fixing_key])
-                    capfloor_pv = self._ir_options_mod.capfloor_npv(
-                        model,
-                        p_disc,
-                        p_fwd,
-                        definition,
-                        capfloor_t0,
-                        x_paths[valuation_idx[0], :],
-                        realized_forward=realized_forward,
-                    )
-                    pv_total_native += float(np.mean(capfloor_pv))
-                    continue
-            if use_flow_amounts_t0 and spec.kind == "IRS" and spec.legs is not None:
-                p_disc = inputs.discount_curves[spec.ccy]
-                anchored = _price_irs_t0_from_flow_amounts(spec.legs, p_disc)
-                pv_total_native += anchored if anchored is not None else float(np.mean(vals[valuation_idx[0], :]))
-            else:
-                pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
+                    anchored = _price_irs_t0_from_flow_amounts(spec.legs, p_disc)
+                    pv_total_native += anchored if anchored is not None else float(np.mean(vals[valuation_idx[0], :]))
+                else:
+                    pv_total_native += float(np.mean(vals[valuation_idx[0], :]))
 
             if xva_deflated:
                 if spec.kind == "IRS" and irs_backend is not None and not bool((spec.legs or {}).get("float_is_averaged", False)):
@@ -1229,6 +1269,12 @@ class PythonLgmAdapter:
             if not self.fallback_to_swig:
                 bad = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported}))
                 preview = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported})[:10])
+                details = "; ".join(
+                    f"{t.trade_id}: {self._unsupported_trade_reason(t, snapshot, mapped.xml_buffers)}"
+                    for t in unsupported
+                    if self._unsupported_trade_reason(t, snapshot, mapped.xml_buffers)
+                    != "unsupported product type or structure"
+                )
                 reporter.log(
                     "native-only run blocked by unsupported trades: "
                     + preview
@@ -1237,15 +1283,23 @@ class PythonLgmAdapter:
                 raise EngineRunError(
                     "Unsupported by PythonLgmAdapter in native-only mode: "
                     f"{bad}. These trades are supported only through the ORE SWIG fallback."
+                    + (f" Details: {details}." if details else "")
                 )
             try:
                 reporter.log(f"entering SWIG fallback for {len(unsupported)} trades")
                 swig_adapter = ORESwigAdapter()
             except Exception as exc:
                 bad = ", ".join(sorted({f"{t.trade_id}:{t.trade_type}" for t in unsupported}))
+                details = "; ".join(
+                    f"{t.trade_id}: {self._unsupported_trade_reason(t, snapshot, mapped.xml_buffers)}"
+                    for t in unsupported
+                    if self._unsupported_trade_reason(t, snapshot, mapped.xml_buffers)
+                    != "unsupported product type or structure"
+                )
                 raise EngineRunError(
                     "Trades supported only through the ORE SWIG fallback were encountered: "
                     f"{bad}. SWIG adapter unavailable: {exc}"
+                    + (f" Details: {details}." if details else "")
                 ) from exc
             fallback_trades = unsupported
             partial = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=tuple(unsupported)))
@@ -1300,6 +1354,10 @@ class PythonLgmAdapter:
             "native_trade_types": sorted({spec.trade.trade_type for spec in inputs.trade_specs}),
             "requires_swig_trade_ids": [trade.trade_id for trade in inputs.unsupported],
             "requires_swig_trade_types": sorted({trade.trade_type for trade in inputs.unsupported}),
+            "requires_swig_reasons": {
+                trade.trade_id: self._unsupported_trade_reason(trade, snapshot, mapped.xml_buffers)
+                for trade in inputs.unsupported
+            },
             "native_trade_count": len(inputs.trade_specs),
             "requires_swig_trade_count": len(inputs.unsupported),
         }
@@ -1580,10 +1638,11 @@ class PythonLgmAdapter:
         """Return (trade_specs, unsupported, ccy_set)."""
         cache_key = (
             self._normalized_asof(snapshot),
-            id(snapshot.portfolio.trades),
-            id(snapshot.fixings.points),
-            id(mapped.xml_buffers.get("portfolio.xml", "")),
-            id(mapped.xml_buffers.get("simulation.xml", "")),
+            _content_fingerprint(snapshot.portfolio.trades),
+            snapshot.fixings.points,
+            _text_fingerprint(mapped.xml_buffers.get("portfolio.xml", "")),
+            _text_fingerprint(mapped.xml_buffers.get("simulation.xml", "")),
+            _text_fingerprint(mapped.xml_buffers.get("curveconfig.xml", "")),
             snapshot.config.base_currency.upper(),
         )
         cached = self._portfolio_classification_cache.get(cache_key)
@@ -1648,16 +1707,22 @@ class PythonLgmAdapter:
             elif isinstance(t.product, GenericProduct):
                 generic_capfloor = self._build_generic_capfloor_state(t, snapshot)
                 if generic_capfloor is not None:
-                    notionals = np.asarray(generic_capfloor["definition"].notional, dtype=float)
-                    trade_specs.append(
-                        _TradeSpec(
-                            trade=t,
-                            kind="CapFloor",
-                            notional=float(np.max(np.abs(notionals))) if notionals.size else 0.0,
-                            ccy=str(generic_capfloor["ccy"]).upper(),
-                            sticky_state=generic_capfloor,
+                    if _proxy_capfloor_fallback_reason(
+                        str(mapped.xml_buffers.get("curveconfig.xml", "")),
+                        str(generic_capfloor.get("index_name", "")),
+                    ) is not None:
+                        unsupported.append(t)
+                    else:
+                        notionals = np.asarray(generic_capfloor["definition"].notional, dtype=float)
+                        trade_specs.append(
+                            _TradeSpec(
+                                trade=t,
+                                kind="CapFloor",
+                                notional=float(np.max(np.abs(notionals))) if notionals.size else 0.0,
+                                ccy=str(generic_capfloor["ccy"]).upper(),
+                                sticky_state=generic_capfloor,
+                            )
                         )
-                    )
                 else:
                     generic_swaption = self._build_generic_swaption_state(t, snapshot)
                     if generic_swaption is not None:
@@ -1745,7 +1810,7 @@ class PythonLgmAdapter:
         return cached
 
     def _fixings_lookup(self, snapshot: XVASnapshot) -> Dict[tuple[str, str], float]:
-        key = (self._normalized_asof(snapshot), id(snapshot.fixings.points), len(snapshot.fixings.points))
+        key = (self._normalized_asof(snapshot), snapshot.fixings.points)
         cached = self._fixings_cache.get(key)
         if cached is None:
             cached = {
@@ -1763,13 +1828,20 @@ class PythonLgmAdapter:
             self._time_date_cache[cache_key] = cached
         return cached
 
-    def _portfolio_cache_key(self, trade: Trade, snapshot: XVASnapshot, portfolio_xml: str = "") -> tuple[object, ...]:
+    def _portfolio_cache_key(
+        self,
+        trade: Trade,
+        snapshot: XVASnapshot,
+        portfolio_xml: str = "",
+        simulation_xml: str = "",
+    ) -> tuple[object, ...]:
         return (
-            trade.trade_id,
+            _content_fingerprint(trade),
             self._normalized_asof(snapshot),
-            id(snapshot.portfolio.trades),
-            id(snapshot.fixings.points),
-            id(portfolio_xml) if portfolio_xml else 0,
+            snapshot.fixings.points,
+            _text_fingerprint(portfolio_xml),
+            _text_fingerprint(simulation_xml),
+            snapshot.config.base_currency.upper(),
         )
 
     def _clone_cached_trade_state(
@@ -1794,14 +1866,14 @@ class PythonLgmAdapter:
         payload = getattr(trade.product, "payload", {})
         return (
             str(payload.get("trade_type", "")).strip(),
-            str(payload.get("xml", "")).strip(),
+            _text_fingerprint(str(payload.get("xml", "")).strip()),
             self._normalized_asof(snapshot),
-            id(snapshot.fixings.points),
+            snapshot.fixings.points,
             snapshot.config.base_currency.upper(),
         )
 
     def _portfolio_root_from_xml(self, portfolio_xml: str) -> ET.Element:
-        key = id(portfolio_xml)
+        key = _text_fingerprint(portfolio_xml)
         root = self._portfolio_root_cache.get(key)
         if root is None:
             root = ET.fromstring(portfolio_xml)
@@ -1811,7 +1883,7 @@ class PythonLgmAdapter:
     def _ore_root_from_xml(self, ore_xml: str) -> Optional[ET.Element]:
         if not ore_xml.strip():
             return None
-        key = id(ore_xml)
+        key = _text_fingerprint(ore_xml)
         root = self._ore_root_cache.get(key)
         if root is None:
             root = ET.fromstring(ore_xml)
@@ -1821,7 +1893,7 @@ class PythonLgmAdapter:
     def _todaysmarket_root_from_xml(self, todaysmarket_xml: str) -> Optional[ET.Element]:
         if not todaysmarket_xml.strip():
             return None
-        key = id(todaysmarket_xml)
+        key = _text_fingerprint(todaysmarket_xml)
         root = self._todaysmarket_root_cache.get(key)
         if root is None:
             root = ET.fromstring(todaysmarket_xml)
@@ -1829,7 +1901,7 @@ class PythonLgmAdapter:
         return root
 
     def _simulation_root_from_xml(self, simulation_xml: str) -> ET.Element:
-        key = id(simulation_xml)
+        key = _text_fingerprint(simulation_xml)
         root = self._simulation_root_cache.get(key)
         if root is None:
             root = ET.fromstring(simulation_xml)
@@ -1837,7 +1909,7 @@ class PythonLgmAdapter:
         return root
 
     def _simulation_node_tenors_from_xml(self, simulation_xml: str) -> np.ndarray:
-        key = id(simulation_xml)
+        key = _text_fingerprint(simulation_xml)
         tenors = self._simulation_tenor_cache.get(key)
         if tenors is None:
             tenors = self._irs_utils.load_simulation_yield_tenors_from_root(
@@ -1913,7 +1985,7 @@ class PythonLgmAdapter:
         return curves
 
     def _parse_swap_index_forward_tenors(self, conventions_xml: str) -> Dict[str, str]:
-        key = id(conventions_xml)
+        key = _text_fingerprint(conventions_xml)
         cached = self._swap_index_forward_tenor_cache.get(key)
         if cached is not None:
             return cached
@@ -1941,7 +2013,7 @@ class PythonLgmAdapter:
         return mapping
 
     def _parse_fx_index_conventions(self, conventions_xml: str) -> Dict[str, Dict[str, object]]:
-        key = id(conventions_xml)
+        key = _text_fingerprint(conventions_xml)
         cached = self._fx_index_convention_cache.get(key)
         if cached is not None:
             return cached
@@ -2156,7 +2228,7 @@ class PythonLgmAdapter:
         valuation_times, observation_times, observation_dates, grid_source = self._build_exposure_grid(snapshot, xml)
         mpor = _resolve_mpor_config(snapshot, xml)
 
-        market_cache_key = id(snapshot.market.raw_quotes)
+        market_cache_key = snapshot.market.raw_quotes
         overlay = self._market_overlay_cache.get(market_cache_key)
         if overlay is None:
             overlay = lgm_market._parse_market_overlay(snapshot.market.raw_quotes, snapshot.config.asof)
@@ -2203,7 +2275,7 @@ class PythonLgmAdapter:
         needed_tenors_sig, needed_forward_names_sig = _derive_curve_needs_from_signature(*need_sig)
         needed_tenors = {ccy: set(tenors) for ccy, tenors in needed_tenors_sig}
         needed_forward_names = {ccy: set(names) for ccy, names in needed_forward_names_sig}
-        market_cache_key = id(snapshot.market.raw_quotes)
+        market_cache_key = snapshot.market.raw_quotes
         quote_dicts = self._quote_dict_cache.get(market_cache_key)
         if quote_dicts is None:
             quote_dicts = _scan_market_quotes(snapshot.market.raw_quotes)
@@ -2677,7 +2749,29 @@ class PythonLgmAdapter:
             forward_specs: Dict[str, Dict[str, str]] = {}
             forward_names: set[str] = set()
             swap_index_forward_tenors = self._parse_swap_index_forward_tenors(mapped.xml_buffers.get("conventions.xml", ""))
+            capfloor_proxy_sources: Dict[str, str] = {}
+            curveconfig_xml = mapped.xml_buffers.get("curveconfig.xml", "")
+            if curveconfig_xml:
+                try:
+                    curveconfig_root = ET.fromstring(curveconfig_xml)
+                    for node in curveconfig_root.findall("./CapFloorVolatilities/CapFloorVolatility"):
+                        curve_id = (node.findtext("./CurveId") or "").strip().upper()
+                        source_index = (node.findtext("./ProxyConfig/Source/Index") or "").strip()
+                        if curve_id and source_index:
+                            capfloor_proxy_sources[curve_id] = source_index
+                except ET.ParseError:
+                    capfloor_proxy_sources = {}
             for spec in trade_specs:
+                if spec.kind == "CapFloor" and isinstance(spec.sticky_state, dict):
+                    index_name = str(spec.sticky_state.get("index_name", "")).strip()
+                    if index_name:
+                        requested_columns.add(index_name)
+                        forward_names.add(index_name.upper())
+                        source_index = capfloor_proxy_sources.get(index_name.upper(), "").strip()
+                        if source_index:
+                            requested_columns.add(source_index)
+                            forward_names.add(source_index.upper())
+                    continue
                 if spec.kind != "IRS" or spec.legs is None:
                     if spec.kind != "RateSwap" or spec.legs is None:
                         continue
@@ -2854,7 +2948,7 @@ class PythonLgmAdapter:
                 (ore_root.findtext("./Markets/Parameter[@name='simulation']") if ore_root is not None else None)
                 or pricing_config_id
             ).strip() or pricing_config_id
-            market_cache_key = id(snapshot.market.raw_quotes)
+            market_cache_key = snapshot.market.raw_quotes
             quote_dicts = self._quote_dict_cache.get(market_cache_key)
             if quote_dicts is None:
                 quote_dicts = _scan_market_quotes(snapshot.market.raw_quotes)
@@ -3628,7 +3722,8 @@ class PythonLgmAdapter:
 
     def _build_irs_legs(self, trade: Trade, mapped: MappedInputs, snapshot: XVASnapshot) -> Dict[str, np.ndarray]:
         portfolio_xml = mapped.xml_buffers.get("portfolio.xml", "")
-        cache_key = self._portfolio_cache_key(trade, snapshot, portfolio_xml)
+        simulation_xml = mapped.xml_buffers.get("simulation.xml", "")
+        cache_key = self._portfolio_cache_key(trade, snapshot, portfolio_xml, simulation_xml)
         cached_legs = self._irs_leg_cache.get(cache_key)
         if cached_legs is not None:
             return cached_legs
@@ -3640,7 +3735,7 @@ class PythonLgmAdapter:
                     trade.trade_id,
                     asof,
                 )
-                sim_xml = mapped.xml_buffers.get("simulation.xml")
+                sim_xml = simulation_xml
                 if sim_xml:
                     try:
                         legs["node_tenors"] = self._simulation_node_tenors_from_xml(sim_xml)
@@ -4253,6 +4348,11 @@ class PythonLgmAdapter:
         fixing_base = e_dates if in_arrears else s_dates
         fixing_dates = [advance_business_days(d, -fixing_days, cal) for d in fixing_base]
         fixing_t = np.asarray([time_from_dates(asof, d, "A365F") for d in fixing_dates], dtype=float)
+        index_name = (fld.findtext("./Index") or "").strip().upper()
+        index_accrual_all = np.asarray(
+            [time_from_dates(start_date, end_date, "A360") for start_date, end_date in zip(s_dates, e_dates)],
+            dtype=float,
+        )
         live = (pay_t >= -1.0e-12) & (end_t >= start_t - 1.0e-12) & (pay_t >= end_t - 1.0e-12)
         if not np.any(live):
             self._generic_capfloor_state_cache[cache_key] = None
@@ -4263,6 +4363,7 @@ class PythonLgmAdapter:
         pay_t = pay_t[live]
         accr = accr[live]
         fixing_t = fixing_t[live]
+        index_accrual = index_accrual_all[live]
         notionals = np.asarray(self._irs_utils.expand_leg_notionals(leg, s_dates, e_dates), dtype=float)
         if notionals.size == live.size:
             notionals = notionals[live]
@@ -4294,7 +4395,6 @@ class PythonLgmAdapter:
         long_short = (data.findtext("./LongShort") or "Long").strip().lower()
         position = -1.0 if long_short == "short" else 1.0
         ccy = (leg.findtext("./Currency") or snapshot.config.base_currency).strip().upper()
-        index_name = (fld.findtext("./Index") or "").strip().upper()
         definition = self._ir_options_mod.CapFloorDef(
             trade_id=trade.trade_id,
             ccy=ccy,
@@ -4311,7 +4411,12 @@ class PythonLgmAdapter:
             fixing_date=np.asarray([d.isoformat() for d in fixing_dates], dtype=object)[live],
             position=position,
         )
-        result = {"definition": definition, "ccy": ccy, "index_name": index_name}
+        result = {
+            "definition": definition,
+            "ccy": ccy,
+            "index_name": index_name,
+            "index_accrual": index_accrual,
+        }
         self._generic_capfloor_state_cache[cache_key] = result
         self._generic_capfloor_state_xml_cache[xml_cache_key] = result
         return result
@@ -5339,7 +5444,7 @@ class PythonLgmAdapter:
         with flat extrapolation.
         """
 
-        key = (id(snapshot.market.raw_quotes), ccy.upper())
+        key = (snapshot.market.raw_quotes, ccy.upper())
         grid = self._capfloor_vol_cache.get(key)
         if grid is None:
             points: dict[float, dict[float, float]] = {}

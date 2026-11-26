@@ -2135,6 +2135,10 @@ def notebook_05() -> list[dict]:
             **What you will learn**
             - how to load a repo parity case into `XVASnapshot` and run both engines explicitly
             - how to read the dual-engine metric table and charts
+
+            **RNG scope:** the live parity case below contains a multi-currency/multi-factor model. Keep its configured RNG;
+            `ore_sobol_direct` is intentionally restricted to single-factor, base-currency IR-only portfolios. The companion
+            Python-only notebook includes a small IRS-only direct-mode example.
             """
         ),
         code(BOOTSTRAP),
@@ -2462,6 +2466,98 @@ def notebook_05_1() -> list[dict]:
             display(nh.trade_frame(snapshot))
             display(nh.quote_family_frame(snapshot))
             display(nh.result_metrics_frame(base_result))
+            """
+        ),
+        md(
+            """
+            ## Direct ORE Sobol on a single IRS
+
+            The starting portfolio also contains an FX forward, which is outside the direct generator's supported scope.
+            The helper's IRS uses matching 3M EURIBOR schedule and market inputs. This comparison isolates that IRS, supplies
+            a one-factor EUR simulation configuration, and changes only the RNG between NumPy and direct ORE Sobol runs.
+            QuantLib is required for the direct generator.
+            """
+        ),
+        code(
+            """
+            try:
+                import QuantLib as _ql
+            except ImportError:
+                print("Skipping direct ORE Sobol example: install the QuantLib Python bindings to run it.")
+            else:
+                irs_only = replace(
+                    snapshot,
+                    portfolio=replace(snapshot.portfolio, trades=(snapshot.portfolio.trades[0],)),
+                    config=replace(
+                        snapshot.config,
+                        analytics=("CVA",),
+                        num_paths=768,
+                        params={
+                            **snapshot.config.params,
+                            "python.torch_device": "numpy",
+                            "python.progress": "N",
+                        },
+                    ),
+                )
+                direct_simulation_xml = \"\"\"<Simulation>
+                  <Parameters>
+                    <Sequence>SobolBrownianBridge</Sequence>
+                    <Ordering>Steps</Ordering>
+                    <DirectionIntegers>JoeKuoD7</DirectionIntegers>
+                    <Grid>10,6M</Grid><Calendar>TARGET</Calendar><DayCounter>A365F</DayCounter>
+                    <TimeStepsPerYear>2</TimeStepsPerYear>
+                  </Parameters>
+                  <CrossAssetModel><DomesticCcy>EUR</DomesticCcy><InterestRateModels>
+                    <LGM ccy=\"EUR\">
+                      <Volatility><TimeGrid/><InitialValue>0.01</InitialValue></Volatility>
+                      <Reversion><TimeGrid/><InitialValue>0.03</InitialValue></Reversion>
+                      <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+                    </LGM>
+                  </InterestRateModels></CrossAssetModel>
+                </Simulation>\"\"\"
+                configured_irs = replace(
+                    irs_only,
+                    config=replace(
+                        irs_only.config,
+                        xml_buffers={**irs_only.config.xml_buffers, "simulation.xml": direct_simulation_xml},
+                    ),
+                )
+                numpy_irs = replace(
+                    configured_irs,
+                    config=replace(
+                        configured_irs.config,
+                        params={**configured_irs.config.params, "python.lgm_rng_mode": "numpy"},
+                    ),
+                )
+                direct_irs = replace(
+                    configured_irs,
+                    config=replace(
+                        configured_irs.config,
+                        params={**configured_irs.config.params, "python.lgm_rng_mode": "ore_sobol_direct"},
+                    ),
+                )
+                numpy_result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(numpy_irs).run(
+                    return_cubes=False
+                )
+                direct_result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(direct_irs).run(
+                    return_cubes=False
+                )
+                assert numpy_result.metadata.get("python_lgm_rng_mode") == "numpy"
+                assert direct_result.metadata.get("python_lgm_rng_mode") == "ore_sobol_direct"
+                assert np.isfinite([numpy_result.pv_total, direct_result.pv_total]).all()
+                assert abs(direct_result.pv_total) < 2 * irs_only.portfolio.trades[0].product.notional
+                assert np.isclose(numpy_result.pv_total, direct_result.pv_total, atol=1.0e-6)
+                rng_comparison = pd.DataFrame(
+                    [
+                        {
+                            "rng": result.metadata.get("python_lgm_rng_mode"),
+                            "pv": result.pv_total,
+                            "CVA": result.xva_by_metric.get("CVA", 0.0),
+                        }
+                        for result in (numpy_result, direct_result)
+                    ]
+                )
+                display(rng_comparison)
             """
         ),
         md(

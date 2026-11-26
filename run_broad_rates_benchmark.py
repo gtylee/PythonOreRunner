@@ -157,6 +157,7 @@ def main() -> None:
             analytics=("CVA",),
             params={
                 **dict(snapshot.config.params or {}),
+                # This broad benchmark has multiple IR and FX factors; direct Sobol is IR-only.
                 "python.lgm_rng_mode": "ore_sobol_bridge",
                 "python.progress": "Y",
                 "python.progress_bar": "Y",

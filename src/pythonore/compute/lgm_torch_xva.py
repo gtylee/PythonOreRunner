@@ -241,6 +241,8 @@ def _capfloor_realized_forward_paths_torch(
     times: np.ndarray,
     x_paths,
     lock_fixings: bool,
+    fixings: Mapping[tuple[str, str], float] | None = None,
+    fixing_index: str | None = None,
 ) -> np.ndarray | None:
     if not lock_fixings:
         return None
@@ -255,6 +257,13 @@ def _capfloor_realized_forward_paths_torch(
         return np.zeros((0, x.shape[1]), dtype=float)
 
     realized = np.zeros((n_coupons, x.shape[1]), dtype=float)
+    fixing_dates = None if capfloor.fixing_date is None else np.asarray(capfloor.fixing_date, dtype=object)
+    if fixings and fixing_index is not None and fixing_dates is not None:
+        for j, fixing_date in enumerate(fixing_dates):
+            fixing_key = (fixing_index.upper(), str(fixing_date))
+            if fixing_key in fixings:
+                realized[j, :] = float(fixings[fixing_key])
+
     future_fixings = np.asarray(fixing > 1.0e-12, dtype=bool)
     if np.any(future_fixings):
         unique_fixings = np.unique(fixing[future_fixings])
@@ -876,7 +885,7 @@ def capfloor_npv_torch(
         notional = np.asarray(capfloor.notional, dtype=float)
         strike = np.asarray(capfloor.strike, dtype=float)
         fixing = _fixing_times(capfloor)
-        live = pay > float(t) + 1.0e-12
+        live = pay >= float(t) - 1.0e-12
         if not np.any(live):
             out = torch.zeros_like(x)
             return out.detach().cpu().numpy() if return_numpy else out
@@ -1011,6 +1020,8 @@ def capfloor_npv_paths_torch(
     x_paths,
     *,
     lock_fixings: bool = True,
+    fixings: Mapping[tuple[str, str], float] | None = None,
+    fixing_index: str | None = None,
     return_numpy: bool = True,
 ):
     t = np.asarray(times, dtype=float)
@@ -1025,10 +1036,16 @@ def capfloor_npv_paths_torch(
         t,
         x_paths,
         lock_fixings=lock_fixings,
+        fixings=fixings,
+        fixing_index=fixing_index,
     )
     out = np.empty_like(x)
+    final_pay = float(np.max(np.asarray(capfloor.pay_time, dtype=float))) if capfloor.pay_time.size else 0.0
     for i, ti in enumerate(t):
-        live = np.asarray(capfloor.pay_time, dtype=float) > ti + 1.0e-12
+        if ti >= final_pay - 1.0e-12:
+            out[i, :] = 0.0
+            continue
+        live = np.asarray(capfloor.pay_time, dtype=float) >= ti - 1.0e-12
         rf_live = realized_forward_full[live, :] if realized_forward_full is not None else None
         out[i, :] = capfloor_npv_torch(
             model,

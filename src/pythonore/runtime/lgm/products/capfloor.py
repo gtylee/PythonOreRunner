@@ -4,6 +4,10 @@ from typing import Any
 
 import numpy as np
 
+from pythonore.runtime.lgm.products.capfloor_market import (
+    market_capfloor_npv_paths,
+    market_capfloor_t0_value,
+)
 from pythonore.runtime.lgm.types import _PricingContext, _TradeSpec
 
 
@@ -49,7 +53,20 @@ def price_trade_capfloor_paths(
     if cached_vals is not None:
         ctx.last_trade_backend = "capfloor-cache"
         ctx.last_trade_backend_detail = "economic-definition"
+        _anchor_market_t0(adapter, spec, ctx, cached_vals)
         return cached_vals, False
+
+    ctx.last_trade_backend = "capfloor-market-vol"
+    ctx.last_trade_backend_detail = "market-optionlet-vol-paths"
+    try:
+        market_vals = market_capfloor_npv_paths(adapter, spec, ctx)
+    except Exception:
+        market_vals = None
+    if market_vals is not None:
+        _anchor_market_t0(adapter, spec, ctx, market_vals)
+        ctx.capfloor_value_cache[capfloor_cache_key] = market_vals
+        return market_vals, False
+
     p_disc = ctx.inputs.discount_curves[spec.ccy]
     p_fwd = adapter._resolve_index_curve(ctx.inputs, spec.ccy, index_name)
     if ctx.irs_backend is None:
@@ -66,6 +83,7 @@ def price_trade_capfloor_paths(
             fixings=adapter._fixings_lookup(ctx.snapshot),
             fixing_index=index_name,
         )
+        _anchor_market_t0(adapter, spec, ctx, vals)
         ctx.capfloor_value_cache[capfloor_cache_key] = vals
         return vals, False
 
@@ -123,10 +141,35 @@ def price_trade_capfloor_paths(
         np.asarray(ctx.inputs.times, dtype=float),
         ctx.x_paths,
         lock_fixings=True,
+        fixings=adapter._fixings_lookup(ctx.snapshot),
+        fixing_index=index_name,
         return_numpy=True,
     )
+    _anchor_market_t0(adapter, spec, ctx, vals)
     ctx.capfloor_value_cache[capfloor_cache_key] = vals
     return vals, False
+
+
+def _anchor_market_t0(adapter: Any, spec: _TradeSpec, ctx: _PricingContext, values: np.ndarray) -> None:
+    valuation_times = np.asarray(ctx.inputs.valuation_times, dtype=float)
+    times = np.asarray(ctx.inputs.times, dtype=float)
+    if valuation_times.size == 0 or times.size == 0 or abs(float(valuation_times[0])) > 1.0e-10:
+        return
+    t0_idx = int(np.argmin(np.abs(times)))
+    if abs(float(times[t0_idx])) > 1.0e-10:
+        return
+    try:
+        market_value = market_capfloor_t0_value(adapter, spec, ctx)
+    except Exception:
+        market_value = None
+    if market_value is None or not np.isfinite(market_value):
+        return
+    values[t0_idx, :] = float(market_value)
+    ctx.last_trade_backend_detail = (
+        f"{ctx.last_trade_backend_detail};t0-market-capfloor-anchor"
+        if ctx.last_trade_backend_detail
+        else "t0-market-capfloor-anchor"
+    )
 
 
 __all__ = ["price_trade_capfloor_paths"]

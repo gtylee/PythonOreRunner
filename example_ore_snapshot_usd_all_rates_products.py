@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import sys
 import time
@@ -23,6 +24,8 @@ from pythonore.apps import ore_snapshot_cli
 PRODUCTS_INPUT = REPO_ROOT / "Examples" / "Products" / "Input"
 DEFAULT_CASE_ROOT = REPO_ROOT / "Examples" / "Generated" / "USD_AllRatesProductsSnapshot"
 ASOF_DATE = "2025-02-10"
+# Two fixing days on the first coupon otherwise require a missing 2025-02-06 CMS fixing.
+CMS_START_DATE = "2025-02-13"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -578,7 +581,7 @@ def _cms_trade_xml(suffix: str) -> str:
         </FixedLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2045-02-10</EndDate>
             <Tenor>1Y</Tenor>
             <Calendar>USD</Calendar>
@@ -607,7 +610,7 @@ def _cms_trade_xml(suffix: str) -> str:
         </CMSLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2045-02-10</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>USD</Calendar>
@@ -660,7 +663,7 @@ def _cmsspread_trade_xml(suffix: str) -> str:
         </CMSSpreadLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2040-02-10</EndDate>
             <Tenor>1Y</Tenor>
             <Calendar>USD</Calendar>
@@ -689,7 +692,7 @@ def _cmsspread_trade_xml(suffix: str) -> str:
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2040-02-10</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>USD</Calendar>
@@ -753,7 +756,7 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         </DigitalCMSSpreadLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2030-02-10</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>USD</Calendar>
@@ -782,7 +785,7 @@ def _digital_cmsspread_trade_xml(suffix: str) -> str:
         </FloatingLegData>
         <ScheduleData>
           <Rules>
-            <StartDate>{ASOF_DATE}</StartDate>
+            <StartDate>{CMS_START_DATE}</StartDate>
             <EndDate>2030-02-10</EndDate>
             <Tenor>6M</Tenor>
             <Calendar>USD</Calendar>
@@ -1546,6 +1549,14 @@ def _simulation_xml() -> str:
         <Name>USD-CMS-30Y</Name>
         <DiscountingIndex>USD-SOFR</DiscountingIndex>
       </SwapIndex>
+      <SwapIndex>
+        <Name>JPY-CMS-1Y</Name>
+        <DiscountingIndex>JPY-TONAR</DiscountingIndex>
+      </SwapIndex>
+      <SwapIndex>
+        <Name>JPY-CMS-30Y</Name>
+        <DiscountingIndex>JPY-TONAR</DiscountingIndex>
+      </SwapIndex>
     </SwapIndices>
     <FxVolatilities>
       <ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay>
@@ -1562,10 +1573,21 @@ def _simulation_xml() -> str:
       <ReactionToTimeDecay>ForwardVariance</ReactionToTimeDecay>
       <Currencies>
         <Currency>USD</Currency>
+        <Currency>JPY</Currency>
       </Currencies>
       <Expiries>6M,1Y,2Y,3Y,5Y,10Y</Expiries>
       <Terms>1Y,2Y,3Y,5Y,10Y,30Y</Terms>
     </SwaptionVolatilities>
+    <CapFloorVolatilities>
+      <Simulate>false</Simulate>
+      <ReactionToTimeDecay>ConstantVariance</ReactionToTimeDecay>
+      <Keys>
+        <Key>USD-LIBOR-3M</Key>
+        <Key>USD-SOFR-3M</Key>
+      </Keys>
+      <Expiries/>
+      <Strikes/>
+    </CapFloorVolatilities>
     <AggregationScenarioDataCurrencies>
       <Currency>USD</Currency>
       <Currency>JPY</Currency>
@@ -1584,7 +1606,15 @@ def _simulation_xml() -> str:
 """
 
 
-def _ore_xml() -> str:
+def _ore_xml(config_input_dir: Path | None = None) -> str:
+    if config_input_dir is not None:
+        curve_config_file = "curveconfig.xml"
+        conventions_file = "conventions.xml"
+        market_config_file = "todaysmarket.xml"
+    else:
+        curve_config_file = PRODUCTS_INPUT / "curveconfig.xml"
+        conventions_file = PRODUCTS_INPUT / "conventions.xml"
+        market_config_file = PRODUCTS_INPUT / "todaysmarket.xml"
     return f"""<?xml version="1.0"?>
 <ORE>
   <Setup>
@@ -1596,9 +1626,9 @@ def _ore_xml() -> str:
     <Parameter name="marketDataFile">{PRODUCTS_INPUT / "marketdata.csv"}</Parameter>
     <Parameter name="fixingDataFile">{PRODUCTS_INPUT / "fixings.csv"}</Parameter>
     <Parameter name="implyTodaysFixings">N</Parameter>
-    <Parameter name="curveConfigFile">{PRODUCTS_INPUT / "curveconfig.xml"}</Parameter>
-    <Parameter name="conventionsFile">{PRODUCTS_INPUT / "conventions.xml"}</Parameter>
-    <Parameter name="marketConfigFile">{PRODUCTS_INPUT / "todaysmarket.xml"}</Parameter>
+    <Parameter name="curveConfigFile">{curve_config_file}</Parameter>
+    <Parameter name="conventionsFile">{conventions_file}</Parameter>
+    <Parameter name="marketConfigFile">{market_config_file}</Parameter>
     <Parameter name="pricingEnginesFile">{PRODUCTS_INPUT / "pricingengine.xml"}</Parameter>
     <Parameter name="portfolioFile">portfolio_usd_all_rates_products.xml</Parameter>
     <Parameter name="referenceDataFile">{PRODUCTS_INPUT / "referencedata.xml"}</Parameter>
@@ -1704,6 +1734,122 @@ def _sensitivity_xml() -> str:
 """
 
 
+def _parse_xml(path: Path) -> ET.ElementTree:
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    return ET.parse(path, parser=parser)
+
+
+def _write_xml(tree: ET.ElementTree, path: Path) -> None:
+    ET.indent(tree, space="  ")
+    tree.write(path, encoding="utf-8")
+    body = path.read_text(encoding="utf-8")
+    body = body.replace(" />", "/>").rstrip()
+    path.write_text(f'<?xml version="1.0"?>\n{body}\n', encoding="utf-8")
+
+
+def _upsert_market_mapping(parent: ET.Element, tag: str, key_name: str, key: str, value: str) -> None:
+    for node in parent.findall(tag):
+        if node.get(key_name) == key:
+            node.text = value
+            return
+    ET.SubElement(parent, tag, {key_name: key}).text = value
+
+
+def _write_market_inputs(input_dir: Path) -> None:
+    for filename in ("curveconfig.xml", "todaysmarket.xml", "conventions.xml"):
+        shutil.copy2(PRODUCTS_INPUT / filename, input_dir / filename)
+
+    curve_config_path = input_dir / "curveconfig.xml"
+    curve_config = _parse_xml(curve_config_path)
+    capfloor_configs = curve_config.findall("./CapFloorVolatilities/CapFloorVolatility")
+    for curve_id in ("USD", "USD-SOFR"):
+        config = next((c for c in capfloor_configs if c.findtext("CurveId") == curve_id), None)
+        if config is None:
+            raise ValueError(f"Products curveconfig.xml is missing USD cap/floor surface {curve_id}")
+        config.find("InputType").text = "OptionletVolatilities"
+        config.find("RateComputationPeriod").text = "1D"
+
+    for curve_id in ("USD-SOFR-3M", "USD-LIBOR-3M"):
+        config = next((c for c in capfloor_configs if c.findtext("CurveId") == curve_id), None)
+        if config is None:
+            raise ValueError(f"Products curveconfig.xml is missing cap/floor proxy {curve_id}")
+        source = config.find("./ProxyConfig/Source")
+        target = config.find("./ProxyConfig/Target")
+        source.find("CurveId").text = "CapFloorVolatility/USD/USD"
+        source.find("RateComputationPeriod").text = "1D"
+        target_index = target.find("RateComputationPeriod")
+        if target_index is None:
+            ET.SubElement(target, "RateComputationPeriod").text = "3M"
+        else:
+            target_index.text = "3M"
+
+    swaption_configs = curve_config.find("./SwaptionVolatilities")
+    if not any(c.findtext("CurveId") == "JPY" for c in swaption_configs.findall("SwaptionVolatility")):
+        proxy = ET.SubElement(swaption_configs, "SwaptionVolatility")
+        ET.SubElement(proxy, "CurveId").text = "JPY"
+        ET.SubElement(proxy, "CurveDescription").text = (
+            "JPY LGM index-base proxy; JPY volatility is fixed in simulation.xml and is not calibrated"
+        )
+        proxy_config = ET.SubElement(proxy, "ProxyConfig")
+        source = ET.SubElement(proxy_config, "Source")
+        ET.SubElement(source, "CurveId").text = "SwaptionVolatility/USD-SOFR/USD-SOFR"
+        ET.SubElement(source, "ShortSwapIndexBase").text = "USD-CMS-SOFR-1Y"
+        ET.SubElement(source, "SwapIndexBase").text = "USD-CMS-SOFR-30Y"
+        target = ET.SubElement(proxy_config, "Target")
+        ET.SubElement(target, "ShortSwapIndexBase").text = "JPY-CMS-1Y"
+        ET.SubElement(target, "SwapIndexBase").text = "JPY-CMS-30Y"
+    _write_xml(curve_config, curve_config_path)
+
+    market_config_path = input_dir / "todaysmarket.xml"
+    market_config = _parse_xml(market_config_path)
+    swaption_vols = market_config.find('./SwaptionVolatilities[@id="default"]')
+    _upsert_market_mapping(
+        swaption_vols,
+        "SwaptionVolatility",
+        "key",
+        "JPY",
+        "SwaptionVolatility/JPY/JPY",
+    )
+    capfloor_vols = market_config.find('./CapFloorVolatilities[@id="default"]')
+    _upsert_market_mapping(
+        capfloor_vols,
+        "CapFloorVolatility",
+        "key",
+        "USD-LIBOR-3M",
+        "CapFloorVolatility/USD-LIBOR-3M/USD-LIBOR-3M",
+    )
+    swap_index_curves = market_config.find('./SwapIndexCurves[@id="default"]')
+    for name in ("JPY-CMS-1Y", "JPY-CMS-30Y"):
+        node = next((x for x in swap_index_curves.findall("SwapIndex") if x.get("name") == name), None)
+        if node is None:
+            node = ET.SubElement(swap_index_curves, "SwapIndex", {"name": name})
+        discounting = node.find("Discounting")
+        if discounting is None:
+            discounting = ET.SubElement(node, "Discounting")
+        discounting.text = "JPY-TONAR"
+    _write_xml(market_config, market_config_path)
+
+    conventions_path = input_dir / "conventions.xml"
+    conventions = _parse_xml(conventions_path)
+    conventions_root = conventions.getroot()
+    if not any(n.findtext("Id") == "JPY-TONAR-SWAP-CONVENTIONS" for n in conventions_root.findall("Swap")):
+        swap = ET.SubElement(conventions_root, "Swap")
+        ET.SubElement(swap, "Id").text = "JPY-TONAR-SWAP-CONVENTIONS"
+        ET.SubElement(swap, "FixedCalendar").text = "JP"
+        ET.SubElement(swap, "FixedFrequency").text = "Annual"
+        ET.SubElement(swap, "FixedConvention").text = "MF"
+        ET.SubElement(swap, "FixedDayCounter").text = "30/360"
+        ET.SubElement(swap, "Index").text = "JPY-TONAR"
+    for name in ("JPY-CMS-1Y", "JPY-CMS-30Y"):
+        if any(n.findtext("Id") == name for n in conventions_root.findall("SwapIndex")):
+            continue
+        swap_index = ET.SubElement(conventions_root, "SwapIndex")
+        ET.SubElement(swap_index, "Id").text = name
+        ET.SubElement(swap_index, "Conventions").text = "JPY-TONAR-SWAP-CONVENTIONS"
+        ET.SubElement(swap_index, "FixingCalendar").text = "JP"
+    _write_xml(conventions, conventions_path)
+
+
 def _write_files(case_root: Path, *, count_per_type: int) -> tuple[Path, Path]:
     input_dir = case_root / "Input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -1714,7 +1860,8 @@ def _write_files(case_root: Path, *, count_per_type: int) -> tuple[Path, Path]:
     netting_xml = input_dir / "netting.xml"
     sensitivity_xml = input_dir / "sensitivity.xml"
 
-    ore_xml.write_text(_ore_xml(), encoding="utf-8")
+    _write_market_inputs(input_dir)
+    ore_xml.write_text(_ore_xml(config_input_dir=input_dir), encoding="utf-8")
     portfolio_xml.write_text(
         _portfolio_xml(count_per_type),
         encoding="utf-8",

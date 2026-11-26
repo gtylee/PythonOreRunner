@@ -90,16 +90,106 @@ display(nh.result_metrics_frame(base_result))
 
 # %% cell 3
 """
+## Direct ORE Sobol on a single IRS
+
+The starting portfolio also contains an FX forward, which is outside the direct generator's supported scope.
+The helper's IRS uses matching 3M EURIBOR schedule and market inputs. This comparison isolates that IRS, supplies
+a one-factor EUR simulation configuration, and changes only the RNG between NumPy and direct ORE Sobol runs.
+QuantLib is required for the direct generator.
+"""
+
+# %% cell 4
+try:
+    import QuantLib as _ql
+except ImportError:
+    print("Skipping direct ORE Sobol example: install the QuantLib Python bindings to run it.")
+else:
+    irs_only = replace(
+        snapshot,
+        portfolio=replace(snapshot.portfolio, trades=(snapshot.portfolio.trades[0],)),
+        config=replace(
+            snapshot.config,
+            analytics=("CVA",),
+            num_paths=768,
+            params={
+                **snapshot.config.params,
+                "python.torch_device": "numpy",
+                "python.progress": "N",
+            },
+        ),
+    )
+    direct_simulation_xml = """<Simulation>
+      <Parameters>
+        <Sequence>SobolBrownianBridge</Sequence>
+        <Ordering>Steps</Ordering>
+        <DirectionIntegers>JoeKuoD7</DirectionIntegers>
+        <Grid>10,6M</Grid><Calendar>TARGET</Calendar><DayCounter>A365F</DayCounter>
+        <TimeStepsPerYear>2</TimeStepsPerYear>
+      </Parameters>
+      <CrossAssetModel><DomesticCcy>EUR</DomesticCcy><InterestRateModels>
+        <LGM ccy="EUR">
+          <Volatility><TimeGrid/><InitialValue>0.01</InitialValue></Volatility>
+          <Reversion><TimeGrid/><InitialValue>0.03</InitialValue></Reversion>
+          <ParameterTransformation><ShiftHorizon>0</ShiftHorizon><Scaling>1</Scaling></ParameterTransformation>
+        </LGM>
+      </InterestRateModels></CrossAssetModel>
+    </Simulation>"""
+    configured_irs = replace(
+        irs_only,
+        config=replace(
+            irs_only.config,
+            xml_buffers={**irs_only.config.xml_buffers, "simulation.xml": direct_simulation_xml},
+        ),
+    )
+    numpy_irs = replace(
+        configured_irs,
+        config=replace(
+            configured_irs.config,
+            params={**configured_irs.config.params, "python.lgm_rng_mode": "numpy"},
+        ),
+    )
+    direct_irs = replace(
+        configured_irs,
+        config=replace(
+            configured_irs.config,
+            params={**configured_irs.config.params, "python.lgm_rng_mode": "ore_sobol_direct"},
+        ),
+    )
+    numpy_result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(numpy_irs).run(
+        return_cubes=False
+    )
+    direct_result = XVAEngine.python_lgm_default(fallback_to_swig=False).create_session(direct_irs).run(
+        return_cubes=False
+    )
+    assert numpy_result.metadata.get("python_lgm_rng_mode") == "numpy"
+    assert direct_result.metadata.get("python_lgm_rng_mode") == "ore_sobol_direct"
+    assert np.isfinite([numpy_result.pv_total, direct_result.pv_total]).all()
+    assert abs(direct_result.pv_total) < 2 * irs_only.portfolio.trades[0].product.notional
+    assert np.isclose(numpy_result.pv_total, direct_result.pv_total, atol=1.0e-6)
+    rng_comparison = pd.DataFrame(
+        [
+            {
+                "rng": result.metadata.get("python_lgm_rng_mode"),
+                "pv": result.pv_total,
+                "CVA": result.xva_by_metric.get("CVA", 0.0),
+            }
+            for result in (numpy_result, direct_result)
+        ]
+    )
+    display(rng_comparison)
+
+# %% cell 5
+"""
 ## Base run
 
 The base snapshot is intentionally small. That keeps the session updates easy to reason about and makes it obvious
 which change caused which metric move.
 """
 
-# %% cell 4
+# %% cell 6
 nh.plot_snapshot_composition(snapshot, title="Python-only session: snapshot inventory and quote mix")
 
-# %% cell 5
+# %% cell 7
 """
 ## Market update
 
@@ -107,7 +197,7 @@ First change a small set of market quotes and rerun the same session. This isola
 current portfolio without rebuilding a new notebook state from scratch.
 """
 
-# %% cell 6
+# %% cell 8
 bumped_quotes = []
 for quote in snapshot.market.raw_quotes:
     if quote.key == "ZERO/RATE/EUR/1Y":
@@ -125,13 +215,13 @@ display(market_compare)
 nh.plot_metric_comparison(market_compare, "base", "market_bump", title="Python-only session: base vs market bump")
 nh.plot_metric_delta(market_compare, title="Python-only session: market bump minus base")
 
-# %% cell 7
+# %% cell 9
 """
 The delta view is more informative than the level view once the baseline is familiar. It shows which metrics are
 genuinely moving and which are mostly stable to this small bump.
 """
 
-# %% cell 8
+# %% cell 10
 """
 ## Portfolio update
 
@@ -139,7 +229,7 @@ Next add one trade and reprice through the same Python session. This is the work
 portfolio patch rather than a market move.
 """
 
-# %% cell 9
+# %% cell 11
 session.update_market(snapshot.market)
 session.update_portfolio(
     add=[
@@ -165,7 +255,7 @@ display(portfolio_compare)
 nh.plot_metric_comparison(portfolio_compare, "base", "portfolio_patch", title="Python-only session: base vs portfolio patch")
 nh.plot_metric_delta(portfolio_compare, title="Python-only session: portfolio patch minus base")
 
-# %% cell 10
+# %% cell 12
 workflow_summary = pd.DataFrame(
     [
         {"run": "base", "pv": base_result.pv_total, "xva_total": base_result.xva_total},
@@ -182,7 +272,7 @@ plt.tight_layout()
 plt.show()
 plt.close(fig)
 
-# %% cell 11
+# %% cell 13
 """
 ## Capabilities in this workflow
 
@@ -190,7 +280,7 @@ The capability table is still useful here, but it is read purely as a Python-sid
 between engines.
 """
 
-# %% cell 12
+# %% cell 14
 capability_df = pd.DataFrame(
     [
         {"capability": "Programmatic snapshot build", "python_only": True},
@@ -203,7 +293,7 @@ capability_df = pd.DataFrame(
 display(capability_df)
 nh.plot_boolean_matrix(capability_df, row_col="capability", value_cols=["python_only"], title="Python-only workflow capabilities")
 
-# %% cell 13
+# %% cell 15
 """
 ## Key takeaways
 

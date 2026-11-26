@@ -88,6 +88,16 @@
       <Expiries>6M,1Y,2Y,3Y,5Y,10Y</Expiries>
       <Terms>1Y,2Y,3Y,5Y,10Y,30Y</Terms>
     </SwaptionVolatilities>
+    <CapFloorVolatilities>
+      <Simulate>false</Simulate>
+      <ReactionToTimeDecay>ConstantVariance</ReactionToTimeDecay>
+      <Keys>
+        <Key>USD-LIBOR-3M</Key>
+        <Key>USD-SOFR-3M</Key>
+      </Keys>
+      <Expiries/>
+      <Strikes/>
+    </CapFloorVolatilities>
     <AggregationScenarioDataCurrencies>
       <Currency>USD</Currency>
     </AggregationScenarioDataCurrencies>

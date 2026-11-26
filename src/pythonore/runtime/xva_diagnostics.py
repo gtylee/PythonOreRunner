@@ -543,7 +543,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("case_dir", type=Path)
     p.add_argument("--paths", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--rng", choices=["numpy", "ore_parity"], default="ore_parity")
+    p.add_argument(
+        "--rng",
+        choices=["numpy", "ore_parity", "ore_sobol_direct"],
+        default="ore_parity",
+        help=(
+            "RNG mode; ore_sobol_direct requires QuantLib and a single-factor, "
+            "base-currency IR-only case"
+        ),
+    )
     p.add_argument(
         "--fit-market-quotes",
         action="store_true",

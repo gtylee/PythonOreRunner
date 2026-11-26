@@ -548,13 +548,13 @@ def make_programmatic_snapshot(num_paths: int = 128):
                 MarketQuote(date="2026-03-08", key="FX/EUR/USD", value=1.10),
                 MarketQuote(date="2026-03-08", key="ZERO/RATE/EUR/1Y", value=0.0210),
                 MarketQuote(date="2026-03-08", key="ZERO/RATE/USD/1Y", value=0.0315),
-                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/EUR/EUR-ESTR/1Y/5Y", value=0.0230),
+                MarketQuote(date="2026-03-08", key="IR_SWAP/RATE/EUR/EUR-EURIBOR-3M/1Y/5Y", value=0.0230),
             ),
         ),
         fixings=FixingsData(
             points=(
-                FixingPoint(date="2026-03-06", index="EUR-ESTR", value=0.0190),
-                FixingPoint(date="2026-03-07", index="EUR-ESTR", value=0.0191),
+                FixingPoint(date="2026-03-06", index="EUR-EURIBOR-3M", value=0.0190),
+                FixingPoint(date="2026-03-07", index="EUR-EURIBOR-3M", value=0.0191),
             )
         ),
         portfolio=Portfolio(
@@ -564,7 +564,14 @@ def make_programmatic_snapshot(num_paths: int = 128):
                     counterparty="CP_A",
                     netting_set="NS_EUR",
                     trade_type="Swap",
-                    product=IRS(ccy="EUR", notional=5_000_000, fixed_rate=0.024, maturity_years=5.0, pay_fixed=True),
+                    product=IRS(
+                        ccy="EUR",
+                        notional=5_000_000,
+                        fixed_rate=0.024,
+                        maturity_years=5.0,
+                        pay_fixed=True,
+                        float_index="EUR-EURIBOR-3M",
+                    ),
                 ),
                 Trade(
                     trade_id="FXFWD_DEMO_1",

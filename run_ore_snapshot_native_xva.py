@@ -109,7 +109,15 @@ def main() -> None:
     parser.add_argument("--case-dir", type=Path, default=None, help="Case dir (default: flat_EUR_5Y_A)")
     parser.add_argument("--paths", type=int, default=None, help="Override num_paths (default: from simulation.xml)")
     parser.add_argument("--seed", type=int, default=42, help="Seed (used for display; runtime uses simulation.xml)")
-    parser.add_argument("--rng", choices=["numpy", "ore_parity"], default="ore_parity", help="Python LGM RNG mode")
+    parser.add_argument(
+        "--rng",
+        choices=["numpy", "ore_parity", "ore_sobol_direct"],
+        default="ore_parity",
+        help=(
+            "Python LGM RNG mode; ore_sobol_direct requires QuantLib and a single-factor, "
+            "base-currency IR-only case"
+        ),
+    )
     parser.add_argument(
         "--fit-market-quotes",
         action="store_true",

@@ -6,6 +6,7 @@ import math
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from pythonore.domain.dataclasses import (
     CollateralBalance,
     CollateralConfig,
     GenericProduct,
+    MarketQuote,
     NettingConfig,
     NettingSet,
     RuntimeConfig,
@@ -1642,7 +1644,7 @@ def test_generated_all_rates_strict_ore_inputs_fail_fast_when_market_family_miss
         adapter._extract_inputs(snapshot, map_snapshot(snapshot))
 
 
-def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_path):
+def test_generated_sofr_optionlet_capfloors_have_ore_sign_and_scale_parity(tmp_path):
     if not LOCAL_ORE_BINARY.exists():
         return
     case_root = tmp_path / "USD_AllRatesProductsSnapshot_CapFloorOreParity"
@@ -1665,13 +1667,14 @@ def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_pat
         }
 
     base_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
     for trade_id, abs_tol in (
-        ("CAP_USD_SOFR3M_0001", 6000.0),
-        ("FLOOR_USD_SOFR3M_0001", 1500.0),
-        ("FLOOR_USD_SOFR3M_FORWARD_0001", 1500.0),
-        ("CAP_USD_LIB3M_0001", 5000.0),
-        ("FLOOR_USD_LIB3M_0001", 500.0),
-        ("CAP_USD_LIB3M_SHORT_GEARED_0001", 75000.0),
+        ("CAP_USD_SOFR3M_0001", 250.0),
+        ("FLOOR_USD_SOFR3M_0001", 100.0),
+        ("FLOOR_USD_SOFR3M_FORWARD_0001", 100.0),
+        ("CAP_USD_LIB3M_0001", 125.0),
+        ("FLOOR_USD_LIB3M_0001", 75.0),
+        ("CAP_USD_LIB3M_SHORT_GEARED_0001", 400.0),
     ):
         trade = next(t for t in base_snapshot.portfolio.trades if t.trade_id == trade_id)
         snapshot = replace(
@@ -1688,18 +1691,231 @@ def test_generated_sofr_capfloor_variants_have_ore_sign_and_scale_parity(tmp_pat
                 },
             ),
         )
+        support = adapter.classify_portfolio_support(snapshot)
+        assert support["native_trade_ids"] == [trade_id]
+        assert support["requires_swig_trade_ids"] == []
         with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
             "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
         ):
-            result = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter.run(
-                snapshot,
-                mapped=map_snapshot(snapshot),
-                run_id=f"generated-sofr-capfloor-ore-parity-{trade_id.lower()}",
-            )
+            result = adapter.run(snapshot, mapped=map_snapshot(snapshot), run_id=f"capfloor-parity-{trade_id.lower()}")
         ore_npv = ore_npvs[trade_id]
         py_npv = float(result.pv_total)
         assert math.copysign(1.0, py_npv) == math.copysign(1.0, ore_npv)
         assert abs(py_npv - ore_npv) <= abs_tol
+        if trade_id in {"CAP_USD_LIB3M_0001", "CAP_USD_LIB3M_SHORT_GEARED_0001"}:
+            bumped_points = tuple(
+                replace(point, value=0.06)
+                if point.index.upper() == "USD-LIBOR-3M" and str(point.date)[:10] == "2025-02-06"
+                else point
+                for point in snapshot.fixings.points
+            )
+            assert bumped_points != snapshot.fixings.points
+            bumped_snapshot = replace(
+                snapshot,
+                fixings=replace(snapshot.fixings, points=bumped_points),
+            )
+            with patch("pythonore.io.ore_snapshot.calibrate_lgm_params_in_python", return_value=None), patch(
+                "pythonore.io.ore_snapshot.calibrate_lgm_params_via_ore", return_value=None
+            ):
+                bumped_result = adapter.run(
+                    bumped_snapshot,
+                    mapped=map_snapshot(bumped_snapshot),
+                    run_id=f"capfloor-fixing-sensitivity-{trade_id.lower()}",
+                )
+            assert float(bumped_result.pv_total) == pytest.approx(py_npv, abs=1.0e-8)
+
+
+def test_generated_sofr_optionlet_capfloor_reprices_natively_after_vol_shock(tmp_path):
+    case_root = tmp_path / "USD_AllRatesProductsSnapshot_CapFloorVolShock"
+    broad_rates_example._write_files(case_root, count_per_type=1)
+    base_snapshot = XVALoader.from_files(str(case_root / "Input"), ore_file="ore.xml")
+    trade = next(t for t in base_snapshot.portfolio.trades if t.trade_id == "CAP_USD_SOFR3M_0001")
+    base_snapshot = replace(
+        base_snapshot,
+        portfolio=replace(base_snapshot.portfolio, trades=(trade,)),
+        config=replace(
+            base_snapshot.config,
+            num_paths=16,
+            params={
+                **dict(base_snapshot.config.params),
+                "python.progress": "N",
+                "python.store_npv_cube_paths": "Y",
+                "python.lgm_rng_mode": "numpy",
+            },
+        ),
+    )
+
+    vol_prefix = "CAPFLOOR/RATE_NVOL/USD/"
+    bumped_quotes = tuple(
+        replace(quote, value=quote.value * 1.5)
+        if quote.key.upper().startswith(vol_prefix)
+        else quote
+        for quote in base_snapshot.market.raw_quotes
+    )
+    assert any(
+        quote.key.upper().startswith(vol_prefix) and quote.value > 0.0
+        for quote in base_snapshot.market.raw_quotes
+    )
+    shocked_snapshot = replace(
+        base_snapshot,
+        market=replace(base_snapshot.market, raw_quotes=bumped_quotes),
+    )
+
+    adapter = XVAEngine.python_lgm_default(fallback_to_swig=False).adapter
+    base_support = adapter.classify_portfolio_support(base_snapshot)
+    shocked_support = adapter.classify_portfolio_support(shocked_snapshot)
+
+    assert base_support["native_trade_ids"] == [trade.trade_id]
+    assert shocked_support["native_trade_ids"] == [trade.trade_id]
+    assert base_support["requires_swig_trade_ids"] == []
+    assert shocked_support["requires_swig_trade_ids"] == []
+
+    from pythonore.runtime.lgm.products import capfloor_market
+
+    initial_surface_strikes = []
+    future_surface_strikes = []
+    original_surface_volatility = capfloor_market._surface_volatility
+
+    def capture_surface_strike(*args, **kwargs):
+        if kwargs.get("option_time") is None:
+            initial_surface_strikes.append(float(kwargs["strike"]))
+        else:
+            future_surface_strikes.append(float(kwargs["strike"]))
+        return original_surface_volatility(*args, **kwargs)
+
+    with patch.object(capfloor_market, "_surface_volatility", side_effect=capture_surface_strike):
+        base_result = _run_python(base_snapshot, "capfloor-vol-shock-base")
+    shocked_result = _run_python(shocked_snapshot, "capfloor-vol-shock-bumped")
+    assert initial_surface_strikes
+    assert future_surface_strikes
+    assert any(abs(strike - 0.05) > 1.0e-6 for strike in initial_surface_strikes)
+    assert all(
+        any(math.isclose(strike, initial, rel_tol=0.0, abs_tol=1.0e-12) for initial in initial_surface_strikes)
+        for strike in future_surface_strikes
+    )
+    assert abs(float(base_result.pv_total) - float(shocked_result.pv_total)) > 1.0
+
+
+def test_proxy_ois_optionlet_surface_uses_ore_fixing_dates_and_atm_quotes():
+    from pythonore.runtime.lgm.products.capfloor_market import _surface_volatility
+
+    asof = date(2025, 2, 10)
+    quotes = (
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/1Y/1D/0/0/0.04", 0.01),
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/1Y/1D/0/0/0.05", 0.03),
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/1Y/1D/1/1/0", 0.02),
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/2Y/1D/0/0/0.04", 0.04),
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/2Y/1D/0/0/0.05", 0.06),
+    )
+    snapshot = SimpleNamespace(market=SimpleNamespace(raw_quotes=quotes))
+    adapter = SimpleNamespace(_irs_utils=irs_utils_mod)
+    config = {
+        "VolatilityType": "Normal",
+        "InputType": "OptionletVolatilities",
+        "SurfaceCurveId": "USD",
+        "SourcePeriod": "1D",
+        "IsProxy": "true",
+        "SettlementDays": "0",
+        "IncludeAtm": "true",
+        "Calendar": "US",
+        "BusinessDayConvention": "Following",
+        "DayCounter": "Actual/365 (Fixed)",
+        "TimeInterpolation": "BackwardFlat",
+        "StrikeInterpolation": "LinearFlat",
+    }
+    atm_level = lambda expiry: 0.045
+
+    atm_quote_vol = _surface_volatility(
+        adapter,
+        snapshot,
+        config,
+        asof=asof,
+        fixing_date=date(2026, 2, 9),
+        strike=0.045,
+        atm_strike_for_expiry=atm_level,
+    )
+    listed_strike_vol = _surface_volatility(
+        adapter,
+        snapshot,
+        config,
+        asof=asof,
+        fixing_date=date(2026, 2, 9),
+        strike=0.05,
+        atm_strike_for_expiry=atm_level,
+    )
+
+    assert atm_quote_vol == pytest.approx(0.02)
+    assert listed_strike_vol == pytest.approx(0.03)
+
+
+def test_proxy_target_atm_uses_ore_ibor_value_dates_not_coupon_dates():
+    from pythonore.runtime.lgm.products.capfloor_market import _target_index_atm_forward
+
+    asof = date(2025, 2, 10)
+    fixing_date = date(2025, 11, 6)
+    adapter = SimpleNamespace(_irs_utils=irs_utils_mod)
+    rate = 0.04
+    curve = lambda t: math.exp(-rate * t)
+
+    target_atm = _target_index_atm_forward(
+        adapter,
+        index_name="USD-LIBOR-3M",
+        period="3M",
+        fixing_date=fixing_date,
+        asof=asof,
+        curve=curve,
+        model_day_counter="A365F",
+    )
+
+    # The two-day LIBOR spot lag maps Nov 6 to Nov 10; three months then ends Feb 10.
+    accrual = 92.0 / 360.0
+    expected = (math.exp(rate * 92.0 / 365.0) - 1.0) / accrual
+    assert target_atm == pytest.approx(expected)
+    assert target_atm != pytest.approx(0.031)
+
+
+def test_capfloor_surface_rolls_to_remaining_expiry_for_ore_constant_variance():
+    from pythonore.runtime.lgm.products.capfloor_market import _surface_volatility
+
+    asof = date(2025, 2, 10)
+    quotes = (
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/6M/3M/0.01", 0.02),
+        MarketQuote(asof.isoformat(), "CAPFLOOR/RATE_NVOL/USD/1Y/3M/0.01", 0.04),
+    )
+    snapshot = SimpleNamespace(market=SimpleNamespace(raw_quotes=quotes))
+    adapter = SimpleNamespace(_irs_utils=irs_utils_mod)
+    surface_config = {
+        "VolatilityType": "Normal",
+        "InputType": "OptionletVolatilities",
+        "SurfaceCurveId": "USD",
+        "SourcePeriod": "3M",
+        "Calendar": "US",
+        "BusinessDayConvention": "Following",
+        "DayCounter": "Actual/365 (Fixed)",
+        "TimeInterpolation": "Linear",
+        "StrikeInterpolation": "LinearFlat",
+    }
+
+    asof_implied = _surface_volatility(
+        adapter,
+        snapshot,
+        surface_config,
+        asof=asof,
+        fixing_date=date(2026, 8, 10),
+        strike=0.01,
+    )
+    future_dynamic = _surface_volatility(
+        adapter,
+        snapshot,
+        surface_config,
+        asof=asof,
+        fixing_date=date(2026, 8, 10),
+        strike=0.01,
+        option_time=0.75,
+    )
+
+    assert asof_implied == pytest.approx(0.04)
+    assert future_dynamic == pytest.approx(0.03, abs=1.0e-4)
 
 
 @pytest.mark.parametrize("count_per_type", (1, 5))

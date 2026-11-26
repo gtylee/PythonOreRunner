@@ -9,9 +9,9 @@
     <Parameter name="marketDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/marketdata.csv</Parameter>
     <Parameter name="fixingDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/fixings.csv</Parameter>
     <Parameter name="implyTodaysFixings">N</Parameter>
-    <Parameter name="curveConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/curveconfig.xml</Parameter>
-    <Parameter name="conventionsFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/conventions.xml</Parameter>
-    <Parameter name="marketConfigFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/todaysmarket.xml</Parameter>
+    <Parameter name="curveConfigFile">curveconfig.xml</Parameter>
+    <Parameter name="conventionsFile">conventions.xml</Parameter>
+    <Parameter name="marketConfigFile">todaysmarket.xml</Parameter>
     <Parameter name="pricingEnginesFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/pricingengine.xml</Parameter>
     <Parameter name="portfolioFile">portfolio_usd_all_rates_products.xml</Parameter>
     <Parameter name="referenceDataFile">/Users/gordonlee/Documents/PythonOreRunner/Examples/Products/Input/referencedata.xml</Parameter>

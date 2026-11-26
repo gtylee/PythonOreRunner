@@ -1368,6 +1368,93 @@ def test_classify_portfolio_support_flags_swig_only_trades():
     assert support["requires_swig_trade_types"] == ["EquityOption"]
 
 
+def test_proxy_capfloor_requires_ore_for_term_and_unhandled_optionlet_inputs():
+    source_config = """
+<CurveConfiguration><CapFloorVolatilities>
+  <CapFloorVolatility><CurveId>USD-SOFR-3M</CurveId><ProxyConfig>
+    <Source><CurveId>CapFloorVolatility/USD/USD</CurveId><Index>USD-SOFR</Index><RateComputationPeriod>1D</RateComputationPeriod></Source>
+    <Target><Index>USD-SOFR-3M</Index><RateComputationPeriod>3M</RateComputationPeriod></Target>
+  </ProxyConfig></CapFloorVolatility>
+  <CapFloorVolatility><CurveId>USD</CurveId><VolatilityType>Normal</VolatilityType>
+    <Tenors>1Y,2Y</Tenors><Strikes>0.02,0.05</Strikes>
+    <InterpolateOn>OptionletVolatilities</InterpolateOn>
+    <TimeInterpolation>BackwardFlat</TimeInterpolation><StrikeInterpolation>LinearFlat</StrikeInterpolation>
+  </CapFloorVolatility>
+</CapFloorVolatilities></CurveConfiguration>
+"""
+    trade = Trade(
+        trade_id="CAP_PROXY_TERM_VOL",
+        counterparty="CP_A",
+        netting_set="NS_EUR",
+        trade_type="CapFloor",
+        product=GenericProduct(
+            payload={"trade_type": "CapFloor", "xml": _generic_capfloor_in_arrears_trade_xml()}
+        ),
+    )
+    base = _make_snapshot()
+
+    term_snapshot = replace(
+        base,
+        portfolio=replace(base.portfolio, trades=(trade,)),
+        config=replace(base.config, xml_buffers={"curveconfig.xml": source_config}),
+    )
+    term_support = classify_portfolio_support(term_snapshot, fallback_to_swig=False)
+    assert term_support["native_trade_count"] == 0
+    assert term_support["requires_swig_trade_ids"] == [trade.trade_id]
+    assert "cap-to-optionlet stripping" in term_support["requires_swig_reasons"][trade.trade_id]
+
+    optionlet_xml = source_config.replace(
+        "<InterpolateOn>OptionletVolatilities</InterpolateOn>",
+        "<InputType>OptionletVolatilities</InputType>",
+    )
+    optionlet_snapshot = replace(
+        term_snapshot,
+        config=replace(term_snapshot.config, xml_buffers={"curveconfig.xml": optionlet_xml}),
+    )
+    optionlet_support = classify_portfolio_support(optionlet_snapshot, fallback_to_swig=False)
+    assert optionlet_support["native_trade_ids"] == [trade.trade_id]
+    assert optionlet_support["requires_swig_trade_ids"] == []
+
+    unsupported_source_xml = optionlet_xml.replace(
+        "<RateComputationPeriod>1D</RateComputationPeriod>",
+        "<RateComputationPeriod>3M</RateComputationPeriod>",
+        1,
+    )
+    unsupported_source_snapshot = replace(
+        term_snapshot,
+        config=replace(term_snapshot.config, xml_buffers={"curveconfig.xml": unsupported_source_xml}),
+    )
+    unsupported_source_support = classify_portfolio_support(unsupported_source_snapshot, fallback_to_swig=False)
+    assert unsupported_source_support["native_trade_ids"] == []
+    assert unsupported_source_support["requires_swig_trade_ids"] == [trade.trade_id]
+    assert "only a 1D overnight source index" in unsupported_source_support["requires_swig_reasons"][trade.trade_id]
+
+    unsupported_index_xml = optionlet_xml.replace("<Index>USD-SOFR</Index>", "<Index>USD-FED-FUNDS</Index>", 1)
+    unsupported_index_snapshot = replace(
+        term_snapshot,
+        config=replace(term_snapshot.config, xml_buffers={"curveconfig.xml": unsupported_index_xml}),
+    )
+    unsupported_index_support = classify_portfolio_support(unsupported_index_snapshot, fallback_to_swig=False)
+    assert unsupported_index_support["native_trade_ids"] == []
+    assert unsupported_index_support["requires_swig_trade_ids"] == [trade.trade_id]
+    assert "only SOFR source indices" in unsupported_index_support["requires_swig_reasons"][trade.trade_id]
+
+
+def test_portfolio_classification_cache_does_not_depend_on_recyclable_object_ids():
+    snapshot = _make_snapshot()
+    irs_trade, fx_trade = snapshot.portfolio.trades
+    adapter = PythonLgmAdapter(fallback_to_swig=False)
+
+    with patch("pythonore.runtime.runtime_impl.id", return_value=17, create=True):
+        irs_snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(irs_trade,)))
+        irs_support = adapter.classify_portfolio_support(irs_snapshot)
+        fx_snapshot = replace(snapshot, portfolio=replace(snapshot.portfolio, trades=(fx_trade,)))
+        fx_support = adapter.classify_portfolio_support(fx_snapshot)
+
+    assert irs_support["native_trade_ids"] == [irs_trade.trade_id]
+    assert fx_support["native_trade_ids"] == [fx_trade.trade_id]
+
+
 def test_xva_session_incremental_updates_track_rebuild_counts():
     snapshot = _make_snapshot()
     session = XVAEngine(adapter=DeterministicToyAdapter()).create_session(snapshot)

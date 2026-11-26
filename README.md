@@ -350,8 +350,8 @@ single-factor, base-currency IR portfolios; it fails explicitly for stochastic F
 or multi-factor CAM cases. The CLI's `--rng ore_sobol_bridge` remains a separate
 legacy path.
 
-To select it through the native adapter (rather than the CLI), set the snapshot
-config parameter before creating the engine session:
+For a programmatic caller, set the snapshot config parameter before creating
+the engine session:
 
 ```python
 from dataclasses import replace
@@ -375,6 +375,39 @@ engine = XVAEngine.python_lgm_default(fallback_to_swig=False)
 result = engine.create_session(snapshot).run(return_cubes=False)
 print(result.metadata["python_lgm_rng_mode"], result.xva_by_metric)
 ```
+
+The native snapshot comparison runner also exposes this mode:
+
+```bash
+python3 run_ore_snapshot_native_xva.py \
+  --case-dir /path/to/single-factor-eur-irs-case \
+  --rng ore_sobol_direct
+```
+
+The selected case must be single-factor, base-currency IR-only. In particular,
+do not assume the runner's default benchmark case is compatible; the adapter
+validates the model and trade scope and reports a clear error otherwise.
+The exposure diagnostic CLI accepts the same mode on compatible cases:
+
+```bash
+python3 -m pythonore.runtime.xva_diagnostics \
+  /path/to/single-factor-eur-irs-case \
+  --rng ore_sobol_direct
+```
+
+For product-level execution coverage without SWIG fallback, generate the small
+all-rates example and run each trade independently through Python LGM:
+
+```bash
+python3 example_ore_snapshot_usd_all_rates_products.py \
+  --case-root /tmp/USD_AllRatesProductsSnapshot --count-per-type 1 --no-run
+python3 scripts/diagnostics/run_native_product_coverage.py \
+  /tmp/USD_AllRatesProductsSnapshot/Input --paths 32 \
+  --output /tmp/native-product-coverage.csv
+```
+
+This report checks native execution, finiteness, and fallback use; it does not
+compare PV or XVA against ORE outputs.
 
 Recommended default for current parity work:
 

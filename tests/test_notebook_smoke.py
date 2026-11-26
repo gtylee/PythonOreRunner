@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
     [
         ("01_python_to_ore_swig_dataclasses.py", 90),
         ("05_joint_python_and_ore_workflow.py", 180),
+        ("05_1_python_only_workflow.py", 180),
     ],
 )
 def test_notebook_series_script_runs(script_name: str, timeout: int):

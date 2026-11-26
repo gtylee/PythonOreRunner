@@ -1,6 +1,12 @@
 from pathlib import Path
+import sys
 
-from pythonore.runtime.xva_diagnostics import compare_native_exposure_to_ore
+from pythonore.runtime.xva_diagnostics import _parse_args, compare_native_exposure_to_ore
+
+
+def test_xva_diagnostic_cli_accepts_direct_sobol(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["xva_diagnostics", "/tmp/case", "--rng", "ore_sobol_direct"])
+    assert _parse_args().rng == "ore_sobol_direct"
 
 
 def test_xva_exposure_diagnostic_splits_formula_from_exposure_shape():

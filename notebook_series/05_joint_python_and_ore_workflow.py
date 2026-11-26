@@ -17,6 +17,10 @@ There is **no** regression-style comparison against saved `Output/*.csv` files.
 **What you will learn**
 - how to load a repo parity case into `XVASnapshot` and run both engines explicitly
 - how to read the dual-engine metric table and charts
+
+**RNG scope:** the live parity case below contains a multi-currency/multi-factor model. Keep its configured RNG;
+`ore_sobol_direct` is intentionally restricted to single-factor, base-currency IR-only portfolios. The companion
+Python-only notebook includes a small IRS-only direct-mode example.
 """
 
 # %% cell 1
