@@ -3911,9 +3911,30 @@ def test_loader_from_ore_xml_matches_from_files():
     assert tuple(t.trade_id for t in from_xml.portfolio.trades) == tuple(t.trade_id for t in from_dir.portfolio.trades)
 
 
-def test_loader_includes_symmetric_dva_when_ore_reports_it_with_cva():
-    ore_xml = TOOLS_DIR / "parity_artifacts" / "multiccy_benchmark_final" / "cases" / "flat_EUR_5Y_A" / "Input" / "ore.xml"
-    snapshot = XVALoader.from_files(str(ore_xml.parent), ore_file=ore_xml.name)
+def test_loader_includes_symmetric_dva_when_ore_reports_it_with_cva(tmp_path):
+    input_dir = tmp_path / "Input"
+    input_dir.mkdir()
+    (input_dir / "portfolio.xml").write_text("<Portfolio />\n", encoding="utf-8")
+    ore_xml = input_dir / "ore.xml"
+    ore_xml.write_text(
+        """<ORE>
+  <Setup>
+    <Parameter name="asofDate">2025-02-10</Parameter>
+    <Parameter name="portfolioFile">portfolio.xml</Parameter>
+  </Setup>
+  <Analytics>
+    <Analytic type="xva">
+      <Parameter name="cva">Y</Parameter>
+      <Parameter name="dva">N</Parameter>
+      <Parameter name="calculationType">Symmetric</Parameter>
+      <Parameter name="dvaName">DVA</Parameter>
+    </Analytic>
+  </Analytics>
+</ORE>
+""",
+        encoding="utf-8",
+    )
+    snapshot = XVALoader.from_files(str(input_dir), ore_file=ore_xml.name)
 
     assert "CVA" in snapshot.config.analytics
     assert "DVA" in snapshot.config.analytics
